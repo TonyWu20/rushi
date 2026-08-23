@@ -114,9 +114,9 @@ This document records corrections applied to `loop-and-edit-implementation.md` a
 
 **Reference:** DeepSeek API docs (api-docs.deepseek.com), studied 2026-08-11
 
-**Problem:** Config set `model = "deepseek-chat"` with `api = "responses"`. The Responses endpoint only accepts `deepseek-v4-flash` or `deepseek-v4-pro`. `deepseek-chat` is deprecated and will not work. The primary path was broken.
+**Problem:** Config set `model = "deepseek-chat"` with `api = "responses"`. The Responses endpoint only accepts `deepseek-v4-flash`, `deepseek-v4-pro`, or `deepseek-v4-flash-vision-exp`. `deepseek-chat` was discontinued on 2026-07-24 and does not work. The primary path was broken.
 
-**Fix:** Set `model = "deepseek-v4-flash"`. This is the default Responses API model. The spec must reference `deepseek-v4-flash` and `deepseek-v4-pro`.
+**Fix:** Set `model = "deepseek-v4-flash"`. The spec must reference `deepseek-v4-flash` and `deepseek-v4-pro` (and note the vision model).
 
 ### 14. SSE stream termination was unspecified
 
@@ -124,7 +124,7 @@ This document records corrections applied to `loop-and-edit-implementation.md` a
 
 **Problem:** DeepSeek's SSE stream ends with `response.completed`, `response.incomplete`, or `response.failed`. There is no `data: [DONE]` terminator. The implementation doc said "parse SSE events" without specifying the terminator. The parser would hang or misread the stream.
 
-**Fix:** Added the terminal event names to the `model` section. The parser keys on these events.
+**Fix:** Added the terminal event names to the `model` section. The parser keys on these events. The Responses API streams semantic SSE events with an `event` field and a `sequence_number`; there is no `data: [DONE]` line.
 
 ### 15. Cache efficiency layer was missing
 
@@ -132,7 +132,7 @@ This document records corrections applied to `loop-and-edit-implementation.md` a
 
 **Problem:** The design had prefix stability but no cache observability. Usage was not recorded on events. Cache behavior was not observable from the log. The design could not prove it hit the provider cache.
 
-**Fix:** Added a "Cache efficiency" section. Added `usage` to the `model` output and the `assistant_message` schema. Added `cache-e2e.sh` to the build plan. The test verifies `cache_read_tokens > 0` on every request after the first.
+**Fix:** Added a "Cache efficiency" section. Added `usage` to the `model` output and the `assistant_message` schema. Added `cache-e2e.sh` to the build plan. The test verifies `cached_tokens > 0` on at least one request in the second turn, retrying while the provider cache constructs.
 
 ### 16. `step.sh` had an unreachable exit code
 
@@ -245,3 +245,11 @@ This document records corrections applied to `loop-and-edit-implementation.md` a
 **Problem:** The script used `|| exit 1` on the `model` call. When the model API failed, the script exited with code 1. No error event was logged. The session state was unclear. The loop could not recover.
 
 **Fix:** Capture the model exit code. On failure, log an error event with message "model API call failed". Exit 0. The error event is terminal. `claim` reports `idle` on the next step. The loop stops cleanly.
+
+### 30. Cache e2e test turn 2 had no work
+
+**Reference:** `loop-and-edit-implementation.md` (cache conformance test)
+
+**Problem:** The test ran `turn.sh` to completion (turn 1). It then ran turn 2 with an unchanged log. A completed turn leaves the session idle. `claim` reports `idle`. `step.sh` exits without calling the model. Turn 2 produced zero model requests. The test could never observe a cache hit.
+
+**Fix:** The test appends a new user message before each turn 2 run. The prefix stays byte-identical. Turn 2 now produces requests that extend the turn 1 prefix. If no request hits, the test waits and repeats. Each repeat adds a new user message.

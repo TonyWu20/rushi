@@ -4,7 +4,7 @@ Phase 1 vertical slice. A one-step-per-turn loop driver over the session log. A 
 
 ## Cache efficiency
 
-DeepSeek uses implicit prefix caching. The provider caches byte-identical request prefixes in 64-token blocks. The harness has no explicit cache-control directives. Its job is to make prefixes stable and cache behavior observable.
+DeepSeek uses implicit prefix caching. The provider caches byte-identical request prefixes in 64-token storage units. The harness has no explicit cache-control directives. Its job is to make prefixes stable and cache behavior observable. Caching is best-effort: cache construction takes seconds, and the provider does not guarantee a hit on the immediately following request.
 
 Mechanisms:
 
@@ -12,8 +12,8 @@ Mechanisms:
 - **Deterministic projection.** `assemble` renders the log to a request with fixed field order, fixed tool-schema order, and no timestamps or PIDs. Same log, same bytes.
 - **Frozen call config.** Model, temperature, and reasoning effort affect cache reuse. The harness holds these values constant across a session. A change invalidates the prefix cache.
 - **Usage on the log.** `model` reports token usage. `parse` records it on the `assistant_message` event. Cache behavior is observable from the log.
-- **Disjoint token counts.** `input_tokens` excludes cache hits. `cache_read_tokens` reports hits separately. The adapter subtracts hits from the provider total because DeepSeek folds them into `prompt_tokens`.
-- **Cache e2e test.** A key-gated test runs a multi-step tool turn against the live API. It verifies `cache_read_tokens > 0` on every request after the first. The system prompt spans one 64-token block.
+- **Cache observability.** The Responses API reports `input_tokens` (total input tokens, cache hits included) and `input_tokens_details.cached_tokens` (the cache-hit portion). The adapter records both on the log. DeepSeek reports no cache-write metric.
+- **Cache e2e test.** A key-gated test runs two consecutive turns against the live API. It verifies that at least one request in the second turn reports `cached_tokens > 0`, retrying while the provider cache constructs.
 
 ## Project Layout
 
@@ -163,13 +163,14 @@ Implementation:
   "usage": {
     "input_tokens": 120,
     "output_tokens": 30,
-    "cache_read_tokens": 96,
-    "cache_write_tokens": 24
+    "cached_tokens": 96
   }
 }
 ```
 
-Usage fields are disjoint. `input_tokens` excludes cache hits. `cache_read_tokens` reports hits. DeepSeek folds cache hits into `prompt_tokens`, so the adapter subtracts them to keep counts disjoint. Fields are present only when the provider reports them.
+Usage fields follow the Responses API shape: `input_tokens` is the total input tokens, cache hits included; `input_tokens_details.cached_tokens` is the cache-hit portion. DeepSeek reports no cache-write metric. Fields are present only when the provider reports them.
+
+If the provider rejects the `developer` role, the adapter falls back to `system`.
 
 Stop reasons: `stop`, `length`, `error`, `aborted`.
 
@@ -201,7 +202,7 @@ Exit codes enable `step.sh` to branch.
 Example output:
 
 ```jsonl
-{"v":1,"type":"assistant_message","ts":"...","content":"I will read the file.","tool_calls":[{"id":"call-1","name":"read","arguments":{"file_path":"src/main.rs"}}],"stop_reason":"stop","usage":{"input_tokens":120,"output_tokens":30,"cache_read_tokens":96}}
+{"v":1,"type":"assistant_message","ts":"...","content":"I will read the file.","tool_calls":[{"id":"call-1","name":"read","arguments":{"file_path":"src/main.rs"}}],"stop_reason":"stop","usage":{"input_tokens":120,"output_tokens":30,"cached_tokens":96}}
 {"v":1,"type":"tool_call","ts":"...","id":"call-1","name":"read","arguments":{"file_path":"src/main.rs"}}
 ```
 
@@ -488,15 +489,14 @@ Empty `new_string` is valid: it deletes the match.
       "properties": {
         "input_tokens": { "type": "integer" },
         "output_tokens": { "type": "integer" },
-        "cache_read_tokens": { "type": "integer" },
-        "cache_write_tokens": { "type": "integer" }
+        "cached_tokens": { "type": "integer" }
       }
     }
   }
 }
 ```
 
-`usage` is optional. It is present when the provider reports token counts. The counts are disjoint: `input_tokens` excludes cache hits.
+`usage` is optional. It is present when the provider reports token counts. `input_tokens` includes cache hits; `cached_tokens` is the cache-hit portion of the input.
 
 ### `tool_call`
 
@@ -600,9 +600,11 @@ Each test checks:
 Steps:
 
 1. Create a session with a user message that forces a tool call.
-2. Run `turn.sh` to completion. This produces at least two model requests.
-3. Read the `usage` field from each `assistant_message` event in the log.
-4. Verify every request after the first has `cache_read_tokens > 0`.
+2. Run `turn.sh` to completion. This produces at least two model requests (turn 1).
+3. Append a new user message to the log. The turn 1 prefix stays byte-identical.
+4. Run `turn.sh` again (turn 2). Requests in turn 2 share the turn 1 prefix.
+5. Read the `usage` field from each `assistant_message` event in the log.
+6. Verify at least one request in turn 2 has `cached_tokens > 0`. If none does, wait a few seconds and repeat from step 3. The provider cache constructs asynchronously and is best-effort.
 
 This test proves the append-only log and deterministic projection produce byte-identical prefixes that hit the DeepSeek provider cache. It is the production observable for cache behavior.
 

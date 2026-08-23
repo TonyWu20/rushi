@@ -44,7 +44,7 @@ pub struct ModelResponse {
     pub text: String,
     pub tool_calls: Vec<ToolCall>,
     pub stop_reason: StopReason, // stop | length | error | aborted
-    pub usage: Usage,            // input/output/cache tokens when provider reports
+    pub usage: Usage,            // input_tokens (incl. cache hits), output_tokens, cached_tokens
 }
 ```
 
@@ -57,14 +57,19 @@ adapter.
 [model]
 api = "responses"                  # or "chat_completions"
 base_url = "https://api.deepseek.com"
-model = "deepseek-chat"            # or "deepseek-reasoner"
+model = "deepseek-v4-flash"        # or "deepseek-v4-pro"
 api_key_env = "DEEPSEEK_API_KEY"
 max_output_tokens = 4096
 ```
 
-The Rust `openai` crate is used with `base_url` overridden to
-`https://api.deepseek.com`. `DEEPSEEK_API_KEY` is read from the environment;
-the harness never writes it to the session log.
+The Responses API accepts `deepseek-v4-flash`, `deepseek-v4-pro`, and
+`deepseek-v4-flash-vision-exp`. The legacy names `deepseek-chat` and
+`deepseek-reasoner` were discontinued on 2026-07-24; they never work with the
+Responses endpoint.
+
+The `model` binary calls the API over HTTP with `reqwest` (the Rust `openai`
+crate does not cover the Responses API). `DEEPSEEK_API_KEY` is read from the
+environment; the harness never writes it to the session log.
 
 ### 1.3 Responses wire subset
 
@@ -72,7 +77,7 @@ Request:
 
 ```json
 {
-  "model": "deepseek-chat",
+  "model": "deepseek-v4-flash",
   "stream": true,
   "store": false,
   "input": [
@@ -99,16 +104,24 @@ Notes:
 - `store: false` — the session log is our store; do not rely on server-side
   response storage.
 - `stream: true` — parse SSE events; support both `response.output_text.delta`
-  and `response.output_item.done` (for `function_call` items).
+  and `response.output_item.done` (for `function_call` items). The stream ends
+  with a `response.completed`, `response.incomplete`, or `response.failed`
+  event. There is no `data: [DONE]` terminator.
 - If the provider rejects the `developer` role, fall back to `system`.
 - If the provider rejects `/responses` entirely (405/404), the
   `ChatCompletionsModelClient` adapter maps the same `InputItem` stream to
   OpenAI chat messages with `tool_calls`/`tool` roles.
+- Usage: the Responses API reports `input_tokens` (total input tokens, cache
+  hits included) and `input_tokens_details.cached_tokens` (the cache-hit
+  portion). DeepSeek reports no cache-write metric. The Chat Completions
+  adapter maps `prompt_tokens`/`prompt_cache_hit_tokens` to the same fields.
 
 ### 1.4 Token efficiency: prefix stability
 
-DeepSeek's caching is prefix-based. Therefore `assemble` must produce
-**byte-identical prefixes for unchanged history** within a session:
+DeepSeek's caching is prefix-based and best-effort. Cache construction takes
+seconds, and the provider does not guarantee a hit on the immediately following
+request. Therefore `assemble` must produce **byte-identical prefixes for
+unchanged history** within a session:
 
 - system prompt: fixed string, no timestamps, no random ids
 - tool schemas: same order, same JSON serialization
