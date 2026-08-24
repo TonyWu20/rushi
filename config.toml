@@ -3,7 +3,7 @@ api = "responses"
 base_url = "https://api.deepseek.com"
 model = "deepseek-v4-flash"
 api_key_env = "DEEPSEEK_API_KEY"
-max_output_tokens = 4096
+max_output_tokens = 16384
 
 [paths]
 sessions_root = "sessions"
