@@ -357,3 +357,19 @@ This document records corrections applied to `loop-and-edit-implementation.md` a
 **Problem:** The loop had only run with a mock model. The real API path was unproven.
 
 **Fix:** Ran a full live turn. The model read `config.toml`, recovered from a schema error, edited `test.txt`, and answered. The loop ended at `idle`. The harness works end to end.
+
+### 44. Thinking level was not a config value
+
+**Reference:** `loop-and-edit-implementation.md` (config, cache efficiency)
+
+**Problem:** The design mentioned reasoning effort as frozen call config. It had no config key and no request field. The model used the provider default thinking behavior. The harness could not set or observe the thinking level.
+
+**Fix:** Added `reasoning_effort = "medium"` to `config.toml`. The `model` binary sends `reasoning.effort` in every request. The value is part of the frozen call config. Documented the allowed values in the config section. The live API accepts the field.
+
+### 45. `max_output_tokens` raised for agentic headroom
+
+**Reference:** `loop-and-edit-implementation.md` (config)
+
+**Problem:** The cap of `4096` truncated long reasoning chains. Reasoning tokens count toward the cap. A truncated response cut the final answer mid-sentence. The loop then treated the partial answer as terminal.
+
+**Fix:** Raised `max_output_tokens` to `32768`. The live API accepts caps up to `384000`. The value stays constant within a session.

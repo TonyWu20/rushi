@@ -50,6 +50,13 @@ fn main() {
         .and_then(|m| m.as_integer())
         .unwrap_or(4096) as u64;
 
+    let reasoning_effort = config
+        .get("model")
+        .and_then(|m| m.get("reasoning_effort"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("medium")
+        .to_string();
+
     let api_key_env = config
         .get("model")
         .and_then(|m| m.get("api_key_env"))
@@ -79,6 +86,9 @@ fn main() {
     let mut api_request = request.clone();
     api_request["max_output_tokens"] = serde_json::json!(max_output_tokens);
     api_request["stream"] = serde_json::json!(true);
+    api_request["reasoning"] = serde_json::json!({
+        "effort": reasoning_effort
+    });
 
     // Try responses API first
     let result = call_responses_api(&url, &api_key, &api_request, model_name);

@@ -10,7 +10,7 @@ Mechanisms:
 
 - **Append-only log.** The log grows. Requests derive from it. Each request's prefix is byte-identical to its predecessor. The provider cache then hits.
 - **Deterministic projection.** `assemble` renders the log to a request with fixed field order, fixed tool-schema order, and no timestamps or PIDs. Same log, same bytes.
-- **Frozen call config.** Model, temperature, and reasoning effort affect cache reuse. The harness holds these values constant across a session. A change invalidates the prefix cache.
+- **Frozen call config.** Model, temperature, and reasoning effort affect cache reuse. The reasoning effort comes from the `reasoning_effort` key in `config.toml`. The harness holds these values constant across a session. A change invalidates the prefix cache.
 - **Usage on the log.** `model` reports token usage. `parse` records it on the `assistant_message` event. Cache behavior is observable from the log.
 - **Cache observability.** The Responses API reports `input_tokens` (total input tokens, cache hits included) and `input_tokens_details.cached_tokens` (the cache-hit portion). The adapter records both on the log. DeepSeek reports no cache-write metric.
 - **Cache e2e test.** A key-gated test runs two consecutive turns against the live API. It verifies that at least one request in the second turn reports `cached_tokens > 0`, retrying while the provider cache constructs.
@@ -66,7 +66,8 @@ api = "responses"
 base_url = "https://api.deepseek.com"
 model = "deepseek-v4-flash"
 api_key_env = "DEEPSEEK_API_KEY"
-max_output_tokens = 4096
+max_output_tokens = 32768
+reasoning_effort = "medium"
 
 [paths]
 sessions_root = "sessions"
@@ -94,6 +95,10 @@ appear exactly once. If it appears multiple times, provide a more specific
 old_string or set replace_all to true. Read the file first unless you just
 created or edited it in this session."""
 ```
+
+`max_output_tokens` bounds the generated output. The value includes reasoning tokens. `32768` gives headroom for long agentic turns. The API accepts a cap up to `384000`.
+
+`reasoning_effort` sets the thinking level. Allowed values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. `none` disables thinking. `medium` gives high-effort thinking on `deepseek-v4-flash`. The value maps to the `reasoning.effort` field in the request. Both fields are frozen call config.
 
 ## Binary Implementations
 
@@ -164,6 +169,7 @@ Implementation:
 
 - Use `reqwest` with streaming.
 - Build the `/v1/responses` request from `ModelRequest`. Add `max_output_tokens` from config and set `stream` to `true`.
+- Add the `reasoning` object with an `effort` field. The value comes from `reasoning_effort` in `config.toml`. The field controls the thinking mode and its effort.
 - Parse SSE events. Each event carries a `type` field.
 - `response.output_text.delta` carries visible text deltas.
 - `response.output_item.added` and `response.output_item.done` carry `function_call` items with `name` and `call_id`.
