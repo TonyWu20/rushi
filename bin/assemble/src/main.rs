@@ -212,7 +212,7 @@ fn main() {
                             .get("description")
                             .and_then(|d| d.as_str())
                             .unwrap_or("");
-                        let params = match tool_def.get("parameters") {
+                        let params = match tool_def.get("schema") {
                             Some(p) => {
                                 let s: serde_json::Value = toml_to_json(p);
                                 s

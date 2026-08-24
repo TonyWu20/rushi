@@ -373,3 +373,27 @@ This document records corrections applied to `loop-and-edit-implementation.md` a
 **Problem:** The cap of `4096` truncated long reasoning chains. Reasoning tokens count toward the cap. A truncated response cut the final answer mid-sentence. The loop then treated the partial answer as terminal.
 
 **Fix:** Raised `max_output_tokens` to `32768`. The live API accepts caps up to `384000`. The value stays constant within a session.
+
+### 46. `assemble` sent empty tool parameters
+
+**Reference:** `loop-and-edit-implementation.md` (assemble, backends)
+
+**Problem:** `assemble` read `tool.parameters` from `tool.toml`. The manifest defines the schema under `tool.schema`. The read failed, so every tool in the request had empty `parameters` and `required`. `route` read `tool.schema` correctly, so it still rejected bad calls. The llama.cpp model followed the empty schema and emitted `arguments: "{}"` every turn. The loop hit `max_steps`. DeepSeek masked the bug by guessing argument names from descriptions. It wasted turns before landing on `file_path`.
+
+**Fix:** `assemble` now reads `tool.schema`. The request tools carry full properties and required fields. Both backends now get the argument name on the first call.
+
+### 47. Added the `user` message binary
+
+**Reference:** `loop-and-edit-implementation.md` (user)
+
+**Problem:** The user hand-wrote the `user_message` JSONL line to seed or continue a session. The format is easy to get wrong.
+
+**Fix:** Added `bin/user`. It takes a session name or directory and a message, builds a valid `user_message` event, validates it against the schema, and appends it. Content comes from a positional argument or stdin. The session name resolves against `sessions_root` from config.
+
+### 48. Added the llama.cpp backend
+
+**Reference:** `loop-and-edit-implementation.md` (backends)
+
+**Problem:** The harness was hard-wired to DeepSeek in the docs. No other provider was documented or verified.
+
+**Fix:** Added `config.llama.toml` pointing at a local llama.cpp server. The `model` binary needed no changes. llama.cpp emits the same Responses SSE events and carries the full response in the terminal event. Verified end to end with model `Nail-Qwen3.6-35B-A3B` at `127.0.0.1:8080`. The empty `Authorization` header is harmless.

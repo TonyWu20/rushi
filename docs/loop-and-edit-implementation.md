@@ -26,14 +26,17 @@ rust-unix-harness/
 ├── bin/
 │   ├── claim                   # Rust binary: derive step state from log
 │   ├── assemble                # Rust binary: project log to ModelRequest
-│   ├── model                   # Rust binary: call DeepSeek API via Responses format
+│   ├── model                   # Rust binary: call the model API via Responses format
 │   ├── parse                   # Rust binary: validate model output, emit tool_call events
 │   ├── route                   # Rust binary: dispatch tool calls, run tools
-│   └── log                     # Rust binary: append events atomically
+│   ├── log                     # Rust binary: append events atomically
+│   └── user                    # Rust binary: append a user_message event to the log
 ├── scripts/
 │   ├── step.sh                 # one-step pipeline with conditional routing
 │   ├── turn.sh                 # loop driver (calls step.sh)
 │   └── tool-conformance.sh     # G4 conformance harness
+├── config.toml                 # DeepSeek provider config
+├── config.llama.toml           # llama.cpp provider config
 ├── tools/
 │   ├── read/
 │   │   ├── tool.toml
@@ -99,6 +102,21 @@ created or edited it in this session."""
 `max_output_tokens` bounds the generated output. The value includes reasoning tokens. `32768` gives headroom for long agentic turns. The API accepts a cap up to `384000`.
 
 `reasoning_effort` sets the thinking level. Allowed values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. `none` disables thinking. `medium` gives high-effort thinking on `deepseek-v4-flash`. The value maps to the `reasoning.effort` field in the request. Both fields are frozen call config.
+
+## Backends
+
+The harness is provider-agnostic. The `[model]` section in the config selects the provider. Both supported backends speak the OpenAI Responses wire format, so the same request shape and SSE parser serve both.
+
+- DeepSeek: `config.toml`. Base URL `https://api.deepseek.com`, model `deepseek-v4-flash`, key from `DEEPSEEK_API_KEY`.
+- llama.cpp: `config.llama.toml`. Base URL `http://127.0.0.1:8080`, model name as served by the local server, no API key needed.
+
+Select a config with the `CONFIG` environment variable or the `--config` flag:
+
+```bash
+CONFIG=config.llama.toml bash scripts/turn.sh s1
+```
+
+llama.cpp requires no code changes. It emits the same SSE event names as DeepSeek. Its terminal event carries the full response object, usage, and tool call items. The empty `Authorization` header is harmless.
 
 ## Binary Implementations
 
@@ -254,7 +272,27 @@ Behavior:
 - Validate each input line against its event schema in `schemas/events/v1/`. Reject the whole batch with nonzero exit and a stderr diagnostic naming the offending line if any line is invalid. No partial append on validation failure.
 - Assign each event a sequence number: the 1-based line position in `events.jsonl` after append. The first event is seq 1. `claim` reads these positions to report `last_user_message_seq`.
 - Append each line with `O_APPEND | O_WRONLY`. Each line is one `write` call.
-- If a `write` fails mid-batch, the lines already written stay in the log. Exits nonzero. The log remains a valid prefix; `claim` recovers the partial state on the next step.
+- If a `write` fails mid-batch, the lines already written stay in the log. Exits nonzero. The log remains a valid prefix. `claim` recovers the partial state on the next step.
+
+### `user` — Input: message content. Output: appended event
+
+Composes a `user_message` event and appends it to a session log. The user does not hand-write the JSONL format.
+
+Usage:
+
+```bash
+user --session s1 "Read config.toml"
+printf 'multi\nline' | user --session s1
+user --session s1 --config config.llama.toml "Read config.toml"
+```
+
+Behavior:
+
+- Accept `--session` as a session name or a session directory. A name resolves against `sessions_root` from config. A value with a path separator or an existing directory is used as-is.
+- Take content as a positional argument or read it from stdin. Reject empty content with exit 1.
+- Build the event with `v: 1`, `type: "user_message"`, a real UTC `ts`, and the content.
+- Validate the produced event against `user_message.json` before append. Exit 1 on mismatch.
+- Create the session directory if missing. Append with `O_APPEND`. Print the appended event on success.
 
 ## Loop Scripts
 

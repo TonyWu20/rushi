@@ -1733,6 +1733,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "user"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "utf8_iter"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

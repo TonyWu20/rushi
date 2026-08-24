@@ -7,6 +7,7 @@ members = [
     "bin/parse",
     "bin/route",
     "bin/log",
+    "bin/user",
     "tools/read",
     "tools/write",
     "tools/edit",
