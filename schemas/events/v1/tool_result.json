@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["v", "type", "ts", "id", "value", "is_error"],
+  "properties": {
+    "v": { "type": "integer", "const": 1 },
+    "type": { "type": "string", "const": "tool_result" },
+    "ts": { "type": "string", "format": "date-time" },
+    "id": { "type": "string" },
+    "value": { "type": "object" },
+    "is_error": { "type": "boolean" }
+  }
+}

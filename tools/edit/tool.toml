@@ -1,0 +1,27 @@
+[tool]
+description = "Edit a file by replacing strings"
+command = "edit"
+args = []
+timeout_ms = 30000
+
+[tool.schema]
+type = "object"
+required = ["file_path", "old_string", "new_string"]
+
+[tool.schema.properties]
+[tool.schema.properties.file_path]
+type = "string"
+description = "Path to the file to edit"
+
+[tool.schema.properties.old_string]
+type = "string"
+description = "String to find"
+
+[tool.schema.properties.new_string]
+type = "string"
+description = "String to replace with"
+
+[tool.schema.properties.replace_all]
+type = "boolean"
+description = "Replace all occurrences"
+default = false

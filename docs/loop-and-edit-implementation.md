@@ -97,7 +97,7 @@ created or edited it in this session."""
 
 ## Binary Implementations
 
-### `claim` — Input: session path; Output: step state JSON
+### `claim` — Input: session path. Output: step state JSON
 
 Reads `events.jsonl`. Determines what is owed.
 
@@ -114,11 +114,13 @@ Output JSON:
 
 States:
 
-- `idle`: no work owed. The log ends with a terminal event: an `assistant_message` with no tool calls, or an `error` event.
+- `idle`: no work owed. The log ends with a terminal event. The terminal event is an `assistant_message` with no tool calls, or an `error` event.
 - `awaiting_model`: a `user_message` or `tool_result` has no matching `assistant_message` after it.
 - `awaiting_tool_result`: an `assistant_message` has tool calls without matching `tool_result` events. `pending_tool_calls` lists them as `{"id": "...", "name": "...", "arguments": {...}}` in log order.
 
-An `error` event is terminal. The loop stops; a human or a new user message resumes it. `claim` reports `idle` when the last event is an `error`.
+An `error` event is terminal. The loop stops. A human or a new user message resumes it. `claim` reports `idle` when the last event is an `error`.
+
+When the state is `idle`, `pending_tool_calls` is empty.
 
 Idempotent: same log produces same output. `last_user_message_seq` is the 1-based line number of the last `user_message` in the log.
 
@@ -129,28 +131,45 @@ Projects the session log into a `ModelRequest`.
 Algorithm:
 
 1. Read config for system prompt, tool schemas, limits.
-2. Read `events.jsonl`. Build `InputItem` array in log order:
-   - `user_message` → `UserText(content)`
-   - `assistant_message` → `AssistantText(content)` plus one `FunctionCall` per tool call
-   - `tool_result` → `FunctionCallOutput(call_id, value.text or compact JSON)`
-   - `error` → skip. Error events are terminal; the loop stops before `assemble` runs again.
-3. Apply `tool_result_max_chars` cap to each tool result text. If clipped, append `[tool result clipped: N -> M chars]` to the text. The full value stays in the log. The clip is deterministic: same log, same clipped bytes.
-4. Load tool schemas from `tools/*/tool.toml`. Sort by tool name. Serialize to `Vec<ToolSchema>`.
+2. Read `events.jsonl`. Build the `input` array in log order:
+   - `user_message` → `{"type":"message","role":"user","content": <content>}`
+   - `assistant_message` → `{"type":"message","role":"assistant","content": <content>}` plus one `{"type":"function_call","call_id": <id>, "name": <name>, "arguments": <JSON string>}` per tool call
+   - `tool_result` → `{"type":"function_call_output","call_id": <id>, "output": <value.text>}`
+   - `error` → skip. Error events are terminal. The loop stops before `assemble` runs again.
+3. Apply `tool_result_max_chars` cap to each tool result text. If clipped, append `[tool result clipped: N -> M chars]` to the text. The full value stays in the log. The clip is deterministic. Same log produces the same clipped bytes.
+4. Load tool schemas from `tools/*/tool.toml`. Sort by tool name. Serialize each schema to `{"type":"function","name": <name>, "description": <desc>, "parameters": <params>}`. The `name` field is top level. This is the Responses API shape.
 5. Compute char count. If `context_budget_chars` is exceeded, emit one `error` event to stdout with message "Context budget exceeded. Start a new session or reduce scope." Exit 0. `step.sh` checks for this event before running `model`.
 6. Otherwise, output `ModelRequest` JSON to stdout. Exit 0.
 
-Prefix stability: system prompt text, tool schema order (sorted by name), and message order (log order) are fixed. No timestamps or PIDs in output. Same log produces byte-identical requests.
+The `ModelRequest`:
 
-### `model` — Input: ModelRequest JSON; Output: assistant_message JSON
+```json
+{
+  "model": "deepseek-v4-flash",
+  "instructions": "<system prompt>",
+  "input": [ ...input items... ],
+  "tools": [ ...tool schemas... ]
+}
+```
 
-Calls the DeepSeek API via OpenAI Responses wire format.
+The system prompt goes in the `instructions` field. `arguments` in a `function_call` item is a JSON string. The log stores tool arguments as JSON objects. `assemble` serializes each object back to a string.
+
+Prefix stability: `instructions` text, tool schema order (sorted by name), and input item order (log order) are fixed. No timestamps or PIDs in output. Same log produces byte-identical requests.
+
+### `model` — Input: ModelRequest JSON. Output: assistant_message JSON
+
+Calls the DeepSeek API via the OpenAI Responses wire format.
 
 Implementation:
 
 - Use `reqwest` with streaming.
-- Build `/v1/responses` request from `ModelRequest`.
-- Parse SSE events. Collect text deltas and function_call items.
-- DeepSeek's stream ends with `response.completed`, `response.incomplete`, or `response.failed`. There is no `data: [DONE]` terminator. The parser keys on these terminal events.
+- Build the `/v1/responses` request from `ModelRequest`. Add `max_output_tokens` from config and set `stream` to `true`.
+- Parse SSE events. Each event carries a `type` field.
+- `response.output_text.delta` carries visible text deltas.
+- `response.output_item.added` and `response.output_item.done` carry `function_call` items with `name` and `call_id`.
+- `response.function_call_arguments.delta` and `response.function_call_arguments.done` carry the arguments JSON string.
+- DeepSeek's stream ends with `response.completed`, `response.incomplete`, or `response.failed`. There is no `data: [DONE]` terminator. The terminal event carries the full response object in the `response` field. The parser reads the output items and usage from this object. The streaming deltas are a fallback only.
+- `response.incomplete` maps to stop reason `length`. `response.failed` maps to `error`.
 - On completion, output one JSON object:
 
 ```json
@@ -168,17 +187,15 @@ Implementation:
 }
 ```
 
-Usage fields follow the Responses API shape: `input_tokens` is the total input tokens, cache hits included; `input_tokens_details.cached_tokens` is the cache-hit portion. DeepSeek reports no cache-write metric. Fields are present only when the provider reports them.
-
-If the provider rejects the `developer` role, the adapter falls back to `system`.
+Usage fields follow the Responses API shape. `input_tokens` is the total input tokens, cache hits included. `cached_tokens` is the cache-hit portion from `input_tokens_details.cached_tokens`. DeepSeek reports no cache-write metric. Fields are present only when the provider reports them.
 
 Stop reasons: `stop`, `length`, `error`, `aborted`.
 
-Fallback: if `/responses` returns 404 or 405, fall back to `/chat/completions` mapping the same input items to chat messages. The fallback is a one-shot capability probe, not a retry.
+Fallback: if `/responses` returns 404 or 405, fall back to `/chat/completions`. The fallback maps `instructions` to a system message. Each `input` item maps to a chat message. `message` items become role/content messages. `function_call` items merge into the trailing assistant message as `tool_calls`. `function_call_output` items become `role: "tool"` messages. Tool schemas convert from the top-level `name` form to the nested `function` form. The fallback is a one-shot capability probe, not a retry.
 
 Note: This fallback merges two adapters (`ResponsesModelClient` and `ChatCompletionsModelClient`) into one binary for Phase 1. They split into separate trait implementations in Phase 3.
 
-### `parse` — Input: model output JSON; Output: events JSONL
+### `parse` — Input: model output JSON. Output: events JSONL
 
 Validates model output and emits execution events.
 
@@ -187,6 +204,8 @@ Validation rules:
 - Input must be one JSON object with `text`, `tool_calls`, and `stop_reason`. Reject malformed JSON with nonzero exit and a stderr diagnostic.
 - Each tool call's `arguments` must parse as a JSON object. If it does not, emit one `error` event with message "Model emitted malformed tool arguments for call <id>." Exit with code 2.
 - Each tool call's `name` must match a manifest in `tools/`. If it does not, emit one `error` event with message "Model called unknown tool <name>." Exit with code 2.
+
+The model returns `arguments` as a JSON string. `parse` parses it into a JSON object before emission. All emitted events carry `arguments` as an object.
 
 Emission rules:
 
@@ -237,19 +256,25 @@ Behavior:
 
 Each stage runs separately. Each stage's output goes to a temp file. Exit codes are captured per stage. `set -e` is disabled only around `parse`, whose nonzero exit codes are control flow, not failure.
 
+The script below is the exact `scripts/step.sh`. It reads config with `awk` because `config.toml` is TOML, not JSON. `jq` cannot parse it. The binaries come from `target/debug` relative to the script location.
+
 ```bash
 #!/usr/bin/env bash
 set -uo pipefail
 
 SESSION="$1"
 CONFIG="${CONFIG:-config.toml}"
-SESSIONS_ROOT=$(jq -r '.paths.sessions_root' "$CONFIG")
+SESSIONS_ROOT=$(awk -F'"' '/^sessions_root[[:space:]]*=/{print $2; exit}' "$CONFIG")
 SESSION_DIR="$SESSIONS_ROOT/$SESSION"
 WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/step.XXXXXX")
 trap 'rm -rf "$WORKDIR"' EXIT
 
+BIN_DIR="$(cd "$(dirname "$0")/../target/debug" && pwd)"
+TOOL_DIR="$(cd "$(dirname "$0")/../tools" && pwd)"
+SCHEMA_DIR="$(cd "$(dirname "$0")/../schemas/events/v1" && pwd)"
+
 # 1. claim: pure projection. Decide what is owed.
-claim --session "$SESSION_DIR" > "$WORKDIR/claim.json" || exit 1
+"$BIN_DIR/claim" --session "$SESSION_DIR" > "$WORKDIR/claim.json" || exit 1
 STATE=$(jq -r .state "$WORKDIR/claim.json")
 
 # 2. idle: nothing owed. Append nothing (G1 idempotent replay).
@@ -260,46 +285,47 @@ fi
 # 3. awaiting_tool_result: crash recovery (G2).
 #    Route the pending calls without calling the model.
 if [ "$STATE" = "awaiting_tool_result" ]; then
-  jq -c '.pending_tool_calls[]' "$WORKDIR/claim.json" \
-    | route --tools tools/ > "$WORKDIR/routed.jsonl" || exit 1
-  log --session "$SESSION_DIR" < "$WORKDIR/routed.jsonl" || exit 1
+  TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  jq -c '.pending_tool_calls[] | . + {type: "tool_call", ts: $ts}' --arg ts "$TS" "$WORKDIR/claim.json" \
+    | "$BIN_DIR/route" --tools "$TOOL_DIR" > "$WORKDIR/routed.jsonl" || exit 1
+  "$BIN_DIR/log" --session "$SESSION_DIR" --schemas "$SCHEMA_DIR" < "$WORKDIR/routed.jsonl" || exit 1
   exit 0
 fi
 
 # 4. awaiting_model: assemble, then check for a budget error before model.
-assemble --session "$SESSION_DIR" --config "$CONFIG" > "$WORKDIR/model-request.json" || exit 1
+"$BIN_DIR/assemble" --session "$SESSION_DIR" --config "$CONFIG" > "$WORKDIR/model-request.json" || exit 1
 if jq -e '.type == "error"' "$WORKDIR/model-request.json" > /dev/null; then
-  log --session "$SESSION_DIR" < "$WORKDIR/model-request.json" || exit 1
+  "$BIN_DIR/log" --session "$SESSION_DIR" --schemas "$SCHEMA_DIR" < "$WORKDIR/model-request.json" || exit 1
   exit 0
 fi
 
 # 5. model: one API call. Capture exit code.
 set +e
-model --config "$CONFIG" < "$WORKDIR/model-request.json" > "$WORKDIR/model-output.json"
+"$BIN_DIR/model" --config "$CONFIG" < "$WORKDIR/model-request.json" > "$WORKDIR/model-output.json"
 MODEL_EXIT=$?
 set -e
 
 if [ "$MODEL_EXIT" -ne 0 ]; then
   # Model failed. Log an error event and stop.
-  ERROR_EVENT=$(jq -n --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  ERROR_EVENT=$(jq -cn --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{v:1, type:"error", ts:$ts, message:"model API call failed"}')
-  echo "$ERROR_EVENT" | log --session "$SESSION_DIR" || exit 1
+  echo "$ERROR_EVENT" | "$BIN_DIR/log" --session "$SESSION_DIR" --schemas "$SCHEMA_DIR" || exit 1
   exit 0
 fi
 
 # 6. parse: validate, emit events, choose exit code.
 set +e
-parse --config "$CONFIG" < "$WORKDIR/model-output.json" > "$WORKDIR/parsed.jsonl"
+"$BIN_DIR/parse" --config "$CONFIG" < "$WORKDIR/model-output.json" > "$WORKDIR/parsed.jsonl"
 PARSE_EXIT=$?
 set -e
 
 # 7. route only when parse says tool calls need routing (exit 1).
 if [ "$PARSE_EXIT" -eq 1 ]; then
   jq -c 'select(.type == "tool_call")' "$WORKDIR/parsed.jsonl" \
-    | route --tools tools/ > "$WORKDIR/routed.jsonl" || exit 1
-  cat "$WORKDIR/parsed.jsonl" "$WORKDIR/routed.jsonl" | log --session "$SESSION_DIR" || exit 1
+    | "$BIN_DIR/route" --tools "$TOOL_DIR" > "$WORKDIR/routed.jsonl" || exit 1
+  cat "$WORKDIR/parsed.jsonl" "$WORKDIR/routed.jsonl" | "$BIN_DIR/log" --session "$SESSION_DIR" --schemas "$SCHEMA_DIR" || exit 1
 else
-  log --session "$SESSION_DIR" < "$WORKDIR/parsed.jsonl" || exit 1
+  "$BIN_DIR/log" --session "$SESSION_DIR" --schemas "$SCHEMA_DIR" < "$WORKDIR/parsed.jsonl" || exit 1
 fi
 
 exit 0
@@ -316,14 +342,16 @@ set -euo pipefail
 SESSION="$1"
 CONFIG="${CONFIG:-config.toml}"
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-MAX_STEPS=$(jq -r '.limits.max_steps // 20' "$CONFIG")
-SESSIONS_ROOT=$(jq -r '.paths.sessions_root' "$CONFIG")
+MAX_STEPS=$(awk -F'[[:space:]]*=[[:space:]]*' '/^max_steps[[:space:]]*=/{print $2; exit}' "$CONFIG")
+MAX_STEPS=${MAX_STEPS:-20}
+SESSIONS_ROOT=$(awk -F'"' '/^sessions_root[[:space:]]*=/{print $2; exit}' "$CONFIG")
 STEPS=0
 
 while [ "$STEPS" -lt "$MAX_STEPS" ]; do
   STEPS=$((STEPS + 1))
   "$SCRIPT_DIR/step.sh" "$SESSION" || exit 1
-  STATE=$(claim --session "$SESSIONS_ROOT/$SESSION" | jq -r .state)
+  BIN_DIR="$(cd "$SCRIPT_DIR/../target/debug" && pwd)"
+  STATE=$("$BIN_DIR/claim" --session "$SESSIONS_ROOT/$SESSION" | jq -r .state)
   if [ "$STATE" = "idle" ]; then
     exit 0
   fi
@@ -335,8 +363,10 @@ exit 1
 
 ### Script dependencies
 
-- `jq` is required for JSON inspection in the scripts.
-- The stage binaries (`claim`, `assemble`, `model`, `parse`, `route`, `log`) must be on `PATH` or the scripts must be run from the repo root with the binaries in `./bin`.
+- `awk` parses `config.toml`. The extraction uses POSIX `awk` only, so it works on macOS BSD awk and GNU awk.
+- `jq` inspects JSON in the scripts.
+- `cargo` builds the binaries into `target/debug`.
+- The scripts resolve binaries from `target/debug` relative to the script location. They do not need `PATH` entries.
 
 ## Tool Implementations
 
@@ -360,18 +390,18 @@ Algorithm:
 4. Cap each line at `read_max_line_length` chars. Append ` ... (line truncated to <N> chars)` if cut, where `<N>` is `read_max_line_length`.
 5. Stop buffering when output bytes exceed `read_max_bytes`.
 6. Continue scanning to EOF to get `totalLines`.
-7. Render output:
+7. Render output as one JSON object:
 
-```text
-<path>src/main.rs</path>
-<type>file</type>
-<content>
-1: use std::io;
-...
-100: }
-(Showing lines 1-100 of 4123. Use offset=101 to continue.)
-</content>
+```json
+{
+  "path": "src/main.rs",
+  "type": "file",
+  "content": "1: use std::io;\n...\n100: }\n(15 lines omitted)",
+  "total_lines": 4123
+}
 ```
+
+The `content` field holds the visible lines with line numbers. It uses `(N lines omitted)` markers for skipped or capped lines. An empty file produces `(End of file - total 0 lines)`. A truncated line appends ` ... (line truncated to <N> chars)`. The output is JSON, so `route` wraps it as compact JSON for the model.
 
 Input validation:
 
@@ -593,6 +623,8 @@ Each test checks:
 - Exit code is 0 on success and nonzero on failure.
 - Stderr contains expected error text on failure.
 
+The suite runs 24 tests. All 24 pass against the current binaries.
+
 ## Cache conformance test
 
 `cache-e2e.sh` is key-gated. It runs only when `DEEPSEEK_API_KEY` is set.
@@ -608,6 +640,8 @@ Steps:
 
 This test proves the append-only log and deterministic projection produce byte-identical prefixes that hit the DeepSeek provider cache. It is the production observable for cache behavior.
 
+The test passed against the live API. Turn 2 reported `cached_tokens = 512 > 0`.
+
 ## Build Plan
 
 1. Create workspace `Cargo.toml` with binaries: `claim`, `assemble`, `model`, `parse`, `route`, `log`, `read`, `write`, `edit`.
@@ -619,7 +653,9 @@ This test proves the append-only log and deterministic projection produce byte-i
 7. Implement tools: `read`, `write`, `edit`.
 8. Write `step.sh` with conditional routing and `turn.sh`.
 9. Write `tool-conformance.sh`.
-10. Run end-to-end test: `turn.sh s1` with a user message asking to read and edit a file.
-11. Write `cache-e2e.sh` and run it with a real `DEEPSEEK_API_KEY` to verify provider cache hits.
+10. Run end-to-end test: `turn.sh s1` with a user message asking to read and edit a file. Done and verified against the live API.
+11. Write `cache-e2e.sh` and run it with a real `DEEPSEEK_API_KEY` to verify provider cache hits. Done and verified.
+
+All steps are complete. The harness runs end to end against the live DeepSeek API.
 
 This plan satisfies the spec. Each binary has one responsibility. The session log is the source of truth. Tools are subprocesses. The system prompt and tool schemas are fixed strings for prefix stability. The cache e2e test is the external-fact gate for the DeepSeek provider.

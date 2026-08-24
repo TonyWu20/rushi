@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["v", "type", "ts", "content", "tool_calls", "stop_reason"],
+  "properties": {
+    "v": { "type": "integer", "const": 1 },
+    "type": { "type": "string", "const": "assistant_message" },
+    "ts": { "type": "string", "format": "date-time" },
+    "content": { "type": "string" },
+    "tool_calls": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "arguments"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "arguments": { "type": "object" }
+        }
+      }
+    },
+    "stop_reason": { "type": "string", "enum": ["stop", "length", "error", "aborted"] },
+    "usage": {
+      "type": "object",
+      "properties": {
+        "input_tokens": { "type": "integer" },
+        "output_tokens": { "type": "integer" },
+        "cached_tokens": { "type": "integer" }
+      }
+    }
+  }
+}

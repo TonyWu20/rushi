@@ -253,3 +253,107 @@ This document records corrections applied to `loop-and-edit-implementation.md` a
 **Problem:** The test ran `turn.sh` to completion (turn 1). It then ran turn 2 with an unchanged log. A completed turn leaves the session idle. `claim` reports `idle`. `step.sh` exits without calling the model. Turn 2 produced zero model requests. The test could never observe a cache hit.
 
 **Fix:** The test appends a new user message before each turn 2 run. The prefix stays byte-identical. Turn 2 now produces requests that extend the turn 1 prefix. If no request hits, the test waits and repeats. Each repeat adds a new user message.
+
+### 31. Responses wire format did not match the DeepSeek API
+
+**Reference:** DeepSeek Responses API docs (api-docs.deepseek.com), verified live 2026-08-24
+
+**Problem:** `assemble` emitted chat-completions shapes. Tools nested `name` under `function`. Messages used `role` and `content`. There was no `instructions`. `model` sent `max_tokens`. The live API returned `400 Bad Request: tools[0]: missing field name`.
+
+**Fix:** `assemble` now emits `{"model", "instructions", "input", "tools"}`. Each tool schema has a top-level `name`. Each input item is `message`, `function_call`, or `function_call_output`. `function_call` arguments serialize to a JSON string. `model` sends `max_output_tokens` and `stream: true`.
+
+### 32. SSE parser used wrong event names
+
+**Reference:** DeepSeek Responses API guide, verified live 2026-08-24
+
+**Problem:** The parser keyed on `input_text.delta`, `input_function_call.added`, and `input_function_call.arguments.delta`. DeepSeek does not emit these events. Text and tool calls never populated.
+
+**Fix:** The parser now handles `response.output_text.delta`, `response.output_item.added` and `response.output_item.done`, and `response.function_call_arguments.delta` and `response.function_call_arguments.done`. The terminal event carries the full response object in the `response` field. The parser reads output items and usage from this object. Streaming deltas are a fallback only.
+
+### 33. Chat completions fallback converted the wrong request shape
+
+**Reference:** `loop-and-edit-implementation.md` (model fallback)
+
+**Problem:** The fallback read a `messages` array. `assemble` no longer emits `messages`. The conversion produced an empty request.
+
+**Fix:** The fallback maps `instructions` to a system message. Each `input` item maps to a chat message. `function_call` items merge into the trailing assistant message as `tool_calls`. `function_call_output` items become `role: "tool"` messages. Tool schemas convert from the top-level `name` form to the nested `function` form. The fallback also extracts tool calls from the chat response.
+
+### 34. Hardcoded timestamps in event emission
+
+**Reference:** `loop-and-edit-implementation.md` (event schemas)
+
+**Problem:** `parse`, `assemble`, and `route` emitted the fixed timestamp `2024-01-01T00:00:00Z` for every event. The `ts` field was fake.
+
+**Fix:** All three binaries now emit real UTC time via `chrono`. `assemble` and `route` gained the `chrono` dependency. The format is RFC 3339 with second precision.
+
+### 35. `parse` emitted string arguments that failed schema validation
+
+**Reference:** `loop-and-edit-implementation.md` (parse), `schemas/events/v1/tool_call.json`
+
+**Problem:** The model returns `arguments` as a JSON string. `parse` copied the string into the emitted events. The schemas require `arguments` to be an object. `log` rejected the whole batch. The loop broke.
+
+**Fix:** `parse` normalizes `arguments` before emission. A string parses into a JSON object. An already-object value passes through. Malformed strings produce an `error` event and exit code 2.
+
+### 36. `claim` reported stale pending tool calls when idle
+
+**Reference:** `loop-and-edit-implementation.md` (claim)
+
+**Problem:** `claim` kept `pending_tool_calls` after the state became `idle`. The output carried tool calls that were already resolved.
+
+**Fix:** `claim` clears `pending_tool_calls` whenever the state becomes `idle`. The field is empty in the idle state.
+
+### 37. `step.sh` model-failure event used pretty-printed JSON
+
+**Reference:** `loop-and-edit-implementation.md` (step.sh)
+
+**Problem:** The error event used `jq -n`. `jq -n` emits multi-line JSON. `log` reads one JSON object per line. It rejected the first line `{`.
+
+**Fix:** The error event uses `jq -cn`. The output is a single compact JSON line. `log` accepts it.
+
+### 38. Config parsing used `sed` and `jq` on TOML
+
+**Reference:** `loop-and-edit-implementation.md` (script dependencies)
+
+**Problem:** `step.sh` and `turn.sh` parsed `config.toml` with `sed`. GNU `sed` and BSD `sed` differ. The original doc called `jq` on a TOML file. `jq` cannot parse TOML. Both approaches break on some systems.
+
+**Fix:** `step.sh` and `turn.sh` parse config with POSIX `awk`. The extraction uses `[[:space:]]`, `-F'"'`, and `print; exit`. These work on macOS BSD awk and GNU awk.
+
+### 39. `route` validation error did not name the missing field
+
+**Reference:** `loop-and-edit-implementation.md` (route)
+
+**Problem:** The error text read "Tool arguments failed schema validation: missing required fields." The spec requires the field name. The model could not correct its call.
+
+**Fix:** `validate_args` returns the first missing required field. `route` emits "Tool arguments failed schema validation: <field>." The live model then retried with `file_path` and succeeded.
+
+### 40. `read` tool printed an empty omission marker at offset 1
+
+**Reference:** `loop-and-edit-implementation.md` (read tool)
+
+**Problem:** At `offset` 1, the output began with `(0 lines omitted)`. The marker is wrong when no lines precede the window.
+
+**Fix:** `read` emits the omission marker only when `offset` is greater than 1.
+
+### 41. Conformance suite was missing three tests
+
+**Reference:** `loop-and-edit-implementation.md` (conformance tests)
+
+**Problem:** The doc listed a 60KB byte-cap read test, an edit binary-file test, and an edit BOM test. The script lacked all three. The suite ran 21 tests.
+
+**Fix:** Added the three tests to `tool-conformance.sh`. The suite now runs 24 tests and all pass.
+
+### 42. Cache e2e verified against the live API
+
+**Reference:** `loop-and-edit-implementation.md` (cache conformance test)
+
+**Problem:** No live run proved the cache behavior. The test had never run with a real key.
+
+**Fix:** Ran `cache-e2e.sh` with a live key. Turn 2 reported `cached_tokens = 512 > 0`. The test passes. The usage trail climbs across turns.
+
+### 43. Full loop verified against the live API
+
+**Reference:** `loop-and-edit-implementation.md` (build plan)
+
+**Problem:** The loop had only run with a mock model. The real API path was unproven.
+
+**Fix:** Ran a full live turn. The model read `config.toml`, recovered from a schema error, edited `test.txt`, and answered. The loop ended at `idle`. The harness works end to end.

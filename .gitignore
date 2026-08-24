@@ -2,3 +2,12 @@
 
 ## Rust build output
 **/target/
+
+## Compiled tool binaries (cargo builds to target/debug)
+tools/*/bin/
+
+## Runtime data (created by the harness)
+sessions/
+
+## Scratch test file
+test.txt

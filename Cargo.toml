@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = [
+    "bin/claim",
+    "bin/assemble",
+    "bin/model",
+    "bin/parse",
+    "bin/route",
+    "bin/log",
+    "tools/read",
+    "tools/write",
+    "tools/edit",
+]

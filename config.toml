@@ -1,0 +1,32 @@
+[model]
+api = "responses"
+base_url = "https://api.deepseek.com"
+model = "deepseek-v4-flash"
+api_key_env = "DEEPSEEK_API_KEY"
+max_output_tokens = 4096
+
+[paths]
+sessions_root = "sessions"
+tools_root = "tools"
+
+[limits]
+max_steps = 20
+read_limit = 2000
+read_max_line_length = 2000
+read_max_bytes = 51200
+read_stream_min_size = 10485760
+write_max_bytes = 1048576
+tool_result_max_chars = 20000
+context_budget_chars = 180000
+
+[system_prompt]
+text = """Use the read tool — not shell commands like cat — to inspect text files.
+Results include line numbers. Use offset and limit to continue reading large files.
+
+Use the write tool to create files or completely replace file contents.
+
+Use the edit tool for targeted changes to existing UTF-8 text files.
+It replaces literal old_string with new_string; by default old_string must
+appear exactly once. If it appears multiple times, provide a more specific
+old_string or set replace_all to true. Read the file first unless you just
+created or edited it in this session."""

@@ -1,0 +1,15 @@
+[package]
+name = "parse"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "parse"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1.0.151"
+glob = "0.3.4"
+clap = { version = "4.6.6", features = ["derive"] }
+toml = "0.7"
+chrono = { version = "0.4", features = ["serde"] }

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["v", "type", "ts", "id", "name", "arguments"],
+  "properties": {
+    "v": { "type": "integer", "const": 1 },
+    "type": { "type": "string", "const": "tool_call" },
+    "ts": { "type": "string", "format": "date-time" },
+    "id": { "type": "string" },
+    "name": { "type": "string" },
+    "arguments": { "type": "object" }
+  }
+}

@@ -1,0 +1,24 @@
+[tool]
+description = "Read a file and output its contents"
+command = "read"
+args = []
+timeout_ms = 30000
+
+[tool.schema]
+type = "object"
+required = ["file_path"]
+
+[tool.schema.properties]
+[tool.schema.properties.file_path]
+type = "string"
+description = "Path to the file to read"
+
+[tool.schema.properties.offset]
+type = "integer"
+description = "1-based line number to start reading from"
+default = 1
+
+[tool.schema.properties.limit]
+type = "integer"
+description = "Maximum number of lines to read"
+default = 2000
