@@ -3,13 +3,36 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read};
 
-/// Call DeepSeek API via Responses format
+/// Call the model API via Responses format
 #[derive(Parser)]
-#[command(name = "model", about = "Call the DeepSeek API and output model response")]
+#[command(name = "model", about = "Call the model API and output model response")]
 struct Args {
     /// Path to config file
     #[arg(long, default_value = "config.toml")]
     config: String,
+}
+
+/// Resolve the active model name from the MODEL env var or config.
+fn resolve_active_model(config: &toml::Value) -> String {
+    std::env::var("MODEL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            config
+                .get("active")
+                .and_then(|a| a.get("model"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("deepseek")
+                .to_string()
+        })
+}
+
+fn val_str(v: &toml::Value, key: &str) -> Option<String> {
+    v.get(key).and_then(|x| x.as_str()).map(|s| s.to_string())
+}
+
+fn val_int(v: &toml::Value, key: &str) -> Option<i64> {
+    v.get(key).and_then(|x| x.as_integer())
 }
 
 fn main() {
@@ -32,36 +55,27 @@ fn main() {
         }
     };
 
-    let base_url = config
-        .get("model")
-        .and_then(|m| m.get("base_url"))
-        .and_then(|u| u.as_str())
-        .unwrap_or("https://api.deepseek.com");
+    // Resolve the active model and its settings.
+    let active_model = resolve_active_model(&config);
+    let empty = toml::Value::Table(toml::map::Map::new());
+    let model_root = config.get("model").unwrap_or(&empty);
+    let mdl = model_root.get(&active_model).unwrap_or(&empty);
 
-    let model_name = config
-        .get("model")
-        .and_then(|m| m.get("model"))
-        .and_then(|m| m.as_str())
-        .unwrap_or("deepseek-v4-flash");
+    let base_url = val_str(mdl, "base_url")
+        .unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
 
-    let max_output_tokens = config
-        .get("model")
-        .and_then(|m| m.get("max_output_tokens"))
-        .and_then(|m| m.as_integer())
+    let model_name = val_str(mdl, "model_id").unwrap_or_else(|| active_model.clone());
+
+    let max_output_tokens = val_int(mdl, "max_output_tokens")
+        .or_else(|| val_int(model_root, "max_output_tokens"))
         .unwrap_or(4096) as u64;
 
-    let reasoning_effort = config
-        .get("model")
-        .and_then(|m| m.get("reasoning_effort"))
-        .and_then(|m| m.as_str())
-        .unwrap_or("medium")
-        .to_string();
+    let reasoning_effort = val_str(mdl, "reasoning_effort")
+        .or_else(|| val_str(model_root, "reasoning_effort"))
+        .unwrap_or_else(|| "medium".to_string());
 
-    let api_key_env = config
-        .get("model")
-        .and_then(|m| m.get("api_key_env"))
-        .and_then(|k| k.as_str())
-        .unwrap_or("DEEPSEEK_API_KEY");
+    let api_key_env = val_str(mdl, "api_key_env")
+        .unwrap_or_else(|| "MODEL_API_KEY".to_string());
 
     let api_key = std::env::var(api_key_env).unwrap_or_default();
 
@@ -91,7 +105,7 @@ fn main() {
     });
 
     // Try responses API first
-    let result = call_responses_api(&url, &api_key, &api_request, model_name);
+    let result = call_responses_api(&url, &api_key, &api_request, &model_name);
 
     match result {
         Ok(response) => {

@@ -35,8 +35,7 @@ rust-unix-harness/
 │   ├── step.sh                 # one-step pipeline with conditional routing
 │   ├── turn.sh                 # loop driver (calls step.sh)
 │   └── tool-conformance.sh     # G4 conformance harness
-├── config.toml                 # DeepSeek provider config
-├── config.llama.toml           # llama.cpp provider config
+├── config.toml                 # unified multi-model config
 ├── tools/
 │   ├── read/
 │   │   ├── tool.toml
@@ -66,11 +65,25 @@ rust-unix-harness/
 ```toml
 [model]
 api = "responses"
-base_url = "https://api.deepseek.com"
-model = "deepseek-v4-flash"
-api_key_env = "DEEPSEEK_API_KEY"
 max_output_tokens = 32768
 reasoning_effort = "medium"
+chars_per_token = 4
+
+[model.deepseek]
+model_id = "deepseek-v4-flash"
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+context_tokens = 131072
+
+[model.llama]
+model_id = "Nail-Qwen3.6-35B-A3B"
+base_url = "http://127.0.0.1:8080"
+api_key_env = "LLAMA_API_KEY"
+context_tokens = 32768
+max_output_tokens = 16384
+
+[active]
+model = "deepseek"
 
 [paths]
 sessions_root = "sessions"
@@ -84,7 +97,6 @@ read_max_bytes = 51200
 read_stream_min_size = 10485760
 write_max_bytes = 1048576
 tool_result_max_chars = 20000
-context_budget_chars = 180000
 
 [system_prompt]
 text = """Use the read tool — not shell commands like cat — to inspect text files.
@@ -99,24 +111,27 @@ old_string or set replace_all to true. Read the file first unless you just
 created or edited it in this session."""
 ```
 
-`max_output_tokens` bounds the generated output. The value includes reasoning tokens. `32768` gives headroom for long agentic turns. The API accepts a cap up to `384000`.
+The `[model]` table holds defaults. Each `[model.<name>]` table defines one model. `[active] model` selects the active model. The `MODEL` environment variable overrides the selection.
 
-`reasoning_effort` sets the thinking level. Allowed values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. `none` disables thinking. `medium` gives high-effort thinking on `deepseek-v4-flash`. The value maps to the `reasoning.effort` field in the request. Both fields are frozen call config.
+`max_output_tokens` bounds the generated output. The value includes reasoning tokens. A per-model value overrides the default. `reasoning_effort` sets the thinking level. Allowed values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. `none` disables thinking. The value maps to the `reasoning.effort` field in the request.
 
-## Backends
+`context_tokens` is the model's context window. `assemble` derives the request budget from it. The formula is `(context_tokens - max_output_tokens) * chars_per_token`. `chars_per_token` estimates characters per token. Set `context_tokens` to match the server for local models. llama.cpp sets the window with `--ctx-size`. `context_budget_chars` is optional. If set in `[limits]`, it caps the derived budget. These values are frozen call config.
 
-The harness is provider-agnostic. The `[model]` section in the config selects the provider. Both supported backends speak the OpenAI Responses wire format, so the same request shape and SSE parser serve both.
+## Models
 
-- DeepSeek: `config.toml`. Base URL `https://api.deepseek.com`, model `deepseek-v4-flash`, key from `DEEPSEEK_API_KEY`.
-- llama.cpp: `config.llama.toml`. Base URL `http://127.0.0.1:8080`, model name as served by the local server, no API key needed.
+The harness is provider-agnostic. One `config.toml` holds many models. Each speaks the OpenAI Responses wire format, so the same request shape and SSE parser serve all.
 
-Select a config with the `CONFIG` environment variable or the `--config` flag:
+- `deepseek`: Base URL `https://api.deepseek.com`, model `deepseek-v4-flash`, key from `DEEPSEEK_API_KEY`.
+- `llama`: Base URL `http://127.0.0.1:8080`, model as served by the local server, no API key needed.
+
+Select the active model with `[active] model` or the `MODEL` environment variable:
 
 ```bash
-CONFIG=config.llama.toml bash scripts/turn.sh s1
+MODEL=llama bash scripts/turn.sh s1
+MODEL=deepseek bash scripts/turn.sh s1
 ```
 
-llama.cpp requires no code changes. It emits the same SSE event names as DeepSeek. Its terminal event carries the full response object, usage, and tool call items. The empty `Authorization` header is harmless.
+llama.cpp needs no code changes. It emits the same SSE event names as DeepSeek. Its terminal event carries the full response object, usage, and tool call items. The empty `Authorization` header is harmless.
 
 ## Binary Implementations
 
@@ -161,8 +176,9 @@ Algorithm:
    - `error` → skip. Error events are terminal. The loop stops before `assemble` runs again.
 3. Apply `tool_result_max_chars` cap to each tool result text. If clipped, append `[tool result clipped: N -> M chars]` to the text. The full value stays in the log. The clip is deterministic. Same log produces the same clipped bytes.
 4. Load tool schemas from `tools/*/tool.toml`. Sort by tool name. Serialize each schema to `{"type":"function","name": <name>, "description": <desc>, "parameters": <params>}`. The `name` field is top level. This is the Responses API shape.
-5. Compute char count. If `context_budget_chars` is exceeded, emit one `error` event to stdout with message "Context budget exceeded. Start a new session or reduce scope." Exit 0. `step.sh` checks for this event before running `model`.
-6. Otherwise, output `ModelRequest` JSON to stdout. Exit 0.
+5. Derive the context budget from the active model. The formula is `(context_tokens - max_output_tokens) * chars_per_token`. An explicit `context_budget_chars` in `[limits]` caps the value.
+6. Compute the char count of the request. If it exceeds the budget, emit one `error` event to stdout with message "Context budget exceeded. Start a new session or reduce scope." Exit 0. `step.sh` checks for this event before running `model`.
+7. Otherwise, output `ModelRequest` JSON to stdout. Exit 0.
 
 The `ModelRequest`:
 
@@ -181,13 +197,15 @@ Prefix stability: `instructions` text, tool schema order (sorted by name), and i
 
 ### `model` — Input: ModelRequest JSON. Output: assistant_message JSON
 
-Calls the DeepSeek API via the OpenAI Responses wire format.
+Calls the active model API via the OpenAI Responses wire format.
+
+The binary resolves the active model. The `MODEL` environment variable selects it. Otherwise `[active] model` in config does. Per-model settings override the `[model]` defaults.
 
 Implementation:
 
 - Use `reqwest` with streaming.
-- Build the `/v1/responses` request from `ModelRequest`. Add `max_output_tokens` from config and set `stream` to `true`.
-- Add the `reasoning` object with an `effort` field. The value comes from `reasoning_effort` in `config.toml`. The field controls the thinking mode and its effort.
+- Build the `/v1/responses` request from `ModelRequest`. Add `max_output_tokens` from the resolved model and set `stream` to `true`.
+- Add the `reasoning` object with an `effort` field. The value comes from `reasoning_effort` in the resolved model. The field controls the thinking mode and its effort.
 - Parse SSE events. Each event carries a `type` field.
 - `response.output_text.delta` carries visible text deltas.
 - `response.output_item.added` and `response.output_item.done` carry `function_call` items with `name` and `call_id`.
@@ -282,8 +300,8 @@ Usage:
 
 ```bash
 user --session s1 "Read config.toml"
+MODEL=llama user --session s1 "Read config.toml"
 printf 'multi\nline' | user --session s1
-user --session s1 --config config.llama.toml "Read config.toml"
 ```
 
 Behavior:

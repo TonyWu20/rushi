@@ -397,3 +397,19 @@ This document records corrections applied to `loop-and-edit-implementation.md` a
 **Problem:** The harness was hard-wired to DeepSeek in the docs. No other provider was documented or verified.
 
 **Fix:** Added `config.llama.toml` pointing at a local llama.cpp server. The `model` binary needed no changes. llama.cpp emits the same Responses SSE events and carries the full response in the terminal event. Verified end to end with model `Nail-Qwen3.6-35B-A3B` at `127.0.0.1:8080`. The empty `Authorization` header is harmless.
+
+### 49. Unified multi-model config
+
+**Reference:** `loop-and-edit-implementation.md` (config, models)
+
+**Problem:** Each provider had its own config file. `config.toml` held DeepSeek. `config.llama.toml` held llama.cpp. Adding a model meant copying a whole file. The `CONFIG` variable switched files.
+
+**Fix:** One `config.toml` now holds all models. Each `[model.<name>]` table defines one model. The `[model]` table holds defaults. `[active] model` selects the active model. The `MODEL` environment variable overrides the selection. Removed `config.llama.toml`. The `assemble` and `model` binaries resolve the active model the same way.
+
+### 50. Context length customization
+
+**Reference:** `loop-and-edit-implementation.md` (config)
+
+**Problem:** The request budget was a fixed character count. Local models have a token-based context window. Sending a request larger than the window truncated or failed. The user could not set the window per model.
+
+**Fix:** Each model defines `context_tokens`. `assemble` derives the budget with `(context_tokens - max_output_tokens) * chars_per_token`. `chars_per_token` defaults to 4. For llama.cpp, `context_tokens` must match the server `--ctx-size`. An optional `context_budget_chars` caps the derived value. Per-model `max_output_tokens` reserves output room in the window.

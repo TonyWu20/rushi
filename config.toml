@@ -1,10 +1,24 @@
 [model]
 api = "responses"
-base_url = "https://api.deepseek.com"
-model = "deepseek-v4-flash"
-api_key_env = "DEEPSEEK_API_KEY"
 max_output_tokens = 32768
 reasoning_effort = "medium"
+chars_per_token = 4
+
+[model.deepseek]
+model_id = "deepseek-v4-flash"
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+context_tokens = 131072
+
+[model.llama]
+model_id = "Nail-Qwen3.6-35B-A3B"
+base_url = "http://127.0.0.1:8080"
+api_key_env = "LLAMA_API_KEY"
+context_tokens = 32768
+max_output_tokens = 16384
+
+[active]
+model = "deepseek"
 
 [paths]
 sessions_root = "sessions"
@@ -18,7 +32,6 @@ read_max_bytes = 51200
 read_stream_min_size = 10485760
 write_max_bytes = 1048576
 tool_result_max_chars = 20000
-context_budget_chars = 180000
 
 [system_prompt]
 text = """Use the read tool — not shell commands like cat — to inspect text files.

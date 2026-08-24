@@ -15,6 +15,51 @@ struct Args {
     config: String,
 }
 
+struct ModelSettings {
+    model_id: String,
+    max_output_tokens: u64,
+    context_tokens: usize,
+    chars_per_token: usize,
+}
+
+/// Resolve the active model name from the MODEL env var or config.
+fn resolve_active_model(config: &toml::Value) -> String {
+    std::env::var("MODEL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            config
+                .get("active")
+                .and_then(|a| a.get("model"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("deepseek")
+                .to_string()
+        })
+}
+
+fn val_str(v: &toml::Value, key: &str) -> Option<String> {
+    v.get(key).and_then(|x| x.as_str()).map(|s| s.to_string())
+}
+
+fn val_int(v: &toml::Value, key: &str) -> Option<i64> {
+    v.get(key).and_then(|x| x.as_integer())
+}
+
+/// Resolve settings for a named model. Per-model values override defaults.
+fn resolve_model_settings(config: &toml::Value, name: &str) -> ModelSettings {
+    let empty = toml::Value::Table(toml::map::Map::new());
+    let model_root = config.get("model").unwrap_or(&empty);
+    let mdl = model_root.get(name).unwrap_or(&empty);
+    ModelSettings {
+        model_id: val_str(mdl, "model_id").unwrap_or_else(|| name.to_string()),
+        max_output_tokens: val_int(mdl, "max_output_tokens")
+            .or_else(|| val_int(model_root, "max_output_tokens"))
+            .unwrap_or(4096) as u64,
+        context_tokens: val_int(mdl, "context_tokens").unwrap_or(131072) as usize,
+        chars_per_token: val_int(model_root, "chars_per_token").unwrap_or(4) as usize,
+    }
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -44,12 +89,6 @@ fn main() {
         .unwrap_or("")
         .to_string();
 
-    let context_budget_chars: usize = config
-        .get("limits")
-        .and_then(|l| l.get("context_budget_chars"))
-        .and_then(|c| c.as_integer())
-        .unwrap_or(180000) as usize;
-
     let tool_result_max_chars: usize = config
         .get("limits")
         .and_then(|l| l.get("tool_result_max_chars"))
@@ -61,6 +100,23 @@ fn main() {
         .and_then(|p| p.get("tools_root"))
         .and_then(|t| t.as_str())
         .unwrap_or("tools");
+
+    // Resolve the active model and derive the context budget from its window.
+    let active_model = resolve_active_model(&config);
+    let model_settings = resolve_model_settings(&config, &active_model);
+    let derived_budget = model_settings
+        .context_tokens
+        .saturating_sub(model_settings.max_output_tokens as usize)
+        .saturating_mul(model_settings.chars_per_token);
+    let explicit_budget = config
+        .get("limits")
+        .and_then(|l| l.get("context_budget_chars"))
+        .and_then(|c| c.as_integer())
+        .map(|v| v as usize);
+    let context_budget_chars = match explicit_budget {
+        Some(e) => e.min(derived_budget),
+        None => derived_budget,
+    };
 
     // Read events
     let log_path = PathBuf::from(&args.session).join("events.jsonl");
@@ -239,11 +295,7 @@ fn main() {
 
     // Compute char count of the request
     let request = serde_json::json!({
-        "model": config
-            .get("model")
-            .and_then(|m| m.get("model"))
-            .and_then(|m| m.as_str())
-            .unwrap_or("deepseek-v4-flash"),
+        "model": model_settings.model_id,
         "instructions": system_prompt,
         "input": input_items,
         "tools": tool_schemas
