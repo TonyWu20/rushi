@@ -1,3 +1,5 @@
+#![deny(clippy::todo, clippy::unimplemented, clippy::unreachable)]
+
 use clap::Parser;
 use std::collections::HashSet;
 use std::fs;

@@ -19,7 +19,7 @@
         }
       }
     },
-    "stop_reason": { "type": "string", "enum": ["stop", "length", "error", "aborted"] },
+    "stop_reason": { "type": "string", "enum": ["stop", "tool_calls", "length", "error", "aborted"] },
     "usage": {
       "type": "object",
       "properties": {

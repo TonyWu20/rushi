@@ -1,0 +1,14 @@
+[tool]
+description = "List the files and subdirectories in a directory. Directories end with a slash. Use this to discover file names before reading them."
+command = "list"
+args = []
+timeout_ms = 30000
+
+[tool.schema]
+type = "object"
+required = ["path"]
+
+[tool.schema.properties]
+[tool.schema.properties.path]
+type = "string"
+description = "Path to the directory to list"

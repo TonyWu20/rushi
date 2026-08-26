@@ -5,7 +5,7 @@
 A Rust-based agent harness that follows the Unix philosophy:
 
 1. **Each tool is a CLI program** — spawn argv, pipe `stdin`, read `stdout`/`stderr`, check exit code.
-2. **Text / structured output is the universal interface** — JSON on stdout as the default contract, plain text as fallback, JSONL/NDJSON for streaming.
+2. **Text / structured output is the universal interface** — JSON on stdout as the default contract, plain text as fallback. JSONL/NDJSON streaming is planned, not yet part of the contract.
 3. **The harness is extended by writing scripts or programs in any language** — the ABI is bytes over pipes; the harness never imports tool code.
 
 The deeper conclusion from comparing this model with `deepseek-harness`/Cordis:
@@ -25,21 +25,20 @@ The deeper conclusion from comparing this model with `deepseek-harness`/Cordis:
 
 - **stdin**: one JSON object per invocation.
 - **stdout**: one JSON object — the canonical result.
-- **stderr**: human-readable diagnostics, never parsed by the harness.
+- **stderr**: human-readable diagnostics, never structurally parsed. On non-zero exit, the harness forwards stderr as the error message.
 - **exit code**: `0` success, non-zero failure.
 - **non-JSON stdout**: wrapped as `{"text": "..."}`.
 
-### 3.2 Streaming tools
+### 3.2 Streaming tools (planned)
 
-Use JSONL/NDJSON on stdout: one event per line, with a terminal `{"type":"result", ...}` line.
+Use JSONL/NDJSON on stdout: one event per line, with a terminal `{"type":"result", ...}` line. Not yet implemented.
 
 ### 3.3 Tool manifest (TOML)
 
 ```toml
 # tools/fetch_url/tool.toml
-name = "fetch_url"
+[tool]
 description = "Fetch a URL and return its text content"
-kind = "subprocess"            # or "rust", "wasm", "mcp"
 command = "python3"
 args = ["main.py"]
 timeout_ms = 30_000
@@ -51,7 +50,9 @@ properties = { url = { type = "string" } }
 required = ["url"]
 ```
 
-`kind` selects the adapter. The core only sees the `ToolExecutor` trait; it never knows whether `execute` spawns a process or calls an in-process function.
+The tool name is the directory name. The manifest carries no `name` field.
+
+The future core selects the adapter. It only sees the `ToolExecutor` trait; it never knows whether `execute` spawns a process or calls an in-process function.
 
 ## 4. Architecture
 

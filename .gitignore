@@ -2,6 +2,7 @@
 
 ## Rust build output
 **/target/
+target
 
 ## Compiled tool binaries (cargo builds to target/debug)
 tools/*/bin/

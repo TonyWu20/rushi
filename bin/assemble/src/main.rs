@@ -1,3 +1,5 @@
+#![deny(clippy::todo, clippy::unimplemented, clippy::unreachable)]
+
 use clap::Parser;
 use std::fs;
 use std::path::PathBuf;
@@ -82,12 +84,24 @@ fn main() {
         }
     };
 
-    let system_prompt = config
+    let mut system_prompt = config
         .get("system_prompt")
         .and_then(|p| p.get("text"))
         .and_then(|t| t.as_str())
         .unwrap_or("")
         .to_string();
+
+    // Inject the session working directory, recorded at the entry point.
+    let cwd_file = PathBuf::from(&args.session).join("cwd");
+    if let Ok(cwd) = fs::read_to_string(&cwd_file) {
+        let cwd = cwd.trim();
+        if !cwd.is_empty() {
+            system_prompt.push_str(&format!(
+                "\n\nCurrent working directory: {cwd}\n\
+                 Relative paths in tool calls resolve against this directory."
+            ));
+        }
+    }
 
     let tool_result_max_chars: usize = config
         .get("limits")

@@ -15,9 +15,15 @@ while [ "$STEPS" -lt "$MAX_STEPS" ]; do
   BIN_DIR="$(cd "$SCRIPT_DIR/../target/debug" && pwd)"
   STATE=$("$BIN_DIR/claim" --session "$SESSIONS_ROOT/$SESSION" | jq -r .state)
   if [ "$STATE" = "idle" ]; then
-    exit 0
+    break
   fi
 done
 
-echo "max_steps reached ($MAX_STEPS)" >&2
-exit 1
+# Print a readable transcript of the current turn.
+jq -c -s -f "$SCRIPT_DIR/transcript.jq" "$SESSIONS_ROOT/$SESSION/events.jsonl" 2>/dev/null
+
+if [ "$STEPS" -ge "$MAX_STEPS" ]; then
+  echo "max_steps reached ($MAX_STEPS)" >&2
+  exit 1
+fi
+exit 0

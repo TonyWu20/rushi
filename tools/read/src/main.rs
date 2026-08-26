@@ -1,3 +1,5 @@
+#![deny(clippy::todo, clippy::unimplemented, clippy::unreachable)]
+
 use clap::Parser;
 use std::fs;
 use std::io::{self, Read};
@@ -190,11 +192,11 @@ fn main() {
         output_lines.join("")
     };
 
-    // Build JSON output
+    // Build JSON output. The text field carries the model-facing content.
     let output = serde_json::json!({
+        "text": content_str,
         "path": file_path,
         "type": "file",
-        "content": content_str,
         "total_lines": total_lines
     });
 

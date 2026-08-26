@@ -1,11 +1,13 @@
+#![deny(clippy::todo, clippy::unimplemented, clippy::unreachable)]
+
 use clap::Parser;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
-/// Append a user_message event to a session log
+/// Append a user_message event to a session log and run the agent loop
 #[derive(Parser)]
-#[command(name = "user", about = "Append a user message to a session log")]
+#[command(name = "user", about = "Append a user message and run the agent loop")]
 struct Args {
     /// Session name or directory
     #[arg(long)]
@@ -18,6 +20,10 @@ struct Args {
     /// Path to schema directory (for validation)
     #[arg(long, default_value = "schemas/events/v1")]
     schemas: String,
+
+    /// Do not run the agent loop after appending
+    #[arg(long)]
+    no_run: bool,
 
     /// Message content. If omitted, read from stdin.
     content: Option<String>,
@@ -70,6 +76,17 @@ fn main() {
         }
     }
 
+    // Record the working directory on the first user message. The entry
+    // point owns this decision; later stages only read it.
+    let cwd_path = session_dir.join("cwd");
+    if !cwd_path.exists() {
+        if let Ok(cwd) = std::env::current_dir() {
+            if let Err(e) = fs::write(&cwd_path, cwd.to_string_lossy().as_bytes()) {
+                eprintln!("Warning: cannot write cwd file: {e}");
+            }
+        }
+    }
+
     let mut file = match OpenOptions::new()
         .create(true)
         .append(true)
@@ -89,7 +106,48 @@ fn main() {
         std::process::exit(1);
     }
 
-    println!("{}", line);
+    if args.no_run {
+        println!("{}", line);
+        return;
+    }
+
+    // Run the agent loop
+    run_turn(&args.session, &args.config);
+}
+
+/// Run the agent loop via turn.sh
+fn run_turn(session: &str, config: &str) {
+    // Find turn.sh relative to the config file location
+    let config_path = PathBuf::from(config);
+    let repo_root = config_path
+        .canonicalize()
+        .map(|p| p.parent().map(|d| d.to_path_buf()))
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| PathBuf::from("."));
+    let turn_script = repo_root.join("scripts").join("turn.sh");
+
+    if !turn_script.exists() {
+        eprintln!("Error: turn.sh not found at {}", turn_script.display());
+        std::process::exit(1);
+    }
+
+    let config_abs = config_path
+        .canonicalize()
+        .unwrap_or_else(|_| config_path.clone());
+
+    let status = std::process::Command::new("bash")
+        .arg(&turn_script)
+        .arg(session)
+        .env("CONFIG", config_abs.to_string_lossy().as_ref())
+        .current_dir(&repo_root)
+        .status()
+        .expect("Failed to execute turn.sh");
+
+    if !status.success() {
+        eprintln!("Error: turn.sh exited with status {}", status.code().unwrap_or(-1));
+        std::process::exit(status.code().unwrap_or(1));
+    }
 }
 
 /// Resolve a session name or path to a session directory.

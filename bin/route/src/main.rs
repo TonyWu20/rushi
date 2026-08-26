@@ -1,3 +1,5 @@
+#![deny(clippy::todo, clippy::unimplemented, clippy::unreachable)]
+
 use clap::Parser;
 use std::collections::HashMap;
 use std::fs;
@@ -16,6 +18,10 @@ struct Args {
     /// Tool result max chars
     #[arg(long, default_value = "20000")]
     tool_result_max_chars: usize,
+
+    /// Working directory for tool subprocesses
+    #[arg(long)]
+    cwd: Option<PathBuf>,
 }
 
 fn main() {
@@ -65,10 +71,31 @@ fn main() {
                                         .and_then(|c| c.as_str())
                                         .unwrap_or(&name_str)
                                         .to_string();
-                                    // Resolve binary path: tools/<name>/bin/<name>
+                                    // Resolve the tool binary. Prefer the cargo
+                                    // build output (this binary's own directory),
+                                    // then the tools/<name>/bin/ copy.
                                     let command = if raw_command == name_str {
-                                        tool_path.join("bin").join(&name_str)
-                                            .to_string_lossy().to_string()
+                                        let exe_dir = std::env::current_exe()
+                                            .ok()
+                                            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+                                        let candidates = [
+                                            exe_dir
+                                                .as_ref()
+                                                .map(|d| d.join(&name_str)),
+                                            Some(tool_path.join("bin").join(&name_str)),
+                                        ];
+                                        candidates
+                                            .iter()
+                                            .flatten()
+                                            .find(|p| p.is_file())
+                                            .map(|p| p.to_string_lossy().to_string())
+                                            .unwrap_or_else(|| {
+                                                tool_path
+                                                    .join("bin")
+                                                    .join(&name_str)
+                                                    .to_string_lossy()
+                                                    .to_string()
+                                            })
                                     } else {
                                         raw_command
                                     };
@@ -188,7 +215,11 @@ fn main() {
         let args_json = manifest.1.get("args").unwrap();
         let timeout_ms = manifest.1.get("timeout_ms").and_then(|t| t.as_u64()).unwrap_or(30000);
 
-        let mut child = match Command::new(command)
+        let mut cmd = Command::new(command);
+        if let Some(ref cwd) = args.cwd {
+            cmd.current_dir(cwd);
+        }
+        let mut child = match cmd
             .args(
                 args_json
                     .as_array()

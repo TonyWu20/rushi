@@ -1,3 +1,5 @@
+#![deny(clippy::todo, clippy::unimplemented, clippy::unreachable)]
+
 use clap::Parser;
 use std::fs;
 use std::io::{self, Read};
@@ -68,7 +70,11 @@ fn main() {
         .and_then(|s| s.as_str())
         .unwrap_or("stop");
 
-    let usage = model_output.get("usage").cloned();
+    // Usage is optional. Omit it when the model returns null.
+    let usage = model_output
+        .get("usage")
+        .filter(|u| !u.is_null())
+        .cloned();
 
     // Load valid tool names from tools/
     let tools_root_path = PathBuf::from(&tools_root);
@@ -138,6 +144,10 @@ fn main() {
 
     // Emit events based on stop_reason
     match stop_reason {
+        "stop" | "tool_calls" => {
+            // Normal completion: assistant message plus any tool calls.
+            emit_assistant_and_tool_calls(&text, &tool_calls, stop_reason, usage.as_ref());
+        }
         "error" | "aborted" => {
             let error_event = serde_json::json!({
                 "v": 1,
@@ -160,15 +170,17 @@ fn main() {
                 }));
             }
 
-            let assistant_message = serde_json::json!({
+            let mut assistant_message = serde_json::json!({
                 "v": 1,
                 "type": "assistant_message",
                 "ts": ts,
                 "content": text,
                 "tool_calls": assistant_tool_calls,
-                "stop_reason": stop_reason,
-                "usage": usage
+                "stop_reason": stop_reason
             });
+            if let Some(u) = usage.as_ref() {
+                assistant_message["usage"] = u.clone();
+            }
             println!("{}", assistant_message);
 
             for tc in &tool_calls {
@@ -187,52 +199,69 @@ fn main() {
             }
             std::process::exit(2);
         }
-        _ => {
-            // Emit assistant_message
-            let mut assistant_tool_calls: Vec<serde_json::Value> = Vec::new();
-            for tc in &tool_calls {
-                let args = normalize_arguments(tc.get("arguments")).unwrap_or(serde_json::json!({}));
-                assistant_tool_calls.push(serde_json::json!({
-                    "id": tc.get("id").and_then(|id| id.as_str()).unwrap_or(""),
-                    "name": tc.get("name").and_then(|n| n.as_str()).unwrap_or(""),
-                    "arguments": args
-                }));
-            }
-
-            let assistant_message = serde_json::json!({
+        other => {
+            // Unknown stop reason: treat as an error so the loop stops.
+            let error_event = serde_json::json!({
                 "v": 1,
-                "type": "assistant_message",
+                "type": "error",
                 "ts": ts,
-                "content": text,
-                "tool_calls": assistant_tool_calls,
-                "stop_reason": stop_reason,
-                "usage": usage
+                "message": format!("Model stop reason: {}.", other)
             });
-            println!("{}", assistant_message);
-
-            // Emit tool_call events if there are tool calls
-            if tool_calls.is_empty() {
-                std::process::exit(2);
-            }
-
-            for tc in &tool_calls {
-                let tc_id = tc.get("id").and_then(|id| id.as_str()).unwrap_or("");
-                let tc_name = tc.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                let tc_args = normalize_arguments(tc.get("arguments")).unwrap_or(serde_json::json!({}));
-
-                let tool_call_event = serde_json::json!({
-                    "v": 1,
-                    "type": "tool_call",
-                    "ts": ts,
-                    "id": tc_id,
-                    "name": tc_name,
-                    "arguments": tc_args
-                });
-                println!("{}", tool_call_event);
-            }
-            std::process::exit(1);
+            println!("{}", error_event);
+            std::process::exit(2);
         }
     }
+}
+
+/// Emit the assistant_message plus one tool_call event per call.
+fn emit_assistant_and_tool_calls(
+    text: &str,
+    tool_calls: &[serde_json::Value],
+    stop_reason: &str,
+    usage: Option<&serde_json::Value>,
+) {
+    let ts = chrono_utc_now();
+
+    let assistant_tool_calls: Vec<serde_json::Value> = tool_calls
+        .iter()
+        .map(|tc| {
+            serde_json::json!({
+                "id": tc.get("id").and_then(|id| id.as_str()).unwrap_or(""),
+                "name": tc.get("name").and_then(|n| n.as_str()).unwrap_or(""),
+                "arguments": normalize_arguments(tc.get("arguments")).unwrap_or(serde_json::json!({}))
+            })
+        })
+        .collect();
+
+    let mut assistant_message = serde_json::json!({
+        "v": 1,
+        "type": "assistant_message",
+        "ts": ts,
+        "content": text,
+        "tool_calls": assistant_tool_calls,
+        "stop_reason": stop_reason
+    });
+    if let Some(u) = usage {
+        assistant_message["usage"] = u.clone();
+    }
+    println!("{}", assistant_message);
+
+    if tool_calls.is_empty() {
+        std::process::exit(2);
+    }
+
+    for tc in tool_calls {
+        let tool_call_event = serde_json::json!({
+            "v": 1,
+            "type": "tool_call",
+            "ts": ts,
+            "id": tc.get("id").and_then(|id| id.as_str()).unwrap_or(""),
+            "name": tc.get("name").and_then(|n| n.as_str()).unwrap_or(""),
+            "arguments": normalize_arguments(tc.get("arguments")).unwrap_or(serde_json::json!({}))
+        });
+        println!("{}", tool_call_event);
+    }
+    std::process::exit(1);
 }
 
 fn normalize_arguments(args: Option<&serde_json::Value>) -> Option<serde_json::Value> {

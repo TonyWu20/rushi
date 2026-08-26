@@ -1,3 +1,5 @@
+#![deny(clippy::todo, clippy::unimplemented, clippy::unreachable)]
+
 use clap::Parser;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, Write};

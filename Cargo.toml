@@ -11,4 +11,5 @@ members = [
     "tools/read",
     "tools/write",
     "tools/edit",
+    "tools/list",
 ]
