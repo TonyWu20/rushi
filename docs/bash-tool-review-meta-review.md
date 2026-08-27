@@ -56,7 +56,7 @@ missed are named below.
 
 - `bash_max_output_bytes` defaults to 32768 bytes (spec section 3.3).
 - `config.toml` sets `tool_result_max_chars = 20000`.
-- `bin/assemble/src/main.rs` (lines 106 to 110, 226 to 239) caps the
+- `bin/assemble/src/main.rs` (lines 106 to 110, 225 to 241) caps the
   tool result `text` at 20000 characters.
 - For ASCII, 20000 characters is smaller than 32768 bytes.
 - The assemble cap, not the tool cap, is the effective bound.
