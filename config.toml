@@ -1,3 +1,11 @@
+# Opaque loop command the TUI supervises (docs/tui.md section 2.3).
+# The TUI never sees the internals of this command; it starts it,
+# streams its output, and stops it on request.
+[loop]
+command = "bash"
+args = ["scripts/turn.sh"]
+arg_style = "append_session"
+
 [model]
 api = "responses"
 max_output_tokens = 32768

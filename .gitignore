@@ -12,3 +12,6 @@ sessions/
 
 ## Scratch test file
 test.txt
+
+## Python bytecode
+__pycache__/

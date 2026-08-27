@@ -1,0 +1,450 @@
+//! `tui` — the first stateful Rust binary of the harness.
+//!
+//! A window onto the session log and a supervisor for the opaque loop
+//! (docs/tui.md). Everything session-shaped goes through
+//! [`crate::port::SessionPort`]; this file is the composition root:
+//! terminal, runtime, port, and the draw/input loop.
+
+#![deny(clippy::todo, clippy::unimplemented, clippy::unreachable)]
+
+mod app;
+mod config;
+mod editor;
+mod event;
+mod highlight;
+mod port;
+mod port_file;
+mod render;
+
+use std::io::Write;
+use std::time::Duration;
+
+use clap::Parser;
+use crossterm::event as cevent;
+use crossterm::terminal;
+use crossterm::ExecutableCommand;
+use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
+
+use app::{Action, App, Decision, Key};
+use config::TuiConfig;
+use port::{SessionId, SessionPort, TailCursor};
+use port_file::FileSessionPort;
+
+/// Interactive window onto the session log. Renders events, appends
+/// user events, and supervises the opaque loop command from config.
+#[derive(Parser, Debug)]
+#[command(name = "tui", about = "Terminal UI for the harness session log")]
+struct Args {
+    /// The session to open. If omitted, the TUI asks for a new session
+    /// name: the session is created on its first appended event.
+    session: Option<String>,
+
+    /// Path to the harness config file. Relative paths resolve against
+    /// the current directory.
+    #[arg(long, default_value = "config.toml")]
+    config: String,
+}
+
+/// Terminal state restoration that must survive a panic: raw mode,
+/// mouse capture, and the alternate screen all come back.
+struct TermGuard;
+
+impl TermGuard {
+    fn init() -> std::io::Result<TermGuard> {
+        let mut out = std::io::stdout();
+        out.execute(terminal::EnterAlternateScreen)?;
+        terminal::enable_raw_mode()?;
+        out.execute(cevent::EnableMouseCapture)?;
+        Ok(TermGuard)
+    }
+}
+
+impl Drop for TermGuard {
+    fn drop(&mut self) {
+        let _ = terminal::disable_raw_mode();
+        let mut out = std::io::stdout();
+        let _ = out.execute(cevent::DisableMouseCapture);
+        crossterm::execute!(out, terminal::LeaveAlternateScreen, crossterm::cursor::Show).ok();
+        let _ = out.flush();
+    }
+}
+
+/// Map a crossterm key event to the app-level [`Key`].
+fn key_input(k: &cevent::KeyEvent) -> Option<Key> {
+    if k.modifiers.contains(cevent::KeyModifiers::CONTROL) {
+        return match k.code {
+            cevent::KeyCode::Char('c') => Some(Key::CtrlC),
+            cevent::KeyCode::Char('e') => Some(Key::CtrlE),
+            cevent::KeyCode::Char('q') => Some(Key::Quit),
+            cevent::KeyCode::Char('r') => Some(Key::CtrlR),
+            cevent::KeyCode::Char('u') => Some(Key::CtrlU),
+            cevent::KeyCode::Char('d') => Some(Key::CtrlD),
+            _ => None,
+        };
+    }
+    match k.code {
+        cevent::KeyCode::Char('q') => Some(Key::Quit),
+        cevent::KeyCode::Char(c) => Some(Key::Char(c)),
+        cevent::KeyCode::Enter => Some(Key::Enter),
+        cevent::KeyCode::Backspace => Some(Key::Backspace),
+        cevent::KeyCode::Tab => Some(Key::Tab),
+        cevent::KeyCode::BackTab => Some(Key::BackTab),
+        cevent::KeyCode::PageUp => Some(Key::PgUp),
+        cevent::KeyCode::PageDown => Some(Key::PgDn),
+        cevent::KeyCode::Esc => Some(Key::Esc),
+        _ => None,
+    }
+}
+
+fn main() {
+    let args = Args::parse();
+    let cfg = match TuiConfig::load(&args.config) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("tui: {e}");
+            std::process::exit(1);
+        }
+    };
+    let port = FileSessionPort::new(&cfg);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("cannot build the async runtime");
+
+    let _guard = TermGuard::init().expect("cannot initialize the terminal (is this a tty?)");
+
+    let active = args.session.clone().map(SessionId::new);
+
+    let backend = CrosstermBackend::new(std::io::stdout());
+    let mut term = Terminal::new(backend).expect("cannot create the terminal");
+    let mut app = App::new();
+
+    if let Some(id) = active {
+        let events = rt.block_on(port.read_events(&id)).unwrap_or_default();
+        app.set_active(id.clone(), events);
+        app.set_watch_rx(port.watch(&id, TailCursor::end()));
+    } else {
+        // No session argument: ask for a new session name instead of
+        // resuming the most recent session.
+        app.set_sessions(rt.block_on(port.list_sessions()).unwrap_or_default());
+        app.start_naming();
+    }
+
+    'ui: loop {
+        // 1. New log events for the active session.
+        while let Some(item) = app.drain_watch() {
+            app.on_watch_item(item);
+        }
+        // 2. Output of every running loop (all sessions).
+        for _ in app.drain_loop_lines() {}
+
+        // 3. One input batch, or a short wait. A wheel notch queues
+        // many scroll events at once; drain the whole pending queue,
+        // then draw once. One event per frame (with a full redraw
+        // between) starved key input behind a mouse burst: the keys
+        // sat in the queue and the UI looked hung. Draining keeps
+        // keys responsive (docs/tui_feature_requests_from_human.md).
+        let mut evs: Vec<cevent::Event> = Vec::new();
+        match cevent::poll(Duration::from_millis(100)) {
+            Ok(true) => {
+                // Read pending events until the queue is empty.
+                // Use a 1 ms poll, not 0: with crossterm's
+                // `use-dev-tty` input source a zero poll timeout
+                // skips the parser check and always reports empty.
+                while cevent::poll(Duration::from_millis(1)).unwrap_or(false) {
+                    match cevent::read() {
+                        Ok(e) => evs.push(e),
+                        Err(_) => break,
+                    }
+                }
+            }
+            Ok(false) => {}
+            Err(_) => break 'ui,
+        }
+
+        let mut actions = Vec::new();
+        for e in evs {
+            match e {
+                cevent::Event::Key(k) => {
+                    // Only press/repeat matter; release events carry
+                    // no information for this UI.
+                    if matches!(
+                        k.kind,
+                        cevent::KeyEventKind::Press | cevent::KeyEventKind::Repeat
+                    ) {
+                        if let Some(key) = key_input(&k) {
+                            actions.extend(app.press(key));
+                        }
+                    }
+                }
+                cevent::Event::Mouse(m) => match m.kind {
+                    cevent::MouseEventKind::ScrollUp => {
+                        actions.extend(app.press(Key::Wheel(-1)))
+                    }
+                    cevent::MouseEventKind::ScrollDown => {
+                        actions.extend(app.press(Key::Wheel(1)))
+                    }
+                    _ => {}
+                },
+                // Resize: ratatui re-queries the terminal on each draw.
+                _ => {}
+            }
+        }
+
+        // 4. Execute the port-level actions.
+        for action in actions {
+            match action {
+                Action::SendDraft => {
+                    let Some(sid) = app.active().cloned() else {
+                        continue;
+                    };
+                    let content = app.take_draft();
+                    let text = content.trim().to_string();
+                    let ev = event::produce::user_message(&text);
+                    match rt.block_on(port.append_event(&sid, &ev)) {
+                        Ok(()) => app.flash("message sent"),
+                        Err(e) => {
+                            // Keep the text: the user must not lose a
+                            // message that failed to land in the log.
+                            app.set_draft(content);
+                            app.flash(e.to_string());
+                        }
+                    }
+                    if let Ok(list) = rt.block_on(port.list_sessions()) {
+                        app.set_sessions(list);
+                    }
+                }
+                Action::AnswerApproval(d) => {
+                    let Some(sid) = app.active().cloned() else {
+                        continue;
+                    };
+                    let Some(p) = app.oldest_pending_approval() else {
+                        app.flash("no pending approval");
+                        continue;
+                    };
+                    let built = match d {
+                        Decision::Allow => {
+                            Some(event::produce::approval(&p.request_id, "allow", None))
+                        }
+                        Decision::Deny => {
+                            Some(event::produce::approval(&p.request_id, "deny", None))
+                        }
+                        Decision::Edit => {
+                            let initial = p
+                                .arguments
+                                .clone()
+                                .map(|v| serde_json::to_string_pretty(&v).unwrap_or_default())
+                                .unwrap_or_else(|| "{}".to_string());
+                            match edit_in_terminal(&initial, &mut term) {
+                                Some(text) => {
+                                    match serde_json::from_str::<serde_json::Value>(&text) {
+                                        Ok(v) => Some(event::produce::approval(
+                                            &p.request_id,
+                                            "allow",
+                                            Some(v),
+                                        )),
+                                        Err(_) => {
+                                            app.flash(
+                                                "edited text is not valid JSON; nothing appended",
+                                            );
+                                            None
+                                        }
+                                    }
+                                }
+                                None => {
+                                    app.flash("edit aborted; nothing appended");
+                                    None
+                                }
+                            }
+                        }
+                    };
+                    let Some(ev) = built else { continue };
+                    match rt.block_on(port.append_event(&sid, &ev)) {
+                        Ok(()) => app.flash(match d {
+                            Decision::Allow => "approval appended: allow",
+                            Decision::Deny => "approval appended: deny",
+                            Decision::Edit => "edited approval appended",
+                        }),
+                        Err(e) => app.flash(e.to_string()),
+                    }
+                }
+                Action::RunLoop => {
+                    let Some(sid) = app.active().cloned() else {
+                        continue;
+                    };
+                    match rt.block_on(port.spawn_loop(&sid)) {
+                        Ok(handle) => {
+                            let lines = handle.take_lines().unwrap_or_else(empty_lines);
+                            app.attach_loop(sid, handle, lines);
+                            app.flash("loop started");
+                        }
+                        Err(e) => app.flash(e.to_string()),
+                    }
+                }
+                Action::StopLoop => {
+                    let Some(sid) = app.active().cloned() else {
+                        continue;
+                    };
+                    let handle = app.loops_mut_for(&sid).and_then(|st| st.handle.take());
+                    if let Some(h) = handle {
+                        h.stop();
+                        app.flash("loop stop requested");
+                        // A stop is a decision worth surviving a
+                        // restart: append the cancel event
+                        // (docs/tui.md section 5).
+                        let ev = event::produce::cancel("turn");
+                        if let Err(e) = rt.block_on(port.append_event(&sid, &ev)) {
+                            app.flash(e.to_string());
+                        }
+                    }
+                }
+                Action::OpenEditor => {
+                    let Some(sid) = app.active().cloned() else {
+                        continue;
+                    };
+                    let _ = sid;
+                    let old = app.take_draft();
+                    match edit_in_terminal(&old, &mut term) {
+                        Some(text) => app.set_draft(text),
+                        None => {
+                            app.set_draft(old);
+                            app.flash("edit aborted; draft unchanged");
+                        }
+                    }
+                }
+                Action::CycleSessions(delta) => {
+                    let list = rt.block_on(port.list_sessions()).unwrap_or_default();
+                    app.set_sessions(list);
+                    let target = app.cycle_target(delta);
+                    if let Some(id) = target {
+                        if Some(&id) != app.active() {
+                            let events = rt.block_on(port.read_events(&id)).unwrap_or_default();
+                            app.set_active(id.clone(), events);
+                            app.set_watch_rx(port.watch(&id, TailCursor::end()));
+                        }
+                    } else {
+                        app.flash("no sessions to cycle");
+                    }
+                }
+                Action::ConfirmNewSession(name) => {
+                    let sid = SessionId::new(&name);
+                    let events = rt.block_on(port.read_events(&sid)).unwrap_or_default();
+                    app.set_active(sid.clone(), events);
+                    app.set_watch_rx(port.watch(&sid, TailCursor::end()));
+                    if let Ok(list) = rt.block_on(port.list_sessions()) {
+                        app.set_sessions(list);
+                    }
+                    app.flash(format!("session {name} opened"));
+                }
+                Action::Quit => {
+                    // Stop every loop before leaving; the log survives.
+                    for (_sid, h) in app.detach_all_handles() {
+                        h.stop();
+                    }
+                    return finish(&mut term);
+                }
+            }
+        }
+
+        // 5. Draw.
+        let mut cursor: Option<(u16, u16)> = None;
+        if let Err(e) = term.draw(|f| render::draw(f, &mut app, &mut cursor)) {
+            eprintln!("tui: draw failed: {e}");
+            break;
+        }
+        if let Some(pos) = cursor {
+            let _ = term.set_cursor_position(pos);
+        }
+    }
+    finish(&mut term);
+}
+
+/// A lines stream that is empty: for handles without output.
+fn empty_lines() -> tokio::sync::mpsc::UnboundedReceiver<port::LoopLine> {
+    let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    rx
+}
+
+fn edit_in_terminal(
+    initial: &str,
+    term: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+) -> Option<String> {
+    let suspend = || {
+        let _ = terminal::disable_raw_mode();
+        let mut out = std::io::stdout();
+        let _ = out.execute(cevent::DisableMouseCapture);
+    };
+    let resume = || {
+        let mut out = std::io::stdout();
+        let _ = out.execute(cevent::EnableMouseCapture);
+        let _ = terminal::enable_raw_mode();
+    };
+    let result = editor::run_editor(initial, suspend, resume);
+    // The editor drew on the alternate screen; clear before the next
+    // frame so its content does not bleed through.
+    let _ = term.clear();
+    match result {
+        Ok(text) => Some(text),
+        Err(e) => {
+            eprintln!("tui: {e}");
+            None
+        }
+    }
+}
+
+fn finish(term: &mut Terminal<CrosstermBackend<std::io::Stdout>>) {
+    let _ = term.clear();
+}
+
+mod guardrail {
+    //! docs/tui.md section 10: the TUI source must not contain loop
+    //! internals or storage layout. Those strings live only in
+    //! `port_file.rs` (the storage detail) and in this scan.
+    #[test]
+    fn storage_and_loop_strings_stay_behind_the_port() {
+        let forbidden = [
+            "turn.sh",
+            "step.sh",
+            "events.jsonl",
+            "state.json",
+            "pending/",
+        ];
+        let allowed = ["port_file.rs", "main.rs"];
+        for entry in std::fs::read_dir("src").expect("tests run from the crate root") {
+            let p = entry.unwrap().path();
+            let name = p.file_name().unwrap().to_string_lossy().into_owned();
+            if allowed.iter().any(|a| a == &name) {
+                continue;
+            }
+            let content = std::fs::read_to_string(&p).unwrap_or_default();
+            for lit in forbidden {
+                assert!(
+                    !content.contains(lit),
+                    "{name} contains the forbidden literal `{lit}` (docs/tui.md 10)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stage_names_are_not_strings_in_the_tui() {
+        // Stage names are config values, not TUI strings.
+        let forbidden = ["claim", "assemble"];
+        let allowed = ["main.rs"];
+        for entry in std::fs::read_dir("src").expect("tests run from the crate root") {
+            let p = entry.unwrap().path();
+            let name = p.file_name().unwrap().to_string_lossy().into_owned();
+            if allowed.iter().any(|a| a == &name) {
+                continue;
+            }
+            let content = std::fs::read_to_string(&p).unwrap_or_default();
+            for lit in forbidden {
+                assert!(
+                    !content.contains(lit),
+                    "{name} contains the stage name `{lit}` (docs/tui.md 10)"
+                );
+            }
+        }
+    }
+}

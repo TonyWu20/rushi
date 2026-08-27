@@ -13,4 +13,5 @@ members = [
     "tools/edit",
     "tools/list",
     "tools/bash",
+    "bin/tui",
 ]
