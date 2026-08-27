@@ -117,6 +117,12 @@ pub struct App {
     /// version folds in, so a new reply rebuilds the lines
     /// (ui-extension-plan stage 1).
     transcript_cache: Option<(u64, usize, u64, Vec<Line<'static>>)>,
+    /// Latest `ext_status` values, id to value, for the active
+    /// session. Maintained incrementally: `set_active` builds it
+    /// and each appended watch event updates it. A tick reads this
+    /// map in O(1) instead of rescanning the whole log
+    /// (ui-extension-plan stage 1, tick payload).
+    ext_status_values: HashMap<String, Value>,
 }
 
 /// A session name must stay a plain directory name inside the sessions
@@ -126,6 +132,24 @@ pub struct App {
 /// `list_sessions` never finds it).
 fn valid_session_name(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains('/')
+}
+
+/// The `ext_status` values of one event list, id to value. Later
+/// events win, like the log order. An event without a string `id`
+/// adds no entry; a missing `value` counts as `null`.
+fn ext_status_map(events: &[Event]) -> HashMap<String, Value> {
+    let mut m = HashMap::new();
+    for e in events {
+        if e.kind() != EventKind::ExtStatus {
+            continue;
+        }
+        let Some(id) = e.get_str("id") else {
+            continue;
+        };
+        let value = e.get("value").cloned().unwrap_or(Value::Null);
+        m.insert(id.to_string(), value);
+    }
+    m
 }
 
 const STATUS_TTL: std::time::Duration = std::time::Duration::from_secs(4);
@@ -149,6 +173,7 @@ impl App {
             quitting: false,
             quit_arm: None,
             pending_name: None,
+            ext_status_values: HashMap::new(),
             viewport: 0,
             events_version: 0,
             transcript_cache: None,
@@ -185,10 +210,12 @@ impl App {
     /// Switch the visible session. Reloads its log and resets scroll.
     /// The caller restarts the port watch afterwards.
     pub fn set_active(&mut self, id: SessionId, events: Vec<Event>) {
+        let statuses = ext_status_map(&events);
         self.active = Some(id);
         self.events = events;
         self.scroll = 0;
         self.events_version += 1;
+        self.ext_status_values = statuses;
     }
 
     // ── new-session name input ──────────────────────────────
@@ -218,6 +245,14 @@ impl App {
     pub fn on_watch_item(&mut self, item: WatchItem) {
         match item {
             WatchItem::Event { event, .. } => {
+                // A new ext_status event updates the map in place.
+                // Later events win, like the log order.
+                if event.kind() == EventKind::ExtStatus {
+                    let value = event.get("value").cloned().unwrap_or(Value::Null);
+                    if let Some(id) = event.get_str("id") {
+                        self.ext_status_values.insert(id.to_string(), value);
+                    }
+                }
                 self.events.push(event);
                 self.events_version += 1;
             }
@@ -285,23 +320,14 @@ impl App {
         m
     }
 
-    /// Latest `ext_status` values, id to value, from the active log.
-    /// The extension host sends this map in every `tick` op, so a
-    /// statusline consumes shared UI state through the log
-    /// (docs/ui-extension.md section 5).
-    pub fn ext_statuses(&self) -> HashMap<String, Value> {
-        let mut m = HashMap::new();
-        for e in &self.events {
-            if e.kind() != EventKind::ExtStatus {
-                continue;
-            }
-            let Some(id) = e.get_str("id") else {
-                continue;
-            };
-            let value = e.get("value").cloned().unwrap_or(Value::Null);
-            m.insert(id.to_string(), value);
-        }
-        m
+    /// Latest `ext_status` values, id to value, for the active
+    /// session. The extension host sends this map in every `tick`
+    /// op, so a statusline consumes shared UI state through the log
+    /// (docs/ui-extension.md section 5). The map is maintained
+    /// incrementally: each watch event updates it, so a tick reads
+    /// O(1) state instead of a whole-log scan.
+    pub fn ext_statuses(&self) -> &HashMap<String, Value> {
+        &self.ext_status_values
     }
 
     // ── scroll ──────────────────────────────────────────────────
@@ -882,6 +908,50 @@ mod tests {
         // (10 lines) is used instead of a half-page.
         assert_eq!(app.press(Key::CtrlU), Vec::<Action>::new());
         assert_eq!(app.scroll(), 10);
+    }
+
+    #[test]
+    fn ext_statuses_track_latest_value_per_id() {
+        let evs = vec![
+            ev(r#"{"v":1,"type":"ext_status","ts":"t","id":"vim_mode","value":"insert"}"#),
+            ev(r#"{"v":1,"type":"ext_status","ts":"t","id":"vim_mode","value":"normal"}"#),
+            ev(r#"{"v":1,"type":"ext_status","ts":"t","id":"team","value":{"on_call":"t"}}"#),
+        ];
+        let app = app_with(evs, "s1");
+        let m = app.ext_statuses();
+        assert_eq!(m.len(), 2);
+        assert_eq!(
+            m.get("vim_mode").unwrap(),
+            &json!("normal"),
+            "the latest event wins per id"
+        );
+        assert_eq!(m.get("team").unwrap(), &json!({"on_call": "t"}));
+    }
+
+    #[test]
+    fn ext_statuses_update_on_watch_events() {
+        let mut app = app_with(
+            vec![ev(r#"{"v":1,"type":"ext_status","ts":"t","id":"vim_mode","value":"insert"}"#)],
+            "s1",
+        );
+        // A new ext_status watch event updates the map in place.
+        app.on_watch_item(WatchItem::Event {
+            event: ev(r#"{"v":1,"type":"ext_status","ts":"t","id":"vim_mode","value":"normal"}"#),
+            cursor: crate::port::TailCursor::end(),
+        });
+        assert_eq!(app.ext_statuses().get("vim_mode").unwrap(), &json!("normal"));
+        // A non-ext_status event leaves the map untouched.
+        app.on_watch_item(WatchItem::Event {
+            event: ev(r#"{"v":1,"type":"user_message","ts":"t","content":"hi"}"#),
+            cursor: crate::port::TailCursor::end(),
+        });
+        assert_eq!(app.ext_statuses().get("vim_mode").unwrap(), &json!("normal"));
+        // A session switch rebuilds the map from that session's log.
+        app.set_active(SessionId::new("s2"), vec![]);
+        assert!(
+            app.ext_statuses().is_empty(),
+            "a fresh session has no ext_status values"
+        );
     }
 
     #[test]

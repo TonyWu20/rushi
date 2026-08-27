@@ -449,13 +449,12 @@ fn main() {
             host.on_resize(width);
             last_width = width;
         }
-        let statuses = app.ext_statuses();
         let tick = ext::TickPayload {
             width,
             session: app.active().map(|s| s.as_str()),
             model: cfg.active_model.as_deref(),
             loop_running: app.active().is_some_and(|s| app.loop_running(s)),
-            statuses: &statuses,
+            statuses: app.ext_statuses(),
         };
         host.pump_ticks(&tick);
         host.poll_transforms();
