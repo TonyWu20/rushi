@@ -19,6 +19,7 @@ import struct
 import tempfile
 import termios
 import fcntl
+import json
 import sys
 import threading
 import time
@@ -49,8 +50,13 @@ class Screen:
         self.grid = [[" "] * cols for _ in range(rows)]
         self.r = 0
         self.c = 0
+        # The raw byte stream. The grid loses control bytes (BEL, OSC);
+        # the raw buffer keeps them for assertions like "the turn
+        # finished and the terminal bell rang".
+        self.raw = bytearray()
 
     def feed(self, data):
+        self.raw += data
         i = 0
         n = len(data)
         while i < n:
@@ -449,6 +455,359 @@ def ext_append_reject():
     )
 
 
+def layer_config(tmpdir, layer_dir, active_model=None):
+    """A temp config that points `[ext] dir` at a layer directory.
+
+    The layer is usually the repo's `ui_extensions/` global layer
+    (the reference extensions) or `ext-rs/`. The sessions root is a
+    private dir so the cases never touch the repo session list.
+    """
+    cfg_dir = tmpdir + "/ext-cfg"
+    os.makedirs(cfg_dir, exist_ok=True)
+    sessions = tmpdir + "/ext-sessions"
+    os.makedirs(sessions, exist_ok=True)
+    path = cfg_dir + "/config.toml"
+    with open(path, "w") as f:
+        f.write("[paths]\n")
+        f.write(f"sessions_root = \"{sessions}\"\n\n")
+        f.write("[ext]\n")
+        f.write(f"dir = \"{layer_dir}\"\n")
+        if active_model:
+            f.write("\n[active]\n")
+            f.write(f"model = \"{active_model}\"\n")
+    return path, sessions
+
+
+def seed_session(sessions_dir, name, events):
+    """Write a session log directly, oldest first."""
+    d = os.path.join(sessions_dir, name)
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "events.jsonl"), "w") as f:
+        for e in events:
+            f.write(json.dumps(e) + "\n")
+
+
+def seed_events():
+    """One realistic turn: user, assistant (tool_calls, usage),
+    tool_call, tool_result, and a finished assistant turn (usage).
+    The usage totals are in:125 out:55 sum:180.
+    """
+    ts = "2026-08-27T10:00:00Z"
+    return [
+        {"v": 1, "type": "user_message", "ts": ts, "content": "check the build"},
+        {
+            "v": 1, "type": "assistant_message", "ts": ts,
+            "content": "Running the build now.",
+            "tool_calls": [{"id": "call_1", "name": "bash", "arguments": {"command": "make"}}],
+            "stop_reason": "tool_calls",
+            "usage": {"input_tokens": 100, "output_tokens": 50},
+        },
+        {"v": 1, "type": "tool_call", "ts": ts, "id": "call_1", "name": "bash", "arguments": {"command": "make"}},
+        {"v": 1, "type": "tool_result", "ts": ts, "id": "call_1", "value": {"text": "all good"}, "is_error": False},
+        {
+            "v": 1, "type": "assistant_message", "ts": ts,
+            "content": "Build finished without errors.",
+            "tool_calls": [],
+            "stop_reason": "stop",
+            "usage": {"input_tokens": 25, "output_tokens": 5},
+        },
+    ]
+
+
+def procs_with_cwd_under(prefix):
+    """Pids whose cwd is `prefix` itself or under it. The host starts
+    every extension with cwd set to its entry dir (docs/ui-extension.md
+    section 7)."""
+    pids = []
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
+        try:
+            cwd = os.readlink(f"/proc/{d}/cwd")
+        except OSError:
+            continue
+        if cwd == prefix or cwd.startswith(prefix + "/"):
+            pids.append(int(d))
+    return pids
+
+
+def wait_markers(master, pid, screen, markers, deadline):
+    """Pump until every marker is seen on screen or the deadline."""
+    seen = set()
+    while time.time() < deadline and len(seen) < len(markers):
+        pump(master, 0.15, screen)
+        if not alive(pid):
+            return seen, False
+        text = screen.text()
+        for m in markers:
+            if m in text:
+                seen.add(m)
+    return seen, all(m in screen.text() for m in markers) and alive(pid)
+
+
+def ext_statusline_real():
+    """A real session on the reference layer.
+
+    The statusline shows live dir, git, model, and usage stats. The
+    two-line layout shows on the 80-col smoke pty. Restarting the
+    TUI mid-session keeps the stats: they are recomputed from the
+    log. The finished turn rings the terminal (raw BEL in the
+    stream).
+    """
+    tmp = tempfile.mkdtemp(prefix="tui-ext-real-")
+    cfg, sessions = layer_config(tmp, REPO + "/ui_extensions", active_model="smoke-model")
+    seed_session(sessions, EXT_SESSION, seed_events())
+    stats_marker = "smoke-model in:125 out:55 sum:180"
+    ok = True
+    master, pid = spawn(EXT_SESSION, cfg)
+    screen = Screen(24, 80)
+    try:
+        deadline = time.time() + 8.0
+        seen, _ = wait_markers(
+            master, pid, screen,
+            ["[ext] tool:call_1", "(git:none)", stats_marker],
+            deadline,
+        )
+        if not alive(pid):
+            print("FAIL ext-statusline-real: process died during startup")
+            return False
+        missing = [m for m in ["[ext] tool:call_1", "(git:none)", stats_marker] if m not in seen]
+        if missing:
+            print(f"FAIL ext-statusline-real: markers not seen: {missing}")
+            print("screen was:\n" + screen.text())
+            return False
+        # The finished turn rings: the notify extension flushes its
+        # remembered turn ~5 s after start. Check the raw stream for
+        # the bell and the OSC title.
+        deadline = time.time() + 6.0
+        while time.time() < deadline:
+            pump(master, 0.25, screen)
+            if b"\x07" in screen.raw:
+                break
+        if b"\x07" not in screen.raw:
+            print("FAIL ext-statusline-real: no terminal bell in the pty stream")
+            return False
+        if b"turn finished" not in screen.raw:
+            print("FAIL ext-statusline-real: no OSC title in the pty stream")
+            return False
+        # Quit, then restart: the usage totals must survive from the
+        # log alone (the host re-sends every usage-bearing message).
+        os.write(master, b"q")
+        pump(master, 0.4, screen)
+        os.write(master, b"q")
+        deadline = time.time() + 4.0
+        while time.time() < deadline and alive(pid):
+            pump(master, 0.2, screen)
+        if alive(pid):
+            print("FAIL ext-statusline-real: still running after double-q (hang)")
+            os.kill(pid, signal.SIGKILL)
+            reap(pid)
+            return False
+        reap(pid)
+        orphans = procs_with_cwd_under(REPO + "/ui_extensions")
+        if orphans:
+            print(f"FAIL ext-statusline-real: orphan layer processes: {orphans}")
+            for p in orphans:
+                try:
+                    os.kill(p, signal.SIGKILL)
+                except OSError:
+                    pass
+            return False
+        master2, pid2 = spawn(EXT_SESSION, cfg)
+        screen2 = Screen(24, 80)
+        try:
+            deadline = time.time() + 8.0
+            while time.time() < deadline:
+                pump(master2, 0.2, screen2)
+                if not alive(pid2):
+                    print("FAIL ext-statusline-real: restart died during startup")
+                    return False
+                if stats_marker in screen2.text():
+                    break
+            if stats_marker not in screen2.text():
+                print("FAIL ext-statusline-real: usage stats did not survive the restart")
+                print("screen was:\n" + screen2.text())
+                return False
+        finally:
+            os.write(master2, b"q")
+            pump(master2, 0.4, screen2)
+            os.write(master2, b"q")
+            deadline = time.time() + 4.0
+            while time.time() < deadline and alive(pid2):
+                pump(master2, 0.2, screen2)
+            if alive(pid2):
+                os.kill(pid2, signal.SIGKILL)
+            reap(pid2)
+            try:
+                os.close(master2)
+            except OSError:
+                pass
+        print("OK ext-statusline-real: dir/git/model/usage shown, two-line layout, bell, stats survive restart")
+        return ok
+    finally:
+        try:
+            os.close(master)
+        except OSError:
+            pass
+
+
+def ext_statusline_repo():
+    """The repo config on a real session: the global layer loads the
+    reference extensions. The statusline shows the live dir, the git
+    branch, the active model, and the usage totals from the real log.
+    """
+    cfg = REPO + "/config.toml"
+    master, pid = spawn(SESSION, cfg)
+    screen = Screen(24, 80)
+    markers = ["unix-harness", "git:main", "Qwen3.8-27B-NVFP4-RTX5090-DSPARK"]
+    try:
+        deadline = time.time() + 10.0
+        seen, _ = wait_markers(master, pid, screen, markers, deadline)
+        if not alive(pid):
+            print("FAIL ext-statusline-repo: process died during startup")
+            return False
+        text = screen.text()
+        missing = [m for m in markers if m not in seen]
+        if missing:
+            print(f"FAIL ext-statusline-repo: markers not seen: {missing}")
+            print("screen was:\n" + text)
+            return False
+        if "in:" not in text:
+            print("FAIL ext-statusline-repo: usage totals not shown")
+            print("screen was:\n" + text)
+            return False
+        os.write(master, b"q")
+        pump(master, 0.4, screen)
+        os.write(master, b"q")
+        deadline = time.time() + 4.0
+        while time.time() < deadline and alive(pid):
+            pump(master, 0.2, screen)
+        if alive(pid):
+            print("FAIL ext-statusline-repo: still running after double-q (hang)")
+            os.kill(pid, signal.SIGKILL)
+            reap(pid)
+            return False
+        reap(pid)
+        orphans = procs_with_cwd_under(REPO + "/ui_extensions")
+        if orphans:
+            print(f"FAIL ext-statusline-repo: orphan layer processes: {orphans}")
+            for p in orphans:
+                try:
+                    os.kill(p, signal.SIGKILL)
+                except OSError:
+                    pass
+            return False
+        print("OK ext-statusline-repo: dir, git branch, model, usage on a real session")
+        return True
+    finally:
+        try:
+            os.close(master)
+        except OSError:
+            pass
+
+
+def ext_tool_result_kill():
+    """Kill the tool_result renderer: the built-in render returns.
+
+    The extension renders the seeded tool_result. SIGKILL the
+    process group on every restart attempt until the 1 s / 2 s / 4 s
+    budget is spent. The host then drops the cached replies, and a
+    freshly appended tool_result renders through the built-in path.
+    """
+    tmp = tempfile.mkdtemp(prefix="tui-ext-kill-")
+    cfg, sessions = layer_config(tmp, REPO + "/ui_extensions", active_model="smoke-model")
+    seed_session(sessions, EXT_SESSION, seed_events())
+    tr_dir = REPO + "/ui_extensions/tool_result"
+    master, pid = spawn(EXT_SESSION, cfg)
+    screen = Screen(24, 80)
+    log = os.path.join(sessions, EXT_SESSION, "events.jsonl")
+    try:
+        # 1. The extension's render is in place.
+        deadline = time.time() + 8.0
+        while time.time() < deadline:
+            pump(master, 0.2, screen)
+            if not alive(pid):
+                print("FAIL ext-tool-result-kill: process died during startup")
+                return False
+            if "[ext] tool:call_1" in screen.text():
+                break
+        if "[ext] tool:call_1" not in screen.text():
+            print("FAIL ext-tool-result-kill: the extension render never showed")
+            print("screen was:\n" + screen.text())
+            return False
+        # 2. Kill every restart generation until the budget is spent.
+        kill_deadline = time.time() + 10.0
+        while time.time() < kill_deadline:
+            for p in procs_with_cwd_under(tr_dir):
+                try:
+                    os.kill(p, signal.SIGKILL)
+                except OSError:
+                    pass
+            time.sleep(0.5)
+        # 3. Append a new tool_result live. The host tailer sees it.
+        with open(log, "a") as f:
+            f.write(json.dumps({
+                "v": 1, "type": "tool_call", "ts": "2026-08-27T10:05:00Z",
+                "id": "call_9", "name": "bash",
+                "arguments": {"command": "true"},
+            }) + "\n")
+            f.write(json.dumps({
+                "v": 1, "type": "tool_result", "ts": "2026-08-27T10:05:00Z",
+                "id": "call_9", "value": {"text": "late result"}, "is_error": False,
+            }) + "\n")
+        # 4. The dead hint flashes and the built-in render shows the
+        # new result. The extension render must be gone.
+        deadline = time.time() + 8.0
+        saw_dead = False
+        saw_builtin = False
+        while time.time() < deadline:
+            pump(master, 0.25, screen)
+            text = screen.text()
+            if "ext tool_result is dead" in text:
+                saw_dead = True
+            if "tool:bash" in text and "[ext] tool:call_9" not in text:
+                saw_builtin = True
+            if saw_dead and saw_builtin:
+                break
+        if not saw_dead:
+            print("FAIL ext-tool-result-kill: the dead hint never flashed")
+            print("screen was:\n" + screen.text())
+            return False
+        if not saw_builtin:
+            print("FAIL ext-tool-result-kill: the built-in render did not return")
+            print("screen was:\n" + screen.text())
+            return False
+        # Quit: no orphan layer process may survive.
+        os.write(master, b"q")
+        pump(master, 0.4, screen)
+        os.write(master, b"q")
+        deadline = time.time() + 4.0
+        while time.time() < deadline and alive(pid):
+            pump(master, 0.2, screen)
+        if alive(pid):
+            print("FAIL ext-tool-result-kill: still running after double-q (hang)")
+            os.kill(pid, signal.SIGKILL)
+            reap(pid)
+            return False
+        reap(pid)
+        orphans = procs_with_cwd_under(REPO + "/ui_extensions")
+        if orphans:
+            print(f"FAIL ext-tool-result-kill: orphan layer processes: {orphans}")
+            for p in orphans:
+                try:
+                    os.kill(p, signal.SIGKILL)
+                except OSError:
+                    pass
+            return False
+        print("OK ext-tool-result-kill: ext render shown, kill -> dead hint, built-in render returns")
+        return True
+    finally:
+        try:
+            os.close(master)
+        except OSError:
+            pass
+
+
 def main():
     ok = True
     ok &= case("baseline-double-q", 0)
@@ -459,6 +818,9 @@ def main():
     ok &= ext_dying_hint()
     ok &= ext_badjsonl()
     ok &= ext_append_reject()
+    ok &= ext_statusline_real()
+    ok &= ext_statusline_repo()
+    ok &= ext_tool_result_kill()
     if not ok:
         sys.exit(1)
     print("ALL SMOKE CASES PASSED")

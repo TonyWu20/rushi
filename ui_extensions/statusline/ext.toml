@@ -1,0 +1,18 @@
+# The reference statusline extension (ui-extension-plan stage 2).
+# One process, tick-driven. The row shows:
+# - the live dir (the config dir, where the TUI and loop operate)
+# - git branch + dirty mark, TTL-cached at 3 s (the design's tick
+#   cost note: no git spawn on every tick)
+# - session, model, and loop state from the tick payload
+# - cumulative usage summed over assistant_message.usage events;
+#   the host re-sends every usage-bearing message at start, so the
+#   totals survive a TUI restart from the log alone
+# - ext_status values published by other extensions
+# Narrow terminals (< 100 cols) get the two-line layout.
+[ext]
+command = "bash"
+args = ["statusline.sh"]
+caps = ["status"]
+kinds = ["assistant_message"]
+tick_ms = 1000
+protocol_v = 1

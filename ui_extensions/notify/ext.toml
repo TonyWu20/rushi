@@ -1,0 +1,25 @@
+# The reference notify extension (ui-extension-plan stage 2).
+#
+# Host notifications through the `notify` op, applied by the host on
+# its own terminal:
+# - a terminal bell when a turn finishes
+# - an OSC 0 (window title) with the finished-turn text
+#
+# A finished turn is an assistant_message whose stop_reason is
+# `stop` or `length` (the model produced a final answer, no pending
+# tool calls). At start the host re-sends the visible transcript, so
+# the script rings once for the most recent finished turn, never a
+# burst for the whole history: it rings only for event ids newer
+# than the last one it rang for.
+#
+# Tmux tty resolution: under tmux the terminal stream of the inner
+# pane may not reach the user's terminal (ssh, nested panes). The
+# script resolves the tmux client tty and writes the ring there as a
+# fallback channel, best effort. The host op stays the primary path.
+
+[ext]
+command = "bash"
+args = ["notify.sh"]
+caps = ["notify"]
+kinds = ["assistant_message"]
+protocol_v = 1

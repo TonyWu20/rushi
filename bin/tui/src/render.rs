@@ -523,6 +523,57 @@ pub fn help_line(running: bool) -> String {
     )
 }
 
+/// The status/help row content as terminal lines (one per row).
+///
+/// The TUI flash wins; then the status extension row (its lines or
+/// the dead hint); then the built-in content. A status reply may
+/// carry up to two lines (the narrow two-line layout,
+/// ui-extension-plan stage 2); more than two is capped at two.
+fn status_rows(
+    app: &App,
+    host: &crate::ext::ExtHost,
+    running: bool,
+    row_width: usize,
+) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(Color::DarkGray);
+    if let Some(msg) = app.status() {
+        return vec![Line::from(Span::styled(
+            format!(" {msg}"),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))];
+    }
+    if app.pending_name().is_some() {
+        return vec![Line::from(Span::styled(
+            " Enter confirm · Esc cancel · q×2 quit",
+            dim,
+        ))];
+    }
+    let last_line = app
+        .active()
+        .and_then(|s| app.loop_state(s))
+        .and_then(|l| l.last_line.clone());
+    match host.status_row() {
+        crate::ext::StatusRow::Lines(lines) => lines
+            .iter()
+            .take(2)
+            .map(|l| Line::from(Span::styled(l.text.clone(), l.style)))
+            .collect(),
+        crate::ext::StatusRow::DeadHint(hint) => vec![Line::from(Span::styled(
+            format!(" {hint}"),
+            Style::default().fg(Color::Red).add_modifier(Modifier::DIM),
+        ))],
+        crate::ext::StatusRow::Builtin => match last_line {
+            Some(l) => vec![Line::from(Span::styled(
+                format!(" » {}", trunc(&l, row_width.saturating_sub(4))),
+                dim,
+            ))],
+            None => vec![Line::from(Span::styled(help_line(running), dim))],
+        },
+    }
+}
+
 /// Render the transcript into wrapped visual lines, separated by blank
 /// lines. The oldest events beyond `TRANSCRIPT_EVENT_CAP` are dropped.
 /// The result is cached per (events version, width, reply version)
@@ -641,18 +692,25 @@ pub fn draw(f: &mut Frame, app: &mut App, cursor: &mut Option<(u16, u16)>, host:
     //   input line (1)
     //   help/status row (1)
     let banner = app.oldest_pending_approval().is_some();
+    // Status/help row content, computed before the layout: the layout
+    // reserves one terminal row per status line. A status extension
+    // reply may carry two lines (the narrow two-line layout,
+    // ui-extension-plan stage 2).
+    let status_lines =
+        status_rows(app, host, running, inner.width as usize);
+    let status_n = status_lines.len() as u16;
     let constraints = if banner {
         vec![
             Constraint::Min(2),
             Constraint::Length(1),
             Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(status_n),
         ]
     } else {
         vec![
             Constraint::Min(3),
             Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(status_n),
         ]
     };
     let rows = ratatui::layout::Layout::vertical(constraints).split(inner);
@@ -742,54 +800,21 @@ pub fn draw(f: &mut Frame, app: &mut App, cursor: &mut Option<(u16, u16)>, host:
 
     // status/help row: the TUI flash wins; then the status extension
     // row (its lines or the dead hint); then the built-in content.
+    // The status slot is one layout cell of `status_n` rows; split it
+    // into single-row rects and render one line each.
     let s_area = rows[row];
-    let status_line: Line = match app.status() {
-        Some(msg) => Line::from(Span::styled(
-            format!(" {msg}"),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        None if app.pending_name().is_some() => Line::from(Span::styled(
-            " Enter confirm · Esc cancel · q×2 quit",
-            Style::default().fg(Color::DarkGray),
-        )),
-        None => match host.status_row() {
-            crate::ext::StatusRow::Lines(lines) => {
-                let spans: Vec<Span<'static>> = lines
-                    .iter()
-                    .map(|l| Span::styled(l.text.clone(), l.style))
-                    .collect();
-                Line::from(spans)
-            }
-            crate::ext::StatusRow::DeadHint(hint) => Line::from(Span::styled(
-                format!(" {hint}"),
-                Style::default()
-                    .fg(Color::Red)
-                    .add_modifier(Modifier::DIM),
-            )),
-            crate::ext::StatusRow::Builtin => {
-                let last = active
-                    .as_ref()
-                    .and_then(|s| app.loop_state(s))
-                    .and_then(|l| l.last_line.clone());
-                match last {
-                    Some(l) => Line::from(Span::styled(
-                        format!(
-                            " » {}",
-                            trunc(&l, (s_area.width as usize).saturating_sub(4))
-                        ),
-                        Style::default().fg(Color::DarkGray),
-                    )),
-                    None => Line::from(Span::styled(
-                        help_line(running),
-                        Style::default().fg(Color::DarkGray),
-                    )),
-                }
-            }
-        },
-    };
-    f.render_widget(Paragraph::new(status_line), s_area);
+    for (i, l) in status_lines.iter().enumerate() {
+        if i as u16 >= s_area.height {
+            break;
+        }
+        let sub = ratatui::layout::Rect {
+            x: s_area.x,
+            y: s_area.y + i as u16,
+            width: s_area.width,
+            height: 1,
+        };
+        f.render_widget(Paragraph::new(l.clone()), sub);
+    }
 }
 
 #[cfg(test)]

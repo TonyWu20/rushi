@@ -1435,7 +1435,7 @@ fn monitor_thread(
             break;
         }
         if attempt >= delays.len() {
-            mark_dead(&slot, &inner);
+            mark_dead(&slot, &inner, idx);
             break;
         }
         let d = delays[attempt];
@@ -1452,14 +1452,28 @@ fn monitor_thread(
             Err(_) => None,
         };
         if gen.is_none() && attempt >= delays.len() {
-            mark_dead(&slot, &inner);
+            mark_dead(&slot, &inner, idx);
             break;
         }
     }
 }
 
-fn mark_dead(slot: &Arc<SlotShared>, inner: &Arc<HostInner>) {
+fn mark_dead(slot: &Arc<SlotShared>, inner: &Arc<HostInner>, idx: usize) {
     *slot.state.lock().unwrap() = SlotState::Dead;
+    // A dead extension cannot produce new replies. Its cached `lines`
+    // replies are stale views: drop them so the built-in render
+    // returns (ui-extension-plan stage 2 acceptance: kill the
+    // extension, the built-in render comes back).
+    slot.lines_cache.lock().unwrap().clear();
+    {
+        let mut reg = inner.transform.lock().unwrap();
+        for r in reg.reqs.values_mut() {
+            if r.owner == idx {
+                r.state = TState::Stale;
+            }
+        }
+    }
+    inner.replies_version.fetch_add(1, Ordering::SeqCst);
     let _ = inner.out_tx.try_send(ExtItem::Dead {
         ext: slot.name.clone(),
     });
