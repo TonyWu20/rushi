@@ -225,3 +225,91 @@ Later, `SocketSessionPort` replaces this with RPC calls to `harnessd`; `render_e
 - **Inline tool diff cards.** Render `tool_call`/`tool_result` payloads as terminal cards (diff view for file edits, terminal view for shell output) — pure rendering, no logic.
 
 The TUI completes the Unix architecture: both the human and the tools interact with the same core mechanism — **append events, render events**.
+
+## 13. Implementation record (2026-08-27)
+
+Phase 1 is built as `bin/tui`. It matches sections 1–10 and 11. The
+record below lists the deviations and the wire formats it fixes. The
+code stays the design record. See `tui-plan.html` for the visual plan
+and verification record.
+
+### 13.1 Deviations from this proposal
+
+- `SessionPort` uses native `async fn`. The `async_trait` dependency is
+  dropped. `SessionId` is passed by reference, not by value.
+- `SessionPort::watch(session, from)` is sync. It returns a
+  `std::sync::mpsc::Receiver<WatchItem>`. The tailer is a std thread
+  that polls the log every 250 ms. The UI drains the receiver in the
+  draw loop. This avoids runtime-context traps.
+- `LoopHandle` is sync: `stop()`, `wait_exit() -> i32`,
+  `take_lines() -> Option<UnboundedReceiver<LoopLine>>`. Lines carry
+  `Stdout`, `Stderr` and exactly one final `Exited(code)`.
+- No `tui-textarea` dependency. The input is a one-line widget. Long
+  input and edit-then-allow shell out to `$VISUAL`/`$EDITOR`.
+- `read_events` reads the last 50 MB of the log. Cursor-based
+  pagination is a later enhancement.
+- The CLI takes the session as a positional argument:
+  `tui [SESSION] --config config.toml`. Without a session argument the
+  TUI does not resume the most recent session: it opens a name input
+  bar (`new session: _`), and Enter confirms the typed name as the
+  active session. The session log is created on its first appended
+  event. Esc cancels the input; an invalid name (empty, path-shaped,
+  or `.`) keeps the input up with a hint. Tab cycles to an existing
+  session and ends the input; with no session to cycle to, the input
+  stays up.
+- Approval wire format: an `approval` event may carry `arguments`
+  (the edited JSON object). This is an additive field. The log stays
+  at `v: 1`.
+- `cancel` events carry `target: "turn"`.
+- Quit is two-step: the first `q` arms, a second `q` inside 3 s
+  quits, any other key disarms. `Ctrl+Q` maps to the same key. This
+  deviates from the single `q` of section 7 for mistouch safety.
+- Text content wraps across lines: user/assistant messages and tool
+  output wrap at the pane width, capped per event with a `… +N more
+  lines` hint. Newlines in the text are hard breaks.
+- Tool results render the tool's `text` payload (or `stdout`/`stderr`
+  when no `text`), not the raw JSON value envelope. The status line
+  shows `exit <code>` and an `(error)` flag.
+- The help row is short and puts the quit hint first, because terminal
+  clipping eats the right end of the row.
+
+### 13.2 Config shape (added to `config.toml`)
+
+```toml
+[loop]
+command = "bash"
+args = ["scripts/turn.sh"]
+arg_style = "append_session"   # append_session | env | none
+```
+
+`spawn_loop` runs `command` with `args` plus the session id when
+`arg_style` is `append_session`. The process runs with the config
+file's directory as working directory and an absolute `CONFIG`
+environment variable.
+
+### 13.3 Loop process supervision
+
+The loop runs in its own process group (`setsid` in `pre_exec`).
+Stop sends `SIGTERM` to the group. A 3 s grace timer escalates to
+`SIGKILL`. A tokio reaper task waits for the child and for both
+output pumps to hit EOF, then sends `Exited` exactly once. `Exited`
+always trails the last output line.
+
+### 13.4 Tailer semantics
+
+The tailer tracks a byte offset. It resets on truncation and on
+rewrite (a byte just before the offset that is not a newline).
+A partial line stays in a carry buffer until its newline lands.
+When the channel is full, the tailer holds its position. It resumes
+on the next poll. It never re-emits an event.
+
+### 13.5 Known limits
+
+- `approval_request`, `approval` and `cancel` have no schema files in
+  `schemas/events/v1` yet, so the producer-side G3 check skips them.
+- The minimal JSON-schema validator is a third copy (see
+  `notes/itches.md`).
+- A session that grows past 50 MB reads only its tail.
+- The tailer is per active session. One std thread per switched
+  session; a dropped receiver stops it on the next send.
+

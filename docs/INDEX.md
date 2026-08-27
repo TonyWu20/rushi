@@ -3,35 +3,43 @@
 Authoritative entry point for any agent starting a new session.
 Read this first. It tells you what exists, what works, and what is next.
 
-## Repo state (2026-08-26)
+## Repo state (2026-08-27)
 
 **Working.** The Phase 1 pipeline runs end to end:
 `user` → `turn.sh` → `step.sh` → `claim` → `assemble` → `model` →
-`parse` → `route` → tools → `log`. Four tools are live:
-`read`, `write`, `edit`, `list`. The session log uses append-only
-JSONL with JSON Schema validation. The model adapter speaks the
-DeepSeek Responses API with a Chat Completions fallback.
+`parse` → `route` → tools → `log`. Five tools are live:
+`read`, `write`, `edit`, `list`, `bash`. The session log uses
+append-only JSONL with JSON Schema validation. The model adapter
+speaks the DeepSeek Responses API with a Chat Completions fallback.
 
-**Not yet done.** No `bash` tool (spec exists, see below).
-No TUI. No Rust unit tests. No CI. No shared `core` crate
-(by design, per Phase 1). No approval flow.
+**New: the TUI.** `bin/tui` renders the session log, appends
+`user_message`, `approval`, and `cancel` events, and supervises the
+opaque `[loop]` command from `config.toml`. See `tui.md` §13 and
+`tui-plan.html`.
+
+**Not yet done.** No CI. No shared `core` crate (by design, per
+Phase 1). The schema validator is now a third copy
+(`notes/itches.md`).
 
 ## Doc inventory
 
-| Doc | Status | Last updated | Purpose |
-|---|---|---|---|
-| `architecture.md` | Active | 2026-08-25 | Hexagonal architecture, phase roadmap, tool contract, guardrails |
-| `refinement-policy.md` | Active | 2026-08-21 | Rules for changing the harness: evidence bar, trigger thresholds, not-yet list |
-| `SPEC_CONTRACT_TESTS.md` | Active | 2026-08-21 | Two-agent method: spec vs contract split, meaning test, mutation gate |
-| `spec-review-criteria.md` | Active | 2026-08-26 | Consolidated review checklist for any new spec document |
-| `loop-and-edit-tool.md` | Implemented | 2026-08-24 | Deep spec: loop driver, model adapter, read/write/edit tools |
-| `loop-and-edit-implementation.md` | Implemented | 2026-08-24 | Implementation proposal: wire format, stage details, session layout |
-| `loop-and-edit-implementation-corrections.md` | Historical | 2026-08-24 | Corrections applied after review. Read for context, not for current behavior |
-| `bash-tool.md` | Spec, not yet built | 2026-08-26 | Deep spec for the `bash` tool: schema, timeout, output capping, conformance tests |
-| `bash-tool-review.md` | Review | 2026-08-26 | Adversarial review of `bash-tool.md` against the review criteria. Four blocking findings. Superseded by `bash-tool-review-2.md`. |
-| `bash-tool-review-2.md` | Review | 2026-08-26 | Second review pass. Finds cap-semantics gaps A1-A6 in the fixed spec and names the review's incorrect judgments. |
-| `tui.md` | Proposal | 2026-08-21 | TUI design: `SessionPort`, event rendering, key bindings, daemon split |
-| `tool-interface-registry-idea_from_human.md` | Draft v2 | 2026-08-25 | User idea: clap-based tool registration and auto-discovery via the daemon |
+| Doc                                           | Status              | Last updated | Purpose                                                                                                                                                    |
+| --------------------------------------------- | ------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `architecture.md`                             | Active              | 2026-08-25   | Hexagonal architecture, phase roadmap, tool contract, guardrails                                                                                           |
+| `refinement-policy.md`                        | Active              | 2026-08-21   | Rules for changing the harness: evidence bar, trigger thresholds, not-yet list                                                                             |
+| `SPEC_CONTRACT_TESTS.md`                      | Active              | 2026-08-21   | Two-agent method: spec vs contract split, meaning test, mutation gate                                                                                      |
+| `spec-review-criteria.md`                     | Active              | 2026-08-26   | Consolidated review checklist for any new spec document                                                                                                    |
+| `loop-and-edit-tool.md`                       | Implemented         | 2026-08-24   | Deep spec: loop driver, model adapter, read/write/edit tools                                                                                               |
+| `loop-and-edit-implementation.md`             | Implemented         | 2026-08-24   | Implementation proposal: wire format, stage details, session layout                                                                                        |
+| `loop-and-edit-implementation-corrections.md` | Historical          | 2026-08-24   | Corrections applied after review. Read for context, not for current behavior                                                                               |
+| `bash-tool.md`                                | Spec, not yet built | 2026-08-26   | Deep spec for the `bash` tool: schema, timeout, output capping, conformance tests                                                                          |
+| `bash-tool-review.md`                         | Review              | 2026-08-26   | Adversarial review of `bash-tool.md` against the review criteria. Four blocking findings. Superseded by `bash-tool-review-2.md`.                           |
+| `bash-tool-review-2.md`                       | Review              | 2026-08-26   | Second review pass. Finds cap-semantics gaps A1-A6 in the fixed spec and names the review's incorrect judgments.                                           |
+| `tui.md`                                      | Implemented         | 2026-08-27   | TUI design: `SessionPort`, event rendering, key bindings, daemon split, §13 implementation record                                                          |
+| `tui-plan.html`                               | Implemented         | 2026-08-27   | Visual implementation plan and verification record for `tui.md`: architecture, event flow, loop lifecycle, tailer, layout, keys, dependencies, deviations  |
+| `empty-turn-root-cause.md`                    | Implemented         | 2026-08-27   | Root cause and fix for `model returned an empty turn after retries`: 30 s reqwest cap on streaming SSE, silent error swallow, loop-guard misclassification |
+| `tool-interface-registry-idea_from_human.md`  | Draft v2            | 2026-08-25   | User idea: clap-based tool registration and auto-discovery via the daemon                                                                                  |
+| `tui_feature_requests_from_human.md`          | Draft               | 2026-08-27   | User feature request on the current tui binary                                                                                                             |
 
 Status legend:
 

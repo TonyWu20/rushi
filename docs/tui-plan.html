@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tui — Implementation Plan (rust-unix-harness)</title>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+</script>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #171a23; --panel2: #1d2130; --ink: #e6e9f2;
+    --muted: #9aa3b5; --line: #2a3040; --accent: #58d0a5; --accent2: #6fb3ff;
+    --warn: #e5b567; --err: #e06c75;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 1080px; margin: 0 auto; padding: 40px 28px 90px; }
+  h1 { font-size: 30px; margin: 0 0 4px; letter-spacing: -0.02em; }
+  h2 { font-size: 21px; margin: 44px 0 12px; padding-top: 22px; border-top: 1px solid var(--line); }
+  h3 { font-size: 16px; margin: 26px 0 8px; color: var(--accent2); }
+  .sub { color: var(--muted); margin: 0 0 30px; }
+  .badges { margin: 14px 0 0; display: flex; gap: 8px; flex-wrap: wrap; }
+  .badge {
+    font-size: 12px; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted); background: var(--panel);
+  }
+  .badge.ok { color: var(--accent); border-color: var(--accent); }
+  .badge.plan { color: var(--accent2); border-color: var(--accent2); }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 12px; padding: 18px 20px; margin: 14px 0;
+  }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
+  .mermaid { background: var(--panel2); border-radius: 10px; padding: 14px; overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--line); padding: 7px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--panel2); color: var(--accent2); font-weight: 600; }
+  code, pre { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre.term {
+    background: #0a0c10; border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px; overflow-x: auto; font-size: 13px; line-height: 1.45;
+  }
+  pre.term .b { color: var(--accent2); font-weight: 700; }
+  pre.term .u { color: #7ec8ff; }
+  pre.term .a { color: var(--accent); }
+  pre.term .m { color: var(--muted); }
+  pre.term .w { color: var(--warn); }
+  .note { border-left: 3px solid var(--warn); padding: 8px 14px; background: var(--panel); border-radius: 0 8px 8px 0; margin: 12px 0; }
+  .kv { display: grid; grid-template-columns: 190px 1fr; gap: 4px 14px; font-size: 14px; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; }
+  ul { margin: 8px 0; padding-left: 22px; }
+  li { margin: 4px 0; }
+  .pill { display:inline-block; font-size:12px; color:var(--accent); border:1px solid var(--accent); border-radius:999px; padding:1px 9px; margin-right:6px; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>tui — Implementation Plan</h1>
+<p class="sub">
+  Stateful terminal supervisor for the agent loop · <code>bin/tui</code> ·
+  2026-08-27 · implements <a href="./tui.md"><code>docs/tui.md</code></a>
+  against <a href="./architecture.md"><code>docs/architecture.md</code></a>
+</p>
+<div class="badges">
+  <span class="badge ok">67 tests passing</span>
+  <span class="badge ok">clippy clean</span>
+  <span class="badge plan">ratatui 0.30 + crossterm 0.29</span>
+  <span class="badge plan">tokio 1.53 · clap 4.6</span>
+</div>
+
+<h2>1. Position</h2>
+<div class="card">
+  <p>
+    The TUI is the first <b>stateful, long-lived, interactive</b> Rust binary in the
+    harness. It is a <b>window onto the session log</b> and a <b>supervisor for the
+    opaque loop</b>. It is stateful as a <i>view</i>: cursor, scrollback, draft and
+    child-process handles live in memory; session state lives in the log. A crash
+    loses nothing — restart re-renders from the log.
+  </p>
+  <dl class="kv">
+    <dt>crate</dt><dd><code>bin/tui</code> (workspace member, binary <code>tui</code>)</dd>
+    <dt>UI stack</dt><dd>ratatui 0.30.2 · crossterm 0.29.0 · sync UI loop on the main thread</dd>
+    <dt>async work</dt><dd>tokio 1.53.1 multi-thread runtime: port calls, output pumps, reaper</dd>
+    <dt>port</dt><dd><code>SessionPort</code> (native <code>async fn</code>) — the only storage seam</dd>
+    <dt>port impl</dt><dd><code>FileSessionPort</code> — directories, JSONL log, opaque <code>[loop]</code> command</dd>
+  </dl>
+</div>
+
+<h2>2. Hexagonal shape</h2>
+<figure class="mermaid">
+graph TB
+  subgraph TUI["bin/tui (adapter)"]
+    CLI["main.rs · clap CLI<br/>TermGuard (RAII terminal)"]
+    LOOP["input/draw loop<br/>crossterm poll + ratatui draw"]
+    APP["app.rs · App state<br/>cursor · scroll · draft · loops · pending approvals"]
+    RD["render.rs · event → styled lines<br/>semantic + fallback"]
+    ED["editor.rs · $VISUAL/$EDITOR shell-out"]
+    PORTT["port.rs · SessionPort trait<br/>LoopHandle · WatchItem · TailCursor"]
+  end
+  subgraph FSP["port_file.rs · FileSessionPort (storage details live here only)"]
+    LIST["list_sessions"]
+    READ["read_events (last 50 MB)"]
+    APPEND["append_event · O_APPEND + schema check (G3)"]
+    TAIL["tailer thread · 250 ms poll · byte offset"]
+    SPAWN["spawn_loop · setsid group · pumps · reaper"]
+  end
+  CFG[("config.toml<br/>[loop] command · args · arg_style")]
+  LOG[("sessions/&lt;name&gt;/<br/>append-only JSONL log")]
+  LOOPPROC(["opaque loop command<br/>(black box: any pipeline)"])
+  CLI --> LOOP
+  LOOP <--> APP
+  APP --> RD
+  APP --> ED
+  APP --> PORTT
+  PORTT <--> FSP
+  FSP <--> LOG
+  SPAWN <--> CFG
+  SPAWN --> LOOPPROC
+  TAIL --> LOG
+  LOOPPROC -- "appends events" --> LOG
+</figure>
+<p>
+  The guardrail boundary is the <code>SessionPort</code> trait: above it, no path,
+  no script name, no file layout. A source-scan test (<code>guardrail::stage_names_are_not_strings_in_the_tui</code>)
+  fails the build if <code>turn.sh</code>, <code>step.sh</code>, <code>events.jsonl</code>,
+  <code>state.json</code>, <code>pending/</code>, <code>claim</code> or <code>assemble</code>
+  appear outside <code>port_file.rs</code>.
+</p>
+
+<h2>3. Event flow</h2>
+<figure class="mermaid">
+sequenceDiagram
+  participant U as Human
+  participant T as TUI (app state)
+  participant P as SessionPort
+  participant L as Opaque loop
+  participant F as Session log (JSONL)
+  U->>T: types "rename the file" + Enter
+  T->>P: append_event(user_message)
+  P->>F: one atomic O_APPEND write
+  U->>T: Ctrl+R (run)
+  T->>P: spawn_loop(session)
+  P->>L: start [loop].command (config)
+  loop as events stream in
+    L->>F: appends tool_call / tool_result / …
+    P-->>T: tailer delivers WatchItem::Event
+    T-->>U: re-render transcript
+  end
+  F-->>T: approval_request appears
+  T-->>U: banner: y allow · n deny · e edit
+  U->>T: e → editor → JSON args
+  T->>P: append_event(approval, decision, arguments)
+  U->>T: Ctrl+C (stop)
+  T->>L: SIGTERM group → SIGKILL after 3 s
+  T->>P: append_event(cancel, target=turn)
+  T-->>U: log intact; next Ctrl+R resumes from it
+</figure>
+
+<h2>4. Loop process lifecycle</h2>
+<figure class="mermaid">
+sequenceDiagram
+  participant T as TUI
+  participant S as spawn_loop
+  participant C as loop process (setsid group)
+  participant PO as stdout pump
+  participant PE as stderr pump
+  participant R as reaper task
+  T->>S: Ctrl+R
+  S->>C: Command (cwd=config dir, env CONFIG)
+  C-->>S: pid
+  S-->>T: LoopHandle (lines: unbounded chan)
+  par stream
+    C->>PO: stdout lines
+    C->>PE: stderr lines
+    PO-->>T: LoopLine::Stdout / Stderr
+    PE-->>T: LoopLine::Stderr
+  end
+  C->>C: exits (or killed)
+  R->>R: wait() + both pumps EOF (ordering barrier)
+  R-->>T: LoopLine::Exited(code)  "always last"
+  T->>C: Ctrl+C → stop(): SIGTERM group
+  C-->>R: killed
+  Note over T: grace timer 3 s → SIGKILL group
+</figure>
+
+<h2>5. Tailer (file watch) decisions</h2>
+<figure class="mermaid">
+flowchart TD
+  A[poll every 250 ms] --> B{file exists?}
+  B -- no, was present --> G["emit Gone, keep offset, retry"]
+  B -- yes --> C{len < offset?}
+  C -- yes --> D["truncated/rotated → reset to 0"]
+  C -- no --> E{byte at offset-1 is \\n?}
+  E -- "no (rewritten)" --> D
+  E -- yes --> F{new bytes?}
+  F -- none --> A
+  F -- yes --> H["complete lines → channel<br/>partial line → carry, offset holds"]
+  H --> I{channel full?}
+  I -- yes --> J["stop, keep position; next poll resumes"]
+  I -- no --> A
+</figure>
+<p>
+  The tailer thread exits when its channel disconnects or when the process ends.
+  It never re-emits: the offset advances only after a successful send, so bounded
+  backpressure cannot lose or duplicate an event.
+</p>
+
+<h2>6. UI layout (as implemented)</h2>
+<div class="card">
+<pre class="term"><span class="b">┌Session: demo ───────────────────────────────────────────────────────────────────────────────────── [idle] ┐</span>
+<span class="b">│</span> <span class="u">user</span>   Investigate the failing test suite.
+<span class="b">│</span>             Run the full test matrix.
+<span class="b">│</span>             Then summarize what broke and why.
+<span class="b">│</span>
+<span class="b">│</span> <span class="a">assistant</span>  I will run the tests and read the recent commits. (1 tool call)
+<span class="b">│</span>
+<span class="b">│</span> <span class="w">tool:bash</span>  {"command":"cargo test …"}
+<span class="b">│</span>             cargo test --workspace 2>&1 | tail -30
+<span class="b">│</span>
+<span class="b">│</span> <span class="w">tool:bash</span>  exit 0
+<span class="b">│</span>             test result: ok. 12 passed; 0 failed
+<span class="b">│</span>             … +3 more lines (full text: bin/log)
+<span class="b">│</span>
+<span class="b">├──────────────────────────────────────────────────────────────────────────────────────────────────────┤</span>
+<span class="b">│</span> <span class="w">&gt;</span> <span class="m">rename the file</span>
+<span class="b">│</span> <span class="m"> q×2 quit · Ctrl+R run · Ctrl+E edit · Enter send · y/n/e approve · Tab cycle · PgUp/Dn scroll</span>
+<span class="b">└──────────────────────────────────────────────────────────────────────────────────────────────────────────┘</span></pre>
+  <ul>
+    <li>Transcript pane: per-event semantic rendering. Message and tool output wrap across as many lines as they need, capped per event with a hint. Blank line between events. Continuation lines align under the content gutter.</li>
+    <li>Tool results show the tool's <code>text</code> payload (or <code>stdout</code>/<code>stderr</code>), not the raw JSON value envelope. The header carries <code>exit N</code> / <code>(error)</code> and error output renders red.</li>
+    <li>Pending <code>approval_request</code> renders as a banner row above the input line (derived from the log: request with no later <code>approval</code> for the same id).</li>
+    <li>Status row: flash messages (4 s TTL), last loop output line (<code>» …</code>), otherwise the key hints with the quit hint first (clipping eats the right end).</li>
+  </ul>
+</div>
+
+<h2>7. Keys → actions</h2>
+<table>
+  <tr><th>Key</th><th>Action</th><th>Port call / effect</th></tr>
+  <tr><td><code>Enter</code></td><td>send draft</td><td><code>append_event(user_message)</code></td></tr>
+  <tr><td><code>Ctrl+E</code></td><td>edit draft or pending approval</td><td><code>$VISUAL</code>/<code>$EDITOR</code> shell-out, terminal suspended</td></tr>
+  <tr><td><code>Ctrl+R</code></td><td>run the loop</td><td><code>spawn_loop(active)</code> + attach line stream</td></tr>
+  <tr><td><code>Ctrl+C</code></td><td>stop the loop</td><td>group SIGTERM→SIGKILL + <code>append_event(cancel)</code></td></tr>
+  <tr><td><code>y / n / e</code></td><td>answer oldest pending approval</td><td><code>append_event(approval, decision[, arguments])</code></td></tr>
+  <tr><td><code>Tab / Shift+Tab</code></td><td>next / previous session</td><td><code>list_sessions</code> + <code>read_events</code> + new tailer</td></tr>
+  <tr><td><code>q / Ctrl+Q</code></td><td>two-step quit</td><td>first press arms (3 s window, any key disarms); second press stops loops and exits</td></tr>
+  <tr><td><code>PgUp / PgDn / wheel</code></td><td>scroll the transcript</td><td>visual-line scroll; new events resume follow at the tail</td></tr>
+</table>
+
+<h2>8. Event vocabulary &amp; fallbacks</h2>
+<table>
+  <tr><th>Wire type</th><th>Render</th><th>Wire type</th><th>Render</th></tr>
+  <tr><td><code>user_message</code></td><td>cyan <code>user</code> label</td><td><code>approval_request</code></td><td>banner + <code>y/n/e</code> prompt</td></tr>
+  <tr><td><code>assistant_message</code></td><td>green <code>assistant</code> label</td><td><code>approval</code></td><td>dim decision line</td></tr>
+  <tr><td><code>tool_call</code></td><td><code>tool:&lt;name&gt;</code> + args</td><td><code>cancel</code></td><td>dim cancel line</td></tr>
+  <tr><td><code>tool_result</code></td><td><code>exit N</code> header + wrapped <code>text</code> payload (dim)</td><td><code>error</code></td><td>red error line + red body</td></tr>
+</table>
+<p>
+  Fallbacks (guardrail 4): unknown <code>type</code> → <code>[unknown event type "x"]</code> + capped JSON;
+  newer <code>v</code> → <code>[log version newer than this TUI]</code> + raw JSON;
+  unparseable line → <code>[malformed log line]</code> + first 96 chars. The TUI never crashes on a log line.
+</p>
+
+<h2>9. Module map</h2>
+<table>
+  <tr><th>File</th><th>Role</th><th>Notes</th></tr>
+  <tr><td><code>main.rs</code></td><td>CLI, terminal setup, event loop, action execution</td><td>clap; <code>TermGuard</code> restores raw mode, alt screen, mouse on exit and panic</td></tr>
+  <tr><td><code>app.rs</code></td><td>state machine + key dispatch</td><td>crossterm-free; returns <code>Action</code> values; log-derived pending approvals</td></tr>
+  <tr><td><code>port.rs</code></td><td><code>SessionPort</code>, <code>LoopHandle</code>, cursors, errors</td><td>native <code>async fn</code>; sync <code>watch()</code> returning a std channel</td></tr>
+  <tr><td><code>port_file.rs</code></td><td><code>FileSessionPort</code></td><td>the only file that knows <code>events.jsonl</code>; tailer; loop process mgmt; minimal G3 validator; path-traversal guard</td></tr>
+  <tr><td><code>event.rs</code></td><td><code>Event</code>, <code>EventKind</code>, <code>produce</code></td><td>enum-based vocabulary (no const-str type list); safe accessors</td></tr>
+  <tr><td><code>render.rs</code></td><td>event → styled lines, layout</td><td>word wrap, windowed scrollback, banner, dynamic status</td></tr>
+  <tr><td><code>editor.rs</code></td><td><code>$VISUAL</code>/<code>$EDITOR</code> shell-out</td><td>suspends raw mode for the editor</td></tr>
+  <tr><td><code>config.rs</code></td><td>config load + <code>[loop]</code> section</td><td>defaults when the file is missing</td></tr>
+</table>
+
+<h2>10. Dependencies (scouted 2026-08-27)</h2>
+<table>
+  <tr><th>Crate</th><th>Version</th><th>Why</th></tr>
+  <tr><td>ratatui</td><td>0.30.2</td><td>widget renderer; <code>Block::bordered()</code> API</td></tr>
+  <tr><td>crossterm</td><td>0.29.0</td><td>raw mode, alt screen, mouse capture, key polling</td></tr>
+  <tr><td>tokio</td><td>1.53.1</td><td>runtime, <code>process</code> (pumps/reaper), <code>sync</code> channels</td></tr>
+  <tr><td>clap</td><td>4.6.6</td><td><code>tui [SESSION] --config …</code></td></tr>
+  <tr><td>serde / serde_json</td><td>1.0.229 / 1.0.151</td><td>event envelope parse + produce</td></tr>
+  <tr><td>toml</td><td>1.1.4</td><td><code>config.toml</code> incl. new <code>[loop]</code> section</td></tr>
+  <tr><td>chrono</td><td>0.4.45</td><td>RFC 3339 <code>ts</code> on produced events</td></tr>
+  <tr><td>libc</td><td>0.2.189</td><td><code>setsid</code>, process-group kill (<code>kill(-pid, sig)</code>)</td></tr>
+  <tr><td>tempfile (dev)</td><td>3.x</td><td>port tests</td></tr>
+</table>
+
+<h2>11. Visual pass (2026-08-27)</h2>
+<div class="card">
+  <p>The first render pass was flat: single truncated lines, raw JSON
+  tool results, and a one-keystroke quit. The visual pass changed:</p>
+  <ul>
+    <li><b>Multi-line text.</b> Newlines are hard breaks; each hard line word-wraps at the pane width. Per-event line caps with a hint keep huge logs bounded.</li>
+    <li><b>Tool results.</b> The header shows <code>exit N</code> / <code>(error)</code>; the body shows the tool's <code>text</code> payload (or <code>stdout</code>/<code>stderr</code>), capped and dim. No raw JSON envelope in the view.</li>
+    <li><b>Two-step quit.</b> First <code>q</code> arms with a flash hint; a second <code>q</code> inside 3 s quits; any other key disarms.</li>
+    <li><b>Structure.</b> Blank line between events, 12-column content gutter, bash commands shown on their own dim line.</li>
+  </ul>
+</div>
+
+<h2>12. Deviations from the proposal (documented)</h2>
+<div class="note">
+  <ul>
+    <li><b>Native <code>async fn</code></b> instead of <code>async_trait</code> — the <code>#[async_trait]</code> dep is dropped; the trait uses native async fns (edition 2021, stable).</li>
+    <li><b><code>watch()</code> is sync</b> and returns a <code>std::sync::mpsc::Receiver&lt;WatchItem&gt;</code>; the tailer is a std thread. The all-async trait sketch of the doc is a deliberate deviation: the UI drains it synchronously, avoiding runtime-context traps.</li>
+    <li><b>No <code>tui-textarea</code></b> — the doc allows a textarea <i>or</i> an editor shell-out; the single-line input + <code>Ctrl+E</code> editor keeps the dep count down.</li>
+    <li><b>CLI</b>: positional <code>SESSION</code> arg + <code>--config</code> (the doc's <code>--session s1</code> form is equivalent).</li>
+  <li><b>Two-step quit</b>: first <code>q</code> arms, second <code>q</code> inside 3 s quits, any other key disarms. <code>Ctrl+Q</code> maps to the same key.</li>
+    <li><b>Approval wire format</b>: <code>approval</code> may carry <code>arguments</code> (edited JSON) — additive field, no <code>v</code> bump (P1b).</li>
+    <li><b>Cancel target</b>: <code>cancel</code> events carry <code>target: "turn"</code>.</li>
+    <li><b>Read cap</b>: <code>read_events</code> reads the last 50 MB (Phase 1 limit; cursor pagination is a later enhancement). The transcript renders at most the newest 2000 events; the log file is the record.</li>
+  </ul>
+</div>
+
+<h2>13. Verification record</h2>
+<table>
+  <tr><th>Check</th><th>Evidence</th></tr>
+  <tr><td>67 unit/integration tests</td><td><code>cargo test -p tui</code> — all pass, stable across repeated runs</td></tr>
+  <tr><td>Guardrail 2 &amp; 3</td><td><code>guardrail::stage_names_are_not_strings_in_the_tui</code> source-scan test passes</td></tr>
+  <tr><td>Guardrail 4</td><td>unknown type / newer v / bad line all render fallbacks (dedicated tests)</td></tr>
+  <tr><td>Spawn + stream + stop</td><td><code>spawn_loop_streams_lines_and_reports_exit</code>, <code>stop_terminates_group_and_wait_exit_resolves</code></td></tr>
+  <tr><td>Tailer edge cases</td><td>truncation, rewrite alignment, partial line hold, gone/resume</td></tr>
+  <tr><td>Real pty smoke</td><td>24×100 pty: render, send draft, Ctrl+R loop, Ctrl+C cancel append, clean quit, terminal restored</td></tr>
+  <tr><td>clippy</td><td><code>cargo clippy -p tui --all-targets</code> clean</td></tr>
+</table>
+
+</main>
+</body>
+</html>
