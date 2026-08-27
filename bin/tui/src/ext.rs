@@ -189,10 +189,8 @@ pub fn discover(cfg: &TuiConfig) -> Result<Discovery, ExtError> {
     let project_dir = cfg.config_dir.join(".pi").join("ui_extensions");
     let mut globals = load_layer(&global_dir, Layer::Global)?;
     let mut projects = load_layer(&project_dir, Layer::Project)?;
-    let project_names: std::collections::HashSet<&str> = projects
-        .iter()
-        .map(|e| e.manifest.name.as_str())
-        .collect();
+    let project_names: std::collections::HashSet<&str> =
+        projects.iter().map(|e| e.manifest.name.as_str()).collect();
     globals.retain(|e| !project_names.contains(e.manifest.name.as_str()));
     let mut exts: Vec<LoadedExt> = Vec::new();
     exts.append(&mut globals);
@@ -264,10 +262,7 @@ fn load_layer(dir: &Path, layer: Layer) -> Result<Vec<LoadedExt>, ExtError> {
     for entry in entries {
         if !entry.join("ext.toml").is_file() {
             return Err(ExtError {
-                message: format!(
-                    "ext entry {} has no ext.toml manifest",
-                    entry.display()
-                ),
+                message: format!("ext entry {} has no ext.toml manifest", entry.display()),
             });
         }
         out.push(LoadedExt {
@@ -281,19 +276,20 @@ fn load_layer(dir: &Path, layer: Layer) -> Result<Vec<LoadedExt>, ExtError> {
 /// Parse and validate one `ext.toml`. Every failure names the file.
 fn load_manifest(entry: &Path) -> Result<Manifest, ExtError> {
     let manifest_path = entry.join("ext.toml");
-    let raw_text = std::fs::read_to_string(&manifest_path).map_err(|e| {
-        ExtError::refuse(&manifest_path, &format!("cannot read manifest: {e}"))
-    })?;
-    let raw: RawManifest = toml::from_str(&raw_text).map_err(|e| {
-        ExtError::refuse(&manifest_path, &format!("invalid TOML: {e}"))
-    })?;
+    let raw_text = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| ExtError::refuse(&manifest_path, &format!("cannot read manifest: {e}")))?;
+    let raw: RawManifest = toml::from_str(&raw_text)
+        .map_err(|e| ExtError::refuse(&manifest_path, &format!("invalid TOML: {e}")))?;
     let b = raw.ext;
     let command = b
         .command
         .as_deref()
         .ok_or_else(|| ExtError::refuse(&manifest_path, "missing `command`"))?;
     if command.trim().is_empty() {
-        return Err(ExtError::refuse(&manifest_path, "`command` must not be empty"));
+        return Err(ExtError::refuse(
+            &manifest_path,
+            "`command` must not be empty",
+        ));
     }
     for cap in &b.caps {
         if !CAPS.contains(&cap.as_str()) {
@@ -315,12 +311,17 @@ fn load_manifest(entry: &Path) -> Result<Manifest, ExtError> {
         if !is_valid_target(t) {
             return Err(ExtError::refuse(
                 &manifest_path,
-                &format!("bad transform target `{t}` (expected `fence:<lang>` or `inline:<delim>`)"),
+                &format!(
+                    "bad transform target `{t}` (expected `fence:<lang>` or `inline:<delim>`)"
+                ),
             ));
         }
     }
     if b.tick_ms == Some(0) {
-        return Err(ExtError::refuse(&manifest_path, "`tick_ms` must be positive"));
+        return Err(ExtError::refuse(
+            &manifest_path,
+            "`tick_ms` must be positive",
+        ));
     }
     if !command_exists(command) {
         return Err(ExtError::refuse(
@@ -362,9 +363,8 @@ fn command_exists(command: &str) -> bool {
     if command.contains('/') {
         return Path::new(command).is_file();
     }
-    std::env::var_os("PATH").is_some_and(|paths| {
-        std::env::split_paths(&paths).any(|dir| dir.join(command).is_file())
-    })
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(command).is_file()))
 }
 
 /// One styled line from an extension reply. The host converts the
@@ -496,7 +496,11 @@ pub enum ExtItem {
     /// terminal. The `ext` field is informational for logs; the main
     /// loop does not read it in Stage 1.
     #[allow(dead_code)]
-    NotifyOsc { ext: String, code: u16, args: String },
+    NotifyOsc {
+        ext: String,
+        code: u16,
+        args: String,
+    },
     /// The restart budget ran out. The owned row shows a dead hint.
     Dead { ext: String },
     /// The host skipped an extension (protocol mismatch or a spawn
@@ -574,11 +578,26 @@ enum TState {
 struct TransformRegistry {
     next: u64,
     reqs: HashMap<u64, TReq>,
+    /// One request per extracted span, keyed by (event log index,
+    /// span index within the event). The key is stable across
+    /// transcript rebuilds; the value is the current request id.
+    /// A resize re-requests every live request and remaps these keys
+    /// to the new ids (ui-extension-plan stage 3).
+    span_reqs: HashMap<(u64, u32), u64>,
 }
 
 impl TransformRegistry {
+    fn new() -> Self {
+        TransformRegistry {
+            next: 1,
+            reqs: HashMap::new(),
+            span_reqs: HashMap::new(),
+        }
+    }
+
     fn clear(&mut self) {
         self.reqs.clear();
+        self.span_reqs.clear();
     }
 }
 
@@ -660,10 +679,7 @@ impl ExtHost {
         ExtHost {
             inner: Arc::new(HostInner {
                 slots,
-                transform: Mutex::new(TransformRegistry {
-                    next: 1,
-                    reqs: HashMap::new(),
-                }),
+                transform: Mutex::new(TransformRegistry::new()),
                 replies_version: AtomicU64::new(0),
                 out_tx,
                 transform_timeout: Mutex::new(TRANSFORM_TIMEOUT),
@@ -726,19 +742,11 @@ impl ExtHost {
                     std::thread::Builder::new()
                         .name(format!("tui-ext-mon-{}", m.name))
                         .spawn(move || {
-                            monitor_thread(
-                                mon_slot,
-                                mon_inner,
-                                stop,
-                                delays,
-                                m2,
-                                cfg_path,
-                                i,
-                                gen,
-                            )
+                            monitor_thread(mon_slot, mon_inner, stop, delays, m2, cfg_path, i, gen)
                         })
                         .ok();
-                }                Err(e) => {
+                }
+                Err(e) => {
                     *slot.state.lock().unwrap() = SlotState::Skipped;
                     items.push(ExtItem::Skipped {
                         ext: m.name.clone(),
@@ -886,16 +894,18 @@ impl ExtHost {
         let timeout = *self.inner.transform_timeout.lock().unwrap();
         let now = Instant::now();
         for r in reg.reqs.values_mut() {
-            if matches!(r.state, TState::Pending)
-                && now.duration_since(r.sent_at) > timeout
-            {
+            if matches!(r.state, TState::Pending) && now.duration_since(r.sent_at) > timeout {
                 r.state = TState::Stale;
             }
         }
     }
 
     /// A resize re-requests every transform block: one new request
-    /// per block, and the superseded request id stops matching.
+    /// per block, and the superseded request id stops matching. The
+    /// span index map remaps to the new request ids, so the next
+    /// render rebuild asks for nothing and waits for the new replies
+    /// (ui-extension-plan stage 3 acceptance: one re-transform per
+    /// block on a resize).
     pub fn on_resize(&self, width: usize) {
         let mut reg = self.inner.transform.lock().unwrap();
         let resends: Vec<(u64, TReq)> = reg
@@ -922,6 +932,12 @@ impl ExtHost {
                     lines: None,
                 },
             );
+            // Remap the spans that pointed at the superseded request.
+            for (_key, req) in reg.span_reqs.iter_mut() {
+                if *req == old {
+                    *req = id;
+                }
+            }
             self.send_op(
                 r.owner,
                 &json!({
@@ -936,10 +952,79 @@ impl ExtHost {
         }
     }
 
+    /// Send one transform request for a span of `scope`, deduplicated
+    /// per (event log index, span index). The first call for a span
+    /// sends the request; a live or finished request for the same span
+    /// reuses its id and sends nothing (a resend would bump the reply
+    /// version on every rebuild: an infinite rebuild loop). A stale
+    /// request re-requests. `None` when no extension declares the
+    /// target: the raw block stays.
+    pub fn request_span(
+        &self,
+        event_id: u64,
+        span_idx: u32,
+        scope: &str,
+        text: &str,
+        width: usize,
+    ) -> Option<u64> {
+        let owner = *self.disc.transform_owners.get(scope)?;
+        let key = (event_id, span_idx);
+        let mut reg = self.inner.transform.lock().unwrap();
+        if let Some(&old) = reg.span_reqs.get(&key) {
+            if let Some(r) = reg.reqs.get(&old) {
+                if matches!(r.state, TState::Pending | TState::Done) {
+                    return Some(old);
+                }
+            }
+            reg.span_reqs.remove(&key);
+        }
+        let id = reg.next;
+        reg.next += 1;
+        reg.span_reqs.insert(key, id);
+        reg.reqs.insert(
+            id,
+            TReq {
+                owner,
+                scope: scope.to_string(),
+                text: text.to_string(),
+                width,
+                sent_at: Instant::now(),
+                state: TState::Pending,
+                lines: None,
+            },
+        );
+        drop(reg);
+        self.send_op(
+            owner,
+            &json!({
+                "v": 1,
+                "op": "transform",
+                "req": id,
+                "text": text,
+                "width": width,
+                "scope": scope,
+            }),
+        );
+        Some(id)
+    }
+
+    /// The finished result for one extracted span, for in-place
+    /// replacement at render time. `None` while the request is in
+    /// flight, after the timeout, or after a resize superseded it:
+    /// the raw span shows in the meantime.
+    pub fn span_lines(&self, event_id: u64, span_idx: u32) -> Option<Vec<ExtLine>> {
+        let reg = self.inner.transform.lock().unwrap();
+        let req = *reg.span_reqs.get(&(event_id, span_idx))?;
+        match reg.reqs.get(&req) {
+            Some(r) if matches!(r.state, TState::Done) => r.lines.clone(),
+            _ => None,
+        }
+    }
+
     /// Send one transform request for a span of `scope`. Returns the
-    /// request id. `None` when no extension declares the target. Stage 1
-    /// keeps the mechanism; Stage 3 adds the span extraction that calls
-    /// it.
+    /// request id. `None` when no extension declares the target. The
+    /// renderer path uses [`ExtHost::request_span`], which dedupes per
+    /// span; this plain form re-sends on every call.
     #[allow(dead_code)]
     pub fn request_transform(&self, scope: &str, text: &str, width: usize) -> Option<u64> {
         let owner = *self.disc.transform_owners.get(scope)?;
@@ -991,7 +1076,12 @@ impl ExtHost {
     /// built-in render (per-op G5 fallback).
     pub fn lookup_lines(&self, owner: &str, event_id: u64) -> Option<Vec<ExtLine>> {
         let i = *self.disc.index_by_name.get(owner)?;
-        self.inner.slots[i].lines_cache.lock().unwrap().get(&event_id).cloned()
+        self.inner.slots[i]
+            .lines_cache
+            .lock()
+            .unwrap()
+            .get(&event_id)
+            .cloned()
     }
 
     /// The statusline row content (docs/ui-extension-plan stage 1
@@ -1002,15 +1092,14 @@ impl ExtHost {
         };
         let s = &self.inner.slots[i];
         match *s.state.lock().unwrap() {
-            SlotState::Dead => StatusRow::DeadHint(format!(
-                "ext {} dead after 3 restarts",
-                s.name
-            )),
+            SlotState::Dead => StatusRow::DeadHint(format!("ext {} dead after 3 restarts", s.name)),
             SlotState::Skipped => StatusRow::Builtin,
-            SlotState::Running | SlotState::Restarting => match s.last_status.lock().unwrap().clone() {
-                Some(l) => StatusRow::Lines(l),
-                None => StatusRow::Builtin,
-            },
+            SlotState::Running | SlotState::Restarting => {
+                match s.last_status.lock().unwrap().clone() {
+                    Some(l) => StatusRow::Lines(l),
+                    None => StatusRow::Builtin,
+                }
+            }
         }
     }
 
@@ -1051,7 +1140,11 @@ impl ExtHost {
     /// from the items themselves.
     #[allow(dead_code)]
     pub fn ext_names(&self) -> Vec<String> {
-        self.disc.exts.iter().map(|e| e.manifest.name.clone()).collect()
+        self.disc
+            .exts
+            .iter()
+            .map(|e| e.manifest.name.clone())
+            .collect()
     }
 
     /// Quit path: SIGTERM every extension process group, escalate to
@@ -1136,6 +1229,12 @@ impl HostInner {
                     // G5: fall back to the built-in render.
                     return;
                 };
+                // A dead extension's buffered replies must not
+                // re-populate the cache that [`mark_dead`] cleared
+                // (a stale render resurfacing after death).
+                if *slot.state.lock().unwrap() == SlotState::Dead {
+                    return;
+                }
                 slot.lines_cache.lock().unwrap().insert(id, lines.clone());
                 self.replies_version.fetch_add(1, Ordering::SeqCst);
                 let _ = self.out_tx.try_send(ExtItem::LinesCached {
@@ -1147,7 +1246,15 @@ impl HostInner {
                     // G5: keep the last valid row.
                     return;
                 };
-                *slot.last_status.lock().unwrap() = Some(lines.clone());
+                let mut last = slot.last_status.lock().unwrap();
+                // Unchanged content: no version bump. The tick reply
+                // is usually identical, and a bump would rewrap the
+                // whole transcript once per tick.
+                if *last == Some(lines.clone()) {
+                    return;
+                }
+                *last = Some(lines.clone());
+                drop(last);
                 self.replies_version.fetch_add(1, Ordering::SeqCst);
                 let _ = self.out_tx.try_send(ExtItem::StatusUpdated {
                     ext: slot.name.clone(),
@@ -1238,7 +1345,11 @@ impl HostInner {
                     let Some(code) = v.get("code").and_then(|c| c.as_u64()) else {
                         return;
                     };
-                    let args = v.get("args").and_then(|a| a.as_str()).unwrap_or("").to_string();
+                    let args = v
+                        .get("args")
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let _ = self.out_tx.try_send(ExtItem::NotifyOsc {
                         ext: slot.name.clone(),
                         code: code.min(u16::MAX as u64) as u16,
@@ -1363,11 +1474,7 @@ fn spawn_gen(
                 let _ = libc::setsid();
                 let _ = libc::dup2(in_pipe[0], 0);
                 let _ = libc::dup2(out_pipe[1], 1);
-                let devnull = libc::open(
-                    c"/dev/null".as_ptr(),
-                    libc::O_RDWR,
-                    0,
-                );
+                let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR, 0);
                 if devnull >= 0 {
                     let _ = libc::dup2(devnull, 2);
                     let _ = libc::close(devnull);
@@ -1523,7 +1630,6 @@ mod tests {
         }
     }
 
-
     const OK_MANIFEST: &str = r#"
 [ext]
 command = "bash"
@@ -1541,9 +1647,11 @@ protocol_v = 1
     #[test]
     fn manifest_parses_with_defaults() {
         let dir = TempDir::new().unwrap();
-        write_ext(dir.path(), "a", &format!(
-            "[ext]\ncommand = \"bash\"\nprotocol_v = 1\n"
-        ));
+        write_ext(
+            dir.path(),
+            "a",
+            &format!("[ext]\ncommand = \"bash\"\nprotocol_v = 1\n"),
+        );
         let m = load_manifest(&dir.path().join("a")).unwrap();
         assert_eq!(m.name, "a");
         assert_eq!(m.command, "bash");
@@ -1645,7 +1753,11 @@ protocol_v = 1
     #[test]
     fn manifest_protocol_v_mismatch_marks_unsupported() {
         let dir = TempDir::new().unwrap();
-        write_ext(dir.path(), "a", "[ext]\ncommand = \"bash\"\nprotocol_v = 2\n");
+        write_ext(
+            dir.path(),
+            "a",
+            "[ext]\ncommand = \"bash\"\nprotocol_v = 2\n",
+        );
         let m = load_manifest(&dir.path().join("a")).unwrap();
         assert!(!m.protocol_ok, "v2 is not what this host speaks");
         write_ext(dir.path(), "b", "[ext]\ncommand = \"bash\"\n");
@@ -1660,8 +1772,16 @@ protocol_v = 1
         let dir = TempDir::new().unwrap();
         let global = dir.path().join("ui_extensions");
         let project = dir.path().join(".pi").join("ui_extensions");
-        write_ext(&global, "alpha", "[ext]\ncommand = \"bash\"\nkinds = [\"tool_result\"]\nprotocol_v = 1\n");
-        write_ext(&global, "beta", "[ext]\ncommand = \"bash\"\nprotocol_v = 1\n");
+        write_ext(
+            &global,
+            "alpha",
+            "[ext]\ncommand = \"bash\"\nkinds = [\"tool_result\"]\nprotocol_v = 1\n",
+        );
+        write_ext(
+            &global,
+            "beta",
+            "[ext]\ncommand = \"bash\"\nprotocol_v = 1\n",
+        );
         write_ext(&project, "alpha", "[ext]\ncommand = \"bash\"\ncaps = [\"status\"]\nkinds = [\"tool_result\"]\nprotocol_v = 1\n");
 
         let mut cfg = cfg_for(dir.path());
@@ -1670,15 +1790,18 @@ protocol_v = 1
         // Global layer first (alpha replaced by the project entry, so
         // only beta remains), then the project layer.
         assert_eq!(
-            d.exts.iter().map(|e| e.manifest.name.clone()).collect::<Vec<_>>(),
+            d.exts
+                .iter()
+                .map(|e| e.manifest.name.clone())
+                .collect::<Vec<_>>(),
             vec!["beta", "alpha"]
         );
-        assert_eq!(d.index_by_name["alpha"], 1, "the project entry overrides the global one");
-        // Kind ownership: alpha (project) is the only tool_result owner.
         assert_eq!(
-            d.kind_owners.get(&EventKind::ToolResult),
-            Some(&1)
+            d.index_by_name["alpha"], 1,
+            "the project entry overrides the global one"
         );
+        // Kind ownership: alpha (project) is the only tool_result owner.
+        assert_eq!(d.kind_owners.get(&EventKind::ToolResult), Some(&1));
         assert_eq!(d.status_owner, Some(1));
     }
 
@@ -1686,8 +1809,16 @@ protocol_v = 1
     fn discovery_kind_owner_is_first_in_sequence() {
         let dir = TempDir::new().unwrap();
         let global = dir.path().join("ui_extensions");
-        write_ext(&global, "a", "[ext]\ncommand = \"bash\"\nkinds = [\"tool_result\"]\nprotocol_v = 1\n");
-        write_ext(&global, "b", "[ext]\ncommand = \"bash\"\nkinds = [\"tool_result\", \"error\"]\nprotocol_v = 1\n");
+        write_ext(
+            &global,
+            "a",
+            "[ext]\ncommand = \"bash\"\nkinds = [\"tool_result\"]\nprotocol_v = 1\n",
+        );
+        write_ext(
+            &global,
+            "b",
+            "[ext]\ncommand = \"bash\"\nkinds = [\"tool_result\", \"error\"]\nprotocol_v = 1\n",
+        );
         let mut cfg = cfg_for(dir.path());
         cfg.ext_dir = Some(global);
         let d = discover(&cfg).unwrap();
@@ -1716,8 +1847,16 @@ protocol_v = 1
     fn discovery_status_conflict_refuses_and_names_both() {
         let dir = TempDir::new().unwrap();
         let global = dir.path().join("ui_extensions");
-        write_ext(&global, "s1", "[ext]\ncommand = \"bash\"\ncaps = [\"status\"]\nprotocol_v = 1\n");
-        write_ext(&global, "s2", "[ext]\ncommand = \"bash\"\ncaps = [\"status\"]\nprotocol_v = 1\n");
+        write_ext(
+            &global,
+            "s1",
+            "[ext]\ncommand = \"bash\"\ncaps = [\"status\"]\nprotocol_v = 1\n",
+        );
+        write_ext(
+            &global,
+            "s2",
+            "[ext]\ncommand = \"bash\"\ncaps = [\"status\"]\nprotocol_v = 1\n",
+        );
         let mut cfg = cfg_for(dir.path());
         cfg.ext_dir = Some(global);
         let err = discover(&cfg).unwrap_err();
@@ -1731,12 +1870,17 @@ protocol_v = 1
     #[test]
     fn style_hex_and_tokens() {
         let s = wire_style(Some(
-            &json!({"fg": "#f00", "bg": "#00ff00", "bold": true}).as_object().unwrap(),
+            &json!({"fg": "#f00", "bg": "#00ff00", "bold": true})
+                .as_object()
+                .unwrap(),
         ));
-        assert_eq!(s, Style::default()
-            .fg(Color::Rgb(255, 0, 0))
-            .bg(Color::Rgb(0, 255, 0))
-            .add_modifier(Modifier::BOLD));
+        assert_eq!(
+            s,
+            Style::default()
+                .fg(Color::Rgb(255, 0, 0))
+                .bg(Color::Rgb(0, 255, 0))
+                .add_modifier(Modifier::BOLD)
+        );
         let s = wire_style(Some(&json!({"fg": "cyan"}).as_object().unwrap()));
         assert_eq!(s, Style::default().fg(Color::Cyan));
         // An unknown token degrades to no color.
@@ -1750,17 +1894,28 @@ protocol_v = 1
         let lines = lines_value(&ok).unwrap();
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0].text, "row one");
-        assert_eq!(lines[0].style, Style::default().fg(Color::Red).add_modifier(Modifier::BOLD));
+        assert_eq!(
+            lines[0].style,
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        );
         assert_eq!(lines[2].style, Style::default(), "null style is plain");
 
         // Bad shapes are all `None` (G5 fallback, never a crash).
         assert!(lines_value(&json!("not an array")).is_none());
         assert!(lines_value(&json!(42)).is_none());
-        assert!(lines_value(&json!([["text", 7]])).is_none(), "a non-object style is invalid");
-        assert!(lines_value(&json!(["text", {}, "extra"])).is_none(), "a 3-tuple is invalid");
-        assert!(lines_value(&json!([7])).is_none(), "a bare number is invalid");
+        assert!(
+            lines_value(&json!([["text", 7]])).is_none(),
+            "a non-object style is invalid"
+        );
+        assert!(
+            lines_value(&json!(["text", {}, "extra"])).is_none(),
+            "a 3-tuple is invalid"
+        );
+        assert!(
+            lines_value(&json!([7])).is_none(),
+            "a bare number is invalid"
+        );
     }
-
 
     // ── host process behavior ─────────────────────────────────────
 
@@ -1824,7 +1979,10 @@ done
         )
         .unwrap()]);
         assert!(
-            wait_item(&host, "lines reply", |i| matches!(i, ExtItem::LinesCached { .. })),
+            wait_item(&host, "lines reply", |i| matches!(
+                i,
+                ExtItem::LinesCached { .. }
+            )),
             "the valid lines reply must reach the host"
         );
         let got = {
@@ -1847,7 +2005,10 @@ echo '{\"v\":1,\"op\":\"lines\",\"event_id\":0,\"lines\":42}'";
         host.start();
         std::thread::sleep(Duration::from_millis(300));
         let cache = host.inner.slots[0].lines_cache.lock().unwrap();
-        assert!(cache.get(&0u64).is_none(), "a bad lines reply must not be cached");
+        assert!(
+            cache.get(&0u64).is_none(),
+            "a bad lines reply must not be cached"
+        );
         host.stop();
     }
 
@@ -1870,7 +2031,12 @@ echo '{\"v\":1,\"op\":\"lines\",\"event_id\":0,\"lines\":42}'";
         );
         host.reply_line(0, r#"{"v":1,"op":"lines","event_id":7,"lines":"nope"}"#);
         assert!(
-            host.inner.slots[0].lines_cache.lock().unwrap().get(&7u64).is_none(),
+            host.inner.slots[0]
+                .lines_cache
+                .lock()
+                .unwrap()
+                .get(&7u64)
+                .is_none(),
             "a bad-shape lines reply must not be cached"
         );
         host.stop();
@@ -1988,16 +2154,14 @@ printf '{"v":1,"op":"notify","kind":"osc","code":0,"args":"job done"}\n'
 "#;
         let host = host_with(&tmp, "beller", manifest, script);
         host.start();
-        assert!(wait_item(
-            &host,
-            "bell",
-            |i| matches!(i, ExtItem::NotifyBell { .. })
-        ));
-        assert!(wait_item(
-            &host,
-            "osc",
-            |i| matches!(i, ExtItem::NotifyOsc { code: 0, .. })
-        ));
+        assert!(wait_item(&host, "bell", |i| matches!(
+            i,
+            ExtItem::NotifyBell { .. }
+        )));
+        assert!(wait_item(&host, "osc", |i| matches!(
+            i,
+            ExtItem::NotifyOsc { code: 0, .. }
+        )));
         host.stop();
     }
 
@@ -2013,7 +2177,11 @@ printf '{"v":1,"op":"notify","kind":"osc","code":0,"args":"job done"}\n'
         ]);
         host.start();
         assert!(
-            wait_item(&host, "dead", |i| matches!(i, ExtItem::Dead { ext } if ext == "dying")),
+            wait_item(
+                &host,
+                "dead",
+                |i| matches!(i, ExtItem::Dead { ext } if ext == "dying")
+            ),
             "three restart attempts with the backoff, then dead"
         );
         assert_eq!(host.slot_state(0), SlotState::Dead);
@@ -2023,8 +2191,7 @@ printf '{"v":1,"op":"notify","kind":"osc","code":0,"args":"job done"}\n'
     #[test]
     fn stop_kills_the_group() {
         let tmp = TempDir::new().unwrap();
-        let manifest =
-            "[ext]\ncommand = \"bash\"\nargs = [\"sleeper.sh\"]\nprotocol_v = 1\n";
+        let manifest = "[ext]\ncommand = \"bash\"\nargs = [\"sleeper.sh\"]\nprotocol_v = 1\n";
         let host = host_with(&tmp, "sleeper", manifest, "sleep 30");
         host.start();
         std::thread::sleep(Duration::from_millis(200));
@@ -2037,7 +2204,10 @@ printf '{"v":1,"op":"notify","kind":"osc","code":0,"args":"job done"}\n'
             if !alive {
                 break;
             }
-            assert!(Instant::now() < deadline, "the group did not die after stop");
+            assert!(
+                Instant::now() < deadline,
+                "the group did not die after stop"
+            );
             std::thread::sleep(Duration::from_millis(50));
         }
     }
@@ -2045,8 +2215,7 @@ printf '{"v":1,"op":"notify","kind":"osc","code":0,"args":"job done"}\n'
     #[test]
     fn skipped_extension_reports_the_reason() {
         let tmp = TempDir::new().unwrap();
-        let manifest =
-            "[ext]\ncommand = \"bash\"\nargs = [\"old.sh\"]\nprotocol_v = 2\n";
+        let manifest = "[ext]\ncommand = \"bash\"\nargs = [\"old.sh\"]\nprotocol_v = 2\n";
         let host = host_with(&tmp, "old", manifest, "sleep 30");
         let items = host.start();
         assert!(
@@ -2079,12 +2248,12 @@ printf '{"v":1,"op":"notify","kind":"osc","code":0,"args":"job done"}\n'
         // The right req lands and caches.
         host.reply_line(
             0,
-            &format!(
-                r#"{{"v":1,"op":"transformed","req":{req},"lines":[["MERMAID ART",{{}}]]}}"#
-            ),
+            &format!(r#"{{"v":1,"op":"transformed","req":{req},"lines":[["MERMAID ART",{{}}]]}}"#),
         );
         assert_eq!(
-            host.transform_lines(req).as_ref().map(|l| l[0].text.as_str()),
+            host.transform_lines(req)
+                .as_ref()
+                .map(|l| l[0].text.as_str()),
             Some("MERMAID ART")
         );
         // A resize re-requests: the old result is superseded.
@@ -2097,12 +2266,12 @@ printf '{"v":1,"op":"notify","kind":"osc","code":0,"args":"job done"}\n'
         let new_req = host.inner.transform.lock().unwrap().next - 1;
         host.reply_line(
             0,
-            &format!(
-                r#"{{"v":1,"op":"transformed","req":{new_req},"lines":[["WIDER",{{}}]]}}"#
-            ),
+            &format!(r#"{{"v":1,"op":"transformed","req":{new_req},"lines":[["WIDER",{{}}]]}}"#),
         );
         assert_eq!(
-            host.transform_lines(new_req).as_ref().map(|l| l[0].text.as_str()),
+            host.transform_lines(new_req)
+                .as_ref()
+                .map(|l| l[0].text.as_str()),
             Some("WIDER")
         );
         host.stop();
@@ -2116,7 +2285,9 @@ printf '{"v":1,"op":"notify","kind":"osc","code":0,"args":"job done"}\n'
         let mut host = host_with(&tmp, "slow", manifest, "sleep 30");
         host.set_transform_timeout(Duration::from_millis(50));
         host.start();
-        let req = host.request_transform("fence:mermaid", "graph TD", 80).unwrap();
+        let req = host
+            .request_transform("fence:mermaid", "graph TD", 80)
+            .unwrap();
         std::thread::sleep(Duration::from_millis(120));
         host.poll_transforms();
         assert!(
@@ -2125,6 +2296,101 @@ printf '{"v":1,"op":"notify","kind":"osc","code":0,"args":"job done"}\n'
         );
         // No extension declares the target: no request at all.
         assert!(host.request_transform("inline:latex", "$x$", 80).is_none());
+        host.stop();
+    }
+
+    #[test]
+    fn span_requests_dedupe_supersede_and_reuse() {
+        let tmp = TempDir::new().unwrap();
+        let manifest =
+            "[ext]\ncommand = \"bash\"\nargs = [\"mm.sh\"]\ntransform = [\"fence:mermaid\"]\nprotocol_v = 1\n";
+        let host = host_with(&tmp, "mm", manifest, "sleep 30");
+        host.start();
+        // First request for (event, span): it sends and caches the
+        // id.
+        let req = host
+            .request_span(7, 0, "fence:mermaid", "graph TD", 64)
+            .expect("the declared target has an owner");
+        // While pending: dedupe, no resend.
+        assert_eq!(
+            host.request_span(7, 0, "fence:mermaid", "graph TD", 64),
+            Some(req)
+        );
+        // A reply lands: the span is done.
+        host.reply_line(
+            0,
+            &format!(
+                r#"{{"v":1,"op":"transformed","req":{req},"lines":[["ART",{{}}]]}}"#,
+                req = req
+            ),
+        );
+        assert!(
+            host.span_lines(7, 0).is_some(),
+            "a done span has a result"
+        );
+        // Done: reuse, no resend (a resend would bump the reply
+        // version on every rebuild: an infinite loop).
+        assert_eq!(
+            host.request_span(7, 0, "fence:mermaid", "graph TD", 64),
+            Some(req)
+        );
+        // A different span index is a different request.
+        let req2 = host
+            .request_span(7, 1, "fence:mermaid", "graph LR", 64)
+            .expect("a declared target has an owner");
+        assert_ne!(req2, req, "a new span gets its own request");
+        // A resize supersedes: the span remaps to a new id and the
+        // result is gone until the new reply lands.
+        host.on_resize(100);
+        assert!(
+            host.span_lines(7, 0).is_none(),
+            "a superseded span shows the raw block"
+        );
+        let cur = *host
+            .inner
+            .transform
+            .lock()
+            .unwrap()
+            .span_reqs
+            .get(&(7u64, 0u32))
+            .expect("the span keeps its index key");
+        host.reply_line(
+            0,
+            &format!(
+                r#"{{"v":1,"op":"transformed","req":{cur},"lines":[["WIDE",{{}}]]}}"#,
+                cur = cur
+            ),
+        );
+        assert!(
+            host.span_lines(7, 0).is_some(),
+            "the re-answered span shows again"
+        );
+        host.stop();
+    }
+
+    #[test]
+    fn span_request_after_timeout_re_requests() {
+        let tmp = TempDir::new().unwrap();
+        let manifest =
+            "[ext]\ncommand = \"bash\"\nargs = [\"mm.sh\"]\ntransform = [\"fence:mermaid\"]\nprotocol_v = 1\n";
+        let mut host = host_with(&tmp, "mm", manifest, "sleep 30");
+        host.set_transform_timeout(Duration::from_millis(50));
+        host.start();
+        let req = host
+            .request_span(9, 0, "fence:mermaid", "graph TD", 64)
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(120));
+        host.poll_transforms();
+        assert!(
+            host.span_lines(9, 0).is_none(),
+            "a timed-out span shows the raw block"
+        );
+        // The stale entry re-requests: a new id, a fresh timer.
+        let again = host.request_span(9, 0, "fence:mermaid", "graph TD", 64);
+        assert!(
+            again.is_some() && again != Some(req),
+            "the stale span re-requests"
+        );
         host.stop();
     }
 
@@ -2261,4 +2527,3 @@ done
         host.stop();
     }
 }
-

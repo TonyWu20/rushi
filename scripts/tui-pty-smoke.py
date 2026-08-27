@@ -28,7 +28,35 @@ BIN = sys.argv[1]
 REPO = sys.argv[2]
 SESSION = "tui-test"
 EXT_SESSION = "tui-test-ext"
+MERMAID_EXT_DIR = REPO + "/ui_extensions/mermaid"
 WHEEL_UP = b"\x1b[<64;5;5M"  # SGR mouse: wheel up at col 5 row 5
+
+
+def setup_mermaid_ext():
+    """Build the reference mermaid extension and put its binary on PATH.
+
+    The mermaid extension is a standalone cargo package. Its manifest
+    resolves `mermaid-ext` on PATH, and the host refuses the start
+    when the command is missing (docs/ui-extension.md section 6).
+    Every case in this file loads the global layer, so the binary
+    must exist and be reachable before the first spawn.
+    """
+    import subprocess
+    bin_dir = MERMAID_EXT_DIR + "/target/debug"
+    bin_path = bin_dir + "/mermaid-ext"
+    if not os.path.exists(bin_path):
+        r = subprocess.run(
+            ["cargo", "build"],
+            cwd=MERMAID_EXT_DIR,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        if r.returncode != 0:
+            print("FAIL setup: cannot build the mermaid extension:")
+            print(r.stderr.decode())
+            sys.exit(1)
+    if bin_dir not in os.environ.get("PATH", "").split(os.pathsep):
+        os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
 
 
 def fixture_dir(name):
@@ -765,7 +793,7 @@ def ext_tool_result_kill():
             text = screen.text()
             if "ext tool_result is dead" in text:
                 saw_dead = True
-            if "tool:bash" in text and "[ext] tool:call_9" not in text:
+            if "late result" in text and "[ext] tool:call_9" not in text:
                 saw_builtin = True
             if saw_dead and saw_builtin:
                 break
@@ -808,7 +836,83 @@ def ext_tool_result_kill():
             pass
 
 
+def ext_mermaid():
+    """Host span extraction plus the reference mermaid transform.
+
+    A valid `fence:mermaid` block in an assistant message is
+    replaced by the extension's Unicode art (the raw fence is gone).
+    A broken fence keeps the raw fence: the extension stays silent
+    on unparseable source, and the per-op G5 fallback shows it.
+    """
+    tmp = tempfile.mkdtemp(prefix="tui-ext-mermaid-")
+    cfg, sessions = layer_config(tmp, REPO + "/ui_extensions", active_model="smoke-model")
+    ts = "2026-08-27T11:00:00Z"
+    events = [
+        {"v": 1, "type": "user_message", "ts": ts, "content": "draw the flow"},
+        {
+            "v": 1, "type": "assistant_message", "ts": ts,
+            "content": "Here is the flow:\n\n```mermaid\ngraph TD\n  A-->B\n```\n",
+            "tool_calls": [], "stop_reason": "stop",
+        },
+        {
+            "v": 1, "type": "assistant_message", "ts": ts,
+            "content": "Broken one:\n\n```mermaid\nthis is %% not a diagram\n```\n",
+            "tool_calls": [], "stop_reason": "stop",
+        },
+    ]
+    seed_session(sessions, "tui-test-mmd", events)
+    master, pid = spawn("tui-test-mmd", cfg)
+    screen = Screen(24, 80)
+    try:
+        # The art marker is a node box from the box-drawing output.
+        # The raw marker is the broken fence body. The source text
+        # of the valid fence must be gone (the art replaced it).
+        deadline = time.time() + 10.0
+        markers = ["│ A │", "not a diagram"]
+        seen, all_ok = wait_markers(master, pid, screen, markers, deadline)
+        text = screen.text()
+        if not all_ok:
+            missing = [m for m in markers if m not in seen]
+            print(f"FAIL ext-mermaid: markers not seen: {missing}")
+            print("screen was:\n" + text)
+            return False
+        if "graph TD" in text:
+            print("FAIL ext-mermaid: the valid fence shows raw, the art is missing")
+            print("screen was:\n" + text)
+            return False
+        # Quit: no orphan layer process may survive.
+        os.write(master, b"q")
+        pump(master, 0.4, screen)
+        os.write(master, b"q")
+        deadline = time.time() + 4.0
+        while time.time() < deadline and alive(pid):
+            pump(master, 0.2, screen)
+        if alive(pid):
+            print("FAIL ext-mermaid: still running after double-q (hang)")
+            os.kill(pid, signal.SIGKILL)
+            reap(pid)
+            return False
+        reap(pid)
+        orphans = procs_with_cwd_under(REPO + "/ui_extensions")
+        if orphans:
+            print(f"FAIL ext-mermaid: orphan layer processes: {orphans}")
+            for p in orphans:
+                try:
+                    os.kill(p, signal.SIGKILL)
+                except OSError:
+                    pass
+            return False
+        print("OK ext-mermaid: valid fence shows the art, broken fence shows raw")
+        return True
+    finally:
+        try:
+            os.close(master)
+        except OSError:
+            pass
+
+
 def main():
+    setup_mermaid_ext()
     ok = True
     ok &= case("baseline-double-q", 0)
     ok &= case("burst-300-then-double-q", 300)
@@ -821,6 +925,7 @@ def main():
     ok &= ext_statusline_real()
     ok &= ext_statusline_repo()
     ok &= ext_tool_result_kill()
+    ok &= ext_mermaid()
     if not ok:
         sys.exit(1)
     print("ALL SMOKE CASES PASSED")

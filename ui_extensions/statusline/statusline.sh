@@ -15,7 +15,8 @@
 #   the row consumes them through the tick payload's `statuses` map
 #
 # Layout: one line on wide terminals, two lines when the terminal is
-# narrow (width < 72). The host reserves one terminal row per line.
+# narrow (width under 100). The host reserves one terminal row per
+# line.
 
 set -u
 DIR="$(dirname "${CONFIG:-.}")"

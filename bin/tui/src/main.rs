@@ -176,20 +176,16 @@ fn main() {
         // into the transcript cache key via the reply version.
         while let Some(item) = host.drain() {
             match item {
-                ext::ExtItem::LinesCached { .. } | ext::ExtItem::StatusUpdated { .. }
+                ext::ExtItem::LinesCached { .. }
+                | ext::ExtItem::StatusUpdated { .. }
                 | ext::ExtItem::TransformedCached { .. } => {}
                 ext::ExtItem::AppendReq { ext: name, event } => {
                     let Some(sid) = app.active().cloned() else {
                         app.flash(format!("ext {name} append failed: no active session"));
                         continue;
                     };
-                    let type_name = event
-                        .get("type")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("?");
-                    let ev = event::Event::Json {
-                        obj: event.clone(),
-                    };
+                    let type_name = event.get("type").and_then(|t| t.as_str()).unwrap_or("?");
+                    let ev = event::Event::Json { obj: event.clone() };
                     match rt.block_on(port.append_event(&sid, &ev)) {
                         Ok(()) => app.flash(format!("ext {name} appended {type_name}")),
                         Err(e) => app.flash(format!("ext {name} append failed: {e}")),
@@ -209,9 +205,7 @@ fn main() {
                     let _ = out.flush();
                 }
                 ext::ExtItem::Dead { ext: name } => {
-                    app.flash(format!(
-                        "ext {name} is dead (restart budget exhausted)"
-                    ));
+                    app.flash(format!("ext {name} is dead (restart budget exhausted)"));
                 }
                 ext::ExtItem::Skipped { ext: name, reason } => {
                     app.flash(format!("ext {name} skipped: {reason}"));
@@ -261,12 +255,8 @@ fn main() {
                     }
                 }
                 cevent::Event::Mouse(m) => match m.kind {
-                    cevent::MouseEventKind::ScrollUp => {
-                        actions.extend(app.press(Key::Wheel(-1)))
-                    }
-                    cevent::MouseEventKind::ScrollDown => {
-                        actions.extend(app.press(Key::Wheel(1)))
-                    }
+                    cevent::MouseEventKind::ScrollUp => actions.extend(app.press(Key::Wheel(-1))),
+                    cevent::MouseEventKind::ScrollDown => actions.extend(app.press(Key::Wheel(1))),
                     _ => {}
                 },
                 // Resize: ratatui re-queries the terminal on each draw.
@@ -446,7 +436,11 @@ fn main() {
         // and loop state.
         let width = term.size().map(|s| s.width as usize).unwrap_or(80);
         if width != last_width {
-            host.on_resize(width);
+            // The re-request width is the transform budget: the
+            // terminal width minus the border (2), the transcript
+            // padding (2), and the content gutter (12), so the
+            // re-rendered art fits the pane like the first pass.
+            host.on_resize(width.saturating_sub(16));
             last_width = width;
         }
         let tick = ext::TickPayload {

@@ -92,8 +92,10 @@ Exit: all three references run in a real session.
 Goal: inline diagram rendering, like pi's.
 
 - host span extraction: `fence:mermaid` code blocks
-- `ui_extensions/mermaid/`: a Rust binary on `grok-mermaid`.
-  Its own cargo package. `ext.toml` declares the transform
+- `ui_extensions/mermaid/`: a Rust binary on the `mermaid-text`
+  crate (a pure-Rust mermaid-to-Unicode renderer; `grok-mermaid`
+  is the JS package the ground rules rule out). Its own cargo
+  package. `ext.toml` declares the transform
 - a 2 s timeout. Stale `req` replies drop. A resize re-requests
 - `inline:latex` span detection lands with the mechanism.
   The LaTeX renderer binary is follow-up work (open item)

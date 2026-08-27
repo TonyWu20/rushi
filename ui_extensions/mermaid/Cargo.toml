@@ -1,0 +1,25 @@
+# The reference `mermaid` transform extension (ui-extension-plan
+# stage 3). A standalone cargo package, not a member of the root
+# workspace: the empty `[workspace]` table stops cargo from
+# attaching it to the root.
+#
+# Build: `cargo build` here. The binary lands in
+# ./target/debug/mermaid-ext; put that directory on `PATH` so the
+# TUI host can resolve the `mermaid-ext` command from
+# ui_extensions/mermaid/ext.toml.
+
+[package]
+name = "mermaid-ext"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[[bin]]
+name = "mermaid-ext"
+path = "src/main.rs"
+
+[dependencies]
+mermaid-text = "0.57"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

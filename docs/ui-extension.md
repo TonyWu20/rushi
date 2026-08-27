@@ -219,6 +219,9 @@ where the core decides the sequence and an entry never claims a slot
 
 ## 11. Open items
 
+- A LaTeX renderer binary for `inline:latex` spans. The host
+  detection and request path landed with the stage 3 mechanism;
+  until a renderer exists, the raw span shows
 - Pre-approval blocking semantics: block before an `approval_request`
   exists, or answer one that does
 - Log-growth bound for chatty `ext_status` publishers

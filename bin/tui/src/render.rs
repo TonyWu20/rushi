@@ -145,11 +145,16 @@ fn result_text(value: Option<&serde_json::Value>, err: bool) -> String {
 
 /// One visual event block: a header line plus wrapped, capped body
 /// lines, each continuation line aligned under the content gutter.
+/// `event_id` is the log index of the event; `ext` enables the stage
+/// 3 span extraction (transform owners may rewrite the message
+/// spans in place). `None` ext renders exactly the built-in path.
 fn event_lines(
     e: &Event,
     pending: bool,
     call_names: &HashMap<String, String>,
     width: usize,
+    event_id: u64,
+    ext: Option<&crate::ext::ExtHost>,
 ) -> Vec<Line<'static>> {
     let gutter = " ".repeat(GUTTER);
     let wrap_w = width.saturating_sub(GUTTER).max(4);
@@ -165,8 +170,11 @@ fn event_lines(
                 .get_str("content")
                 .unwrap_or("[missing content]")
                 .to_string();
-            let wrapped = wrap_markdown(&content, wrap_w);
-            let mut spans = vec![Span::styled(format!("{LABEL}user"), label_style(Color::Cyan))];
+            let wrapped = render_message_content(&content, event_id, ext, wrap_w);
+            let mut spans = vec![Span::styled(
+                format!("{LABEL}user"),
+                label_style(Color::Cyan),
+            )];
             if let Some(first) = wrapped.first() {
                 spans.push(Span::raw("  "));
                 spans.extend(first.spans.iter().cloned());
@@ -197,7 +205,7 @@ fn event_lines(
             let wrapped = if content.is_empty() {
                 Vec::new()
             } else {
-                wrap_markdown(&content, wrap_w)
+                render_message_content(&content, event_id, ext, wrap_w)
             };
             if let Some(first) = wrapped.first() {
                 header.push(Span::raw("  "));
@@ -514,6 +522,343 @@ fn wrap_flow(segs: Vec<(Style, String)>, width: usize) -> Vec<Line<'static>> {
     out
 }
 
+// ── transform span extraction (ui-extension-plan stage 3) ──────
+/// One extracted span of a message, in content order. The `idx`
+/// numbering is a pure function of the content, so it is stable
+/// across transcript rebuilds: the host dedupes transform requests
+/// per (event log index, span index).
+#[derive(Debug)]
+enum MBlock<'a> {
+    /// A run of hard lines with no mermaid fence. Each line is
+    /// pre-split into flow parts at split time. Fence-aware: no
+    /// span inside a code fence.
+    Text { parts: Vec<Vec<Part<'a>>> },
+    /// A `fence:mermaid` code fence. `raw` is the whole fence
+    /// (backtick lines included) for the raw fallback; `text` is
+    /// the body the extension rewrites.
+    Mermaid { idx: u32, raw: String, text: String },
+}
+
+/// One flow part of a hard line: markdown text, or an extracted
+/// span.
+#[derive(Debug, Clone)]
+enum Part<'a> {
+    /// Markdown flow text, highlighted with the shared fence state.
+    Text(&'a str),
+    /// An `inline:latex` span. `raw` is the source with delimiters;
+    /// `text` is what the extension rewrites.
+    Latex {
+        idx: u32,
+        raw: &'a str,
+        text: &'a str,
+    },
+}
+
+/// One marker line of a code fence: the run of leading backticks or
+/// tildes (three or more) plus the info string. A closing fence has
+/// an empty info string.
+fn fence_marker(line: &str) -> Option<(char, usize, &str)> {
+    let t = line.trim_start();
+    let bytes = t.as_bytes();
+    let first = *bytes.first()?;
+    if first != b'`' && first != b'~' {
+        return None;
+    }
+    let run = bytes.iter().take_while(|&&b| b == first).count();
+    if run < 3 {
+        return None;
+    }
+    Some((first as char, run, t[run..].trim()))
+}
+
+/// Split one hard line into flow parts. Outside a code fence, a
+/// `$$...$$` or `$...$` pair becomes a LaTeX span (an
+/// `inline:latex` transform target). Inside a fence, on fence
+/// marker lines, and for a `$` with no closing partner, the
+/// dollars stay literal. The span `idx` numbering continues the
+/// counter, in content order.
+fn line_parts<'a>(line: &'a str, in_fence: bool, next_idx: &mut u32) -> Vec<Part<'a>> {
+    if in_fence || fence_marker(line).is_some() || !line.contains('$') {
+        return vec![Part::Text(line)];
+    }
+    let mut out: Vec<Part<'a>> = Vec::new();
+    let bytes = line.as_bytes();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] != b'$' {
+            i += 1;
+            continue;
+        }
+        let display = i + 1 < bytes.len() && bytes[i + 1] == b'$';
+        if display {
+            let rest = &line[i + 2..];
+            if let Some(off) = rest.find("$$") {
+                let close = i + 2 + off;
+                if close > i + 2 {
+                    if start < i {
+                        out.push(Part::Text(&line[start..i]));
+                    }
+                    out.push(Part::Latex {
+                        idx: *next_idx,
+                        raw: &line[i..close + 2],
+                        text: &line[i + 2..close],
+                    });
+                    *next_idx += 1;
+                    start = close + 2;
+                    i = start;
+                    continue;
+                }
+            }
+            // No closing marker: the dollars stay literal.
+            i += 2;
+            continue;
+        }
+        let rest = &line[i + 1..];
+        if let Some(off) = rest.find('$') {
+            let close = i + 1 + off;
+            if close > i + 1 {
+                if start < i {
+                    out.push(Part::Text(&line[start..i]));
+                }
+                out.push(Part::Latex {
+                    idx: *next_idx,
+                    raw: &line[i..close + 1],
+                    text: &line[i + 1..close],
+                });
+                *next_idx += 1;
+                start = close + 1;
+                i = start;
+                continue;
+            }
+        }
+        // A lone dollar stays literal.
+        i += 1;
+    }
+    if start < line.len() {
+        out.push(Part::Text(&line[start..]));
+    }
+    if out.is_empty() {
+        out.push(Part::Text(line));
+    }
+    out
+}
+
+/// The code-fence state before each hard line of `content`: true
+/// inside a code fence. A miniature of the markdown fence rules:
+/// three or more leading backticks or tildes opens; a matching run
+/// of the same character with an empty info string closes; a fence
+/// opens only outside another fence.
+fn fence_states(content: &str) -> Vec<bool> {
+    let content = content.trim_end_matches('\n');
+    let lines: Vec<&str> = content.split('\n').collect();
+    let mut states = vec![false; lines.len()];
+    let mut open: Option<(char, usize)> = None;
+    for (i, line) in lines.iter().enumerate() {
+        states[i] = open.is_some();
+        if let Some((c, run, info)) = fence_marker(line) {
+            match open {
+                Some((oc, orun)) => {
+                    if c == oc && info.is_empty() && run >= orun {
+                        open = None;
+                    }
+                }
+                None => open = Some((c, run)),
+            }
+        }
+    }
+    states
+}
+
+/// Split message content into blocks: `fence:mermaid` code fences
+/// become [`MBlock::Mermaid`] blocks; everything else (including
+/// other code fences and their bodies) stays in the text flow, with
+/// LaTeX spans extracted per line.
+///
+/// Mermaid fences are recognized by the info string `mermaid`
+/// (case-insensitive), outside a code fence. All span indices are
+/// numbered in content order at split time: that is what makes
+/// them stable across transcript rebuilds.
+fn message_blocks(content: &str) -> Vec<MBlock<'_>> {
+    let content = content.trim_end_matches('\n');
+    let lines: Vec<&str> = content.split('\n').collect();
+    let states = fence_states(content);
+    let mut blocks: Vec<MBlock> = Vec::new();
+    let mut next_idx: u32 = 0;
+    let mut i = 0usize;
+    let mut run_start = 0usize;
+    while i < lines.len() {
+        let line = lines[i];
+        // Inside a code fence: plain text run.
+        if states[i] {
+            i += 1;
+            continue;
+        }
+        let marker = fence_marker(line);
+        if let Some((c, run, info)) = marker {
+            if !info.eq_ignore_ascii_case("mermaid") {
+                // A non-mermaid fence: flow text, until its close.
+                i += 1;
+                continue;
+            }
+            // A mermaid fence: extract it. The body is the
+            // transform target; the whole fence is the raw
+            // fallback.
+            if run_start < i {
+                let parts: Vec<Vec<Part>> = (run_start..i)
+                    .map(|j| line_parts(lines[j], states[j], &mut next_idx))
+                    .collect();
+                if !parts.is_empty() {
+                    blocks.push(MBlock::Text { parts });
+                }
+            }
+            let open_run = run;
+            let mut raw_lines: Vec<&str> = vec![line];
+            let mut text_lines: Vec<&str> = Vec::new();
+            i += 1;
+            loop {
+                let l2 = lines[i];
+                if let Some((c2, run2, info2)) = fence_marker(l2) {
+                    if c2 == c && info2.is_empty() && run2 >= open_run {
+                        raw_lines.push(l2);
+                        i += 1;
+                        break;
+                    }
+                }
+                raw_lines.push(l2);
+                text_lines.push(l2);
+                i += 1;
+                if i >= lines.len() {
+                    // An unterminated fence runs to the end of the
+                    // content: standard markdown behavior.
+                    break;
+                }
+            }
+            let raw = raw_lines.join("\n");
+            let text = text_lines.join("\n");
+            blocks.push(MBlock::Mermaid {
+                idx: next_idx,
+                raw,
+                text,
+            });
+            next_idx += 1;
+            run_start = i;
+            continue;
+        }
+        i += 1;
+    }
+    if run_start < lines.len() {
+        let parts: Vec<Vec<Part>> = (run_start..lines.len())
+            .map(|j| line_parts(lines[j], states[j], &mut next_idx))
+            .collect();
+        if !parts.is_empty() {
+            blocks.push(MBlock::Text { parts });
+        }
+    }
+    blocks
+}
+
+/// Render one user/assistant message with the stage 3 span
+/// extraction.
+///
+/// - A `fence:mermaid` block: the host requests a transform for the
+///   fence body. A finished reply replaces the fence with the
+///   extension's lines, guttered like the transcript. A missing
+///   owner, a pending or timed-out request, or a dead extension
+///   shows the raw fence (G5 fallback).
+/// - An `inline:latex` span: the host requests a transform for the
+///   span. A finished reply replaces the span text in place (the
+///   reply lines join into one line). No owner: the raw span text
+///   renders, exactly like the built-in path.
+///
+/// The `ext == None` path renders the content with [`wrap_markdown`],
+/// byte-identical to the pre-stage-3 renderer.
+fn render_message_content(
+    content: &str,
+    event_id: u64,
+    ext: Option<&crate::ext::ExtHost>,
+    wrap_w: usize,
+) -> Vec<Line<'static>> {
+    if ext.is_none() {
+        return wrap_markdown(content, wrap_w);
+    }
+    let host = ext.expect("checked above");
+    let blocks = message_blocks(content);
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut fence = false;
+    for block in blocks {
+        match block {
+            MBlock::Text { parts } => {
+                for line_parts in parts {
+                    let mut segs: Vec<(Style, String)> = Vec::new();
+                    for part in line_parts {
+                        match part {
+                            Part::Text(s) => {
+                                segs.extend(highlight::markdown_line(s, &mut fence));
+                            }
+                            Part::Latex { idx, raw, text } => {
+                                let req =
+                                    host.request_span(event_id, idx, "inline:latex", text, wrap_w);
+                                let replaced = req
+                                    .and_then(|_| host.span_lines(event_id, idx))
+                                    .map(|ls| {
+                                        ls.iter()
+                                            .map(|l| l.text.clone())
+                                            .collect::<Vec<_>>()
+                                            .join(" ")
+                                    })
+                                    .unwrap_or_else(|| raw.to_string());
+                                segs.push((Style::default(), replaced));
+                            }
+                        }
+                    }
+                    // One hard line always renders at least one
+                    // visual line (the pre-stage-3 invariant the
+                    // event header slices `wrapped[1..]` on).
+                    if segs.is_empty() {
+                        out.push(Line::default());
+                    } else {
+                        out.extend(wrap_flow(segs, wrap_w));
+                    }
+                }
+            }
+            MBlock::Mermaid { idx, raw, text } => {
+                let req = host.request_span(event_id, idx, "fence:mermaid", &text, wrap_w);
+                // An empty reply erases the block: treat it as no
+                // reply and show the raw fence.
+                let art = req
+                    .and_then(|_| host.span_lines(event_id, idx))
+                    .filter(|ls| !ls.is_empty());
+                match art {
+                    Some(lines) => {
+                        // The reply lines are width-independent; the
+                        // host wraps them to the pane width with the
+                        // transcript gutter, like every extension
+                        // reply.
+                        out.extend(ext_lines_guttered(&lines, wrap_w + GUTTER));
+                    }
+                    None => {
+                        // The raw fence shows. A private fence state
+                        // highlights the fence lines; the shared
+                        // state is untouched, because the block is a
+                        // balanced fence.
+                        let mut private = fence;
+                        for hard in raw.split('\n') {
+                            let segs = highlight::markdown_line(hard, &mut private);
+                            if segs.is_empty() {
+                                out.push(Line::default());
+                            } else {
+                                out.extend(wrap_flow(segs, wrap_w));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The static help row. The quit hint comes first: it is the safety
 /// relevant one, and terminal clipping always eats the right end.
 pub fn help_line(running: bool) -> String {
@@ -555,11 +900,20 @@ fn status_rows(
         .and_then(|s| app.loop_state(s))
         .and_then(|l| l.last_line.clone());
     match host.status_row() {
-        crate::ext::StatusRow::Lines(lines) => lines
-            .iter()
-            .take(2)
-            .map(|l| Line::from(Span::styled(l.text.clone(), l.style)))
-            .collect(),
+        crate::ext::StatusRow::Lines(lines) => {
+            let rows: Vec<Line<'static>> = lines
+                .iter()
+                .take(2)
+                .map(|l| Line::from(Span::styled(l.text.clone(), l.style)))
+                .collect();
+            // An empty reply must not erase the row slot (the help
+            // content shares it): reserve one blank row.
+            if rows.is_empty() {
+                vec![Line::default()]
+            } else {
+                rows
+            }
+        }
         crate::ext::StatusRow::DeadHint(hint) => vec![Line::from(Span::styled(
             format!(" {hint}"),
             Style::default().fg(Color::Red).add_modifier(Modifier::DIM),
@@ -585,7 +939,11 @@ fn status_rows(
 /// for the event, the extension's styled lines replace the built-in
 /// render. A missing, stale, or timed-out reply falls back to the
 /// built-in render (per-op G5 fallback).
-pub fn build_transcript_lines(app: &App, width: usize, ext: Option<&crate::ext::ExtHost>) -> Vec<Line<'static>> {
+pub fn build_transcript_lines(
+    app: &App,
+    width: usize,
+    ext: Option<&crate::ext::ExtHost>,
+) -> Vec<Line<'static>> {
     let names = app.call_names();
     let pending = app.oldest_pending_approval().is_some();
     let events = app.events();
@@ -608,10 +966,10 @@ pub fn build_transcript_lines(app: &App, width: usize, ext: Option<&crate::ext::
                 Some(lines) => ext_lines_guttered(&lines, width),
                 // No valid reply for this event: the built-in render
                 // is the fallback.
-                None => event_lines(e, pending, &names, width.max(GUTTER + 8)),
+                None => event_lines(e, pending, &names, width.max(GUTTER + 8), event_id, ext),
             }
         } else {
-            event_lines(e, pending, &names, width.max(GUTTER + 8))
+            event_lines(e, pending, &names, width.max(GUTTER + 8), event_id, ext)
         };
         all.extend(segs);
     }
@@ -625,10 +983,7 @@ pub fn build_transcript_lines(app: &App, width: usize, ext: Option<&crate::ext::
 fn ext_lines_guttered(lines: &[crate::ext::ExtLine], width: usize) -> Vec<Line<'static>> {
     let gutter = " ".repeat(GUTTER);
     let wrap_w = width.saturating_sub(GUTTER).max(4);
-    let segs: Vec<(Style, String)> = lines
-        .iter()
-        .map(|l| (l.style, l.text.clone()))
-        .collect();
+    let segs: Vec<(Style, String)> = lines.iter().map(|l| (l.style, l.text.clone())).collect();
     let wrapped = wrap_styled(segs, wrap_w);
     guttered(&wrapped, &gutter)
 }
@@ -638,7 +993,12 @@ fn ext_lines_guttered(lines: &[crate::ext::ExtLine], width: usize) -> Vec<Line<'
 /// When a status extension exists, its row owns that last line
 /// (ui-extension-plan stage 1 layout); otherwise the built-in
 /// help/status content shows there.
-pub fn draw(f: &mut Frame, app: &mut App, cursor: &mut Option<(u16, u16)>, host: &crate::ext::ExtHost) {
+pub fn draw(
+    f: &mut Frame,
+    app: &mut App,
+    cursor: &mut Option<(u16, u16)>,
+    host: &crate::ext::ExtHost,
+) {
     *cursor = None;
     let area = f.area();
     if area.width < 12 || area.height < 6 {
@@ -696,8 +1056,7 @@ pub fn draw(f: &mut Frame, app: &mut App, cursor: &mut Option<(u16, u16)>, host:
     // reserves one terminal row per status line. A status extension
     // reply may carry two lines (the narrow two-line layout,
     // ui-extension-plan stage 2).
-    let status_lines =
-        status_rows(app, host, running, inner.width as usize);
+    let status_lines = status_rows(app, host, running, inner.width as usize);
     let status_n = status_lines.len() as u16;
     let constraints = if banner {
         vec![
@@ -789,8 +1148,7 @@ pub fn draw(f: &mut Frame, app: &mut App, cursor: &mut Option<(u16, u16)>, host:
     if !app.should_quit() {
         let x = if naming {
             // One past the rendered `_` underline.
-            (prefix.chars().count() + text.chars().count() + 1)
-                .min(i_area.width as usize)
+            (prefix.chars().count() + text.chars().count() + 1).min(i_area.width as usize)
         } else {
             (2 + text.chars().count()).min(i_area.width as usize)
         } as u16;
@@ -942,7 +1300,10 @@ mod tests {
         let app = app_with_session(evs);
         let joined = join(&build_transcript_lines(&app, 60, None));
         // Item 1: the content is shown in full — no cap, no hint.
-        assert!(!joined.contains("more lines"), "content must not fold: {joined}");
+        assert!(
+            !joined.contains("more lines"),
+            "content must not fold: {joined}"
+        );
         for i in 0..60 {
             assert!(
                 joined.contains(&format!("line {i:02}")),
@@ -964,7 +1325,10 @@ mod tests {
         .unwrap()];
         let app = app_with_session(evs);
         let joined = join(&build_transcript_lines(&app, 80, None));
-        assert!(!joined.contains("more lines"), "tool result must not fold: {joined}");
+        assert!(
+            !joined.contains("more lines"),
+            "tool result must not fold: {joined}"
+        );
         for i in [0, 1, 50, 99] {
             assert!(
                 joined.contains(&format!("tool out {i:03}")),
@@ -986,9 +1350,15 @@ mod tests {
         .unwrap()];
         let app = app_with_session(evs);
         let joined = join(&build_transcript_lines(&app, 80, None));
-        assert!(!joined.contains("more lines"), "error must not fold: {joined}");
+        assert!(
+            !joined.contains("more lines"),
+            "error must not fold: {joined}"
+        );
         for i in [0, 49] {
-            assert!(joined.contains(&format!("trace {i:02}")), "error line {i} missing");
+            assert!(
+                joined.contains(&format!("trace {i:02}")),
+                "error line {i} missing"
+            );
         }
     }
 
@@ -1002,40 +1372,50 @@ mod tests {
         // Word wrapping splits a line into spans, so assert over the
         // spans of the line that holds the syntax, not global spans.
         let hl = find("# Title").expect("heading line missing");
-        assert!(lines[hl]
-            .spans
-            .iter()
-            .filter(|s| s.content.as_ref() == "# " || s.content.as_ref() == "Title")
-            .all(|s| s.style == highlight::heading_style()),
-            "heading spans not styled: {lines:?}");
+        assert!(
+            lines[hl]
+                .spans
+                .iter()
+                .filter(|s| s.content.as_ref() == "# " || s.content.as_ref() == "Title")
+                .all(|s| s.style == highlight::heading_style()),
+            "heading spans not styled: {lines:?}"
+        );
         let ql = find("> quote").expect("quote line missing");
-        assert!(lines[ql]
-            .spans
-            .iter()
-            .filter(|s| s.content.as_ref() == "> " || s.content.as_ref() == "quote")
-            .all(|s| s.style == highlight::quote_style()),
-            "quote spans not styled: {lines:?}");
+        assert!(
+            lines[ql]
+                .spans
+                .iter()
+                .filter(|s| s.content.as_ref() == "> " || s.content.as_ref() == "quote")
+                .all(|s| s.style == highlight::quote_style()),
+            "quote spans not styled: {lines:?}"
+        );
         let ml = find("item").expect("list line missing");
-        assert!(lines[ml].spans
+        assert!(lines[ml]
+            .spans
             .iter()
             .any(|s| s.content.as_ref() == "-" && s.style == highlight::list_style()));
         let cl = find("`code`").expect("inline code line missing");
-        assert!(lines[cl].spans
+        assert!(lines[cl]
+            .spans
             .iter()
             .any(|s| s.content.as_ref() == "`code`" && s.style == highlight::inline_code_style()));
         let bl = find("**b**").expect("bold line missing");
-        assert!(lines[bl].spans
+        assert!(lines[bl]
+            .spans
             .iter()
             .any(|s| s.content.as_ref() == "**b**" && s.style == highlight::bold_style()));
         let il = find("*i*").expect("italic line missing");
-        assert!(lines[il].spans
+        assert!(lines[il]
+            .spans
             .iter()
             .any(|s| s.content.as_ref() == "*i*" && s.style == highlight::italic_style()));
         let ll = find("[t]").expect("link line missing");
-        assert!(lines[ll].spans
+        assert!(lines[ll]
+            .spans
             .iter()
             .any(|s| s.content.as_ref() == "[t]" && s.style == highlight::link_style()));
-        assert!(lines[ll].spans
+        assert!(lines[ll]
+            .spans
             .iter()
             .any(|s| s.content.as_ref() == "(u)" && s.style == highlight::link_url_style()));
     }
@@ -1271,14 +1651,10 @@ mod tests {
         // Two more events, interleaved: still no rows.
         let many = vec![
             produce::user_message("a"),
-            Event::parse_line(
-                r#"{"v":1,"type":"ext_status","ts":"t","id":"s1","value":"x"}"#,
-            )
-            .unwrap(),
-            Event::parse_line(
-                r#"{"v":1,"type":"ext_status","ts":"t","id":"s2","value":{"k":1}}"#,
-            )
-            .unwrap(),
+            Event::parse_line(r#"{"v":1,"type":"ext_status","ts":"t","id":"s1","value":"x"}"#)
+                .unwrap(),
+            Event::parse_line(r#"{"v":1,"type":"ext_status","ts":"t","id":"s2","value":{"k":1}}"#)
+                .unwrap(),
             produce::user_message("b"),
         ];
         let app = app_with_session(many);
@@ -1298,8 +1674,8 @@ mod tests {
         // cached lines reply for event 0: the extension's styled
         // lines replace the built-in render (ui-extension-plan
         // stage 1: kind ownership in build_transcript_lines).
-        use crate::ext::{discover, ExtHost};
         use crate::config::TuiConfig;
+        use crate::ext::{discover, ExtHost};
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().to_path_buf();
         let entry = root.join("ui_extensions").join("tr");
@@ -1330,7 +1706,10 @@ mod tests {
         let app = app_with_session(evs);
         // No reply yet: the built-in render shows.
         let joined = join(&build_transcript_lines(&app, 80, Some(&host)));
-        assert!(joined.contains("exit 0"), "the fallback is the built-in render: {joined}");
+        assert!(
+            joined.contains("exit 0"),
+            "the fallback is the built-in render: {joined}"
+        );
         // A valid reply lands: the extension lines replace it.
         host.reply_line(
             0,
@@ -1345,8 +1724,14 @@ mod tests {
         ]);
         let lines = build_transcript_lines(&app, 80, Some(&host));
         let joined = join(&lines);
-        assert!(joined.contains("EXT TOOL VIEW"), "the reply replaces the render: {joined}");
-        assert!(!joined.contains("exit 0"), "the built-in render is gone: {joined}");
+        assert!(
+            joined.contains("EXT TOOL VIEW"),
+            "the reply replaces the render: {joined}"
+        );
+        assert!(
+            !joined.contains("exit 0"),
+            "the built-in render is gone: {joined}"
+        );
         // The reply version folded into the transcript cache key:
         // a second rebuild picks the new lines up through App.
         let mut app2 = app_with_session(vec![
@@ -1358,8 +1743,7 @@ mod tests {
         ]);
         let _ = app2.transcript_lines(80, Some(&host));
         assert!(
-            app2
-                .transcript_lines(80, Some(&host))
+            app2.transcript_lines(80, Some(&host))
                 .iter()
                 .any(|l| l.to_string().contains("EXT TOOL VIEW")),
             "the cache rebuild folds in the extension reply"
@@ -1387,5 +1771,155 @@ mod tests {
         let app = app_with_session(evs);
         let joined = join(&build_transcript_lines(&app, 80, None));
         assert!(!joined.contains(&many), "oldest event must be dropped");
+    }
+
+    // ── transform span extraction (stage 3) ─────────────────────
+    fn parts_of<'a>(block: &MBlock<'a>) -> Vec<Vec<Part<'a>>> {
+        match block {
+            MBlock::Text { parts } => (*parts).clone(),
+            MBlock::Mermaid { .. } => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn message_blocks_extract_mermaid_and_latex() {
+        let content = "Line one $a+b$ tail\n\n```mermaid\ngraph TD\n  A-->B\n```\n\n```bash\necho $HOME\n```\nend $$x$$ done";
+        let blocks = message_blocks(content);
+        // One text run before the fence, the mermaid block, and one
+        // text run after, in order.
+        assert_eq!(blocks.len(), 3, "blocks: {blocks:?}");
+        match &blocks[1] {
+            MBlock::Mermaid { idx, raw, text } => {
+                assert_eq!(*idx, 1, "the mermaid span takes index 1");
+                assert!(raw.starts_with("```mermaid") && raw.ends_with("```"));
+                assert_eq!(text, "graph TD\n  A-->B");
+            }
+            other => panic!("expected a mermaid block, got {other:?}"),
+        }
+        // The text before the fence: the first latex span is index 0
+        // (content order: it comes before the mermaid fence).
+        let pre = parts_of(&blocks[0]);
+        let span: Vec<Part> = pre
+            .iter()
+            .flatten()
+            .filter_map(|p| match *p {
+                Part::Latex { idx, raw, text } => {
+                    assert_eq!(idx, 0, "the first latex span takes index 0");
+                    assert_eq!(raw, "$a+b$");
+                    assert_eq!(text, "a+b");
+                    Some(Part::Text(raw))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(span.len(), 1, "one latex span before the fence");
+        // The non-mermaid fence body stays in the text flow, and its
+        // dollar pair is literal (inside a code fence).
+        let post = parts_of(&blocks[2]);
+        let all: String = post
+            .iter()
+            .flatten()
+            .filter_map(|p| match p {
+                Part::Text(s) => Some(s.to_string()),
+                Part::Latex { .. } => None,
+            })
+            .collect();
+        assert!(
+            all.contains("echo $HOME"),
+            "code fence dollars stay literal"
+        );
+        // The trailing `$$x$$` is a second latex span (index 2),
+        // after the first took 0 and the mermaid fence took 1.
+        let tail: Vec<&Part> = post
+            .iter()
+            .flatten()
+            .filter(|p| matches!(p, Part::Latex { .. }))
+            .collect();
+        assert_eq!(tail.len(), 1, "the trailing span only");
+        match *tail[0] {
+            Part::Latex { idx, raw, text } => {
+                assert_eq!(idx, 2);
+                assert_eq!(raw, "$$x$$");
+                assert_eq!(text, "x");
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn message_blocks_mermaid_inside_code_fence_stays_text() {
+        let content = "```bash\n# ```mermaid\n# graph TD\n```";
+        let blocks = message_blocks(content);
+        assert_eq!(blocks.len(), 1, "no extraction inside a code fence");
+        match &blocks[0] {
+            MBlock::Text { parts } => {
+                let joined: String = parts
+                    .iter()
+                    .flatten()
+                    .filter_map(|p| match p {
+                        Part::Text(s) => Some(s.to_string()),
+                        Part::Latex { .. } => None,
+                    })
+                    .collect();
+                assert!(joined.contains("# ```mermaid"), "fence stays literal");
+            }
+            MBlock::Mermaid { .. } => panic!("a fenced mermaid comment must not extract"),
+        }
+    }
+
+    #[test]
+    fn line_parts_dollar_cases() {
+        let mut idx = 0u32;
+        // An unclosed dollar stays literal.
+        let parts = line_parts("price is $5 only", false, &mut idx);
+        assert_eq!(parts.len(), 1, "no span: {parts:?}");
+        assert!(matches!(parts[0], Part::Text(_)));
+        // Two pairs on one line: both become spans, in order.
+        let parts = line_parts("$a$ mid $b$", false, &mut idx);
+        assert_eq!(parts.len(), 3, "span-text-span: {parts:?}");
+        match &parts[0] {
+            Part::Latex { idx, text, .. } => {
+                assert_eq!(*idx, 0);
+                assert_eq!(*text, "a");
+            }
+            _ => panic!("expected the first span"),
+        }
+        match &parts[2] {
+            Part::Latex { idx, text, .. } => {
+                assert_eq!(*idx, 1);
+                assert_eq!(*text, "b");
+            }
+            _ => panic!("expected the second span"),
+        }
+        // Display form takes the whole `$$...$$` span.
+        let parts = line_parts("$$x$$ end", false, &mut idx);
+        assert_eq!(parts.len(), 2, "span-text: {parts:?}");
+        match &parts[0] {
+            Part::Latex { idx, text, .. } => {
+                assert_eq!(*idx, 2);
+                assert_eq!(*text, "x");
+            }
+            _ => panic!("expected the display span"),
+        }
+        // Inside a fence: no span.
+        let parts = line_parts("$a$ $b$", true, &mut idx);
+        assert_eq!(parts.len(), 1, "fence lines keep dollars literal");
+        // An empty inline span ($$) is a display-form opener with no
+        // body: the dollars stay literal.
+        let parts = line_parts("$$$$", false, &mut idx);
+        assert_eq!(parts.len(), 1, "empty span is literal: {parts:?}");
+    }
+
+    #[test]
+    fn render_message_content_without_ext_matches_wrap_markdown() {
+        let content = "head $a+b$\n\n```mermaid\ngraph TD\n  A-->B\n```\n\n```bash\necho hi\n```";
+        let plain = render_message_content(content, 7, None, 60);
+        let builtin = wrap_markdown(content, 60);
+        let show = |v: &Vec<Line>| v.iter().map(|l| l.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            show(&plain),
+            show(&builtin),
+            "ext None must match the built-in path"
+        );
     }
 }

@@ -17,8 +17,14 @@ tests).
 | `notify/` | bash | `notify` | bell and OSC for finished turns, tmux client-tty fallback, burst suppression on history resend |
 | `mermaid/` | Rust | `transform` | `fence:mermaid` code blocks rendered as Unicode art by a Rust binary (stage 3) |
 
-The scripts add zero compiled binaries on a user machine. The
-`mermaid` entry builds its binary on first use (stage 3).
+The bash references add no compiled binary on a user machine. The
+`mermaid` entry is a standalone cargo package (not a member of the
+root workspace). Build it with `cargo build` inside
+`ui_extensions/mermaid/`, then put `ui_extensions/mermaid/target/debug`
+on `PATH` so the host can resolve the `mermaid-ext` command. The
+host refuses the start when the command is missing (fail-loud,
+docs/ui-extension.md section 6). The PTY smoke test builds the
+binary and sets `PATH` on start.
 
 The Rust ports of the bash references live in the sibling
 `ext-rs/` layer (ui-extension-plan stage 4). A user activates them
