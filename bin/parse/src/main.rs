@@ -76,6 +76,13 @@ fn main() {
         .filter(|u| !u.is_null())
         .cloned();
 
+    // The model binary attaches a failure detail to error results
+    // (stream truncation, API failure). Pass it through to the error event.
+    let detail = model_output
+        .get("detail")
+        .and_then(|d| d.as_str())
+        .map(str::to_string);
+
     // Load valid tool names from tools/
     let tools_root_path = PathBuf::from(&tools_root);
     let mut valid_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -149,11 +156,15 @@ fn main() {
             emit_assistant_and_tool_calls(&text, &tool_calls, stop_reason, usage.as_ref());
         }
         "error" | "aborted" => {
+            let message = match &detail {
+                Some(d) => format!("Model stop reason: {stop_reason}. {d}"),
+                None => format!("Model stop reason: {stop_reason}.")
+            };
             let error_event = serde_json::json!({
                 "v": 1,
                 "type": "error",
                 "ts": ts,
-                "message": format!("Model stop reason: {}.", stop_reason)
+                "message": message
             });
             println!("{}", error_event);
             std::process::exit(2);
@@ -201,11 +212,15 @@ fn main() {
         }
         other => {
             // Unknown stop reason: treat as an error so the loop stops.
+            let message = match &detail {
+                Some(d) => format!("Model stop reason: {other}. {d}"),
+                None => format!("Model stop reason: {other}.")
+            };
             let error_event = serde_json::json!({
                 "v": 1,
                 "type": "error",
                 "ts": ts,
-                "message": format!("Model stop reason: {}.", other)
+                "message": message
             });
             println!("{}", error_event);
             std::process::exit(2);

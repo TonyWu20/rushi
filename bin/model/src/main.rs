@@ -115,14 +115,38 @@ fn main() {
         }
         Err(e) => {
             eprintln!("Error: model API call failed: {e}");
-            // Output error event
+            // Output error event with the failure detail. The parse step
+            // includes the detail in the logged error message.
             let error_event = serde_json::json!({
                 "text": "",
                 "tool_calls": [],
                 "stop_reason": "error",
-                "usage": null
+                "usage": null,
+                "detail": e
             });
             println!("{}", error_event);
+        }
+    }
+}
+
+/// Build the HTTP client for model calls.
+///
+/// Streaming SSE responses can run for minutes on thinking models. The
+/// reqwest blocking default applies a 30 second overall request timeout,
+/// which cuts long streams short and silently turns them into empty
+/// turns. Disable the overall timeout for this client and bound only the
+/// connect phase.
+fn build_client() -> reqwest::blocking::Client {
+    match reqwest::blocking::Client::builder()
+        .timeout(None)
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .pool_idle_timeout(std::time::Duration::from_secs(60))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error: failed to build HTTP client: {e:?}");
+            reqwest::blocking::Client::new()
         }
     }
 }
@@ -133,8 +157,7 @@ fn call_responses_api(
     request: &serde_json::Value,
     model_name: &str,
 ) -> Result<String, String> {
-    // Use reqwest blocking client
-    let client = reqwest::blocking::Client::new();
+    let client = build_client();
 
     let response = client
         .post(url)
@@ -155,11 +178,15 @@ fn call_responses_api(
                 return Err(format!("API returned status {}: {}", status, body));
             }
 
-            // Parse SSE stream
-            let body = resp.text().unwrap_or_default();
+            // Parse SSE stream. A failed body read is a transport failure.
+            // Report it instead of feeding an empty body to the parser.
+            let body = match resp.text() {
+                Ok(b) => b,
+                Err(e) => return Err(format!("Failed to read response stream: {e}")),
+            };
             parse_sse_response(&body)
         }
-        Err(e) => Err(format!("Request failed: {e}")),
+        Err(e) => Err(format!("Request failed: {e} (debug: {e:?})")),
     }
 }
 
@@ -170,7 +197,7 @@ fn call_chat_completions(
     _model_name: &str,
 ) -> Result<String, String> {
     let url = format!("{}/v1/chat/completions", base_url);
-    let client = reqwest::blocking::Client::new();
+    let client = build_client();
 
     // Convert responses format to chat completions format
     let chat_request = convert_to_chat_format(request);
@@ -189,7 +216,13 @@ fn call_chat_completions(
                 let body = resp.text().unwrap_or_default();
                 return Err(format!("Chat completions API returned status {}: {}", status, body));
             }
-            parse_chat_response(&resp.text().unwrap_or_default())
+            let body = match resp.text() {
+                Ok(b) => b,
+                Err(e) => {
+                    return Err(format!("Failed to read response: {e}"));
+                }
+            };
+            parse_chat_response(&body)
         }
         Err(e) => Err(format!("Request failed: {e}")),
     }
@@ -322,6 +355,11 @@ fn parse_sse_response(body: &str) -> Result<String, String> {
     let mut stop_reason = "stop";
     let mut usage: Option<serde_json::Value> = None;
     let mut final_response: Option<serde_json::Value> = None;
+    // A well-formed SGLang/OpenAI stream ends with exactly one terminal
+    // event: response.completed, response.incomplete, or response.failed.
+    // If none arrives, the stream was cut short (network or server side).
+    // That is a transport failure, not an empty model turn.
+    let mut saw_terminal = false;
 
     // Streaming fallback state: item_id -> function name / arguments
     let mut fc_names: HashMap<String, String> = HashMap::new();
@@ -407,10 +445,12 @@ fn parse_sse_response(body: &str) -> Result<String, String> {
                 if event_type == "response.incomplete" {
                     stop_reason = "length";
                 }
+                saw_terminal = true;
                 final_response = event.get("response").cloned();
             }
             "response.failed" => {
                 stop_reason = "error";
+                saw_terminal = true;
                 final_response = event.get("response").cloned();
             }
             _ => {}
@@ -520,12 +560,21 @@ fn parse_sse_response(body: &str) -> Result<String, String> {
         None => None,
     };
 
-    let output = serde_json::json!({
+    let mut output = serde_json::json!({
         "text": text,
         "tool_calls": tool_calls,
         "stop_reason": stop_reason,
         "usage": usage
     });
+
+    // Mark a cut stream as an error with a detail, so the caller can tell a
+    // truncated transport apart from a genuine empty model turn.
+    if !saw_terminal {
+        output["stop_reason"] = serde_json::json!("error");
+        output["detail"] = serde_json::json!(
+            "SSE stream ended without a terminal event (response.completed/incomplete/failed); the response was truncated."
+        );
+    }
 
     Ok(serde_json::to_string(&output).unwrap())
 }
@@ -594,3 +643,82 @@ fn parse_chat_response(body: &str) -> Result<String, String> {
 
     Ok(serde_json::to_string(&output).unwrap())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A complete stream: deltas plus the terminal response.completed event.
+    fn completed_stream() -> String {
+        let mut s = String::new();
+        s.push_str("event: response.created\n");
+        s.push_str("data: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\"}}\n\n");
+        s.push_str(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello \"}\n\n",
+        );
+        s.push_str(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"world\"}\n\n",
+        );
+        s.push_str(
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}}\n\n",
+        );
+        s
+    }
+
+    #[test]
+    fn complete_stream_parses_clean() {
+        let out: serde_json::Value =
+            serde_json::from_str(&parse_sse_response(&completed_stream()).unwrap()).unwrap();
+        assert_eq!(out["stop_reason"], "stop");
+        assert_eq!(out["text"], "hello world");
+        assert!(out.get("detail").is_none());
+        assert_eq!(out["usage"]["input_tokens"], 10);
+    }
+
+    /// The same stream cut after the last text delta: no terminal event.
+    #[test]
+    fn cut_stream_reports_error_with_detail() {
+        let stream = completed_stream();
+        let cut = stream
+            .split("\"type\":\"response.completed\"")
+            .next()
+            .unwrap()
+            .to_string();
+        let out: serde_json::Value =
+            serde_json::from_str(&parse_sse_response(&cut).unwrap()).unwrap();
+        assert_eq!(out["stop_reason"], "error");
+        assert_eq!(out["text"], "hello world");
+        assert!(out["detail"].as_str().unwrap().contains("truncated"));
+    }
+
+    #[test]
+    fn empty_body_reports_error() {
+        let out: serde_json::Value =
+            serde_json::from_str(&parse_sse_response("").unwrap()).unwrap();
+        assert_eq!(out["stop_reason"], "error");
+        assert!(out["detail"].as_str().is_some());
+    }
+
+    #[test]
+    fn incomplete_stream_reports_length() {
+        let mut s = String::new();
+        s.push_str("data: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"r1\"}}\n\n");
+        s.push_str(
+            "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"r1\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"output\":[]}}\n\n",
+        );
+        let out: serde_json::Value =
+            serde_json::from_str(&parse_sse_response(&s).unwrap()).unwrap();
+        assert_eq!(out["stop_reason"], "length");
+        assert!(out.get("detail").is_none());
+    }
+
+    #[test]
+    fn failed_stream_reports_error() {
+        let s = "data: {\"type\":\"response.failed\",\"response\":{\"id\":\"r1\",\"status\":\"failed\"}}\n\n";
+        let out: serde_json::Value =
+            serde_json::from_str(&parse_sse_response(s).unwrap()).unwrap();
+        assert_eq!(out["stop_reason"], "error");
+        assert!(out.get("detail").is_none());
+    }
+}
+

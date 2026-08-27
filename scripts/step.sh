@@ -55,8 +55,12 @@ fi
 # 5-6. model + parse, with a guard against empty assistant turns.
 # An empty turn (no text and no tool calls) is a model glitch.
 # Retry up to EMPTY_RETRIES times. If it persists, log an error and stop.
+# A failed model call (API or stream error) is a transport problem. Retry
+# up to MODEL_ERR_RETRIES times before logging the error and stopping.
 EMPTY_RETRIES=3
+MODEL_ERR_RETRIES=2
 ATTEMPT=0
+MODEL_ERR_ATTEMPT=0
 while true; do
   ATTEMPT=$((ATTEMPT + 1))
 
@@ -67,9 +71,31 @@ while true; do
   set -e
 
   if [ "$MODEL_EXIT" -ne 0 ]; then
-    # Model failed. Log an error event and stop.
+    # The model binary crashed. Treat it as a transient failure.
+    if [ "$MODEL_ERR_ATTEMPT" -lt "$MODEL_ERR_RETRIES" ]; then
+      MODEL_ERR_ATTEMPT=$((MODEL_ERR_ATTEMPT + 1))
+      sleep 3
+      continue
+    fi
     ERROR_EVENT=$(jq -cn --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      '{v:1, type:"error", ts:$ts, message:"model API call failed"}')
+      '{v:1, type:"error", ts:$ts, message:"model binary failed to run"}')
+    echo "$ERROR_EVENT" | "$BIN_DIR/log" --session "$SESSION_DIR" --schemas "$SCHEMA_DIR" || exit 1
+    exit 0
+  fi
+
+  # Transport-level model failure (API error, truncated stream). The model
+  # binary reports it with stop_reason "error" and a detail. Retry while
+  # attempts remain. Then log the detail and stop.
+  MR=$(jq -r '.stop_reason // "none"' "$WORKDIR/model-output.json")
+  if [ "$MR" = "error" ]; then
+    if [ "$MODEL_ERR_ATTEMPT" -lt "$MODEL_ERR_RETRIES" ]; then
+      MODEL_ERR_ATTEMPT=$((MODEL_ERR_ATTEMPT + 1))
+      sleep 3
+      continue
+    fi
+    DETAIL=$(jq -r '.detail // "no detail"' "$WORKDIR/model-output.json")
+    ERROR_EVENT=$(jq -cn --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg d "$DETAIL" \
+      '{v:1, type:"error", ts:$ts, message:("model API call failed after retries: " + $d)}')
     echo "$ERROR_EVENT" | "$BIN_DIR/log" --session "$SESSION_DIR" --schemas "$SCHEMA_DIR" || exit 1
     exit 0
   fi
@@ -82,6 +108,18 @@ while true; do
 
   # Detect an empty assistant turn: no text and no tool calls.
   EMPTY=$(jq -c 'select(.type == "assistant_message") | select(((.content // "") | length) == 0) | select(((.tool_calls // []) | length) == 0) | "empty"' "$WORKDIR/parsed.jsonl" | head -1)
+
+  # An output-budget exhaustion is not a glitch. The model hit
+  # max_output_tokens mid-generation. Do not burn retries on it.
+  if [ -n "$EMPTY" ]; then
+    LAST_STOP=$(jq -r 'select(.type == "assistant_message") | .stop_reason // ""' "$WORKDIR/parsed.jsonl" | head -1)
+    if [ "$LAST_STOP" = "length" ]; then
+      ERROR_EVENT=$(jq -cn --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{v:1, type:"error", ts:$ts, message:"model output budget exhausted: no content after max_output_tokens"}')
+      echo "$ERROR_EVENT" | "$BIN_DIR/log" --session "$SESSION_DIR" --schemas "$SCHEMA_DIR" || exit 1
+      exit 0
+    fi
+  fi
 
   # Empty turn is a glitch. Retry while attempts remain.
   if [ -n "$EMPTY" ] && [ "$ATTEMPT" -lt "$EMPTY_RETRIES" ]; then
