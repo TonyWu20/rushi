@@ -9,7 +9,7 @@ the manifest runs).
 | ---------------- | ---------------- | ------------------------------------------------ |
 | ext-stub-alive   | `stub/`          | a status extension owns the status row           |
 | ext-dying-hint   | `dying/`         | restart budget 1s/2s/4s, then the dead hint      |
-| ext-badjsonl     | `badjsonl/`      | broken JSONL: per-op G5 fallbacks, no crash      |
+| ext-badjsonl     | `badjsonl/`      | not-JSON lines and shape-invalid JSON payloads: per-op G5 fallbacks, no crash |
 | ext-append-reject| `append-reject/` | whitelist reject flash, whitelisted append lands |
 
 The smoke test points a temp config at one of these directories via

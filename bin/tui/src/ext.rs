@@ -1827,12 +1827,38 @@ done
         let tmp = TempDir::new().unwrap();
         let manifest = "[ext]\ncommand = \"bash\"\nargs = [\"junk.sh\"]\nprotocol_v = 1\n";
         let script = "echo 'this is not json'
-echo '{\"v\":1,\"op\":\"lines\",\"event_id\":0,\"lines\":BROKEN}'";
+echo '{\"v\":1,\"op\":\"lines\",\"event_id\":0,\"lines\":BROKEN}'
+echo '{\"v\":1,\"op\":\"lines\",\"event_id\":0,\"lines\":42}'";
         let host = host_with(&tmp, "junk", manifest, script);
         host.start();
         std::thread::sleep(Duration::from_millis(300));
         let cache = host.inner.slots[0].lines_cache.lock().unwrap();
         assert!(cache.get(&0u64).is_none(), "a bad lines reply must not be cached");
+        host.stop();
+    }
+
+    #[test]
+    fn shape_invalid_replies_keep_state() {
+        // Valid JSON with a bad payload shape. The per-op G5 fallback
+        // applies: status keeps the last valid row, lines cache stays
+        // empty (docs/ui-extension.md section 4).
+        let tmp = TempDir::new().unwrap();
+        let manifest =
+            "[ext]\ncommand = \"bash\"\nargs = [\"stat.sh\"]\ncaps = [\"status\"]\nprotocol_v = 1\n";
+        let host = host_with(&tmp, "stat", manifest, "sleep 30");
+        host.start();
+        host.reply_line(0, r#"{"v":1,"op":"status","lines":[["good",{}]]}"#);
+        host.reply_line(0, r#"{"v":1,"op":"status","lines":42}"#);
+        let row = host.status_row();
+        assert!(
+            matches!(row, StatusRow::Lines(ref l) if l[0].text == "good"),
+            "a bad-shape status reply keeps the last valid row: {row:?}"
+        );
+        host.reply_line(0, r#"{"v":1,"op":"lines","event_id":7,"lines":"nope"}"#);
+        assert!(
+            host.inner.slots[0].lines_cache.lock().unwrap().get(&7u64).is_none(),
+            "a bad-shape lines reply must not be cached"
+        );
         host.stop();
     }
 
@@ -1888,6 +1914,7 @@ done
             "[ext]\ncommand = \"bash\"\nargs = [\"stat.sh\"]\ncaps = [\"status\"]\nprotocol_v = 1\n";
         let script = r#"printf '{"v":1,"op":"status","lines":[["good row",{}]]}\n'
 printf '{"v":1,"op":"status","lines":NOT_ARRAY}\n'
+printf '{"v":1,"op":"status","lines":42}\n'
 "#;
         let host = host_with(&tmp, "stat", manifest, script);
         host.start();
