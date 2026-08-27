@@ -1,0 +1,18 @@
+[tool]
+description = "Run a shell command in the session working directory. Returns combined output and exit code."
+command = "bash"
+args = []
+timeout_ms = 310000
+
+[tool.schema]
+type = "object"
+required = ["command"]
+
+[tool.schema.properties.command]
+type = "string"
+description = "Shell command to execute via sh -c."
+
+[tool.schema.properties.timeout_secs]
+type = "integer"
+description = "Kill after this many seconds. Default 60, max 300."
+default = 60

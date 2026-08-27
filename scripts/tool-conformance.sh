@@ -10,6 +10,7 @@ trap 'rm -rf "$TEST_DIR"' EXIT
 READ_BIN="$TOOLS_DIR/read/bin/read"
 WRITE_BIN="$TOOLS_DIR/write/bin/write"
 EDIT_BIN="$TOOLS_DIR/edit/bin/edit"
+BASH_BIN="$TOOLS_DIR/bash/bin/bash"
 
 # Fallback to target/debug if bin/ not found
 if [ ! -f "$READ_BIN" ]; then
@@ -20,6 +21,9 @@ if [ ! -f "$WRITE_BIN" ]; then
 fi
 if [ ! -f "$EDIT_BIN" ]; then
   EDIT_BIN="$(cd "$SCRIPT_DIR/../target/debug" && pwd)/edit"
+fi
+if [ ! -f "$BASH_BIN" ]; then
+  BASH_BIN="$(cd "$SCRIPT_DIR/../target/debug" && pwd)/bash"
 fi
 
 PASSED=0
@@ -69,6 +73,180 @@ run_test() {
       return
     fi
   fi
+
+  echo "PASS: $name"
+  PASSED=$((PASSED + 1))
+}
+
+# Extended runner for the bash tool. Adds JSON shape checks, env control, and
+# cwd control on top of the exit-code checks in run_test.
+#
+#   run_bash_test <name> <expected_exit> <input_json> <env_spec> <cwd> [check ...]
+#
+#   expected_exit: "0" for a command-level result (tool exits 0), "nonzero"
+#                  for a tool-level failure (tool exits non-zero).
+#   env_spec:      space-separated KEY=VALUE assignments, or empty.
+#   cwd:           directory to run the tool in, or empty.
+#
+# Each check is one of:
+#   ec:<n>            exit_code field equals <n>
+#   text_contains:s   text field contains s
+#   stdout_contains:s stdout field contains s
+#   stdout_equals:v   stdout field equals v (trailing newline stripped)
+#   stdout_empty      stdout field is empty
+#   stderr_contains:s stderr field contains s
+#   timed_out:b       timed_out field equals b
+#   truncated:b       truncated field equals b
+#   marker_line2      the truncation marker is the second line of text
+#   stderr_diag       stderr diagnostic present (tool-level failure)
+#   no_survive:re     no process matching re survives after the tool returns
+run_bash_test() {
+  local name="$1"
+  local expected_exit="$2"
+  local input="$3"
+  local env_spec="${4:-}"
+  local cwd="${5:-}"
+  shift 5
+  local checks=("$@")
+
+  local tmp_out="$TEST_DIR/bash_out.$$"
+  local tmp_err="$TEST_DIR/bash_err.$$"
+  local actual_exit=0
+
+  if [ -n "$env_spec" ]; then
+    # shellcheck disable=SC2206
+    local envs=($env_spec)
+    if [ -n "$cwd" ]; then
+      ( cd "$cwd" && env "${envs[@]}" "$BASH_BIN" > "$tmp_out" 2> "$tmp_err" <<< "$input" )
+      actual_exit=$?
+    else
+      env "${envs[@]}" "$BASH_BIN" > "$tmp_out" 2> "$tmp_err" <<< "$input"
+      actual_exit=$?
+    fi
+  else
+    if [ -n "$cwd" ]; then
+      ( cd "$cwd" && "$BASH_BIN" > "$tmp_out" 2> "$tmp_err" <<< "$input" )
+      actual_exit=$?
+    else
+      "$BASH_BIN" > "$tmp_out" 2> "$tmp_err" <<< "$input"
+      actual_exit=$?
+    fi
+  fi
+
+  local stdout stderr
+  stdout=$(cat "$tmp_out" 2>/dev/null || true)
+  stderr=$(cat "$tmp_err" 2>/dev/null || true)
+
+  if [ "$expected_exit" = "0" ]; then
+    if [ "$actual_exit" -ne 0 ]; then
+      echo "FAIL: $name - expected tool exit 0, got $actual_exit (stderr: $stderr)"
+      FAILED=$((FAILED + 1)); return
+    fi
+    if [ -n "$stderr" ]; then
+      echo "FAIL: $name - expected empty stderr, got: $stderr"
+      FAILED=$((FAILED + 1)); return
+    fi
+    if ! printf '%s' "$stdout" | jq -e 'type=="object" and has("text")' > /dev/null 2>&1; then
+      echo "FAIL: $name - stdout is not a JSON object with a text field"
+      FAILED=$((FAILED + 1)); return
+    fi
+  else
+    if [ "$actual_exit" -eq 0 ]; then
+      echo "FAIL: $name - expected non-zero tool exit, got 0"
+      FAILED=$((FAILED + 1)); return
+    fi
+  fi
+
+  local c
+  for c in "${checks[@]}"; do
+    case "$c" in
+      ec:*)
+        local want="${c#ec:}"
+        local got=$(printf '%s' "$stdout" | jq -r '.exit_code' 2>/dev/null)
+        if [ "$got" != "$want" ]; then
+          echo "FAIL: $name - exit_code: expected $want, got $got"
+          FAILED=$((FAILED + 1)); return
+        fi
+        ;;
+      text_contains:*)
+        local want="${c#text_contains:}"
+        if ! printf '%s' "$stdout" | jq -r '.text' 2>/dev/null | rg --fixed-strings -q "$want"; then
+          echo "FAIL: $name - text does not contain '$want'"
+          FAILED=$((FAILED + 1)); return
+        fi
+        ;;
+      stdout_contains:*)
+        local want="${c#stdout_contains:}"
+        if ! printf '%s' "$stdout" | jq -r '.stdout' 2>/dev/null | rg --fixed-strings -q "$want"; then
+          echo "FAIL: $name - stdout field does not contain '$want'"
+          FAILED=$((FAILED + 1)); return
+        fi
+        ;;
+      stdout_equals:*)
+        local want="${c#stdout_equals:}"
+        local got=$(printf '%s' "$stdout" | jq -r '.stdout' 2>/dev/null)
+        if [ "$got" != "$want" ]; then
+          echo "FAIL: $name - stdout field: expected '$want', got '$got'"
+          FAILED=$((FAILED + 1)); return
+        fi
+        ;;
+      stdout_empty)
+        local got=$(printf '%s' "$stdout" | jq -r '.stdout' 2>/dev/null)
+        if [ -n "$got" ]; then
+          echo "FAIL: $name - expected empty stdout, got: $got"
+          FAILED=$((FAILED + 1)); return
+        fi
+        ;;
+      stderr_contains:*)
+        local want="${c#stderr_contains:}"
+        if ! printf '%s' "$stdout" | jq -r '.stderr' 2>/dev/null | rg --fixed-strings -q "$want"; then
+          echo "FAIL: $name - stderr field does not contain '$want'"
+          FAILED=$((FAILED + 1)); return
+        fi
+        ;;
+      timed_out:*)
+        local want="${c#timed_out:}"
+        local got=$(printf '%s' "$stdout" | jq -r '.timed_out' 2>/dev/null)
+        if [ "$got" != "$want" ]; then
+          echo "FAIL: $name - timed_out: expected $want, got $got"
+          FAILED=$((FAILED + 1)); return
+        fi
+        ;;
+      truncated:*)
+        local want="${c#truncated:}"
+        local got=$(printf '%s' "$stdout" | jq -r '.truncated' 2>/dev/null)
+        if [ "$got" != "$want" ]; then
+          echo "FAIL: $name - truncated: expected $want, got $got"
+          FAILED=$((FAILED + 1)); return
+        fi
+        ;;
+      marker_line2)
+        local line2=$(printf '%s' "$stdout" | jq -r '.text' 2>/dev/null | sed -n '2p')
+        if ! printf '%s' "$line2" | rg -q '^\[output truncated:'; then
+          echo "FAIL: $name - marker is not the second line of text (line 2: $line2)"
+          FAILED=$((FAILED + 1)); return
+        fi
+        ;;
+      stderr_diag)
+        if [ -z "$stderr" ]; then
+          echo "FAIL: $name - expected a stderr diagnostic, got none"
+          FAILED=$((FAILED + 1)); return
+        fi
+        ;;
+      no_survive:*)
+        local re="${c#no_survive:}"
+        sleep 0.2
+        if pgrep -f "$re" > /dev/null 2>&1; then
+          echo "FAIL: $name - process matching '$re' survived the tool"
+          FAILED=$((FAILED + 1)); return
+        fi
+        ;;
+      *)
+        echo "FAIL: $name - unknown check '$c'"
+        FAILED=$((FAILED + 1)); return
+        ;;
+    esac
+  done
 
   echo "PASS: $name"
   PASSED=$((PASSED + 1))
@@ -188,6 +366,68 @@ else
   echo "FAIL: edit: BOM preservation - edit failed: $BOM_STDOUT"
   FAILED=$((FAILED + 1))
 fi
+
+echo ""
+
+echo "=== Bash Tool Tests ==="
+
+# bash: echo - exit 0, text contains hello, exit_code 0
+run_bash_test "bash: echo" 0 '{"command":"echo hello"}' '' '' 'ec:0' 'text_contains:hello'
+
+# bash: non-zero exit - tool exit 0, exit_code 42, not an error
+run_bash_test "bash: non-zero exit" 0 '{"command":"exit 42"}' '' '' 'ec:42'
+
+# bash: command not found - a command-level result, exit_code 127, not an error
+run_bash_test "bash: command not found" 0 '{"command":"nonexistent_cmd_xyz"}' '' '' 'ec:127'
+
+# bash: stderr - stderr field is populated
+run_bash_test "bash: stderr" 0 '{"command":"echo err >&2"}' '' '' 'stderr_contains:err'
+
+# bash: combined output - both stdout and stderr populated
+run_bash_test "bash: combined output" 0 '{"command":"echo out; echo err >&2"}' '' '' \
+  'stdout_contains:out' 'stderr_contains:err'
+
+# bash: timeout - timed_out true, exit_code 143, tool exit 0, group killed
+run_bash_test "bash: timeout" 0 '{"command":"sleep 10","timeout_secs":2}' '' '' \
+  'ec:143' 'timed_out:true' 'no_survive:^sleep 10$'
+
+# bash: output cap - truncated true, marker is the second line of text
+cap_input=$(cat <<'EOF'
+{"command":"head -c 100000 /dev/zero | tr '\\0' 'a'"}
+EOF
+)
+run_bash_test "bash: output cap" 0 "$cap_input" '' '' 'truncated:true' 'marker_line2'
+
+# bash: output cap keeps the tail - seq output is non-uniform, so the kept
+# tail ends with the largest number. A head-keeping cap would drop it.
+run_bash_test "bash: output cap keeps tail" 0 '{"command":"seq 1 50000"}' '' '' \
+  'truncated:true' 'marker_line2' 'stdout_contains:50000'
+
+# bash: cwd - run in a known directory, pwd returns it
+mkdir -p "$TEST_DIR/cwd"
+run_bash_test "bash: cwd" 0 '{"command":"pwd"}' '' "$TEST_DIR/cwd" \
+  "stdout_equals:$TEST_DIR/cwd"
+
+# bash: pipeline - wc -c counts the echo output
+run_bash_test "bash: pipeline" 0 '{"command":"echo hello | wc -c"}' '' '' 'stdout_equals:6'
+
+# bash: spawn failure - PATH=/dev/null hides sh, tool-level failure
+run_bash_test "bash: spawn failure" nonzero '{"command":"echo hi"}' 'PATH=/dev/null' '' 'stderr_diag'
+
+# bash: empty command - valid, exit 0, empty output
+run_bash_test "bash: empty command" 0 '{"command":""}' '' '' 'ec:0' 'stdout_empty'
+
+# bash: timeout zero - rejected
+run_bash_test "bash: timeout zero" nonzero '{"command":"echo hi","timeout_secs":0}' '' '' 'stderr_diag'
+
+# bash: timeout negative - rejected
+run_bash_test "bash: timeout negative" nonzero '{"command":"echo hi","timeout_secs":-1}' '' '' 'stderr_diag'
+
+# bash: timeout too large - rejected (above the hard cap)
+run_bash_test "bash: timeout too large" nonzero '{"command":"echo hi","timeout_secs":500}' '' '' 'stderr_diag'
+
+# bash: stdin EOF - cat gets EOF on the closed stdin, exit 0, empty output
+run_bash_test "bash: stdin EOF" 0 '{"command":"cat"}' '' '' 'ec:0' 'stdout_empty'
 
 echo ""
 echo "=== Results: $PASSED passed, $FAILED failed ==="

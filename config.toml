@@ -10,14 +10,20 @@ base_url = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"
 context_tokens = 131072
 
-[model.Qwen3.8-27B-NVFP4-DFlash2]
+[model."Qwen3.8-27B-NVFP4-DFlash2"]
 model_id = "Qwen3.8-27B-NVFP4"
 base_url = "http://127.0.0.1:30000"
 api_key_env = "LLAMA_API_KEY"
 context_tokens = 262144
 
+[model."Qwen3.8-27B-NVFP4-RTX5090-DSPARK"]
+model_id = "Qwen3.8-27B-NVFP4-RTX5090-DSPARK"
+base_url = "http://127.0.0.1:30000"
+api_key_env = "LLAMA_API_KEY"
+context_tokens = 262144
+
 [active]
-model = "Qwen3.8-27B-NVFP4-DFlash2"
+model = "Qwen3.8-27B-NVFP4-RTX5090-DSPARK"
 
 [paths]
 sessions_root = "sessions"
@@ -31,6 +37,9 @@ read_max_bytes = 51200
 read_stream_min_size = 10485760
 write_max_bytes = 1048576
 tool_result_max_chars = 20000
+bash_max_output_bytes = 16000
+bash_timeout_default = 60
+bash_timeout_max = 300
 
 [system_prompt]
 text = """Use the read tool — not shell commands like cat — to inspect text files.
@@ -42,4 +51,11 @@ Use the edit tool for targeted changes to existing UTF-8 text files.
 It replaces literal old_string with new_string; by default old_string must
 appear exactly once. If it appears multiple times, provide a more specific
 old_string or set replace_all to true. Read the file first unless you just
-created or edited it in this session."""
+created or edited it in this session.
+
+Use the bash tool to run shell commands: builds, tests, git, file discovery,
+and any task that the read/write/edit tools cannot handle.
+The command runs in the session working directory. Use relative paths.
+Prefer read/write/edit over bash for file operations.
+Use bash for: running tests (cargo test), checking builds (cargo build),
+git operations, searching (grep, find), and inspecting the environment."""
