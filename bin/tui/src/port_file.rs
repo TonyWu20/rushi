@@ -876,6 +876,87 @@ mod tests {
         block_on(&rt, c.port.append_event(&SessionId::new("s1"), &novel)).unwrap();
     }
 
+    /// Write the ext_status schema into the temp schemas dir, matching
+    /// the repo file `schemas/events/v1/ext_status.json` (stage 0, G3
+    /// producer coverage).
+    fn write_ext_status_schema(c: &Cfg) {
+        let sdir = c.dir.path().join("schemas").join("events").join("v1");
+        std::fs::create_dir_all(&sdir).unwrap();
+        std::fs::write(
+            sdir.join("ext_status.json"),
+            r#"{"type":"object","required":["v","type","ts","id","value"],"properties":{"v":{"type":"integer","const":1},"type":{"type":"string","const":"ext_status"},"ts":{"type":"string"},"id":{"type":"string"}}}"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ext_status_producer_event_passes_schema_and_appends() {
+        // G3: with the schema file present, the typed envelope from
+        // `produce::ext_status` validates and lands in the log.
+        let c = make_cfg(true, None);
+        write_ext_status_schema(&c);
+        let rt = runtime();
+        let ev = crate::event::produce::ext_status("vim_mode", serde_json::json!("insert"));
+        block_on(&rt, c.port.append_event(&SessionId::new("s1"), &ev)).unwrap();
+        let content = std::fs::read_to_string(log_path(&c, "s1")).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 1, "one line in the log: {lines:?}");
+        let parsed: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(parsed["type"], "ext_status");
+        assert_eq!(parsed["id"], "vim_mode");
+        assert_eq!(parsed["value"], "insert");
+    }
+
+    #[test]
+    fn ext_status_missing_value_is_rejected() {
+        // Stage 0 acceptance: a missing `value` field is rejected by
+        // the schema check. Nothing lands in the log.
+        let c = make_cfg(true, None);
+        write_ext_status_schema(&c);
+        let rt = runtime();
+        let ev = Event::Json {
+            obj: serde_json::json!({"v":1,"type":"ext_status","ts":"t","id":"vim_mode"}),
+        };
+        let err = block_on(
+            &rt,
+            c.port.append_event(&SessionId::new("s1"), &ev),
+        )
+        .unwrap_err();
+        assert!(matches!(err, BusError::InvalidEvent { .. }), "{err:?}");
+        assert!(
+            !log_path(&c, "s1").exists(),
+            "a rejected event must not create a log file"
+        );
+    }
+
+    #[test]
+    fn repo_ext_status_schema_accepts_producer_and_rejects_missing_value() {
+        // The shipped schema file must pass under the port validator.
+        // A producer envelope passes. A missing `value` fails.
+        // Tests run from the crate root. The schema is two levels up.
+        let raw = std::fs::read_to_string(
+            std::path::Path::new("../..")
+                .join("schemas")
+                .join("events")
+                .join("v1")
+                .join("ext_status.json"),
+        )
+        .expect("repo schema file must exist");
+        let schema: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let produced = crate::event::produce::ext_status("vim_mode", serde_json::json!("insert"));
+        let produced_obj = produced.obj().expect("a produced event has an object").clone();
+        assert!(
+            matches_schema(&produced_obj, &schema),
+            "producer envelope must match the repo schema: {produced_obj:?}"
+        );
+        let missing_value =
+            serde_json::json!({"v":1,"type":"ext_status","ts":"t","id":"vim_mode"});
+        assert!(
+            !matches_schema(&missing_value, &schema),
+            "a missing `value` must fail the repo schema"
+        );
+    }
+
     #[test]
     fn append_event_rejects_path_traversal_session_ids() {
         let c = make_cfg(false, None);

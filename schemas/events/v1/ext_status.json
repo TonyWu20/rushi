@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["v", "type", "ts", "id", "value"],
+  "properties": {
+    "v": { "type": "integer", "const": 1 },
+    "type": { "type": "string", "const": "ext_status" },
+    "ts": { "type": "string", "format": "date-time" },
+    "id": { "type": "string" },
+    "value": {
+      "description": "shared UI state (vim mode, team status). Any JSON value is allowed. The field is present on every ext_status event."
+    }
+  }
+}

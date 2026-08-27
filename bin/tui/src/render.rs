@@ -308,6 +308,11 @@ fn event_lines(
                 dim,
             )));
         }
+        EventKind::ExtStatus => {
+            // Shared UI state: the transcript shows no row for the
+            // event (docs/ui-extension.md section 5). The log keeps
+            // the event.
+        }
         EventKind::Error => {
             let msg = e
                 .get_str("message")
@@ -528,6 +533,13 @@ pub fn build_transcript_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     let start = events.len().saturating_sub(TRANSCRIPT_EVENT_CAP);
     let mut all: Vec<Line<'static>> = Vec::new();
     for e in &events[start..] {
+        // ext_status is shared UI state: suppressed from the transcript
+        // by default. ext_status events add no rows, and add no blank
+        // separators. The log keeps ext_status events
+        // (docs/ui-extension.md 5).
+        if e.kind() == EventKind::ExtStatus {
+            continue;
+        }
         if !all.is_empty() {
             all.push(Line::from(""));
         }
@@ -1148,6 +1160,58 @@ mod tests {
                 "visual line wider than the pane: {l:?}"
             );
         }
+    }
+
+    #[test]
+    fn ext_status_event_adds_no_transcript_lines() {
+        // Stage 0 acceptance (ui-extension-plan): an ext_status event
+        // adds no rows, including the blank separator. Compare with
+        // the same log without the ext_status event.
+        let plain = vec![
+            produce::user_message("before"),
+            produce::user_message("after"),
+        ];
+        let app = app_with_session(plain);
+        let base = build_transcript_lines(&app, 80);
+
+        let with_ext = vec![
+            produce::user_message("before"),
+            Event::parse_line(
+                r#"{"v":1,"type":"ext_status","ts":"t","id":"vim_mode","value":"insert"}"#,
+            )
+            .unwrap(),
+            produce::user_message("after"),
+        ];
+        let app = app_with_session(with_ext);
+        let lines = build_transcript_lines(&app, 80);
+        assert_eq!(
+            join(&base),
+            join(&lines),
+            "an ext_status event adds no transcript lines"
+        );
+        let joined = join(&lines);
+        assert!(!joined.contains("ext_status"), "{joined}");
+        // Two more events, interleaved: still no rows.
+        let many = vec![
+            produce::user_message("a"),
+            Event::parse_line(
+                r#"{"v":1,"type":"ext_status","ts":"t","id":"s1","value":"x"}"#,
+            )
+            .unwrap(),
+            Event::parse_line(
+                r#"{"v":1,"type":"ext_status","ts":"t","id":"s2","value":{"k":1}}"#,
+            )
+            .unwrap(),
+            produce::user_message("b"),
+        ];
+        let app = app_with_session(many);
+        assert_eq!(
+            join(&build_transcript_lines(&app, 80)),
+            join(&build_transcript_lines(&app_with_session(vec![
+                produce::user_message("a"),
+                produce::user_message("b"),
+            ]), 80)),
+        );
     }
 
     #[test]

@@ -19,7 +19,7 @@ pub const SUPPORTED_VERSIONS: &[i64] = &[1];
 
 /// How the renderer should treat an [`Event`].
 ///
-/// The first eight variants are the known event types of the log's
+/// The first nine variants are the known event types of the log's
 /// vocabulary, one variant per wire `type` name; the enum itself is the
 /// name registry, so no string constants are needed elsewhere.
 /// The last three are fallback categories: they never crash the TUI,
@@ -34,6 +34,10 @@ pub enum EventKind {
     Approval,
     Cancel,
     Error,
+    /// Shared UI state published by extensions (`{id, value}`).
+    /// The transcript suppresses the event by default. The log keeps
+    /// the event (docs/ui-extension.md section 5).
+    ExtStatus,
     /// `type` value outside the known vocabulary. Render raw JSON.
     UnknownType,
     /// Known `type` but `v` outside [`SUPPORTED_VERSIONS`] (or missing).
@@ -55,6 +59,7 @@ impl EventKind {
         EventKind::Approval,
         EventKind::Cancel,
         EventKind::Error,
+        EventKind::ExtStatus,
     ];
 
     /// The wire `type` value for a semantic kind; `None` for fallback kinds.
@@ -68,6 +73,7 @@ impl EventKind {
             EventKind::Approval => "approval",
             EventKind::Cancel => "cancel",
             EventKind::Error => "error",
+            EventKind::ExtStatus => "ext_status",
             EventKind::UnknownType | EventKind::UnsupportedVersion | EventKind::BadLine => {
                 return None
             }
@@ -86,6 +92,7 @@ impl EventKind {
             "approval" => EventKind::Approval,
             "cancel" => EventKind::Cancel,
             "error" => EventKind::Error,
+            "ext_status" => EventKind::ExtStatus,
             _ => return None,
         })
     }
@@ -153,6 +160,26 @@ pub mod produce {
                 "type": EventKind::Cancel.as_wire().expect("semantic kind has a wire name"),
                 "ts": now_ts(),
                 "target": target,
+            }),
+        }
+    }
+
+    /// `ext_status` event: shared UI state `{id, value}` (docs/ui-extension.md
+    /// section 5). Extensions publish the state; the statusline consumes
+    /// the state. `value` stays open-typed: a string like a vim mode, or
+    /// an object like a team status. G3: producers build the typed
+    /// envelope, not free-form JSON. No TUI call site yet: the extension
+    /// host (ui-extension-plan stage 1) appends these events. Tests use
+    /// the constructor directly.
+    #[allow(dead_code)]
+    pub fn ext_status(id: &str, value: Value) -> Event {
+        Event::Json {
+            obj: json!({
+                "v": 1,
+                "type": EventKind::ExtStatus.as_wire().expect("semantic kind has a wire name"),
+                "ts": now_ts(),
+                "id": id,
+                "value": value,
             }),
         }
     }
@@ -341,6 +368,7 @@ mod tests {
                         | EventKind::Approval
                         | EventKind::Cancel
                         | EventKind::Error
+                        | EventKind::ExtStatus
                 ),
                 "type {wire} fell through to fallback"
             );
@@ -415,6 +443,42 @@ mod tests {
         let c = produce::cancel("turn");
         assert_eq!(c.kind(), EventKind::Cancel);
         assert_eq!(c.get_str("target"), Some("turn"));
+    }
+
+    #[test]
+    fn ext_status_line_is_semantic_not_fallback() {
+        // Stage 0 acceptance (ui-extension-plan): an ext_status line
+        // parses to the semantic kind, never a fallback category.
+        let e = Event::parse_line(
+            r#"{"v":1,"type":"ext_status","ts":"t","id":"vim_mode","value":"insert"}"#,
+        )
+        .unwrap();
+        assert_eq!(e.kind(), EventKind::ExtStatus);
+        assert_ne!(e.kind(), EventKind::UnknownType);
+        assert_ne!(e.kind(), EventKind::UnsupportedVersion);
+        assert_ne!(e.kind(), EventKind::BadLine);
+        assert_eq!(e.get_str("id"), Some("vim_mode"));
+        assert_eq!(e.get("value"), Some(&json!("insert")));
+        // An object value parses the same way: the field is open-typed.
+        let e = Event::parse_line(
+            r#"{"v":1,"type":"ext_status","ts":"t","id":"team","value":{"on_call":"t"}}"#,
+        )
+        .unwrap();
+        assert_eq!(e.kind(), EventKind::ExtStatus);
+        assert_eq!(e.get("value"), Some(&json!({"on_call": "t"})));
+    }
+
+    #[test]
+    fn produced_ext_status_event() {
+        // G3 producer coverage: producers build the typed envelope
+        // with every schema field.
+        let e = produce::ext_status("vim_mode", json!("insert"));
+        assert_eq!(e.kind(), EventKind::ExtStatus);
+        assert_eq!(e.get_str("type"), Some("ext_status"));
+        assert_eq!(e.get_i64("v"), Some(1));
+        assert_eq!(e.get_str("id"), Some("vim_mode"));
+        assert_eq!(e.get("value"), Some(&json!("insert")));
+        assert!(e.get_str("ts").is_some());
     }
 
     #[test]
