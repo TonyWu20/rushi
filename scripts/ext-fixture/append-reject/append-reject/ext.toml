@@ -1,0 +1,9 @@
+# Asks to append one type outside its whitelist and one inside it.
+# The host rejects the first with a flash and appends the second.
+# The smoke test asserts both flashes and the appended event in
+# the session log.
+[ext]
+command = "bash"
+args = ["append-reject.sh"]
+append_types = ["ext_status"]
+protocol_v = 1

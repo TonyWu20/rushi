@@ -700,6 +700,8 @@ mod tests {
             }),
             config_dir: root.clone(),
             config_path: root.join("config.toml"),
+            active_model: None,
+            ext_dir: None,
         };
         Cfg {
             dir,

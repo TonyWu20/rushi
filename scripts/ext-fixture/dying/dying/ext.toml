@@ -1,0 +1,9 @@
+# A status extension that dies at once. The host restarts it with
+# the 1s/2s/4s budget, then marks it dead. The smoke test asserts
+# the dead hint on the status row.
+[ext]
+command = "bash"
+args = ["dying.sh"]
+caps = ["status"]
+tick_ms = 300
+protocol_v = 1

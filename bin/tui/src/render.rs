@@ -37,7 +37,7 @@ const GUTTER: usize = 12;
 const TOOL_CALL_BODY_LINES: usize = 4;
 /// Events rendered into the transcript at once. The oldest are dropped
 /// to bound memory on huge logs. The log file is the record.
-const TRANSCRIPT_EVENT_CAP: usize = 2000;
+pub const TRANSCRIPT_EVENT_CAP: usize = 2000;
 /// Raw JSON lines a fallback event block may show. The fallback is for
 /// opaque data the TUI does not model; the log keeps the full text.
 const RAW_FALLBACK_MAX_LINES: usize = 6;
@@ -525,14 +525,22 @@ pub fn help_line(running: bool) -> String {
 
 /// Render the transcript into wrapped visual lines, separated by blank
 /// lines. The oldest events beyond `TRANSCRIPT_EVENT_CAP` are dropped.
-/// The result is cached per (events version, width) by the caller.
-pub fn build_transcript_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+/// The result is cached per (events version, width, reply version)
+/// by the caller.
+///
+/// Extension replies fold in (ui-extension-plan stage 1): when an
+/// extension owns an event kind (the first extension in the composed
+/// sequence that lists the kind) and a valid `lines` reply is cached
+/// for the event, the extension's styled lines replace the built-in
+/// render. A missing, stale, or timed-out reply falls back to the
+/// built-in render (per-op G5 fallback).
+pub fn build_transcript_lines(app: &App, width: usize, ext: Option<&crate::ext::ExtHost>) -> Vec<Line<'static>> {
     let names = app.call_names();
     let pending = app.oldest_pending_approval().is_some();
     let events = app.events();
     let start = events.len().saturating_sub(TRANSCRIPT_EVENT_CAP);
     let mut all: Vec<Line<'static>> = Vec::new();
-    for e in &events[start..] {
+    for (i, e) in events[start..].iter().enumerate() {
         // ext_status is shared UI state: suppressed from the transcript
         // by default. ext_status events add no rows, and add no blank
         // separators. The log keeps ext_status events
@@ -543,15 +551,43 @@ pub fn build_transcript_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         if !all.is_empty() {
             all.push(Line::from(""));
         }
-        let segs = event_lines(e, pending, &names, width.max(GUTTER + 8));
+        let event_id = (start + i) as u64;
+        let segs = if let Some(owner) = ext.and_then(|h| h.owner_for_kind(e.kind())) {
+            match ext.unwrap().lookup_lines(owner, event_id) {
+                Some(lines) => ext_lines_guttered(&lines, width),
+                // No valid reply for this event: the built-in render
+                // is the fallback.
+                None => event_lines(e, pending, &names, width.max(GUTTER + 8)),
+            }
+        } else {
+            event_lines(e, pending, &names, width.max(GUTTER + 8))
+        };
         all.extend(segs);
     }
     all
 }
 
+/// Extension reply lines into the transcript: the extension returns
+/// width-independent styled lines; the host wraps them to the pane
+/// width with the same gutter as the built-in render (docs/ui-
+/// extension.md section 4).
+fn ext_lines_guttered(lines: &[crate::ext::ExtLine], width: usize) -> Vec<Line<'static>> {
+    let gutter = " ".repeat(GUTTER);
+    let wrap_w = width.saturating_sub(GUTTER).max(4);
+    let segs: Vec<(Style, String)> = lines
+        .iter()
+        .map(|l| (l.style, l.text.clone()))
+        .collect();
+    let wrapped = wrap_styled(segs, wrap_w);
+    guttered(&wrapped, &gutter)
+}
+
 /// The whole frame: bordered panel with session title, transcript,
 /// optional approval banner, input line, and the status/help row.
-pub fn draw(f: &mut Frame, app: &mut App, cursor: &mut Option<(u16, u16)>) {
+/// When a status extension exists, its row owns that last line
+/// (ui-extension-plan stage 1 layout); otherwise the built-in
+/// help/status content shows there.
+pub fn draw(f: &mut Frame, app: &mut App, cursor: &mut Option<(u16, u16)>, host: &crate::ext::ExtHost) {
     *cursor = None;
     let area = f.area();
     if area.width < 12 || area.height < 6 {
@@ -627,7 +663,7 @@ pub fn draw(f: &mut Frame, app: &mut App, cursor: &mut Option<(u16, u16)>) {
     let h = t_area.height as usize;
     let scroll = app.scroll();
     app.set_viewport_height(h);
-    let lines = app.transcript_lines(t_width);
+    let lines = app.transcript_lines(t_width, Some(host));
     let total = lines.len();
     let start = total.saturating_sub(scroll + h);
     let window = &lines[start..];
@@ -704,7 +740,8 @@ pub fn draw(f: &mut Frame, app: &mut App, cursor: &mut Option<(u16, u16)>) {
     }
     row += 1;
 
-    // status/help row
+    // status/help row: the TUI flash wins; then the status extension
+    // row (its lines or the dead hint); then the built-in content.
     let s_area = rows[row];
     let status_line: Line = match app.status() {
         Some(msg) => Line::from(Span::styled(
@@ -717,25 +754,40 @@ pub fn draw(f: &mut Frame, app: &mut App, cursor: &mut Option<(u16, u16)>) {
             " Enter confirm · Esc cancel · q×2 quit",
             Style::default().fg(Color::DarkGray),
         )),
-        None => {
-            let last = active
-                .as_ref()
-                .and_then(|s| app.loop_state(s))
-                .and_then(|l| l.last_line.clone());
-            match last {
-                Some(l) => Line::from(Span::styled(
-                    format!(
-                        " » {}",
-                        trunc(&l, (s_area.width as usize).saturating_sub(4))
-                    ),
-                    Style::default().fg(Color::DarkGray),
-                )),
-                None => Line::from(Span::styled(
-                    help_line(running),
-                    Style::default().fg(Color::DarkGray),
-                )),
+        None => match host.status_row() {
+            crate::ext::StatusRow::Lines(lines) => {
+                let spans: Vec<Span<'static>> = lines
+                    .iter()
+                    .map(|l| Span::styled(l.text.clone(), l.style))
+                    .collect();
+                Line::from(spans)
             }
-        }
+            crate::ext::StatusRow::DeadHint(hint) => Line::from(Span::styled(
+                format!(" {hint}"),
+                Style::default()
+                    .fg(Color::Red)
+                    .add_modifier(Modifier::DIM),
+            )),
+            crate::ext::StatusRow::Builtin => {
+                let last = active
+                    .as_ref()
+                    .and_then(|s| app.loop_state(s))
+                    .and_then(|l| l.last_line.clone());
+                match last {
+                    Some(l) => Line::from(Span::styled(
+                        format!(
+                            " » {}",
+                            trunc(&l, (s_area.width as usize).saturating_sub(4))
+                        ),
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                    None => Line::from(Span::styled(
+                        help_line(running),
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                }
+            }
+        },
     };
     f.render_widget(Paragraph::new(status_line), s_area);
 }
@@ -766,7 +818,7 @@ mod tests {
         // wrap (the transcript is a view: no text is lost).
         let text = "4. **Cursor.** While naming the cursor x is `p + n length`, i.e. one column *left* of the rendered `_` underline.";
         let app = app_with_session(vec![produce::user_message(text)]);
-        let lines = build_transcript_lines(&app, 80);
+        let lines = build_transcript_lines(&app, 80, None);
         let joined: String = lines
             .iter()
             .map(|l| {
@@ -816,7 +868,7 @@ mod tests {
             .unwrap(),
         ];
         let app = app_with_session(evs);
-        let joined = join(&build_transcript_lines(&app, 80));
+        let joined = join(&build_transcript_lines(&app, 80, None));
         assert!(joined.contains("user"), "{joined}");
         assert!(joined.contains("rename the file"), "{joined}");
         assert!(joined.contains("assistant"), "{joined}");
@@ -839,7 +891,7 @@ mod tests {
         let content = format!("line one\nline two\n{}", "word ".repeat(80).trim());
         let evs = vec![produce::user_message(&content)];
         let app = app_with_session(evs);
-        let lines = build_transcript_lines(&app, 60);
+        let lines = build_transcript_lines(&app, 60, None);
         let joined = join(&lines);
         // The full text is visible across wrapped lines, no 96-char
         // cutoff: content well past 96 chars must survive.
@@ -863,7 +915,7 @@ mod tests {
             .join("\n");
         let evs = vec![produce::user_message(&content)];
         let app = app_with_session(evs);
-        let joined = join(&build_transcript_lines(&app, 60));
+        let joined = join(&build_transcript_lines(&app, 60, None));
         // Item 1: the content is shown in full — no cap, no hint.
         assert!(!joined.contains("more lines"), "content must not fold: {joined}");
         for i in 0..60 {
@@ -886,7 +938,7 @@ mod tests {
         ))
         .unwrap()];
         let app = app_with_session(evs);
-        let joined = join(&build_transcript_lines(&app, 80));
+        let joined = join(&build_transcript_lines(&app, 80, None));
         assert!(!joined.contains("more lines"), "tool result must not fold: {joined}");
         for i in [0, 1, 50, 99] {
             assert!(
@@ -908,7 +960,7 @@ mod tests {
         ))
         .unwrap()];
         let app = app_with_session(evs);
-        let joined = join(&build_transcript_lines(&app, 80));
+        let joined = join(&build_transcript_lines(&app, 80, None));
         assert!(!joined.contains("more lines"), "error must not fold: {joined}");
         for i in [0, 49] {
             assert!(joined.contains(&format!("trace {i:02}")), "error line {i} missing");
@@ -920,7 +972,7 @@ mod tests {
         let content = "# Title\n- item\n`code` **b** *i* [t](u)\n> quote";
         let evs = vec![produce::user_message(content)];
         let app = app_with_session(evs);
-        let lines = build_transcript_lines(&app, 80);
+        let lines = build_transcript_lines(&app, 80, None);
         let find = |needle: &str| lines.iter().position(|l| l.to_string().contains(needle));
         // Word wrapping splits a line into spans, so assert over the
         // spans of the line that holds the syntax, not global spans.
@@ -971,7 +1023,7 @@ mod tests {
         ))
         .unwrap()];
         let app = app_with_session(evs);
-        let lines = build_transcript_lines(&app, 80);
+        let lines = build_transcript_lines(&app, 80, None);
         let spans: Vec<(Style, &str)> = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| (s.style, s.content.as_ref())))
@@ -1005,11 +1057,11 @@ mod tests {
         ))
         .unwrap()];
         let app = app_with_session(evs);
-        let joined = join(&build_transcript_lines(&app, 80));
+        let joined = join(&build_transcript_lines(&app, 80, None));
         assert!(joined.contains("exit 0"), "{joined}");
         // Newlines are hard breaks: each hard line of the tool text
         // lands on its own visual line.
-        let lines: Vec<String> = build_transcript_lines(&app, 80)
+        let lines: Vec<String> = build_transcript_lines(&app, 80, None)
             .iter()
             .map(|l| l.to_string())
             .collect();
@@ -1035,7 +1087,7 @@ mod tests {
         ))
         .unwrap()];
         let app = app_with_session(evs);
-        let joined = join(&build_transcript_lines(&app, 80));
+        let joined = join(&build_transcript_lines(&app, 80, None));
         assert!(joined.contains("exit 2 (error)"), "{joined}");
         assert!(joined.contains("boom"), "{joined}");
     }
@@ -1050,7 +1102,7 @@ mod tests {
             produce::user_message("after"),
         ];
         let app = app_with_session(evs);
-        let joined = join(&build_transcript_lines(&app, 80));
+        let joined = join(&build_transcript_lines(&app, 80, None));
         assert!(
             joined.contains("unknown event type \"flux_capacitor\""),
             "{joined}"
@@ -1072,7 +1124,7 @@ mod tests {
         )
         .unwrap()];
         let app = app_with_session(evs);
-        let joined = join(&build_transcript_lines(&app, 80));
+        let joined = join(&build_transcript_lines(&app, 80, None));
         assert!(
             joined.contains("log version newer than this TUI"),
             "{joined}"
@@ -1090,7 +1142,7 @@ mod tests {
             },
         ];
         let app = app_with_session(evs);
-        let joined = join(&build_transcript_lines(&app, 80));
+        let joined = join(&build_transcript_lines(&app, 80, None));
         assert!(joined.contains("malformed log line"), "{joined}");
         assert!(joined.contains("{broken"), "{joined}");
     }
@@ -1104,7 +1156,7 @@ mod tests {
             Event::parse_line(r#"{"v":1,"type":"user_message","ts":"t"}"#).unwrap(),
         ];
         let app = app_with_session(evs);
-        let joined = join(&build_transcript_lines(&app, 80));
+        let joined = join(&build_transcript_lines(&app, 80, None));
         assert!(joined.contains("[missing arguments]"), "{joined}");
         assert!(joined.contains("[missing message]"), "{joined}");
         assert!(joined.contains("[missing content]"), "{joined}");
@@ -1126,7 +1178,7 @@ mod tests {
         let pending = app.oldest_pending_approval().expect("request is pending");
         assert_eq!(pending.request_id, "appr-1");
         assert_eq!(pending.arguments, Some(json!({"command": "rm -rf /tmp/x"})),);
-        let joined = join(&build_transcript_lines(&app, 80));
+        let joined = join(&build_transcript_lines(&app, 80, None));
         assert!(joined.contains("[y allow] [n deny] [e edit]"), "{joined}");
     }
 
@@ -1153,7 +1205,7 @@ mod tests {
         let long = "x".repeat(400);
         let evs = vec![produce::user_message(&long)];
         let app = app_with_session(evs);
-        let lines = build_transcript_lines(&app, 40);
+        let lines = build_transcript_lines(&app, 40, None);
         for l in &lines {
             assert!(
                 l.to_string().chars().count() <= 40,
@@ -1172,7 +1224,7 @@ mod tests {
             produce::user_message("after"),
         ];
         let app = app_with_session(plain);
-        let base = build_transcript_lines(&app, 80);
+        let base = build_transcript_lines(&app, 80, None);
 
         let with_ext = vec![
             produce::user_message("before"),
@@ -1183,7 +1235,7 @@ mod tests {
             produce::user_message("after"),
         ];
         let app = app_with_session(with_ext);
-        let lines = build_transcript_lines(&app, 80);
+        let lines = build_transcript_lines(&app, 80, None);
         assert_eq!(
             join(&base),
             join(&lines),
@@ -1206,11 +1258,86 @@ mod tests {
         ];
         let app = app_with_session(many);
         assert_eq!(
-            join(&build_transcript_lines(&app, 80)),
-            join(&build_transcript_lines(&app_with_session(vec![
-                produce::user_message("a"),
-                produce::user_message("b"),
-            ]), 80)),
+            join(&build_transcript_lines(&app, 80, None)),
+            join(&build_transcript_lines(
+                &app_with_session(vec![produce::user_message("a"), produce::user_message("b")]),
+                80,
+                None,
+            )),
+        );
+    }
+
+    #[test]
+    fn ext_lines_replace_the_builtin_render() {
+        // A host whose single extension owns tool_result and has a
+        // cached lines reply for event 0: the extension's styled
+        // lines replace the built-in render (ui-extension-plan
+        // stage 1: kind ownership in build_transcript_lines).
+        use crate::ext::{discover, ExtHost};
+        use crate::config::TuiConfig;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+        let entry = root.join("ui_extensions").join("tr");
+        std::fs::create_dir_all(&entry).unwrap();
+        std::fs::write(
+            entry.join("ext.toml"),
+            "[ext]\ncommand = \"bash\"\nargs = []\nkinds = [\"tool_result\"]\nprotocol_v = 1\n",
+        )
+        .unwrap();
+        let cfg = TuiConfig {
+            sessions_root: root.join("sessions"),
+            schemas_dir: None,
+            loop_cmd: None,
+            config_dir: root.clone(),
+            config_path: root.join("config.toml"),
+            ext_dir: Some(root.join("ui_extensions")),
+            active_model: None,
+        };
+        let disc = discover(&cfg).unwrap();
+        let host = ExtHost::new(&disc, &cfg);
+        let evs = vec![
+            produce::user_message("before"),
+            Event::parse_line(
+                r#"{"v":1,"type":"tool_result","ts":"t","id":"c1","value":{"exit_code":0},"is_error":false}"#,
+            )
+            .unwrap(),
+        ];
+        let app = app_with_session(evs);
+        // No reply yet: the built-in render shows.
+        let joined = join(&build_transcript_lines(&app, 80, Some(&host)));
+        assert!(joined.contains("exit 0"), "the fallback is the built-in render: {joined}");
+        // A valid reply lands: the extension lines replace it.
+        host.reply_line(
+            0,
+            r#"{"v":1,"op":"lines","event_id":1,"lines":[["EXT TOOL VIEW",{"fg":"green","bold":true}]]}"#,
+        );
+        let app = app_with_session(vec![
+            produce::user_message("before"),
+            Event::parse_line(
+                r#"{"v":1,"type":"tool_result","ts":"t","id":"c1","value":{"exit_code":0},"is_error":false}"#,
+            )
+            .unwrap(),
+        ]);
+        let lines = build_transcript_lines(&app, 80, Some(&host));
+        let joined = join(&lines);
+        assert!(joined.contains("EXT TOOL VIEW"), "the reply replaces the render: {joined}");
+        assert!(!joined.contains("exit 0"), "the built-in render is gone: {joined}");
+        // The reply version folded into the transcript cache key:
+        // a second rebuild picks the new lines up through App.
+        let mut app2 = app_with_session(vec![
+            produce::user_message("before"),
+            Event::parse_line(
+                r#"{"v":1,"type":"tool_result","ts":"t","id":"c1","value":{"exit_code":0},"is_error":false}"#,
+            )
+            .unwrap(),
+        ]);
+        let _ = app2.transcript_lines(80, Some(&host));
+        assert!(
+            app2
+                .transcript_lines(80, Some(&host))
+                .iter()
+                .any(|l| l.to_string().contains("EXT TOOL VIEW")),
+            "the cache rebuild folds in the extension reply"
         );
     }
 
@@ -1233,7 +1360,7 @@ mod tests {
             })
             .collect();
         let app = app_with_session(evs);
-        let joined = join(&build_transcript_lines(&app, 80));
+        let joined = join(&build_transcript_lines(&app, 80, None));
         assert!(!joined.contains(&many), "oldest event must be dropped");
     }
 }

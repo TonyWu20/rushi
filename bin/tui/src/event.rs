@@ -24,7 +24,7 @@ pub const SUPPORTED_VERSIONS: &[i64] = &[1];
 /// name registry, so no string constants are needed elsewhere.
 /// The last three are fallback categories: they never crash the TUI,
 /// they only change how the raw line is displayed (refinement policy G5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventKind {
     UserMessage,
     AssistantMessage,

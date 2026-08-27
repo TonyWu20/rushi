@@ -11,6 +11,7 @@ mod app;
 mod config;
 mod editor;
 mod event;
+mod ext;
 mod highlight;
 mod port;
 mod port_file;
@@ -28,7 +29,7 @@ use ratatui::Terminal;
 
 use app::{Action, App, Decision, Key};
 use config::TuiConfig;
-use port::{SessionId, SessionPort, TailCursor};
+use port::{SessionId, SessionPort, TailCursor, WatchItem};
 use port_file::FileSessionPort;
 
 /// Interactive window onto the session log. Renders events, appends
@@ -106,6 +107,16 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // Extension discovery fails loud before any terminal effect:
+    // a bad manifest or a broken command refuses the start and names
+    // the file (docs/ui-extension-plan.md stage 1).
+    let disc = match ext::discover(&cfg) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("tui: {e}");
+            std::process::exit(1);
+        }
+    };
     let port = FileSessionPort::new(&cfg);
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -119,11 +130,25 @@ fn main() {
     let backend = CrosstermBackend::new(std::io::stdout());
     let mut term = Terminal::new(backend).expect("cannot create the terminal");
     let mut app = App::new();
+    let host = ext::ExtHost::new(&disc, &cfg);
+
+    for item in host.start() {
+        match item {
+            ext::ExtItem::Skipped { ext: name, reason } => {
+                app.flash(format!("ext {name} skipped: {reason}"));
+            }
+            ext::ExtItem::Dead { ext: name } => {
+                app.flash(format!("ext {name} dead at start"));
+            }
+            _ => {}
+        }
+    }
 
     if let Some(id) = active {
         let events = rt.block_on(port.read_events(&id)).unwrap_or_default();
-        app.set_active(id.clone(), events);
+        app.set_active(id.clone(), events.clone());
         app.set_watch_rx(port.watch(&id, TailCursor::end()));
+        host.send_history(&events);
     } else {
         // No session argument: ask for a new session name instead of
         // resuming the most recent session.
@@ -131,10 +156,67 @@ fn main() {
         app.start_naming();
     }
 
+    let mut last_width: usize = 0;
     'ui: loop {
         // 1. New log events for the active session.
         while let Some(item) = app.drain_watch() {
+            let is_event = matches!(item, WatchItem::Event { .. });
             app.on_watch_item(item);
+            if is_event {
+                // Forward the new event to the extensions whose kinds
+                // match; the event id is its index in the log
+                // (docs/ui-extension.md section 4 history rule).
+                let evs = app.events();
+                let ev = evs.last().cloned().expect("a watch event was just pushed");
+                host.forward_event((evs.len() - 1) as u64, &ev);
+            }
+        }
+        // 1.5 Extension items: log appends, terminal notify ops, and
+        // the dead/skipped flashes. The reply items already folded
+        // into the transcript cache key via the reply version.
+        while let Some(item) = host.drain() {
+            match item {
+                ext::ExtItem::LinesCached { .. } | ext::ExtItem::StatusUpdated { .. }
+                | ext::ExtItem::TransformedCached { .. } => {}
+                ext::ExtItem::AppendReq { ext: name, event } => {
+                    let Some(sid) = app.active().cloned() else {
+                        app.flash(format!("ext {name} append failed: no active session"));
+                        continue;
+                    };
+                    let type_name = event
+                        .get("type")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("?");
+                    let ev = event::Event::Json {
+                        obj: event.clone(),
+                    };
+                    match rt.block_on(port.append_event(&sid, &ev)) {
+                        Ok(()) => app.flash(format!("ext {name} appended {type_name}")),
+                        Err(e) => app.flash(format!("ext {name} append failed: {e}")),
+                    }
+                }
+                ext::ExtItem::AppendRejected { ext: name, reason } => {
+                    app.flash(format!("ext {name}: append rejected: {reason}"));
+                }
+                ext::ExtItem::NotifyBell { .. } => {
+                    let mut out = std::io::stdout();
+                    let _ = out.write_all(b"\x07");
+                    let _ = out.flush();
+                }
+                ext::ExtItem::NotifyOsc { code, args, .. } => {
+                    let mut out = std::io::stdout();
+                    let _ = out.write_all(format!("\x1b]{};{}\x07", code, args).as_bytes());
+                    let _ = out.flush();
+                }
+                ext::ExtItem::Dead { ext: name } => {
+                    app.flash(format!(
+                        "ext {name} is dead (restart budget exhausted)"
+                    ));
+                }
+                ext::ExtItem::Skipped { ext: name, reason } => {
+                    app.flash(format!("ext {name} skipped: {reason}"));
+                }
+            }
         }
         // 2. Output of every running loop (all sessions).
         for _ in app.drain_loop_lines() {}
@@ -320,8 +402,13 @@ fn main() {
                     if let Some(id) = target {
                         if Some(&id) != app.active() {
                             let events = rt.block_on(port.read_events(&id)).unwrap_or_default();
-                            app.set_active(id.clone(), events);
+                            app.set_active(id.clone(), events.clone());
                             app.set_watch_rx(port.watch(&id, TailCursor::end()));
+                            // Event ids restart per session: clear the
+                            // reply caches and resend this session's
+                            // history (docs/ui-extension.md section 4).
+                            host.clear_replies();
+                            host.send_history(&events);
                         }
                     } else {
                         app.flash("no sessions to cycle");
@@ -330,26 +417,52 @@ fn main() {
                 Action::ConfirmNewSession(name) => {
                     let sid = SessionId::new(&name);
                     let events = rt.block_on(port.read_events(&sid)).unwrap_or_default();
-                    app.set_active(sid.clone(), events);
+                    app.set_active(sid.clone(), events.clone());
                     app.set_watch_rx(port.watch(&sid, TailCursor::end()));
                     if let Ok(list) = rt.block_on(port.list_sessions()) {
                         app.set_sessions(list);
                     }
                     app.flash(format!("session {name} opened"));
+                    host.clear_replies();
+                    host.send_history(&events);
                 }
                 Action::Quit => {
                     // Stop every loop before leaving; the log survives.
                     for (_sid, h) in app.detach_all_handles() {
                         h.stop();
                     }
+                    // Stop every extension group: SIGTERM now, SIGKILL
+                    // escalation in the background. No orphan process
+                    // outlives the TUI (docs/ui-extension.md section 7).
+                    host.stop();
                     return finish(&mut term);
                 }
             }
         }
 
+        // 4.5 Extension ticks, transform timeouts, and resize
+        // re-requests. The tick cadence is per extension; the main
+        // loop drives the host because it owns the width, session,
+        // and loop state.
+        let width = term.size().map(|s| s.width as usize).unwrap_or(80);
+        if width != last_width {
+            host.on_resize(width);
+            last_width = width;
+        }
+        let statuses = app.ext_statuses();
+        let tick = ext::TickPayload {
+            width,
+            session: app.active().map(|s| s.as_str()),
+            model: cfg.active_model.as_deref(),
+            loop_running: app.active().is_some_and(|s| app.loop_running(s)),
+            statuses: &statuses,
+        };
+        host.pump_ticks(&tick);
+        host.poll_transforms();
+
         // 5. Draw.
         let mut cursor: Option<(u16, u16)> = None;
-        if let Err(e) = term.draw(|f| render::draw(f, &mut app, &mut cursor)) {
+        if let Err(e) = term.draw(|f| render::draw(f, &mut app, &mut cursor, &host)) {
             eprintln!("tui: draw failed: {e}");
             break;
         }

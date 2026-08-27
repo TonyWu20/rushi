@@ -62,6 +62,13 @@ pub struct TuiConfig {
     pub config_dir: PathBuf,
     /// Absolute config file path (exported to the loop process).
     pub config_path: PathBuf,
+    /// The global extension directory, if the `[ext] dir` override is
+    /// set. `None` uses `<config_dir>/ui_extensions`
+    /// (docs/ui-extension.md section 3).
+    pub ext_dir: Option<PathBuf>,
+    /// The active model name, for the extension `tick` payload
+    /// (docs/ui-extension.md section 4). `None` when unconfigured.
+    pub active_model: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -69,6 +76,21 @@ struct RawConfig {
     paths: Option<RawPaths>,
     #[serde(rename = "loop")]
     loop_cmd: Option<RawLoop>,
+    ext: Option<RawExt>,
+    active: Option<RawActive>,
+}
+
+/// The optional `[ext]` section: an override for the global extension
+/// directory (docs/ui-extension-plan.md stage 1).
+#[derive(Debug, Default, Deserialize)]
+struct RawExt {
+    dir: Option<String>,
+}
+
+/// The optional `[active]` section: the active model name.
+#[derive(Debug, Default, Deserialize)]
+struct RawActive {
+    model: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -150,12 +172,22 @@ impl TuiConfig {
             None => None,
         };
 
+        let ext_dir = raw
+            .ext
+            .as_ref()
+            .and_then(|e| e.dir.clone())
+            .map(|d| resolve(&config_dir, d));
+
+        let active_model = raw.active.as_ref().and_then(|a| a.model.clone());
+
         Ok(TuiConfig {
             sessions_root,
             schemas_dir,
             loop_cmd,
             config_dir,
             config_path: canonical,
+            ext_dir,
+            active_model,
         })
     }
 
@@ -184,6 +216,8 @@ impl TuiConfig {
             loop_cmd: None,
             config_dir,
             config_path: path.to_path_buf(),
+            ext_dir: None,
+            active_model: None,
         }
     }
 }
@@ -271,5 +305,27 @@ arg_style = "append_session"
         write(dir.path(), "config.toml", "not toml [");
         let err = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap_err();
         assert!(err.contains("invalid TOML"), "{err}");
+    }
+
+    #[test]
+    fn ext_dir_override_and_active_model_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "config.toml",
+            "[ext]\ndir = \"my-exts\"\n\n[active]\nmodel = \"test-model\"\n",
+        );
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        assert_eq!(cfg.ext_dir, Some(dir.path().join("my-exts")), "relative dir resolves against the config dir");
+        assert_eq!(cfg.active_model.as_deref(), Some("test-model"));
+    }
+
+    #[test]
+    fn ext_section_is_optional() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "config.toml", "[loop]\ncommand = \"bash\"\n");
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        assert!(cfg.ext_dir.is_none());
+        assert!(cfg.active_model.is_none());
     }
 }

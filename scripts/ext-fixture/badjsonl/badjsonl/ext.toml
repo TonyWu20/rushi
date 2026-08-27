@@ -1,0 +1,11 @@
+# An extension that answers every op with broken JSONL. Each op
+# falls back on its own (G5): lines keeps the built-in render,
+# status keeps the last valid row, nothing crashes. The smoke test
+# asserts that the TUI stays alive and quits cleanly.
+[ext]
+command = "bash"
+args = ["badjsonl.sh"]
+caps = ["status"]
+kinds = ["tool_result"]
+tick_ms = 300
+protocol_v = 1

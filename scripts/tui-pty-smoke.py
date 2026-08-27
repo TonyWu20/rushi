@@ -16,6 +16,7 @@ import pty
 import select
 import signal
 import struct
+import tempfile
 import termios
 import fcntl
 import sys
@@ -25,7 +26,12 @@ import time
 BIN = sys.argv[1]
 REPO = sys.argv[2]
 SESSION = "tui-test"
+EXT_SESSION = "tui-test-ext"
 WHEEL_UP = b"\x1b[<64;5;5M"  # SGR mouse: wheel up at col 5 row 5
+
+
+def fixture_dir(name):
+    return REPO + "/scripts/ext-fixture/" + name
 
 
 class Screen:
@@ -117,11 +123,12 @@ class Screen:
         return "\n".join("".join(row).rstrip() for row in self.grid)
 
 
-def spawn():
+def spawn(session=SESSION, config=None):
     master, slave = pty.openpty()
     winsz = struct.pack("HHHH", 24, 80, 0, 0)
     fcntl.ioctl(master, termios.TIOCSWINSZ, winsz)
     fcntl.ioctl(slave, termios.TIOCSWINSZ, winsz)
+    cfg = config if config is not None else REPO + "/config.toml"
     pid = os.fork()
     if pid == 0:
         os.setsid()
@@ -130,7 +137,7 @@ def spawn():
         os.dup2(slave, 2)
         for fd in (master, slave):
             os.close(fd)
-        os.execv(BIN, [BIN, SESSION, "--config", REPO + "/config.toml"])
+        os.execv(BIN, [BIN, session, "--config", cfg])
     os.close(slave)
     return master, pid
 
@@ -284,12 +291,174 @@ def scroll_burst_reaches_head():
             pass
 
 
+def ext_config(tmpdir, fixture):
+    """A temp config that points `[ext] dir` at a fixture layer.
+
+    The sessions root is a private dir so the ext cases never touch
+    the repo session list.
+    """
+    cfg_dir = tmpdir + "/ext-cfg"
+    os.makedirs(cfg_dir, exist_ok=True)
+    sessions = tmpdir + "/ext-sessions"
+    os.makedirs(sessions, exist_ok=True)
+    path = cfg_dir + "/config.toml"
+    with open(path, "w") as f:
+        f.write("[paths]\n")
+        f.write(f"sessions_root = \"{sessions}\"\n\n")
+        f.write("[ext]\n")
+        f.write(f"dir = \"{fixture_dir(fixture)}\"\n")
+    return path, sessions
+
+
+def fixture_orphans(fixture):
+    """Pids whose cwd is under a fixture layer.
+
+    The host starts every extension with cwd set to its entry dir
+    (docs/ui-extension.md section 7). After the TUI quits, no such
+    process may survive.
+    """
+    prefix = fixture_dir(fixture)
+    orphans = []
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
+        try:
+            cwd = os.readlink(f"/proc/{d}/cwd")
+        except OSError:
+            continue
+        if cwd.startswith(prefix + "/"):
+            orphans.append((d, cwd))
+    return orphans
+
+
+def ext_case(name, fixture, expect, wait_seconds, log_check=None):
+    """Start the TUI on a fresh session with one fixture layer.
+
+    `expect` is a list of screen substrings to catch within
+    `wait_seconds` (each once; later frames may replace the flash).
+    `log_check` is an optional sessions dir to scan for a string
+    after the quit.
+    """
+    tmp = tempfile.mkdtemp(prefix="tui-ext-smoke-")
+    cfg, sessions = ext_config(tmp, fixture)
+    master, pid = spawn(EXT_SESSION, cfg)
+    screen = Screen(24, 80)
+    try:
+        deadline = time.time() + wait_seconds
+        seen = set()
+        while time.time() < deadline and len(seen) < len(expect):
+            pump(master, 0.15, screen)
+            if not alive(pid):
+                print(f"FAIL {name}: process died while waiting for {expect}")
+                return False
+            text = screen.text()
+            for sub in expect:
+                if sub in text:
+                    seen.add(sub)
+        missing = [s for s in expect if s not in seen]
+        if missing:
+            print(f"FAIL {name}: markers not seen within {wait_seconds}s: {missing}")
+            print("screen was:\n" + screen.text())
+            os.kill(pid, signal.SIGKILL)
+            reap(pid)
+            return False
+        # Double-q quit, then prove no orphan fixture process lives.
+        os.write(master, b"q")
+        pump(master, 0.4, screen)
+        os.write(master, b"q")
+        deadline = time.time() + 4.0
+        while time.time() < deadline and alive(pid):
+            pump(master, 0.2, screen)
+        if alive(pid):
+            print(f"FAIL {name}: still running after double-q (hang)")
+            os.kill(pid, signal.SIGKILL)
+            reap(pid)
+            return False
+        reap(pid)
+        orphans = fixture_orphans(fixture)
+        if orphans:
+            print(f"FAIL {name}: orphan fixture processes: {orphans}")
+            for d, _ in orphans:
+                try:
+                    os.kill(int(d), signal.SIGKILL)
+                except OSError:
+                    pass
+            return False
+        if log_check:
+            log = os.path.join(sessions, EXT_SESSION, "events.jsonl")
+            content = ""
+            if os.path.exists(log):
+                with open(log) as f:
+                    content = f.read()
+            if log_check not in content:
+                print(f"FAIL {name}: session log lacks {log_check!r}")
+                print("log was:\n" + content)
+                return False
+        print(f"OK {name}: markers seen, clean quit, no orphans")
+        return True
+    finally:
+        try:
+            os.close(master)
+        except OSError:
+            pass
+
+
+def ext_stub_alive():
+    """A status extension owns the status row."""
+    return ext_case(
+        "ext-stub-alive",
+        "stub",
+        ["EXT stub alive"],
+        6.0,
+    )
+
+
+def ext_dying_hint():
+    """A dying extension exhausts the 1s/2s/4s budget, then hints."""
+    return ext_case(
+        "ext-dying-hint",
+        "dying",
+        ["ext dying dead after 3 restarts"],
+        15.0,
+    )
+
+
+def ext_badjsonl():
+    """Broken JSONL on every op: the TUI stays alive and quits."""
+    return ext_case(
+        "ext-badjsonl",
+        "badjsonl",
+        [" (no events yet"],  # the built-in placeholder still renders
+        4.0,
+    )
+
+
+def ext_append_reject():
+    """The whitelist reject flashes; the whitelisted append lands."""
+    return ext_case(
+        "ext-append-reject",
+        "append-reject",
+        [
+            # The full flash text exceeds the 80-col row; assert the
+            # visible prefix up to the type name.
+            "append rejected: type `tool_result`",
+            "ext append-reject appended ext_status",
+        ],
+        12.0,
+        log_check='"type":"ext_status"',
+    )
+
+
 def main():
     ok = True
     ok &= case("baseline-double-q", 0)
     ok &= case("burst-300-then-double-q", 300)
     ok &= case("burst-1000-then-double-q", 1000)
     ok &= scroll_burst_reaches_head()
+    ok &= ext_stub_alive()
+    ok &= ext_dying_hint()
+    ok &= ext_badjsonl()
+    ok &= ext_append_reject()
     if not ok:
         sys.exit(1)
     print("ALL SMOKE CASES PASSED")

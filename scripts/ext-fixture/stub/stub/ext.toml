@@ -1,0 +1,8 @@
+# A stub status extension for the PTY smoke test
+# (scripts/tui-pty-smoke.py case ext-stub-alive).
+[ext]
+command = "bash"
+args = ["stub.sh"]
+caps = ["status"]
+tick_ms = 300
+protocol_v = 1

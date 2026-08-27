@@ -111,10 +111,12 @@ pub struct App {
     /// Bumped whenever the event list changes. The transcript cache is
     /// valid only while this number is unchanged.
     events_version: u64,
-    /// Cached wrapped transcript lines, keyed by (events_version, width).
-    /// A scroll redraw reuses the cache: O(viewport) instead of
-    /// O(total lines).
-    transcript_cache: Option<(u64, usize, Vec<Line<'static>>)>,
+    /// Cached wrapped transcript lines, keyed by (events_version,
+    /// width, ext reply version). A scroll redraw reuses the cache:
+    /// O(viewport) instead of O(total lines). The extension reply
+    /// version folds in, so a new reply rebuilds the lines
+    /// (ui-extension-plan stage 1).
+    transcript_cache: Option<(u64, usize, u64, Vec<Line<'static>>)>,
 }
 
 /// A session name must stay a plain directory name inside the sessions
@@ -243,17 +245,25 @@ impl App {
 
     /// The wrapped transcript lines at `width`, oldest first.
     ///
-    /// Cached by (events_version, width): a scroll redraw or a draw with
-    /// no new events reuses the cache instead of rewrapping every line.
-    pub fn transcript_lines(&mut self, width: usize) -> &[Line<'static>] {
-        if let Some((v, w, _)) = &self.transcript_cache {
-            if *v == self.events_version && *w == width {
-                return &self.transcript_cache.as_ref().unwrap().2;
+    /// Cached by (events_version, width, ext reply version): a scroll
+    /// redraw or a draw with no new events reuses the cache instead of
+    /// rewrapping every line. A new extension reply (or a session
+    /// switch that clears the replies) bumps the ext version and
+    /// rebuilds the lines.
+    pub fn transcript_lines(
+        &mut self,
+        width: usize,
+        ext: Option<&crate::ext::ExtHost>,
+    ) -> &[Line<'static>] {
+        let ext_ver = ext.map(|h| h.replies_version()).unwrap_or(0);
+        if let Some((v, w, ev, _)) = &self.transcript_cache {
+            if *v == self.events_version && *w == width && *ev == ext_ver {
+                return &self.transcript_cache.as_ref().unwrap().3;
             }
         }
-        let lines = crate::render::build_transcript_lines(self, width);
-        self.transcript_cache = Some((self.events_version, width, lines));
-        &self.transcript_cache.as_ref().unwrap().2
+        let lines = crate::render::build_transcript_lines(self, width, ext);
+        self.transcript_cache = Some((self.events_version, width, ext_ver, lines));
+        &self.transcript_cache.as_ref().unwrap().3
     }
 
     /// Events of the active session, oldest first.
@@ -271,6 +281,25 @@ impl App {
                     m.insert(id.to_string(), name.to_string());
                 }
             }
+        }
+        m
+    }
+
+    /// Latest `ext_status` values, id to value, from the active log.
+    /// The extension host sends this map in every `tick` op, so a
+    /// statusline consumes shared UI state through the log
+    /// (docs/ui-extension.md section 5).
+    pub fn ext_statuses(&self) -> HashMap<String, Value> {
+        let mut m = HashMap::new();
+        for e in &self.events {
+            if e.kind() != EventKind::ExtStatus {
+                continue;
+            }
+            let Some(id) = e.get_str("id") else {
+                continue;
+            };
+            let value = e.get("value").cloned().unwrap_or(Value::Null);
+            m.insert(id.to_string(), value);
         }
         m
     }
@@ -859,22 +888,22 @@ mod tests {
     fn transcript_cache_reuses_until_events_change() {
         let mut app = app_with(vec![], "s1");
         app.set_active(SessionId::new("s1"), vec![ev(r#"{"v":1,"type":"user_message","ts":"t","content":"one"}"#)]);
-        let a = app.transcript_lines(80) as *const _;
-        let b = app.transcript_lines(80) as *const _;
+        let a = app.transcript_lines(80, None) as *const _;
+        let b = app.transcript_lines(80, None) as *const _;
         assert_eq!(
             a, b,
             "an unchanged event list and width must reuse the cache"
         );
-        let c = app.transcript_lines(60) as *const _;
+        let c = app.transcript_lines(60, None) as *const _;
         assert_ne!(b, c, "a width change rebuilds the lines");
         // A new event bumps the version: the cache rebuilds.
         app.on_watch_item(WatchItem::Event {
             event: ev(r#"{"v":1,"type":"user_message","ts":"t","content":"two"}"#),
             cursor: crate::port::TailCursor::end(),
         });
-        let d = app.transcript_lines(80) as *const _;
+        let d = app.transcript_lines(80, None) as *const _;
         assert_ne!(a, d, "a new event must invalidate the cache");
-        assert!(app.transcript_lines(80).iter().any(|l| l.to_string().contains("two")));
+        assert!(app.transcript_lines(80, None).iter().any(|l| l.to_string().contains("two")));
     }
 
     #[test]
