@@ -876,17 +876,28 @@ mod tests {
         block_on(&rt, c.port.append_event(&SessionId::new("s1"), &novel)).unwrap();
     }
 
-    /// Write the ext_status schema into the temp schemas dir, matching
-    /// the repo file `schemas/events/v1/ext_status.json` (stage 0, G3
-    /// producer coverage).
+    /// The repo's ext_status schema, two levels above the crate root.
+    /// Tests run from the crate root. This file is the single source
+    /// of truth for the ext_status schema (stage 0, G3 producer
+    /// coverage).
+    fn repo_ext_status_schema_path() -> std::path::PathBuf {
+        std::path::Path::new("../..")
+            .join("schemas")
+            .join("events")
+            .join("v1")
+            .join("ext_status.json")
+            .to_path_buf()
+    }
+
+    /// Copy the repo's ext_status schema into the temp schemas dir.
+    /// The port reads schemas from its config dir, which the test sets
+    /// to the temp dir. The copy puts the repo file in that dir.
     fn write_ext_status_schema(c: &Cfg) {
         let sdir = c.dir.path().join("schemas").join("events").join("v1");
         std::fs::create_dir_all(&sdir).unwrap();
-        std::fs::write(
-            sdir.join("ext_status.json"),
-            r#"{"type":"object","required":["v","type","ts","id","value"],"properties":{"v":{"type":"integer","const":1},"type":{"type":"string","const":"ext_status"},"ts":{"type":"string"},"id":{"type":"string"}}}"#,
-        )
-        .unwrap();
+        let src = repo_ext_status_schema_path();
+        std::fs::copy(&src, sdir.join("ext_status.json"))
+            .expect("repo schema file must exist");
     }
 
     #[test]
@@ -933,15 +944,8 @@ mod tests {
     fn repo_ext_status_schema_accepts_producer_and_rejects_missing_value() {
         // The shipped schema file must pass under the port validator.
         // A producer envelope passes. A missing `value` fails.
-        // Tests run from the crate root. The schema is two levels up.
-        let raw = std::fs::read_to_string(
-            std::path::Path::new("../..")
-                .join("schemas")
-                .join("events")
-                .join("v1")
-                .join("ext_status.json"),
-        )
-        .expect("repo schema file must exist");
+        let raw = std::fs::read_to_string(repo_ext_status_schema_path())
+            .expect("repo schema file must exist");
         let schema: serde_json::Value = serde_json::from_str(&raw).unwrap();
         let produced = crate::event::produce::ext_status("vim_mode", serde_json::json!("insert"));
         let produced_obj = produced.obj().expect("a produced event has an object").clone();
