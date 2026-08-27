@@ -100,33 +100,58 @@ The rejection produces a `tool_result` with `is_error: true` and text
 
 - Default 60 s. Configurable via CLI flag `--timeout-default` (default 60).
 - Hard cap 300 s. Configurable via `--timeout-max` (default 300).
-- On timeout, the tool kills the command and all of its child processes.
-  After the tool returns, no process spawned by the command remains.
+- A `timeout_secs` above the hard cap is an input error. The tool exits
+  non-zero with a stderr diagnostic. It never waits past the cap, so
+  the route backstop (310 s) cannot fire on a command timeout.
+- On timeout, the tool kills the command's process group. It sends
+  SIGTERM to the group. It sends SIGKILL after 2 s to the processes
+  that survive. A process that detaches from the group (for example by
+  calling `setsid`) can survive the group kill. That is a known
+  limitation. For ordinary commands, nothing the command spawned
+  remains after the tool returns.
 - A timeout is not a tool error. The command ran. It did not finish.
 - The tool exits 0 and sets `"timed_out": true` in the JSON output.
-- The model sees the partial output and the `timed_out` flag.
+- On timeout, `exit_code` is 143 (128 + SIGTERM, signal 15). The group
+  kill sends SIGTERM first.
+- The model sees the partial output, the `timed_out` flag, and the 143
+  exit code.
 
 ### 4.3 Output capping
 
 - Cap the combined stdout and stderr at `bash_max_output_bytes`
   (default 16000, configurable via `--max-output-bytes`).
-- The default of 16000 bytes stays below the assemble backstop
-  (`tool_result_max_chars`, 20000 characters) so the tool cap is the
-  effective bound for all output.
-- When the cap is reached, keep the **tail** of the output (the last N
-  bytes). Build and test output is most relevant at the end.
-- Prepend a truncation marker:
+- The cap is one shared limit for both streams. It is not a per-field
+  limit. When the cap is reached, the tool keeps the **tail** of the
+  combined output (the last N bytes). Build and test output is most
+  relevant at the end.
+- The `stdout` field holds the kept tail bytes from stdout. The
+  `stderr` field holds the kept tail bytes from stderr. Together they
+  hold at most `bash_max_output_bytes` bytes.
+- `text` builds from the capped content. Its length stays at or below
+  the cap plus fixed overhead (command line, marker, exit code line).
+- The default of 16000 bytes is at most 16000 characters. It stays
+  below the `route` and `assemble` backstop (`tool_result_max_chars`,
+  20000 characters). The tool cap is the effective bound. The backstop
+  cannot fire on a well-formed bash result.
+- When truncated, `text` carries the marker on the second line, right
+  after the `$ <command>` line:
 
   ```
+  $ git status
   [output truncated: showing last 16000 of 148291 bytes]
+  <tail of output>
+  (exit code: 0)
   ```
 
-- The `assemble` stage adds a second safety cap of `tool_result_max_chars`
-  (default 20000 characters) on any tool result text. Because 16000 bytes
-  is at most 16000 characters, the tool cap is always the primary bound.
-  The assemble cap is the backstop.
-- The model sees the tool cap. The tool uses bytes. The assemble stage
-  uses characters. For ASCII output the two units are equivalent.
+- Backstop behavior, stated for completeness. When any tool result
+  text exceeds 20000 characters:
+  - `route` clips non-JSON tool stdout to the head. It adds no marker.
+  - `assemble` clips the `tool_result` text to the head and appends
+    `[tool result clipped: <N> -> <M> chars]`.
+  A head clip defeats the tail-keeping design. The tool cap must stay
+  below the backstop. 16000 stays below 20000.
+- The tool counts bytes. `route` and `assemble` count characters. For
+  ASCII output the two units are equivalent.
 
 ### 4.4 Exit code
 
@@ -156,10 +181,10 @@ stdout is one JSON object:
 
 | Field | Type | Description |
 |---|---|---|
-| `text` | string | Model-facing rendering. Contains the command, the combined output, and the exit code. Capped at `bash_max_output_bytes`. |
-| `exit_code` | integer | Exit code of the shell command. 0 on success. Not the tool process exit code. |
-| `stdout` | string | Raw stdout, capped at the same limit. |
-| `stderr` | string | Raw stderr, capped at the same limit. |
+| `text` | string | Model-facing rendering. Command line, marker (when truncated), capped output, and exit code. Stays at or below the cap plus fixed overhead. |
+| `exit_code` | integer | Exit code of the shell command. 0 on success. 143 on timeout. Not the tool process exit code. |
+| `stdout` | string | Raw stdout. Kept tail when truncated. Shares the cap with `stderr`. |
+| `stderr` | string | Raw stderr. Kept tail when truncated. Shares the cap with `stdout`. |
 | `timed_out` | boolean | True if the timeout fired. |
 | `truncated` | boolean | True if the output exceeded the byte cap. |
 
@@ -167,18 +192,20 @@ The `text` field format:
 
 ```
 $ <command>
+[output truncated: showing last N of M bytes]
 <stdout>
 <stderr, prefixed with lines if present>
 (exit code: <N>)
 ```
+
+The marker line appears only when truncated. The command line stays
+first. The marker is the second line of `text`.
 
 On timeout, append:
 
 ```
 (timed out after <N>s)
 ```
-
-On truncation, the `text` field begins with the truncation marker.
 
 Route forwards only the `text` field into the `tool_result` event.
 The other fields (`exit_code`, `stdout`, `stderr`, `timed_out`,
@@ -194,10 +221,12 @@ The model sees the `text` field and the `is_error` flag only.
 | Timeout | 0 | false | partial output + timeout note |
 | Output exceeds cap | 0 | false | truncated output + marker |
 | Cannot spawn process | non-zero | true | stderr diagnostic |
-| Invalid input (`timeout_secs` less than 1) | non-zero | true | stderr diagnostic |
+| Invalid input (`timeout_secs` below 1 or above 300) | non-zero | true | stderr diagnostic |
 
 The harness creates a `tool_result` with `is_error: true` when the tool
 exits non-zero. The `value.text` field is populated from stderr (capped).
+
+On timeout, the JSON `exit_code` field is 143 and `timed_out` is true.
 
 An input missing the `command` field is rejected by route schema
 validation before the tool starts. The `tool_result` has `is_error: true`
@@ -246,19 +275,33 @@ Add to `scripts/tool-conformance.sh`:
 | `bash: command not found` | `{"command": "nonexistent_cmd_xyz"}` | tool exit 0, `exit_code` 127, `is_error` false |
 | `bash: stderr` | `{"command": "echo err >&2"}` | `stderr` contains `err` |
 | `bash: combined output` | `{"command": "echo out; echo err >&2"}` | both `stdout` and `stderr` populated |
-| `bash: timeout` | `{"command": "sleep 10", "timeout_secs": 2}` | `timed_out` true, tool exit 0, no `sleep` process survives |
-| `bash: output cap` | `{"command": "head -c 100000 /dev/zero \| tr '\0' 'a'"}` | `truncated` true, `text` starts with truncation marker |
+| `bash: timeout` | `{"command": "sleep 10", "timeout_secs": 2}` | `timed_out` true, `exit_code` 143, tool exit 0, no `sleep` process survives |
+| `bash: output cap` | `{"command": "head -c 100000 /dev/zero \| tr '\0' 'a'"}` | `truncated` true, marker is the second line of `text` |
 | `bash: cwd` | Run tool with cwd set to a known directory. `{"command": "pwd"}` | `stdout` equals that directory |
 | `bash: pipeline` | `{"command": "echo hello \| wc -c"}` | `stdout` contains `6` |
 | `bash: spawn failure` | Run with `PATH=/dev/null`. `{"command": "echo hi"}` | non-zero exit, `is_error` true, stderr diagnostic |
 | `bash: empty command` | `{"command": ""}` | exit 0, `exit_code` 0, empty output |
 | `bash: timeout zero` | `{"command": "echo hi", "timeout_secs": 0}` | non-zero exit, stderr diagnostic |
 | `bash: timeout negative` | `{"command": "echo hi", "timeout_secs": -1}` | non-zero exit, stderr diagnostic |
+| `bash: timeout too large` | `{"command": "echo hi", "timeout_secs": 500}` | non-zero exit, stderr diagnostic |
 | `bash: stdin EOF` | `{"command": "cat"}` | exit 0, `exit_code` 0, empty output |
 
-Each test checks: stdout is one JSON object with a `text` field, stderr is
-empty on success, exit code is 0 for command-level results and non-zero for
-tool-level failures.
+The current harness checks the exit code and the stdout and stderr
+substrings only. It has no env or cwd control. The bash section extends
+`run_test` with three capabilities:
+
+- JSON shape check: on success, parse the tool stdout as one JSON
+  object and check the named fields.
+- Env control: run the tool under a changed environment
+  (`PATH=/dev/null` for the spawn-failure test, which hides `sh`).
+- Cwd control: run the tool in a known directory (the cwd test).
+
+With those extensions, each test checks:
+
+- stdout is one JSON object with a `text` field.
+- stderr is empty on success.
+- exit code is 0 for command-level results.
+- exit code is non-zero for tool-level failures.
 
 ### Mutation gate
 
@@ -269,13 +312,13 @@ fail.
 |---|---|
 | Non-zero exit is not a tool error | `bash: non-zero exit` |
 | Command not found is a command-level result | `bash: command not found` |
-| Timeout sets `timed_out` and kills the process group | `bash: timeout` |
+| Timeout sets `timed_out`, sets `exit_code` 143, and kills the process group | `bash: timeout` |
 | Output cap keeps the tail and adds a marker | `bash: output cap` |
 | Separate stdout and stderr capture | `bash: stderr`, `bash: combined output` |
 | `exit_code` reports the command exit code | `bash: non-zero exit` |
 | Spawn failure is a tool error | `bash: spawn failure` |
 | Empty command is valid and exits 0 | `bash: empty command` |
-| Zero or negative `timeout_secs` is rejected | `bash: timeout zero`, `bash: timeout negative` |
+| Zero, negative, or above-max `timeout_secs` is rejected | `bash: timeout zero`, `bash: timeout negative`, `bash: timeout too large` |
 | Stdin is closed immediately | `bash: stdin EOF` |
 | Tool runs in the harness-set cwd | `bash: cwd` |
 
