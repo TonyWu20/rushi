@@ -174,7 +174,12 @@ where the core decides the sequence and an entry never claims a slot
 
 - One process per enabled extension, in its own process group
   (`setsid`), like the loop (`docs/tui.md` section 13.3)
-- Quit: SIGTERM the group, escalate to SIGKILL after 3 s, reaper task
+- Quit: SIGTERM the group, wait 3 s, SIGKILL the survivors, and
+  wait for the deaths, synchronously on the quit path. The pids are
+  re-collected after the escalation: a restart that started during
+  the wait is a new group, and the kill covers it. No detached
+  reaper: a detached thread dies with the process, and a group that
+  ignores SIGTERM would orphan
 - Restart budget: 3 attempts with 1 s / 2 s / 4 s backoff, then dead.
   The owned row shows a hint
 - A slow `transform` times out at 2 s. Fallback is the raw block

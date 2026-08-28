@@ -1211,15 +1211,17 @@ impl ExtHost {
             .collect()
     }
 
-    /// Quit path: SIGTERM every extension process group, escalate to
-    /// SIGKILL after the grace window, like the loop stop. The stop
-    /// flag keeps the monitors from restarting anything.
-    /// Stop every extension process group and wait for the deaths.
-    ///
-    /// SIGTERM, then a bounded wait, then SIGKILL for the groups
-    /// that survive. The escalation is synchronous, not a detached
-    /// thread: a detached thread dies with the process, and a group
-    /// that ignores SIGTERM would orphan (docs/tui.md section 13.3).
+    /// Quit path: SIGTERM every extension process group, wait the
+    /// grace window, SIGKILL the survivors, and wait for the
+    /// deaths, like the loop stop. The stop flag keeps the monitors
+    /// from restarting anything. The escalation is synchronous,
+    /// not a detached thread: a detached thread dies with the
+    /// process, and a group that ignores SIGTERM would orphan
+    /// (docs/tui.md section 13.3). After the escalation, the pids
+    /// are re-collected: a monitor that passed its stop check just
+    /// before the flag was set can still start a new generation, and
+    /// that new group would otherwise survive (docs/ui-extension.md
+    /// section 7).
     pub fn stop(&self) {
         self.stop_flag.store(true, Ordering::SeqCst);
         let mut pids: Vec<i32> = Vec::new();
@@ -1246,11 +1248,24 @@ impl ExtHost {
                         libc::kill(-pid, libc::SIGKILL);
                     }
                 }
-                // A SIGKILL'd group dies; the kernel reaps it on the
-                // monitor threads' wait or reparents it to init.
                 break;
             }
             std::thread::sleep(Duration::from_millis(50));
+        }
+        // A generation that started during the wait is a new group
+        // not in the list above. The monitor cannot start another
+        // one: its loop checks the stop flag before each spawn.
+        // Let the in-flight spawn store its pid, collect again, and
+        // kill the new pids.
+        std::thread::sleep(Duration::from_millis(200));
+        let original: std::collections::HashSet<i32> = pids.iter().copied().collect();
+        for s in &self.inner.slots {
+            let pid = s.pid.load(Ordering::SeqCst);
+            if pid > 0 && !original.contains(&pid) {
+                unsafe {
+                    libc::kill(-pid, libc::SIGKILL);
+                }
+            }
         }
     }
 
@@ -1541,9 +1556,23 @@ fn spawn_gen(
         }
     }
     let argv = build_argv(m)?;
-    let cwd = m.dir.as_os_str().as_bytes().to_vec();
-    let config = config_path.as_os_str().as_bytes().to_vec();
-    let ext_dir = m.dir.as_os_str().as_bytes().to_vec();
+    // The child must not take a lock after fork: the host may be
+    // multithreaded, and a fork that copies locked futexes deadlocks
+    // the child on its first allocation. The CString args and the
+    // argv pointer table are built here, in the parent; the child
+    // path below is libc calls only, no heap.
+    let argv_ptrs: Vec<*const libc::c_char> = {
+        let mut v: Vec<*const libc::c_char> =
+            argv.iter().map(|s| s.as_ptr()).collect();
+        v.push(std::ptr::null());
+        v
+    };
+    let cwd_c = CString::new(m.dir.as_os_str().as_bytes().to_vec())
+        .map_err(|e| e.to_string())?;
+    let config_c = CString::new(config_path.as_os_str().as_bytes().to_vec())
+        .map_err(|e| e.to_string())?;
+    let ext_dir_c = CString::new(m.dir.as_os_str().as_bytes().to_vec())
+        .map_err(|e| e.to_string())?;
 
     unsafe {
         let pid = libc::fork();
@@ -1567,18 +1596,9 @@ fn spawn_gen(
                 for fd in [in_pipe[0], in_pipe[1], out_pipe[0], out_pipe[1]] {
                     let _ = libc::close(fd);
                 }
-                if let Ok(cwd_c) = CString::new(cwd) {
-                    let _ = libc::chdir(cwd_c.as_ptr());
-                }
-                if let Ok(c) = CString::new(config) {
-                    libc::setenv(c"CONFIG".as_ptr(), c.as_ptr(), 1);
-                }
-                if let Ok(c) = CString::new(ext_dir) {
-                    libc::setenv(c"EXT_DIR".as_ptr(), c.as_ptr(), 1);
-                }
-                let mut argv_ptrs: Vec<*const libc::c_char> =
-                    argv.iter().map(|s| s.as_ptr()).collect();
-                argv_ptrs.push(std::ptr::null());
+                let _ = libc::chdir(cwd_c.as_ptr());
+                libc::setenv(c"CONFIG".as_ptr(), config_c.as_ptr(), 1);
+                libc::setenv(c"EXT_DIR".as_ptr(), ext_dir_c.as_ptr(), 1);
                 libc::execvp(argv[0].as_ptr(), argv_ptrs.as_ptr());
                 // execvp failed: 127 marks a generation that never
                 // started; the monitor counts it as a failed attempt.
@@ -2588,7 +2608,9 @@ done
         // The status extension gets only the usage-bearing assistant
         // messages, not the user message.
         host.send_history(&[user.clone(), usage.clone(), no_usage.clone()]);
-        let deadline = Instant::now() + Duration::from_millis(5000);
+        // A long deadline: the extension is a real bash process, and
+        // the spawn can be slow under a loaded, parallel test suite.
+        let deadline = Instant::now() + Duration::from_millis(15000);
         loop {
             let got = std::fs::read_to_string(entry.join("received.log")).unwrap_or_default();
             if got.lines().count() == 1 {
@@ -2634,7 +2656,9 @@ done
         let um = produce::user_message("no forward for me");
         host.forward_event(5, &um);
         host.forward_event(6, &tr);
-        let deadline = Instant::now() + Duration::from_millis(5000);
+        // A long deadline: the extension is a real bash process, and
+        // the spawn can be slow under a loaded, parallel test suite.
+        let deadline = Instant::now() + Duration::from_millis(15000);
         loop {
             let got = std::fs::read_to_string(entry.join("received.log")).unwrap_or_default();
             if got.lines().count() == 1 {
