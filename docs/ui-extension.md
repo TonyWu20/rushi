@@ -217,19 +217,41 @@ where the core decides the sequence and an entry never claims a slot
   section 5). The extension protocol is bidirectional and stateful.
   It is the UI-side twin, not the tool contract
 
-## 11. Open items
+## 11. Decisions and open items
+
+### Settled in stage 4 (ui-extension-plan)
+
+- **Pre-approval semantics: answer one that does.** An extension with
+  `append` may append an `approval` that answers an `approval_request`
+  that already exists in the log. The pending state is derived from the
+  log in order: an `approval` counts only after the request it answers
+  (refinement policy G6). Pre-approval blocking (holding the loop on a
+  request that does not exist yet) is ruled out: it would let the
+  extension approve tools before the loop asks, crossing the loop
+  trust boundary. An extension holds loop-level trust, not tool-level
+  trust (section 10)
+- **The ext_status growth bound: the log is unbounded, memory is
+  capped.** The session log is the audit record: no cap on
+  `ext_status` events there. The TUI's in-memory view caps at 128
+  distinct ids, oldest-updated out first; the statusline consumes the
+  capped map through the tick payload
+- **Per-op timeouts beyond transform: a status staleness bound.** A
+  status extension that gives no valid reply for three tick intervals
+  (3 x tick_ms) drops its row to a stale hint. The transform 2 s
+  bound is unchanged
+- **`order.toml`: declined for now.** The composed order stays
+  alphabetical by entry name within a layer, global layer first. An
+  explicit host sequence file is the escape valve if alphabetical
+  order ever proves insufficient. It stays host-owned, not a
+  project-visible knob
+
+### Still open
 
 - A LaTeX renderer binary for `inline:latex` spans. The host
-  detection and request path landed with the stage 3 mechanism;
-  until a renderer exists, the raw span shows
-- Pre-approval blocking semantics: block before an `approval_request`
-  exists, or answer one that does
-- Log-growth bound for chatty `ext_status` publishers
+  detection and request path landed with the stage 3 mechanism; until
+  a renderer exists, the raw span shows
 - Decisions made here, flagged for sign-off: hex colors allowed in
   `style`; `ext_status` suppressed from the transcript
-- Per-op timeout values beyond `transform` (status staleness bound)
-- An explicit host sequence file (`order.toml`) if alphabetical order
-  ever proves insufficient. It stays host-owned
 
 ## 12. What we borrow from deepseek-harness
 

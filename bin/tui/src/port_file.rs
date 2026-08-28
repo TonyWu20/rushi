@@ -898,8 +898,7 @@ mod tests {
         let sdir = c.dir.path().join("schemas").join("events").join("v1");
         std::fs::create_dir_all(&sdir).unwrap();
         let src = repo_ext_status_schema_path();
-        std::fs::copy(&src, sdir.join("ext_status.json"))
-            .expect("repo schema file must exist");
+        std::fs::copy(&src, sdir.join("ext_status.json")).expect("repo schema file must exist");
     }
 
     #[test]
@@ -930,11 +929,7 @@ mod tests {
         let ev = Event::Json {
             obj: serde_json::json!({"v":1,"type":"ext_status","ts":"t","id":"vim_mode"}),
         };
-        let err = block_on(
-            &rt,
-            c.port.append_event(&SessionId::new("s1"), &ev),
-        )
-        .unwrap_err();
+        let err = block_on(&rt, c.port.append_event(&SessionId::new("s1"), &ev)).unwrap_err();
         assert!(matches!(err, BusError::InvalidEvent { .. }), "{err:?}");
         assert!(
             !log_path(&c, "s1").exists(),
@@ -950,13 +945,15 @@ mod tests {
             .expect("repo schema file must exist");
         let schema: serde_json::Value = serde_json::from_str(&raw).unwrap();
         let produced = crate::event::produce::ext_status("vim_mode", serde_json::json!("insert"));
-        let produced_obj = produced.obj().expect("a produced event has an object").clone();
+        let produced_obj = produced
+            .obj()
+            .expect("a produced event has an object")
+            .clone();
         assert!(
             matches_schema(&produced_obj, &schema),
             "producer envelope must match the repo schema: {produced_obj:?}"
         );
-        let missing_value =
-            serde_json::json!({"v":1,"type":"ext_status","ts":"t","id":"vim_mode"});
+        let missing_value = serde_json::json!({"v":1,"type":"ext_status","ts":"t","id":"vim_mode"});
         assert!(
             !matches_schema(&missing_value, &schema),
             "a missing `value` must fail the repo schema"

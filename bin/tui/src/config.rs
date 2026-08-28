@@ -316,7 +316,11 @@ arg_style = "append_session"
             "[ext]\ndir = \"my-exts\"\n\n[active]\nmodel = \"test-model\"\n",
         );
         let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
-        assert_eq!(cfg.ext_dir, Some(dir.path().join("my-exts")), "relative dir resolves against the config dir");
+        assert_eq!(
+            cfg.ext_dir,
+            Some(dir.path().join("my-exts")),
+            "relative dir resolves against the config dir"
+        );
         assert_eq!(cfg.active_model.as_deref(), Some("test-model"));
     }
 

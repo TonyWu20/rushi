@@ -619,6 +619,15 @@ struct SlotShared {
     pub lines_cache: Mutex<HashMap<u64, Vec<ExtLine>>>,
     /// The last valid `status` reply (G5: a bad reply keeps it).
     pub last_status: Mutex<Option<Vec<ExtLine>>>,
+    /// When the last valid `status` reply landed (or `None` since
+    /// the generation started). The staleness check reads it.
+    pub last_status_reply: Mutex<Option<Instant>>,
+    /// When this generation started. A status extension that has
+    /// not replied by `gen_started + 3 x tick_ms` is stale.
+    pub gen_started: Mutex<Instant>,
+    /// Set by [`ExtHost::poll_status`] when the status replies stop
+    /// for the bound (ui-extension-plan stage 4 open items).
+    pub status_stale: AtomicBool,
     pub tick: Mutex<TickClock>,
 }
 
@@ -666,6 +675,9 @@ impl ExtHost {
                     send_rx: Mutex::new(Some(send_rx)),
                     lines_cache: Mutex::new(HashMap::new()),
                     last_status: Mutex::new(None),
+                    last_status_reply: Mutex::new(None),
+                    gen_started: Mutex::new(Instant::now()),
+                    status_stale: AtomicBool::new(false),
                     tick: Mutex::new(TickClock {
                         // The first tick fires on the first pump, so a
                         // status row shows as soon as the process is up.
@@ -733,6 +745,11 @@ impl ExtHost {
             match spawn_gen(&slot, &m, &self.config_path) {
                 Ok(gen) => {
                     *slot.state.lock().unwrap() = SlotState::Running;
+                    // A fresh generation: the staleness clock and
+                    // flag reset with it.
+                    *slot.gen_started.lock().unwrap() = Instant::now();
+                    *slot.last_status_reply.lock().unwrap() = None;
+                    slot.status_stale.store(false, Ordering::SeqCst);
                     let mon_slot = slot.clone();
                     let mon_inner = self.inner.clone();
                     let stop = self.stop_flag.clone();
@@ -884,6 +901,34 @@ impl ExtHost {
                 obj["model"] = json!(m);
             }
             self.send_op(i, &obj);
+        }
+    }
+
+    /// Mark a status extension stale: no valid `status` reply for
+    /// three tick intervals (3 x tick_ms) drops the row to a stale
+    /// hint. A valid reply or a restart clears it. The bound is the
+    /// status staleness of docs/ui-extension.md section 11
+    /// (ui-extension-plan stage 4).
+    pub fn poll_status(&self) {
+        let now = Instant::now();
+        for s in &self.inner.slots {
+            if !s.manifest.caps.iter().any(|c| c == "status") {
+                continue;
+            }
+            if !matches!(
+                *s.state.lock().unwrap(),
+                SlotState::Running | SlotState::Restarting
+            ) {
+                continue;
+            }
+            let since = {
+                let l = *s.last_status_reply.lock().unwrap();
+                l.unwrap_or_else(|| *s.gen_started.lock().unwrap())
+            };
+            let bound = Duration::from_millis(s.manifest.tick_ms.saturating_mul(3));
+            if now.duration_since(since) > bound {
+                s.status_stale.store(true, Ordering::SeqCst);
+            }
         }
     }
 
@@ -1095,6 +1140,12 @@ impl ExtHost {
             SlotState::Dead => StatusRow::DeadHint(format!("ext {} dead after 3 restarts", s.name)),
             SlotState::Skipped => StatusRow::Builtin,
             SlotState::Running | SlotState::Restarting => {
+                if s.status_stale.load(Ordering::SeqCst) {
+                    return StatusRow::DeadHint(format!(
+                        "ext {} status stale: no reply for 3 ticks",
+                        s.name
+                    ));
+                }
                 match s.last_status.lock().unwrap().clone() {
                     Some(l) => StatusRow::Lines(l),
                     None => StatusRow::Builtin,
@@ -1255,6 +1306,10 @@ impl HostInner {
                 }
                 *last = Some(lines.clone());
                 drop(last);
+                // A live reply clears the staleness flag and re-
+                // starts the staleness clock.
+                *slot.last_status_reply.lock().unwrap() = Some(Instant::now());
+                slot.status_stale.store(false, Ordering::SeqCst);
                 self.replies_version.fetch_add(1, Ordering::SeqCst);
                 let _ = self.out_tx.try_send(ExtItem::StatusUpdated {
                     ext: slot.name.clone(),
@@ -1555,7 +1610,14 @@ fn monitor_thread(
         // A failed spawn consumes the attempt; the loop backs off
         // again on the next pass and dies when the budget is spent.
         gen = match spawn_gen(&slot, &manifest, &config_path) {
-            Ok(g) => Some(g),
+            Ok(g) => {
+                // A fresh generation: the staleness clock and flag
+                // reset with it.
+                *slot.gen_started.lock().unwrap() = Instant::now();
+                *slot.last_status_reply.lock().unwrap() = None;
+                slot.status_stale.store(false, Ordering::SeqCst);
+                Some(g)
+            }
             Err(_) => None,
         };
         if gen.is_none() && attempt >= delays.len() {
@@ -2324,10 +2386,7 @@ printf '{"v":1,"op":"notify","kind":"osc","code":0,"args":"job done"}\n'
                 req = req
             ),
         );
-        assert!(
-            host.span_lines(7, 0).is_some(),
-            "a done span has a result"
-        );
+        assert!(host.span_lines(7, 0).is_some(), "a done span has a result");
         // Done: reuse, no resend (a resend would bump the reply
         // version on every rebuild: an infinite loop).
         assert_eq!(
@@ -2364,6 +2423,61 @@ printf '{"v":1,"op":"notify","kind":"osc","code":0,"args":"job done"}\n'
         assert!(
             host.span_lines(7, 0).is_some(),
             "the re-answered span shows again"
+        );
+        host.stop();
+    }
+
+    #[test]
+    fn status_reply_bound_marks_the_row_stale() {
+        let tmp = TempDir::new().unwrap();
+        // One reply, then silence: the process stays alive, but the
+        // row must drop to the stale hint after 3 x tick_ms.
+        let script = r#"read -r line
+printf '{"v":1,"op":"status","lines":[["once",null]]}\n'
+exec sleep 30
+"#;
+        let manifest = "[ext]\ncommand = \"bash\"\nargs = [\"stale.sh\"]\ncaps = [\"status\"]\ntick_ms = 100\nprotocol_v = 1\n";
+        let host = host_with(&tmp, "stale", manifest, script);
+        host.start();
+        // Drive the ticks: the script answers the first one, then
+        // stays silent. Two 100 ms ticks: the reply lands, and the
+        // staleness clock (3 x tick_ms = 300 ms) is not yet past.
+        let empty = std::collections::HashMap::new();
+        for _ in 0..2 {
+            let p = crate::ext::TickPayload {
+                width: 80,
+                session: Some("s"),
+                model: None,
+                loop_running: false,
+                statuses: &empty,
+            };
+            host.pump_ticks(&p);
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        host.poll_status();
+        assert!(
+            matches!(host.status_row(), StatusRow::Lines(_)),
+            "the first reply shows: {:?}",
+            host.status_row()
+        );
+        // Four more missed ticks cross the 300 ms bound: the row
+        // drops to the stale hint.
+        for _ in 0..4 {
+            let p = crate::ext::TickPayload {
+                width: 80,
+                session: Some("s"),
+                model: None,
+                loop_running: false,
+                statuses: &empty,
+            };
+            host.pump_ticks(&p);
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        host.poll_status();
+        assert!(
+            matches!(host.status_row(), StatusRow::DeadHint(h) if h.contains("status stale")),
+            "the stale hint shows: {:?}",
+            host.status_row()
         );
         host.stop();
     }

@@ -29,34 +29,43 @@ REPO = sys.argv[2]
 SESSION = "tui-test"
 EXT_SESSION = "tui-test-ext"
 MERMAID_EXT_DIR = REPO + "/ui_extensions/mermaid"
+EXT_RS_STATUSLINE = REPO + "/ext-rs/statusline-rs"
+EXT_RS_TOOL_RESULT = REPO + "/ext-rs/tool_result-rs"
 WHEEL_UP = b"\x1b[<64;5;5M"  # SGR mouse: wheel up at col 5 row 5
 
 
-def setup_mermaid_ext():
-    """Build the reference mermaid extension and put its binary on PATH.
+def setup_ext_bins():
+    """Build the Rust extension binaries and put them on PATH.
 
-    The mermaid extension is a standalone cargo package. Its manifest
-    resolves `mermaid-ext` on PATH, and the host refuses the start
-    when the command is missing (docs/ui-extension.md section 6).
-    Every case in this file loads the global layer, so the binary
+    The Rust reference extensions are standalone cargo packages
+    (ui-extension-plan stages 3 and 4). Their manifests resolve the
+    binary names on PATH, and the host refuses the start when a
+    command is missing (docs/ui-extension.md section 6). Every case
+    in this file loads a layer that includes them, so the binaries
     must exist and be reachable before the first spawn.
     """
     import subprocess
-    bin_dir = MERMAID_EXT_DIR + "/target/debug"
-    bin_path = bin_dir + "/mermaid-ext"
-    if not os.path.exists(bin_path):
-        r = subprocess.run(
-            ["cargo", "build"],
-            cwd=MERMAID_EXT_DIR,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
-        if r.returncode != 0:
-            print("FAIL setup: cannot build the mermaid extension:")
-            print(r.stderr.decode())
-            sys.exit(1)
-    if bin_dir not in os.environ.get("PATH", "").split(os.pathsep):
-        os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+    ext_packages = [
+        (MERMAID_EXT_DIR, "mermaid-ext"),
+        (EXT_RS_STATUSLINE, "statusline-ext"),
+        (EXT_RS_TOOL_RESULT, "tool_result-ext"),
+    ]
+    for ext_dir, bin_name in ext_packages:
+        bin_dir = ext_dir + "/target/debug"
+        bin_path = bin_dir + "/" + bin_name
+        if not os.path.exists(bin_path):
+            r = subprocess.run(
+                ["cargo", "build"],
+                cwd=ext_dir,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            if r.returncode != 0:
+                print(f"FAIL setup: cannot build {ext_dir}:")
+                print(r.stderr.decode())
+                sys.exit(1)
+        if bin_dir not in os.environ.get("PATH", "").split(os.pathsep):
+            os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
 
 
 def fixture_dir(name):
@@ -911,8 +920,70 @@ def ext_mermaid():
             pass
 
 
+def ext_rus():
+    """The Rust reference layer on a seeded session.
+
+    The ext-rs layer loads the Rust ports of the stage 2 bash
+    references (ui-extension-plan stage 4). The statusline shows
+    the same content as the bash reference: git, session, loop
+    state, cumulative usage from the log. The tool_result renderer
+    shows its [ext] header for the seeded result. The exit
+    criterion: every surface has a bash and a Rust reference.
+    """
+    tmp = tempfile.mkdtemp(prefix="tui-ext-rus-")
+    cfg, sessions = layer_config(tmp, REPO + "/ext-rs", active_model="smoke-model")
+    seed_session(sessions, EXT_SESSION, seed_events())
+    stats_marker = "smoke-model in:125 out:55 sum:180"
+    master, pid = spawn(EXT_SESSION, cfg)
+    screen = Screen(24, 80)
+    try:
+        deadline = time.time() + 8.0
+        seen, _ = wait_markers(
+            master, pid, screen,
+            ["[ext] tool:call_1", "(git:none)", stats_marker],
+            deadline,
+        )
+        if not alive(pid):
+            print("FAIL ext-rus: process died during startup")
+            return False
+        missing = [m for m in ["[ext] tool:call_1", "(git:none)", stats_marker] if m not in seen]
+        if missing:
+            print(f"FAIL ext-rus: markers not seen: {missing}")
+            print("screen was:\n" + screen.text())
+            return False
+        # Quit: no orphan layer process may survive.
+        os.write(master, b"q")
+        pump(master, 0.4, screen)
+        os.write(master, b"q")
+        deadline = time.time() + 4.0
+        while time.time() < deadline and alive(pid):
+            pump(master, 0.2, screen)
+        if alive(pid):
+            print("FAIL ext-rus: still running after double-q (hang)")
+            os.kill(pid, signal.SIGKILL)
+            reap(pid)
+            return False
+        reap(pid)
+        orphans = procs_with_cwd_under(REPO + "/ext-rs")
+        if orphans:
+            print(f"FAIL ext-rus: orphan layer processes: {orphans}")
+            for p in orphans:
+                try:
+                    os.kill(p, signal.SIGKILL)
+                except OSError:
+                    pass
+            return False
+        print("OK ext-rus: Rust statusline and tool_result references shown")
+        return True
+    finally:
+        try:
+            os.close(master)
+        except OSError:
+            pass
+
+
 def main():
-    setup_mermaid_ext()
+    setup_ext_bins()
     ok = True
     ok &= case("baseline-double-q", 0)
     ok &= case("burst-300-then-double-q", 300)
@@ -926,6 +997,7 @@ def main():
     ok &= ext_statusline_repo()
     ok &= ext_tool_result_kill()
     ok &= ext_mermaid()
+    ok &= ext_rus()
     if not ok:
         sys.exit(1)
     print("ALL SMOKE CASES PASSED")

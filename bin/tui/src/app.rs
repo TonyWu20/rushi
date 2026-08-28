@@ -4,7 +4,7 @@
 //! [`Action`]s and folds port results back in. `main.rs` executes the
 //! actions; the tests here drive the state machine directly.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
 use ratatui::text::Line;
@@ -123,7 +123,18 @@ pub struct App {
     /// map in O(1) instead of rescanning the whole log
     /// (ui-extension-plan stage 1, tick payload).
     ext_status_values: HashMap<String, Value>,
+    /// The update order of the ext_status ids, most recent last.
+    /// Drops the oldest id when the map holds the cap
+    /// (ui-extension-plan stage 4: the log-growth bound).
+    ext_status_order: VecDeque<String>,
 }
+
+/// The cap on the distinct ext_status ids the in-memory map holds.
+/// A chatty publisher cannot grow the map without bound. At the cap
+/// the least-recently-updated id drops first. The log keeps every
+/// event: the log is the audit record, and the bound bounds the
+/// TUI's memory only (ui-extension-plan stage 4, open items).
+const EXT_STATUS_ID_CAP: usize = 128;
 
 /// A session name must stay a plain directory name inside the sessions
 /// root. Mirrors `port_file::session_dir`: no absolute paths, no
@@ -136,9 +147,13 @@ fn valid_session_name(name: &str) -> bool {
 
 /// The `ext_status` values of one event list, id to value. Later
 /// events win, like the log order. An event without a string `id`
-/// adds no entry; a missing `value` counts as `null`.
-fn ext_status_map(events: &[Event]) -> HashMap<String, Value> {
+/// adds no entry; a missing `value` counts as `null`. The pair is
+/// the value map plus the update order (most recent last), capped
+/// at [`EXT_STATUS_ID_CAP`] distinct ids: at the cap the
+/// least-recently-updated id drops, like the incremental path.
+fn ext_status_map(events: &[Event]) -> (HashMap<String, Value>, VecDeque<String>) {
     let mut m = HashMap::new();
+    let mut order: VecDeque<String> = VecDeque::new();
     for e in events {
         if e.kind() != EventKind::ExtStatus {
             continue;
@@ -147,9 +162,20 @@ fn ext_status_map(events: &[Event]) -> HashMap<String, Value> {
             continue;
         };
         let value = e.get("value").cloned().unwrap_or(Value::Null);
-        m.insert(id.to_string(), value);
+        if m.insert(id.to_string(), value).is_none() {
+            order.push_back(id.to_string());
+            while order.len() > EXT_STATUS_ID_CAP {
+                let old = order.pop_front().expect("cap keeps the order non-empty");
+                m.remove(&old);
+            }
+        } else {
+            if let Some(pos) = order.iter().position(|x| x == id) {
+                order.remove(pos);
+            }
+            order.push_back(id.to_string());
+        }
     }
-    m
+    (m, order)
 }
 
 const STATUS_TTL: std::time::Duration = std::time::Duration::from_secs(4);
@@ -174,6 +200,7 @@ impl App {
             quit_arm: None,
             pending_name: None,
             ext_status_values: HashMap::new(),
+            ext_status_order: VecDeque::new(),
             viewport: 0,
             events_version: 0,
             transcript_cache: None,
@@ -210,12 +237,13 @@ impl App {
     /// Switch the visible session. Reloads its log and resets scroll.
     /// The caller restarts the port watch afterwards.
     pub fn set_active(&mut self, id: SessionId, events: Vec<Event>) {
-        let statuses = ext_status_map(&events);
+        let (statuses, order) = ext_status_map(&events);
         self.active = Some(id);
         self.events = events;
         self.scroll = 0;
         self.events_version += 1;
         self.ext_status_values = statuses;
+        self.ext_status_order = order;
     }
 
     // ── new-session name input ──────────────────────────────
@@ -246,11 +274,13 @@ impl App {
         match item {
             WatchItem::Event { event, .. } => {
                 // A new ext_status event updates the map in place.
-                // Later events win, like the log order.
+                // Later events win, like the log order. The id set
+                // is capped: at the cap the least-recently-updated
+                // id drops first.
                 if event.kind() == EventKind::ExtStatus {
                     let value = event.get("value").cloned().unwrap_or(Value::Null);
                     if let Some(id) = event.get_str("id") {
-                        self.ext_status_values.insert(id.to_string(), value);
+                        self.record_ext_status(id, value);
                     }
                 }
                 self.events.push(event);
@@ -328,6 +358,29 @@ impl App {
     /// O(1) state instead of a whole-log scan.
     pub fn ext_statuses(&self) -> &HashMap<String, Value> {
         &self.ext_status_values
+    }
+
+    /// Record one ext_status value in log order. A later event for
+    /// the same id wins. The id set is capped:
+    /// [`EXT_STATUS_ID_CAP`] distinct ids, oldest-updated first out.
+    fn record_ext_status(&mut self, id: &str, value: Value) {
+        if self
+            .ext_status_values
+            .insert(id.to_string(), value)
+            .is_none()
+        {
+            self.ext_status_order.push_back(id.to_string());
+            while self.ext_status_order.len() > EXT_STATUS_ID_CAP {
+                let old = self
+                    .ext_status_order
+                    .pop_front()
+                    .expect("the cap keeps the order non-empty");
+                self.ext_status_values.remove(&old);
+            }
+        } else if let Some(pos) = self.ext_status_order.iter().position(|x| x == id) {
+            self.ext_status_order.remove(pos);
+            self.ext_status_order.push_back(id.to_string());
+        }
     }
 
     // ── scroll ──────────────────────────────────────────────────
@@ -929,9 +982,75 @@ mod tests {
     }
 
     #[test]
+    fn ext_statuses_drop_the_oldest_id_at_the_cap() {
+        // The cap bounds the distinct ids a chatty publisher can
+        // hold in memory: 130 ids drop the first two.
+        let evs: Vec<Event> = (0..130)
+            .map(|i| {
+                ev(&format!(
+                    r#"{{"v":1,"type":"ext_status","ts":"t","id":"id-{i}","value":{i}}}"#,
+                    i = i
+                ))
+            })
+            .collect();
+        let app = app_with(evs, "s1");
+        let m = app.ext_statuses();
+        assert_eq!(m.len(), EXT_STATUS_ID_CAP, "the cap holds");
+        assert!(m.get("id-0").is_none(), "the oldest id drops");
+        assert!(m.get("id-1").is_none(), "the next oldest drops");
+        assert!(m.get("id-2").is_some(), "the rest keep");
+        assert!(m.get("id-129").is_some(), "the newest keeps");
+    }
+
+    #[test]
+    fn ext_statuses_rebuild_keeps_the_cap_semantics() {
+        // A session switch rebuilds from the log: the same cap and
+        // the same update order apply.
+        let evs: Vec<Event> = (0..130)
+            .map(|i| {
+                ev(&format!(
+                    r#"{{"v":1,"type":"ext_status","ts":"t","id":"id-{i}","value":{i}}}"#,
+                    i = i
+                ))
+            })
+            .collect();
+        let mut app = app_with(Vec::new(), "s1");
+        app.set_active(SessionId::new("s2"), evs);
+        assert_eq!(app.ext_statuses().len(), EXT_STATUS_ID_CAP);
+        assert!(app.ext_statuses().get("id-0").is_none());
+        // An in-place update moves the id to most recent: it is the
+        // last one to drop. 127 new ids drop the untouched ids; the
+        // updated id still holds.
+        app.on_watch_item(WatchItem::Event {
+            event: ev(r#"{"v":1,"type":"ext_status","ts":"t","id":"id-2","value":99}"#),
+            cursor: crate::port::TailCursor::end(),
+        });
+        for i in 3..130 {
+            app.on_watch_item(WatchItem::Event {
+                event: ev(&format!(
+                    r#"{{"v":1,"type":"ext_status","ts":"t","id":"fill-{i}","value":{i}}}"#,
+                    i = i
+                )),
+                cursor: crate::port::TailCursor::end(),
+            });
+        }
+        let m = app.ext_statuses();
+        assert_eq!(m.len(), EXT_STATUS_ID_CAP);
+        assert!(m.get("id-3").is_none(), "an untouched id drops");
+        assert!(m.get("id-129").is_none(), "the untouched ids drop");
+        assert_eq!(
+            m.get("id-2").unwrap(),
+            &json!(99),
+            "the updated id is the most recent"
+        );
+    }
+
+    #[test]
     fn ext_statuses_update_on_watch_events() {
         let mut app = app_with(
-            vec![ev(r#"{"v":1,"type":"ext_status","ts":"t","id":"vim_mode","value":"insert"}"#)],
+            vec![ev(
+                r#"{"v":1,"type":"ext_status","ts":"t","id":"vim_mode","value":"insert"}"#,
+            )],
             "s1",
         );
         // A new ext_status watch event updates the map in place.
@@ -939,13 +1058,19 @@ mod tests {
             event: ev(r#"{"v":1,"type":"ext_status","ts":"t","id":"vim_mode","value":"normal"}"#),
             cursor: crate::port::TailCursor::end(),
         });
-        assert_eq!(app.ext_statuses().get("vim_mode").unwrap(), &json!("normal"));
+        assert_eq!(
+            app.ext_statuses().get("vim_mode").unwrap(),
+            &json!("normal")
+        );
         // A non-ext_status event leaves the map untouched.
         app.on_watch_item(WatchItem::Event {
             event: ev(r#"{"v":1,"type":"user_message","ts":"t","content":"hi"}"#),
             cursor: crate::port::TailCursor::end(),
         });
-        assert_eq!(app.ext_statuses().get("vim_mode").unwrap(), &json!("normal"));
+        assert_eq!(
+            app.ext_statuses().get("vim_mode").unwrap(),
+            &json!("normal")
+        );
         // A session switch rebuilds the map from that session's log.
         app.set_active(SessionId::new("s2"), vec![]);
         assert!(
@@ -957,7 +1082,12 @@ mod tests {
     #[test]
     fn transcript_cache_reuses_until_events_change() {
         let mut app = app_with(vec![], "s1");
-        app.set_active(SessionId::new("s1"), vec![ev(r#"{"v":1,"type":"user_message","ts":"t","content":"one"}"#)]);
+        app.set_active(
+            SessionId::new("s1"),
+            vec![ev(
+                r#"{"v":1,"type":"user_message","ts":"t","content":"one"}"#,
+            )],
+        );
         let a = app.transcript_lines(80, None) as *const _;
         let b = app.transcript_lines(80, None) as *const _;
         assert_eq!(
@@ -973,7 +1103,10 @@ mod tests {
         });
         let d = app.transcript_lines(80, None) as *const _;
         assert_ne!(a, d, "a new event must invalidate the cache");
-        assert!(app.transcript_lines(80, None).iter().any(|l| l.to_string().contains("two")));
+        assert!(app
+            .transcript_lines(80, None)
+            .iter()
+            .any(|l| l.to_string().contains("two")));
     }
 
     #[test]
@@ -1081,7 +1214,11 @@ mod tests {
             app.press(Key::Char(c));
         }
         assert!(app.press(Key::Enter).is_empty());
-        assert_eq!(app.pending_name(), Some("../x"), "the name stays for editing");
+        assert_eq!(
+            app.pending_name(),
+            Some("../x"),
+            "the name stays for editing"
+        );
         // A bare `.` would land the log in the sessions root itself;
         // it is rejected like any path-shaped name.
         let mut app = App::new();

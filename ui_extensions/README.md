@@ -8,7 +8,7 @@ overrides entries by name. An `[ext] dir` in `config.toml` replaces
 the global layer for one run (used by the PTY smoke test and by
 tests).
 
-## References shipped here (ui-extension-plan stage 2)
+## References shipped here (ui-extension-plan stages 2 and 3)
 
 | Entry | Language | Capability | What it proves |
 | --- | --- | --- | --- |

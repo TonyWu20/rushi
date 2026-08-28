@@ -452,6 +452,7 @@ fn main() {
         };
         host.pump_ticks(&tick);
         host.poll_transforms();
+        host.poll_status();
 
         // 5. Draw.
         let mut cursor: Option<(u16, u16)> = None;

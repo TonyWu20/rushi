@@ -25,19 +25,27 @@ pub fn code_style() -> Style {
 }
 /// A ``` / ~~~ fence line, including its language tag.
 pub fn fence_style() -> Style {
-    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD)
 }
 /// A markdown heading line.
 pub fn heading_style() -> Style {
-    Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)
+    Style::default()
+        .fg(Color::Blue)
+        .add_modifier(Modifier::BOLD)
 }
 /// A blockquote line.
 pub fn quote_style() -> Style {
-    Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+    Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::DIM)
 }
 /// A list marker (`-`, `*`, `+`, `1.`).
 pub fn list_style() -> Style {
-    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD)
 }
 /// An inline `code` span, backticks included.
 pub fn inline_code_style() -> Style {
@@ -53,15 +61,21 @@ pub fn italic_style() -> Style {
 }
 /// The `[text]` part of a markdown link.
 pub fn link_style() -> Style {
-    Style::default().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED)
+    Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::UNDERLINED)
 }
 /// The `(url)` part of a markdown link.
 pub fn link_url_style() -> Style {
-    Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+    Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::DIM)
 }
 /// A JSON object key (the string before the `:`).
 pub fn json_key_style() -> Style {
-    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+    Style::default()
+        .fg(Color::Green)
+        .add_modifier(Modifier::BOLD)
 }
 /// A JSON string value.
 pub fn json_string_style() -> Style {
@@ -73,15 +87,21 @@ pub fn json_number_style() -> Style {
 }
 /// `true` / `false`.
 pub fn json_literal_style() -> Style {
-    Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)
+    Style::default()
+        .fg(Color::Blue)
+        .add_modifier(Modifier::BOLD)
 }
 /// `null`.
 pub fn json_null_style() -> Style {
-    Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+    Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::DIM)
 }
 /// JSON structural punctuation (`{ } [ ] , :`).
 pub fn json_punct_style() -> Style {
-    Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+    Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::DIM)
 }
 
 // ── markdown ───────────────────────────────────────────────────
@@ -149,8 +169,7 @@ fn is_heading(t: &str) -> bool {
         }
         break;
     }
-    (1..=6).contains(&hashes)
-        && (t[hashes..].starts_with(' ') || t[hashes..].is_empty())
+    (1..=6).contains(&hashes) && (t[hashes..].starts_with(' ') || t[hashes..].is_empty())
 }
 
 /// A list marker: `-`, `+`, or `*` followed by a space or end of
@@ -340,8 +359,7 @@ pub fn json_line(line: &str) -> Vec<Seg> {
         }
         if c.is_ascii_digit() || (c == '-' && i + 1 < n && cs[i + 1].is_ascii_digit()) {
             let mut j = i;
-            while j < n
-                && (cs[j].is_ascii_digit() || matches!(cs[j], '.' | '+' | '-' | 'e' | 'E'))
+            while j < n && (cs[j].is_ascii_digit() || matches!(cs[j], '.' | '+' | '-' | 'e' | 'E'))
             {
                 j += 1;
             }
@@ -407,14 +425,20 @@ mod tests {
         let mut fence = false;
         let open = markdown_line("```python", &mut fence);
         assert!(fence, "a fence opens the block");
-        assert!(open
-            .iter()
-            .any(|(s, t)| *t == "```" && *s == fence_style())
-            && open.iter().any(|(s, t)| *t == "python" && *s == fence_style()),
-            "{open:?}");
+        assert!(
+            open.iter().any(|(s, t)| *t == "```" && *s == fence_style())
+                && open
+                    .iter()
+                    .any(|(s, t)| *t == "python" && *s == fence_style()),
+            "{open:?}"
+        );
         let inside = markdown_line("x = 1", &mut fence);
         assert!(fence, "the block stays open");
-        assert_eq!(inside, vec![(code_style(), "x = 1".to_string())], "{inside:?}");
+        assert_eq!(
+            inside,
+            vec![(code_style(), "x = 1".to_string())],
+            "{inside:?}"
+        );
         let close = markdown_line("```", &mut fence);
         assert!(!fence, "a fence closes the block");
         assert!(close.iter().all(|(s, _)| *s == fence_style()), "{close:?}");
@@ -450,13 +474,20 @@ mod tests {
         // A lone dash that is not a marker stays plain.
         let plain = markdown_line("--verbose", &mut fence);
         assert_eq!(joined(&plain), "--verbose");
-        assert!(plain.iter().all(|(s, _)| *s == Style::default()), "{plain:?}");
+        assert!(
+            plain.iter().all(|(s, _)| *s == Style::default()),
+            "{plain:?}"
+        );
     }
 
     #[test]
     fn inline_tokens_are_styled_and_text_survives() {
         let s = markdown_line("a `code` **b** *i* [t](u) tail", &mut false);
-        assert_eq!(joined(&s), "a `code` **b** *i* [t](u) tail", "no text is lost");
+        assert_eq!(
+            joined(&s),
+            "a `code` **b** *i* [t](u) tail",
+            "no text is lost"
+        );
         let texts: Vec<&str> = s.iter().map(|(_, t)| t.as_str()).collect();
         assert_eq!(
             texts,
@@ -479,12 +510,22 @@ mod tests {
         // stray `**` never becomes a bold span, and the lone `*` pair
         // reads as italic (`*c*`).
         let s = inline_segments("a `b **c* [d] (e)");
-        assert_eq!(joined(&s), "a `b **c* [d] (e)", "unmatched markers never eat text");
+        assert_eq!(
+            joined(&s),
+            "a `b **c* [d] (e)",
+            "unmatched markers never eat text"
+        );
         let texts: Vec<&str> = s.iter().map(|(_, t)| t.as_str()).collect();
         let styles: Vec<Style> = s.iter().map(|(st, _)| *st).collect();
         assert_eq!(texts, vec!["a `b *", "*c*", " [d] (e)"], "{s:?}");
-        assert_eq!(styles, vec![Style::default(), italic_style(), Style::default()]);
-        assert!(!s.iter().any(|(st, _)| *st == bold_style()), "no bold from **");
+        assert_eq!(
+            styles,
+            vec![Style::default(), italic_style(), Style::default()]
+        );
+        assert!(
+            !s.iter().any(|(st, _)| *st == bold_style()),
+            "no bold from **"
+        );
     }
 
     #[test]
@@ -494,8 +535,8 @@ mod tests {
         assert_eq!(
             texts,
             vec![
-                "{", "\"a\"", ":", "1", ",", "\"s\"", ":", "\"x\"", ",", "\"t\"", ":", "true",
-                ",", "\"n\"", ":", "null", "}"
+                "{", "\"a\"", ":", "1", ",", "\"s\"", ":", "\"x\"", ",", "\"t\"", ":", "true", ",",
+                "\"n\"", ":", "null", "}"
             ],
             "{s:?}"
         );
@@ -547,7 +588,15 @@ mod tests {
         assert_eq!(
             texts,
             vec![
-                "{", "\"k\"", ":", r#""a\"b\n""#, ",", "\"m\"", ":", r#""c""#, "}"
+                "{",
+                "\"k\"",
+                ":",
+                r#""a\"b\n""#,
+                ",",
+                "\"m\"",
+                ":",
+                r#""c""#,
+                "}"
             ],
             "{s:?}"
         );
