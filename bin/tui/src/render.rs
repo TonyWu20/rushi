@@ -648,7 +648,12 @@ fn line_parts<'a>(line: &'a str, in_fence: bool, next_idx: &mut u32) -> Vec<Part
 /// inside a code fence. A miniature of the markdown fence rules:
 /// three or more leading backticks or tildes opens; a matching run
 /// of the same character with an empty info string closes; a fence
-/// opens only outside another fence.
+/// opens only outside another fence. Known divergence from the
+/// highlighter: it closes on any three-backtick line, tagged or
+/// not. For a tagged marker inside a fence the two disagree about
+/// the inline state; the visual render is identical, and span
+/// extraction and highlight only diverge for that pathological
+/// content (ui-extension-plan stage 3, LaTeX eligibility note).
 fn fence_states(content: &str) -> Vec<bool> {
     let content = content.trim_end_matches('\n');
     let lines: Vec<&str> = content.split('\n').collect();
