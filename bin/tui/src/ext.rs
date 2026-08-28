@@ -628,6 +628,13 @@ struct SlotShared {
     /// Set by [`ExtHost::poll_status`] when the status replies stop
     /// for the bound (ui-extension-plan stage 4 open items).
     pub status_stale: AtomicBool,
+    /// Set when the generation is dead, before the cache clear.
+    /// The reader checks it while holding the `lines_cache` lock,
+    /// so a reply that arrives between the dead mark and the cache
+    /// clear cannot re-populate the cleared cache (the check and the
+    /// insert share one lock scope; no lock nesting, no deadlock
+    /// with [`mark_dead`]).
+    pub dead: AtomicBool,
     pub tick: Mutex<TickClock>,
 }
 
@@ -678,6 +685,7 @@ impl ExtHost {
                     last_status_reply: Mutex::new(None),
                     gen_started: Mutex::new(Instant::now()),
                     status_stale: AtomicBool::new(false),
+                    dead: AtomicBool::new(false),
                     tick: Mutex::new(TickClock {
                         // The first tick fires on the first pump, so a
                         // status row shows as soon as the process is up.
@@ -951,6 +959,11 @@ impl ExtHost {
     /// render rebuild asks for nothing and waits for the new replies
     /// (ui-extension-plan stage 3 acceptance: one re-transform per
     /// block on a resize).
+    /// Re-send every transform request at the new width. A resize
+    /// that supersedes a request remaps its spans, so each span
+    /// re-transforms once per resize. Timed-out requests are
+    /// re-sent too: bounded waste, no display effect, because the
+    /// re-send is what the spans point at after the remap.
     pub fn on_resize(&self, width: usize) {
         let mut reg = self.inner.transform.lock().unwrap();
         let resends: Vec<(u64, TReq)> = reg
@@ -1294,12 +1307,16 @@ impl HostInner {
                     return;
                 };
                 // A dead extension's buffered replies must not
-                // re-populate the cache that [`mark_dead`] cleared
+                // re-populate the cache that [`mark_dead`] cleared.
+                // The mark check runs while holding the cache lock,
+                // so the mark and the insert cannot interleave
                 // (a stale render resurfacing after death).
-                if *slot.state.lock().unwrap() == SlotState::Dead {
+                let mut cache = slot.lines_cache.lock().unwrap();
+                if slot.dead.load(Ordering::SeqCst) {
                     return;
                 }
-                slot.lines_cache.lock().unwrap().insert(id, lines.clone());
+                cache.insert(id, lines.clone());
+                drop(cache);
                 self.replies_version.fetch_add(1, Ordering::SeqCst);
                 let _ = self.out_tx.try_send(ExtItem::LinesCached {
                     ext: slot.name.clone(),
@@ -1641,6 +1658,11 @@ fn monitor_thread(
 }
 
 fn mark_dead(slot: &Arc<SlotShared>, inner: &Arc<HostInner>, idx: usize) {
+    /// Set the dead mark before clearing the cache: a reader that
+    /// passes the mark check under the `lines_cache` lock inserts
+    /// before the clear; the clear then wipes the insert. A reader
+    /// that checks after the mark sees it and skips.
+    slot.dead.store(true, Ordering::SeqCst);
     *slot.state.lock().unwrap() = SlotState::Dead;
     // A dead extension cannot produce new replies. Its cached `lines`
     // replies are stale views: drop them so the built-in render
