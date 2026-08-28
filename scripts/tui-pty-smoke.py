@@ -16,6 +16,7 @@ import pty
 import select
 import signal
 import struct
+import subprocess
 import tempfile
 import termios
 import fcntl
@@ -706,15 +707,56 @@ def ext_statusline_real():
             pass
 
 
+def active_model_from_config(path):
+    """The [active] model from a config.toml, or None.
+
+    A tiny TOML scan: find the [active] section, then its model key.
+    No TOML dependency in the smoke script.
+    """
+    try:
+        with open(path) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return None
+    in_active = False
+    for line in lines:
+        s = line.strip()
+        if s.startswith("["):
+            in_active = s.strip("[] ") == "active"
+            continue
+        if in_active and s.startswith("model"):
+            i = s.find('"')
+            j = s.find('"', i + 1) if i >= 0 else -1
+            if 0 <= i and j > i:
+                return s[i + 1 : j]
+    return None
+
+
 def ext_statusline_repo():
     """The repo config on a real session: the global layer loads the
     reference extensions. The statusline shows the live dir, the git
     branch, the active model, and the usage totals from the real log.
-    """
+
+    The markers are computed from the checkout, not hardcoded: the
+    dir is the repo basename, the branch is the repo branch, and the
+    model is the config's [active] model. The row truncates the dir
+    to its last 16 chars, so the dir marker is the basename's last
+    12. A missing value drops its marker, so the case passes on any
+    branch or config."""
     cfg = REPO + "/config.toml"
     master, pid = spawn(SESSION, cfg)
     screen = Screen(24, 80)
-    markers = ["unix-harness", "git:main", "Qwen3.8-27B-NVFP4-RTX5090-DSPARK"]
+    markers = [os.path.basename(REPO)[-12:]]
+    branch = subprocess.run(
+        ["git", "-C", REPO, "branch", "--show-current"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if branch:
+        markers.append(f"git:{branch}")
+    model = active_model_from_config(cfg)
+    if model:
+        markers.append(model)
     try:
         deadline = time.time() + 10.0
         seen, _ = wait_markers(master, pid, screen, markers, deadline)

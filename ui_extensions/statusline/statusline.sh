@@ -66,7 +66,9 @@ usage_add() {
 }
 
 # Extract "in out" from one op line. jq when available; a sed
-# fallback for machines without it.
+# fallback for machines without it. The fallback anchors on the
+# flat `"usage":{...}` object, so tool_calls with nested objects
+# earlier in the line cannot fragment the match.
 usage_pair() {
   local line=$1
   if [ "$USE_JQ" = 1 ]; then
@@ -76,11 +78,14 @@ usage_pair() {
       | .event.usage // empty
       | "\(.input_tokens // 0) \(.output_tokens // 0)"
     ' 2>/dev/null
-  else
-    printf '%s' "$line" | tr '}' '\n' | sed -n \
-      -e 's/.*"type":"assistant_message".*"input_tokens":\([0-9]*\).*"output_tokens":\([0-9]*\).*/\1 \2/p' \
-      | head -n 1
+    return 0
   fi
+  local in out
+  in=$(printf '%s' "$line" | sed -n \
+    's/.*"usage":{[^}]*"input_tokens":\([0-9]*\).*/\1/p')
+  out=$(printf '%s' "$line" | sed -n \
+    's/.*"usage":{[^}]*"output_tokens":\([0-9]*\).*/\1/p')
+  [ -n "$in" ] && [ -n "$out" ] && printf '%s %s\n' "$in" "$out"
 }
 
 # The ext_status values of the tick, compact "k=v" text. The row
