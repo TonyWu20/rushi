@@ -54,6 +54,12 @@ const STOP_GRACE: Duration = Duration::from_secs(3);
 const PROTOCOL_V: u64 = 1;
 /// Default tick cadence for status extensions.
 const DEFAULT_TICK_MS: u64 = 1000;
+/// The first reply of a generation gets a wider window than the
+/// steady-state bound: a cold start (a git spawn on a cold cache)
+/// can exceed 3 x tick_ms without the extension being stuck. After
+/// the first valid reply, the steady bound applies from the last
+/// reply (ui-extension-plan stage 4 open items: status staleness).
+const INITIAL_STATUS_GRACE: Duration = Duration::from_secs(10);
 /// The capability names a manifest may list.
 pub const CAPS: &[&str] = &["render", "status", "transform", "append", "notify"];
 
@@ -914,9 +920,11 @@ impl ExtHost {
 
     /// Mark a status extension stale: no valid `status` reply for
     /// three tick intervals (3 x tick_ms) drops the row to a stale
-    /// hint. A valid reply or a restart clears it. The bound is the
-    /// status staleness of docs/ui-extension.md section 11
-    /// (ui-extension-plan stage 4).
+    /// hint. A valid reply or a restart clears it. The first reply
+    /// of a generation gets the wider initial grace: a cold start
+    /// (a git spawn on a cold cache) is not a stuck extension. The
+    /// bound is the status staleness of docs/ui-extension.md
+    /// section 11 (ui-extension-plan stage 4).
     pub fn poll_status(&self) {
         let now = Instant::now();
         for s in &self.inner.slots {
@@ -929,11 +937,17 @@ impl ExtHost {
             ) {
                 continue;
             }
+            let has_reply = s.last_status_reply.lock().unwrap().is_some();
             let since = {
                 let l = *s.last_status_reply.lock().unwrap();
                 l.unwrap_or_else(|| *s.gen_started.lock().unwrap())
             };
-            let bound = Duration::from_millis(s.manifest.tick_ms.saturating_mul(3));
+            let steady = Duration::from_millis(s.manifest.tick_ms.saturating_mul(3));
+            let bound = if has_reply {
+                steady
+            } else {
+                steady.max(INITIAL_STATUS_GRACE)
+            };
             if now.duration_since(since) > bound {
                 s.status_stale.store(true, Ordering::SeqCst);
             }
@@ -2532,6 +2546,38 @@ exec sleep 30
         assert!(
             matches!(host.status_row(), StatusRow::DeadHint(h) if h.contains("status stale")),
             "the stale hint shows: {:?}",
+            host.status_row()
+        );
+        host.stop();
+    }
+
+    #[test]
+    fn initial_status_grace_covers_a_slow_first_reply() {
+        let tmp = TempDir::new().unwrap();
+        // The first valid reply lands 4 s after start: past the
+        // steady bound of 3 x tick_ms (3 s), but inside the 10 s
+        // initial grace. A cold start is not a stuck extension, so
+        // the row must not drop to the stale hint.
+        let script = "read -r line\nsleep 4\nprintf '{\"v\":1,\"op\":\"status\",\"lines\":[[\"late\",null]]}\\n'\nexec sleep 30\n";
+        let manifest = "[ext]\ncommand = \"bash\"\nargs = [\"late.sh\"]\ncaps = [\"status\"]\ntick_ms = 1000\nprotocol_v = 1\n";
+        let host = host_with(&tmp, "late", manifest, script);
+        host.start();
+        let empty = std::collections::HashMap::new();
+        for _ in 0..5 {
+            let p = crate::ext::TickPayload {
+                width: 80,
+                session: Some("s"),
+                model: None,
+                loop_running: false,
+                statuses: &empty,
+            };
+            host.pump_ticks(&p);
+            std::thread::sleep(Duration::from_millis(1000));
+        }
+        host.poll_status();
+        assert!(
+            matches!(host.status_row(), StatusRow::Lines(ref l) if l[0].text == "late"),
+            "the late first reply shows: {:?}",
             host.status_row()
         );
         host.stop();

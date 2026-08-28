@@ -110,7 +110,12 @@ fn main() {
     let dir = live_dir();
     let mut in_total: u64 = 0;
     let mut out_total: u64 = 0;
-    let mut git: (String, u64, Option<Instant>) = (String::new(), 0, None);
+    // The git cache starts "fresh": the first tick skips the git
+    // spawn and the row shows git:none; the TTL refresh lands about
+    // 3 s in. A cold git can take seconds, and the first tick reply
+    // must stay fast (the host gives a generation 10 s to its
+    // first reply, but the row still waits on it).
+    let mut git: (String, u64, Option<Instant>) = (String::new(), 0, Some(Instant::now()));
 
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();

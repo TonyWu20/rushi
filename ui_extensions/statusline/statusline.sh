@@ -27,10 +27,14 @@ in_total=0
 out_total=0
 
 # Git state cache, TTL 3 s. SECONDS is a bash builtin counter, so the
-# TTL check spawns nothing.
+# TTL check spawns nothing. The cache starts "fresh": the first tick
+# skips the git spawn and the row shows git:none; the refresh lands
+# by the fourth tick. A cold git can take seconds on a cold cache,
+# and the first tick reply must stay fast (the host gives a
+# generation 10 s to its first reply, but the row still waits on it).
 git_branch=""
 git_dirty=0
-git_ts=-10
+git_ts=$SECONDS
 GIT_TTL=3
 
 git_refresh() {

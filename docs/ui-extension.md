@@ -242,7 +242,11 @@ where the core decides the sequence and an entry never claims a slot
   capped map through the tick payload
 - **Per-op timeouts beyond transform: a status staleness bound.** A
   status extension that gives no valid reply for three tick intervals
-  (3 x tick_ms) drops its row to a stale hint. The transform 2 s
+  (3 x tick_ms) drops its row to a stale hint. The bound runs from
+  the last valid reply. The first reply of a generation gets a wider
+  10 s window: a cold start (a git spawn on a cold cache) is not a
+  stuck extension. The reference statuslines defer their first git
+  refresh so the first tick reply stays fast. The transform 2 s
   bound is unchanged
 - **`order.toml`: declined for now.** The composed order stays
   alphabetical by entry name within a layer, global layer first. An
