@@ -1658,10 +1658,10 @@ fn monitor_thread(
 }
 
 fn mark_dead(slot: &Arc<SlotShared>, inner: &Arc<HostInner>, idx: usize) {
-    /// Set the dead mark before clearing the cache: a reader that
-    /// passes the mark check under the `lines_cache` lock inserts
-    /// before the clear; the clear then wipes the insert. A reader
-    /// that checks after the mark sees it and skips.
+    // Set the dead mark before clearing the cache: a reader that
+    // passes the mark check under the `lines_cache` lock inserts
+    // before the clear; the clear then wipes the insert. A reader
+    // that checks after the mark sees it and skips.
     slot.dead.store(true, Ordering::SeqCst);
     *slot.state.lock().unwrap() = SlotState::Dead;
     // A dead extension cannot produce new replies. Its cached `lines`
