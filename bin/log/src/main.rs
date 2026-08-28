@@ -1,8 +1,11 @@
 #![deny(clippy::todo, clippy::unimplemented, clippy::unreachable)]
 
+mod logline;
+use logline::LogLine;
+
 use clap::Parser;
-use std::fs::{self, OpenOptions};
-use std::io::{self, BufRead, Write};
+use std::fs;
+use std::io::{self, BufRead};
 use std::path::PathBuf;
 
 /// Append events to the session log
@@ -125,26 +128,13 @@ fn main() {
         }
     }
 
-    // Append all validated lines to the log
-    let mut file = match OpenOptions::new()
-        .create(true)
-        .append(true)
-        .write(true)
-        .open(&log_path)
-    {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("Error: cannot open log file {}: {e}", log_path.display());
-            std::process::exit(1);
-        }
-    };
-
+    // One locked single-write append per line (FT-005). `LogLine` is
+    // the only type that may write the session log.
     for line in &lines {
-        writeln!(file, "{}", line).map_err(|e| {
+        if let Err(e) = LogLine::from_json(line).commit(&log_path) {
             eprintln!("Error: cannot write to log: {e}");
             std::process::exit(1);
-        })
-        .unwrap();
+        }
     }
 }
 

@@ -1,8 +1,11 @@
 #![deny(clippy::todo, clippy::unimplemented, clippy::unreachable)]
 
+mod logline;
+use logline::LogLine;
+
 use clap::Parser;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
+use std::fs;
+use std::io::{self, Read};
 use std::path::PathBuf;
 
 /// Append a user_message event to a session log and run the agent loop
@@ -87,21 +90,10 @@ fn main() {
         }
     }
 
-    let mut file = match OpenOptions::new()
-        .create(true)
-        .append(true)
-        .write(true)
-        .open(&log_path)
-    {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("Error: cannot open log file {}: {e}", log_path.display());
-            std::process::exit(1);
-        }
-    };
-
+    // One locked single-write append (FT-005). `LogLine` is the only
+    // type that may write the session log.
     let line = serde_json::to_string(&event).unwrap();
-    if let Err(e) = writeln!(file, "{}", line) {
+    if let Err(e) = LogLine::from_json(&line).commit(&log_path) {
         eprintln!("Error: cannot write to log: {e}");
         std::process::exit(1);
     }

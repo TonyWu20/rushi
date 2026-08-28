@@ -209,7 +209,7 @@ This is one concrete implementation below `SessionPort`. It can change completel
 // FileSessionPort: sessions live as directories; the loop is an opaque command.
 // - list_sessions: scan session_root for subdirs containing an event log
 // - read_events:   tail <session_dir>/events.jsonl
-// - append_event:  O_APPEND one line to events.jsonl
+// - append_event:  schema-checked, then one locked write(2) via LogLine (FT-005)
 // - spawn_loop:    run [loop].command with [loop].args and pass the session id
 ```
 
