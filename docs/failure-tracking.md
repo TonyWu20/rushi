@@ -133,3 +133,70 @@ suites (2 tests each) pass.
 
 **Residual risk:** `flock` needs local storage. The sessions root
 is local in this deployment.
+
+## FT-006 — Launch panic on an empty `assistant_message` content
+
+**Symptom:** The TUI exits at startup, one second in, in a tmux
+pane. The stderr holds a panic:
+`thread 'main' panicked at bin/tui/src/render.rs:242:41: range
+start index 1 out of range for slice of length 0`. Observed on the
+better-ui session, 2026-08-28, after the user put the reference
+extension binaries on `PATH`.
+
+**Root cause:** The better-ui log holds an `assistant_message` with
+an empty `content` string (log index 925: the model emitted only a
+tool call, no text). The `AssistantMessage` arm of `event_lines`
+(`bin/tui/src/render.rs`) builds `wrapped` as `Vec::new()` for an
+empty content, then slices `&wrapped[1..]` without a guard. An
+empty-slice start of 1 panics on a zero-length vec. The cap window
+(`TRANSCRIPT_EVENT_CAP` 2000) covers the whole log (1302 events),
+so the first draw of every launch renders that event and panics.
+The `UserMessage` and `Error` arms carry the same unguarded slice;
+their `wrapped` cannot be empty in practice (a non-empty default
+string, a one-line wrap), so only the `AssistantMessage` arm
+fires.
+
+**Fix:** Guard all three `guttered(&wrapped[1..], ...)` call sites
+with `if !wrapped.is_empty()`. An empty `wrapped` leaves the header
+row alone, with no body row.
+
+**Verification:** Regression test
+`render::tests::empty_assistant_content_renders_header_without_panic`
+(an empty content and a whitespace-only content, both with tool
+calls) passes. All 173 tui tests pass. End-to-end in a tmux pane
+under the devshell: `tui better-ui` renders the full log, accepts
+key input, and quits cleanly.
+
+## FT-007 — Launch refusal when the reference extension binary is
+absent from `PATH`
+
+**Symptom:** `tui better-ui` exits at once with `tui: ext manifest
+.../mermaid/ext.toml: command mermaid-ext not found` (exit 1).
+Observed 2026-08-28: the user's devshell `PATH` lacks the
+reference extension binary dirs. The TUI is unstartable in that
+shell until the dirs enter `PATH`.
+
+**Root cause:** The `mermaid` manifest names `mermaid-ext`, a
+binary built under `ui_extensions/mermaid/target/debug`. The
+discovery-time refusal is documented design
+(docs/ui-extension.md section 3: a broken command refuses the
+start and names the file). The user's nix devshell
+(`~/programming/flake.nix`) adds no extension dirs. `scripts/
+ext-env.sh` prints the dirs, but nothing wires them into a
+persistent shell.
+
+**Fix:** A repo `.envrc` (direnv) puts the four built extension
+binary dirs on `PATH` on entry into the directory. An absent
+target dir degrades silently: the fail-loud message still names
+the missing command.
+
+**Verification:** `sh -c '. ./.envrc; command -v mermaid-ext'`
+resolves `ui_extensions/mermaid/target/debug/mermaid-ext`. All
+four `target/debug` dirs land on `PATH`. The tmux launch with the
+`.envrc` `PATH` shows no discovery refusal and no panic (the
+FT-006 fix).
+
+**Residual risk:** Shells without direnv still need a manual
+`PATH` export (`scripts/ext-env.sh`). The design keeps the
+refusal: a missing command stays a start-time error, not a
+runtime skip.

@@ -181,7 +181,11 @@ fn event_lines(
             }
             out.push(Line::from(spans));
             // The content is displayed in full: no cap, no hint.
-            out.extend(guttered(&wrapped[1..], &gutter));
+            // An empty `wrapped` has no body line; the header stands
+            // alone (an empty-slice `wrapped[1..]` panics).
+            if !wrapped.is_empty() {
+                out.extend(guttered(&wrapped[1..], &gutter));
+            }
         }
         EventKind::AssistantMessage => {
             let content = e.get_str("content").unwrap_or("").to_string();
@@ -212,7 +216,13 @@ fn event_lines(
                 header.extend(first.spans.iter().cloned());
             }
             out.push(Line::from(header));
-            out.extend(guttered(&wrapped[1..], &gutter));
+            // An empty content (a model output that carries only tool
+            // calls) has no body line; the header stands alone.
+            // FT-006: an unguarded `wrapped[1..]` panicked on the
+            // first launch draw.
+            if !wrapped.is_empty() {
+                out.extend(guttered(&wrapped[1..], &gutter));
+            }
         }
         EventKind::ToolCall => {
             let name = e.get_str("name").unwrap_or("?");
@@ -337,7 +347,11 @@ fn event_lines(
             }
             out.push(Line::from(spans));
             // The whole message is displayed, multi-line included.
-            out.extend(guttered(&wrapped[1..], &gutter));
+            // An empty `wrapped` has no body line; the header stands
+            // alone (an empty-slice `wrapped[1..]` panics).
+            if !wrapped.is_empty() {
+                out.extend(guttered(&wrapped[1..], &gutter));
+            }
         }
         EventKind::UnknownType => {
             let ty = e.type_name().unwrap_or("?").to_string();
@@ -1271,6 +1285,30 @@ mod tests {
         assert!(
             !joined.contains("\"exit_code\""),
             "raw JSON leaked into the result view: {joined}"
+        );
+    }
+
+    #[test]
+    fn empty_assistant_content_renders_header_without_panic() {
+        // FT-006: a model output that carries only tool calls has an
+        // empty content string. The launch draw must not panic on the
+        // `wrapped[1..]` slice of an empty vec.
+        let evs = vec![
+            Event::parse_line(
+                r#"{"v":1,"type":"assistant_message","ts":"t","content":"","tool_calls":[{"id":"c1","name":"bash","arguments":{"command":"ls"}}]}"#,
+            )
+            .unwrap(),
+            Event::parse_line(
+                r#"{"v":1,"type":"assistant_message","ts":"t","content":"\n\n","tool_calls":[{"id":"c2","name":"read","arguments":{"path":"f"}}]}"#,
+            )
+            .unwrap(),
+        ];
+        let app = app_with_session(evs);
+        let joined = join(&build_transcript_lines(&app, 80, None));
+        assert!(joined.contains("assistant"), "header missing: {joined}");
+        assert!(
+            joined.contains("tool call"),
+            "the tool-call hint must survive the empty content: {joined}"
         );
     }
 
