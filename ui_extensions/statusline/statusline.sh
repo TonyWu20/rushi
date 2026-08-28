@@ -26,28 +26,49 @@ command -v jq >/dev/null 2>&1 && USE_JQ=1
 in_total=0
 out_total=0
 
-# Git state cache, TTL 3 s. SECONDS is a bash builtin counter, so the
-# TTL check spawns nothing. The cache starts "fresh": the first tick
-# skips the git spawn and the row shows git:none; the refresh lands
-# by the fourth tick. A cold git can take seconds on a cold cache,
-# and the first tick reply must stay fast (the host gives a
-# generation 10 s to its first reply, but the row still waits on it).
+# Git state cache, TTL 3 s. The refresh runs in a background job:
+# a tick reply never waits on a slow git (a cold cache can take
+# seconds, and the staleness bound is 3 x tick_ms). The job writes
+# one "branch dirty" line to a state file; the next tick loads it.
+# The row shows the last loaded state until then, git:none at start.
 git_branch=""
 git_dirty=0
 git_ts=$SECONDS
+git_job_pid=""
 GIT_TTL=3
+# The state file lives in a temp file, not the entry dir: the entry
+# dir is the user's checkout, and the host chdirs the script there.
+GIT_STATE="$(mktemp 2>/dev/null)"
+[ -n "$GIT_STATE" ] || GIT_STATE="${EXT_DIR:-.}/.git_state"
 
 git_refresh() {
   local now=$SECONDS
   if (( now - git_ts < GIT_TTL )); then
     return
   fi
+  # A running job already owns the refresh; one job at a time.
+  [ -n "$git_job_pid" ] && kill -0 "$git_job_pid" 2>/dev/null && return
   git_ts=$now
-  local b d
-  b=$(git -C "$DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
-  d=$(git -C "$DIR" status --porcelain 2>/dev/null | wc -l | tr -d '[:space:]')
-  [ -n "$b" ] && git_branch="$b"
-  [ -n "$d" ] && git_dirty="$d"
+  # A background job: the tick reply does not wait on git. The job
+  # dies with the process group on quit.
+  (
+    local b d
+    b=$(git -C "$DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    d=$(git -C "$DIR" status --porcelain 2>/dev/null | wc -l | tr -d '[:space:]')
+    printf '%s %s\n' "${b:-none}" "${d:-0}" > "$GIT_STATE"
+  ) &
+  git_job_pid=$!
+}
+
+git_load() {
+  # Load the newest state file without waiting on its writer.
+  local st
+  st=$(cat "$GIT_STATE" 2>/dev/null) || return 0
+  [ -n "$st" ] || return 0
+  git_branch=${st%% *}
+  git_dirty=${st##* }
+  [ "$git_branch" = "none" ] && git_branch=""
+  [ "$git_dirty" = "0" ] && git_dirty=0
 }
 
 # JSON-string escape without spawning a process. Covers the values
@@ -147,6 +168,7 @@ emit_status() {
 on_tick() {
   # $1 = the tick line
   git_refresh
+  git_load
   # Tick parsing is pure bash: the tick payload is small and the row
   # rebuilds once per second. `width` is the terminal width; terminals
   # under 100 cols get the two-line layout.

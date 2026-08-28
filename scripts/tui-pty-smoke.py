@@ -14,6 +14,7 @@ raw stream text is fragmented. The replayed grid is the real display.
 import os
 import pty
 import select
+import shutil
 import signal
 import struct
 import subprocess
@@ -169,7 +170,7 @@ class Screen:
         return "\n".join("".join(row).rstrip() for row in self.grid)
 
 
-def spawn(session=SESSION, config=None):
+def spawn(session=SESSION, config=None, prepend_path=None):
     master, slave = pty.openpty()
     winsz = struct.pack("HHHH", 24, 80, 0, 0)
     fcntl.ioctl(master, termios.TIOCSWINSZ, winsz)
@@ -183,6 +184,10 @@ def spawn(session=SESSION, config=None):
         os.dup2(slave, 2)
         for fd in (master, slave):
             os.close(fd)
+        if prepend_path:
+            os.environ["PATH"] = (
+                prepend_path + os.pathsep + os.environ.get("PATH", "")
+            )
         os.execv(BIN, [BIN, session, "--config", cfg])
     os.close(slave)
     return master, pid
@@ -803,6 +808,87 @@ def ext_statusline_repo():
             pass
 
 
+def ext_statusline_slowgit():
+    """The reference statusline under a slow git.
+
+    A PATH wrapper makes every git call take 4 s (a cold cache).
+    A tick reply must never wait on git: the row shows within 4 s,
+    and the stale hint never appears while a refresh is in flight
+    (a synchronous tick handler crosses the 3 x tick_ms bound and
+    shows the hint, which is the regression this case guards).
+    """
+    tmp = tempfile.mkdtemp(prefix="tui-ext-slowgit-")
+    cfg, sessions = layer_config(tmp, REPO + "/ui_extensions", active_model="smoke-model")
+    seed_session(sessions, EXT_SESSION, seed_events())
+    bindir = tmp + "/slowbin"
+    os.makedirs(bindir)
+    real_git = shutil.which("git")
+    if not real_git:
+        print("FAIL ext-statusline-slowgit: no system git for the wrapper")
+        return False
+    with open(bindir + "/git", "w") as f:
+        f.write('#!/bin/sh\nsleep 4\nexec "' + real_git + '" "$@"\n')
+    os.chmod(bindir + "/git", 0o755)
+    stats_marker = "smoke-model in:125 out:55 sum:180"
+    master, pid = spawn(EXT_SESSION, cfg, prepend_path=bindir)
+    screen = Screen(24, 80)
+    raw = b""
+    row_at = None
+    stale_at = None
+    t0 = time.time()
+    end = t0 + 12.0
+    try:
+        while time.time() < end:
+            r, _, _ = select.select([master], [], [], 0.25)
+            if r:
+                try:
+                    chunk = os.read(master, 65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                raw += chunk
+                screen.feed(chunk)
+            if not alive(pid):
+                print("FAIL ext-statusline-slowgit: process died during startup")
+                return False
+            text = screen.text()
+            if row_at is None and stats_marker in text:
+                row_at = time.time() - t0
+            if b"status stale" in raw:
+                stale_at = time.time() - t0
+                break
+        if stale_at is not None:
+            print(f"FAIL ext-statusline-slowgit: stale hint at {stale_at:.1f} s; a tick reply must not wait on a slow git")
+            return False
+        if row_at is None:
+            print("FAIL ext-statusline-slowgit: the status row never showed")
+            return False
+        if row_at > 4.0:
+            print(f"FAIL ext-statusline-slowgit: the row took {row_at:.1f} s; the first tick reply must stay fast")
+            return False
+        os.write(master, b"q")
+        pump(master, 0.4, screen)
+        os.write(master, b"q")
+        deadline = time.time() + 4.0
+        while time.time() < deadline and alive(pid):
+            pump(master, 0.2, screen)
+        if alive(pid):
+            os.kill(pid, signal.SIGKILL)
+        reap(pid)
+        orphans = settled_orphans(REPO + "/ui_extensions")
+        if orphans:
+            print(f"FAIL ext-statusline-slowgit: orphan layer processes: {orphans}")
+            return False
+        print(f"OK ext-statusline-slowgit: row at {row_at:.1f} s, no stale hint over the slow git (12 s window)")
+        return True
+    finally:
+        try:
+            os.close(master)
+        except OSError:
+            pass
+
+
 def ext_tool_result_kill():
     """Kill the tool_result renderer: the built-in render returns.
 
@@ -1064,6 +1150,7 @@ def main():
     ok &= ext_append_reject()
     ok &= ext_statusline_real()
     ok &= ext_statusline_repo()
+    ok &= ext_statusline_slowgit()
     ok &= ext_tool_result_kill()
     ok &= ext_mermaid()
     ok &= ext_rus()

@@ -1359,8 +1359,15 @@ impl HostInner {
                 let mut last = slot.last_status.lock().unwrap();
                 // Unchanged content: no version bump. The tick reply
                 // is usually identical, and a bump would rewrap the
-                // whole transcript once per tick.
+                // whole transcript once per tick. The staleness
+                // clock still advances: a live reply keeps the
+                // extension fresh even when the row text does not
+                // change (a stable row freezing the clock would
+                // show the stale hint on a live extension).
                 if *last == Some(lines.clone()) {
+                    drop(last);
+                    *slot.last_status_reply.lock().unwrap() = Some(Instant::now());
+                    slot.status_stale.store(false, Ordering::SeqCst);
                     return;
                 }
                 *last = Some(lines.clone());
@@ -2578,6 +2585,49 @@ exec sleep 30
         assert!(
             matches!(host.status_row(), StatusRow::Lines(ref l) if l[0].text == "late"),
             "the late first reply shows: {:?}",
+            host.status_row()
+        );
+        host.stop();
+    }
+
+    #[test]
+    fn unchanged_status_replies_advance_the_staleness_clock() {
+        let tmp = TempDir::new().unwrap();
+        // The extension answers every tick with the same line. A
+        // stable row must keep the extension fresh: the staleness
+        // clock advances on every live reply, so the hint never
+        // shows. Before the fix, the unchanged-content early return
+        // skipped the clock update, and the hint fired 3 s after
+        // the first reply even though the extension was alive.
+        let script = r#"while IFS= read -r line; do
+  case "$line" in
+    *'"op":"tick"'*)
+      printf '{"v":1,"op":"status","lines":[["same",null]]}\n'
+      ;;
+  esac
+done
+"#;
+        let manifest = "[ext]\ncommand = \"bash\"\nargs = [\"same.sh\"]\ncaps = [\"status\"]\ntick_ms = 100\nprotocol_v = 1\n";
+        let host = host_with(&tmp, "same", manifest, script);
+        host.start();
+        let empty = std::collections::HashMap::new();
+        // Twelve 100 ms ticks: 1.2 s of identical replies. Far past
+        // the 300 ms steady bound, measured from the first reply.
+        for _ in 0..12 {
+            let p = crate::ext::TickPayload {
+                width: 80,
+                session: Some("s"),
+                model: None,
+                loop_running: false,
+                statuses: &empty,
+            };
+            host.pump_ticks(&p);
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        host.poll_status();
+        assert!(
+            matches!(host.status_row(), StatusRow::Lines(ref l) if l[0].text == "same"),
+            "a stable row keeps the extension fresh: {:?}",
             host.status_row()
         );
         host.stop();

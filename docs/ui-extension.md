@@ -244,10 +244,11 @@ where the core decides the sequence and an entry never claims a slot
   status extension that gives no valid reply for three tick intervals
   (3 x tick_ms) drops its row to a stale hint. The bound runs from
   the last valid reply. The first reply of a generation gets a wider
-  10 s window: a cold start (a git spawn on a cold cache) is not a
-  stuck extension. The reference statuslines defer their first git
-  refresh so the first tick reply stays fast. The transform 2 s
-  bound is unchanged
+  10 s window: a cold start is not a stuck extension. A slow reply is
+  not a stuck one either: a tick reply must never wait on slow
+  external work. The reference statuslines refresh git in the
+  background (a bash job, a Rust thread) and merge the result into
+  the next tick. The transform 2 s bound is unchanged
 - **`order.toml`: declined for now.** The composed order stays
   alphabetical by entry name within a layer, global layer first. An
   explicit host sequence file is the escape valve if alphabetical

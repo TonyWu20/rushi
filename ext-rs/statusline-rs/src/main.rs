@@ -22,11 +22,15 @@
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// The git cache TTL: a tick never spawns git more than once per
 /// interval (the design's tick-cost note).
 const GIT_TTL: Duration = Duration::from_secs(3);
+
+/// The shared git state: branch, dirty count, last refresh time.
+type GitCache = (String, u64, Option<Instant>);
 
 /// The live dir: the config dir, where the TUI and the loop operate
 /// ($CONFIG is exported by the host; unset means the current dir).
@@ -41,43 +45,56 @@ fn live_dir() -> String {
 }
 
 /// Refresh the git branch + dirty count. The TTL check spawns
-/// nothing; the refresh spawns git twice at most per 3 s.
-fn git_refresh(dir: &str, cache: &mut (String, u64, Option<Instant>)) {
+/// nothing; the refresh runs in a background thread, so a tick
+/// reply never waits on a slow git (a cold cache can take seconds,
+/// and the staleness bound is 3 x tick_ms). The thread writes the
+/// shared cache; the next tick shows the last finished state.
+fn git_refresh(dir: &str, cache: &Arc<Mutex<GitCache>>) {
     let now = Instant::now();
-    if cache
-        .2
-        .map(|last| now.duration_since(last) < GIT_TTL)
-        .unwrap_or(false)
-    {
+    let stale = {
+        let c = cache.lock().unwrap();
+        c.2
+            .map(|last| now.duration_since(last) >= GIT_TTL)
+            .unwrap_or(true)
+    };
+    if !stale {
         return;
     }
-    cache.2 = Some(now);
-    let branch = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .arg("rev-parse")
-        .arg("--abbrev-ref")
-        .arg("HEAD")
-        .output();
-    if let Ok(b) = branch {
-        if b.status.success() {
-            cache.0 = String::from_utf8_lossy(&b.stdout).trim().to_string();
-        }
+    {
+        let mut c = cache.lock().unwrap();
+        c.2 = Some(now);
     }
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .arg("status")
-        .arg("--porcelain")
-        .output();
-    if let Ok(s) = status {
-        if s.status.success() {
-            cache.1 = String::from_utf8_lossy(&s.stdout)
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .count() as u64;
+    let dir = dir.to_string();
+    let cache = cache.clone();
+    std::thread::spawn(move || {
+        let branch = Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .arg("rev-parse")
+            .arg("--abbrev-ref")
+            .arg("HEAD")
+            .output();
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .arg("status")
+            .arg("--porcelain")
+            .output();
+        let mut c = cache.lock().unwrap();
+        if let Ok(b) = branch {
+            if b.status.success() {
+                c.0 = String::from_utf8_lossy(&b.stdout).trim().to_string();
+            }
         }
-    }
+        if let Ok(s) = status {
+            if s.status.success() {
+                c.1 = String::from_utf8_lossy(&s.stdout)
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .count() as u64;
+            }
+        }
+    });
 }
 
 /// The ext_status values of the tick, compact `k=v` text. The row
@@ -111,11 +128,11 @@ fn main() {
     let mut in_total: u64 = 0;
     let mut out_total: u64 = 0;
     // The git cache starts "fresh": the first tick skips the git
-    // spawn and the row shows git:none; the TTL refresh lands about
-    // 3 s in. A cold git can take seconds, and the first tick reply
-    // must stay fast (the host gives a generation 10 s to its
-    // first reply, but the row still waits on it).
-    let mut git: (String, u64, Option<Instant>) = (String::new(), 0, Some(Instant::now()));
+    // spawn and the row shows git:none; the first TTL refresh lands
+    // about 3 s in, on a background thread. A tick reply never
+    // waits on a slow git (the staleness bound is 3 x tick_ms).
+    let git: Arc<Mutex<GitCache>> =
+        Arc::new(Mutex::new((String::new(), 0, Some(Instant::now()))));
 
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -149,8 +166,11 @@ fn main() {
                 }
             }
             Some("tick") => {
-                git_refresh(&dir, &mut git);
-                let (branch, dirty) = (&git.0, git.1);
+                git_refresh(&dir, &git);
+                let (branch, dirty) = {
+                    let c = git.lock().unwrap();
+                    (c.0.clone(), c.1)
+                };
                 let width = v.get("width").and_then(|w| w.as_u64()).unwrap_or(80) as usize;
                 let sess = v
                     .get("session")
@@ -170,7 +190,7 @@ fn main() {
                 } else {
                     String::new()
                 };
-                let branch_s = if branch.is_empty() { "none" } else { branch };
+                let branch_s: &str = if branch.is_empty() { "none" } else { &branch };
                 let totals = format!("in:{in_total} out:{out_total} sum:{}", in_total + out_total);
                 let lines: Vec<(String, Value)> = if width >= 100 {
                     let mut l = format!(
