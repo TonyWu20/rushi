@@ -31,6 +31,7 @@ EXT_SESSION = "tui-test-ext"
 MERMAID_EXT_DIR = REPO + "/ui_extensions/mermaid"
 EXT_RS_STATUSLINE = REPO + "/ext-rs/statusline-rs"
 EXT_RS_TOOL_RESULT = REPO + "/ext-rs/tool_result-rs"
+EXT_RS_NOTIFY = REPO + "/ext-rs/notify-rs"
 WHEEL_UP = b"\x1b[<64;5;5M"  # SGR mouse: wheel up at col 5 row 5
 
 
@@ -49,6 +50,7 @@ def setup_ext_bins():
         (MERMAID_EXT_DIR, "mermaid-ext"),
         (EXT_RS_STATUSLINE, "statusline-ext"),
         (EXT_RS_TOOL_RESULT, "tool_result-ext"),
+        (EXT_RS_NOTIFY, "notify-ext"),
     ]
     for ext_dir, bin_name in ext_packages:
         bin_dir = ext_dir + "/target/debug"
@@ -568,6 +570,22 @@ def procs_with_cwd_under(prefix):
     return pids
 
 
+def settled_orphans(prefix, seconds=4.0):
+    """Orphans after a settle window.
+
+    The host's stop is SIGTERM, then SIGKILL: a signalled extension
+    dies a moment after the scan, not before it. A one-shot scan
+    false-positives on the dying set. Retry until the pids clear or
+    the window runs out; pids that survive the window are real
+    orphans (they survived SIGTERM and SIGKILL)."""
+    end = time.time() + seconds
+    while True:
+        pids = procs_with_cwd_under(prefix)
+        if not pids or time.time() >= end:
+            return pids
+        time.sleep(0.5)
+
+
 def wait_markers(master, pid, screen, markers, deadline):
     """Pump until every marker is seen on screen or the deadline."""
     seen = set()
@@ -641,7 +659,7 @@ def ext_statusline_real():
             reap(pid)
             return False
         reap(pid)
-        orphans = procs_with_cwd_under(REPO + "/ui_extensions")
+        orphans = settled_orphans(REPO + "/ui_extensions")
         if orphans:
             print(f"FAIL ext-statusline-real: orphan layer processes: {orphans}")
             for p in orphans:
@@ -725,7 +743,7 @@ def ext_statusline_repo():
             reap(pid)
             return False
         reap(pid)
-        orphans = procs_with_cwd_under(REPO + "/ui_extensions")
+        orphans = settled_orphans(REPO + "/ui_extensions")
         if orphans:
             print(f"FAIL ext-statusline-repo: orphan layer processes: {orphans}")
             for p in orphans:
@@ -827,7 +845,7 @@ def ext_tool_result_kill():
             reap(pid)
             return False
         reap(pid)
-        orphans = procs_with_cwd_under(REPO + "/ui_extensions")
+        orphans = settled_orphans(REPO + "/ui_extensions")
         if orphans:
             print(f"FAIL ext-tool-result-kill: orphan layer processes: {orphans}")
             for p in orphans:
@@ -902,7 +920,7 @@ def ext_mermaid():
             reap(pid)
             return False
         reap(pid)
-        orphans = procs_with_cwd_under(REPO + "/ui_extensions")
+        orphans = settled_orphans(REPO + "/ui_extensions")
         if orphans:
             print(f"FAIL ext-mermaid: orphan layer processes: {orphans}")
             for p in orphans:
@@ -951,6 +969,15 @@ def ext_rus():
             print(f"FAIL ext-rus: markers not seen: {missing}")
             print("screen was:\n" + screen.text())
             return False
+        # The Rust notify reference rings once: the start resend is
+        # a burst, so the bell flushes when the stream goes quiet
+        # past the 5 s window.
+        deadline = time.time() + 7.0
+        while time.time() < deadline and b"\x07" not in screen.raw:
+            pump(master, 0.25, screen)
+        if b"\x07" not in screen.raw:
+            print("FAIL ext-rus: no terminal bell from the Rust notify reference")
+            return False
         # Quit: no orphan layer process may survive.
         os.write(master, b"q")
         pump(master, 0.4, screen)
@@ -964,7 +991,7 @@ def ext_rus():
             reap(pid)
             return False
         reap(pid)
-        orphans = procs_with_cwd_under(REPO + "/ext-rs")
+        orphans = settled_orphans(REPO + "/ext-rs")
         if orphans:
             print(f"FAIL ext-rus: orphan layer processes: {orphans}")
             for p in orphans:
@@ -973,7 +1000,7 @@ def ext_rus():
                 except OSError:
                     pass
             return False
-        print("OK ext-rus: Rust statusline and tool_result references shown")
+        print("OK ext-rus: Rust statusline, tool_result, and notify references shown")
         return True
     finally:
         try:

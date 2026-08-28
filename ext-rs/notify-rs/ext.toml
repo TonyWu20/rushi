@@ -1,0 +1,13 @@
+# The reference `notify` extension, Rust port (ui-extension-plan
+# stage 4). The bash reference is ui_extensions/notify/.
+#
+# Build: `cargo build` in this directory (a standalone cargo
+# package, not a member of the root workspace). Put
+# ./target/debug on `PATH` so the host can resolve the
+# `notify-ext` command.
+
+[ext]
+command = "notify-ext"
+caps = ["notify"]
+kinds = ["assistant_message"]
+protocol_v = 1

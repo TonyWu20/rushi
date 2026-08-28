@@ -1201,6 +1201,12 @@ impl ExtHost {
     /// Quit path: SIGTERM every extension process group, escalate to
     /// SIGKILL after the grace window, like the loop stop. The stop
     /// flag keeps the monitors from restarting anything.
+    /// Stop every extension process group and wait for the deaths.
+    ///
+    /// SIGTERM, then a bounded wait, then SIGKILL for the groups
+    /// that survive. The escalation is synchronous, not a detached
+    /// thread: a detached thread dies with the process, and a group
+    /// that ignores SIGTERM would orphan (docs/tui.md section 13.3).
     pub fn stop(&self) {
         self.stop_flag.store(true, Ordering::SeqCst);
         let mut pids: Vec<i32> = Vec::new();
@@ -1213,19 +1219,26 @@ impl ExtHost {
                 }
             }
         }
-        std::thread::Builder::new()
-            .name("tui-ext-kill".into())
-            .spawn(move || {
-                std::thread::sleep(STOP_GRACE);
-                for pid in pids {
-                    if group_alive(pid) {
-                        unsafe {
-                            libc::kill(-pid, libc::SIGKILL);
-                        }
+        // The grace: most extensions die on SIGTERM; the SIGKILL
+        // escalation covers the rest.
+        let deadline = Instant::now() + STOP_GRACE;
+        while !pids.is_empty() {
+            pids.retain(|&pid| group_alive(pid));
+            if pids.is_empty() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                for pid in &pids {
+                    unsafe {
+                        libc::kill(-pid, libc::SIGKILL);
                     }
                 }
-            })
-            .ok();
+                // A SIGKILL'd group dies; the kernel reaps it on the
+                // monitor threads' wait or reparents it to init.
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     /// One `ext.toml`-driven extension's shared slot, for tests.
