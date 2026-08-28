@@ -350,6 +350,17 @@ run_test "edit: missing file error" 1 "file not found" '' '{"file_path":"'"$TEST
 printf '\x00\x01\x02' > "$TEST_DIR/edit_binary.bin"
 run_test "edit: binary file error" 1 "not a UTF-8 text file" '' '{"file_path":"'"$TEST_DIR/edit_binary.bin"'","old_string":"x","new_string":"y"}' "$EDIT_BIN"
 
+# FT-004: a multibyte character straddling byte 8192 must not panic.
+# 8191 ASCII bytes, then U+2500 '─' at bytes 8191..8194 (straddles 8192).
+python3 - "$TEST_DIR/edit_ft004.txt" <<'PY'
+import sys
+with open(sys.argv[1], "w", encoding="utf-8") as f:
+    f.write("a" * 8191)
+    f.write("\u2500")
+    f.write(" tail-marker\n")
+PY
+run_test "edit: multibyte char straddling byte 8192 (FT-004)" 0 "" "updated successfully" '{"file_path":"'"$TEST_DIR/edit_ft004.txt"'","old_string":"tail-marker","new_string":"tail-edited"}' "$EDIT_BIN"
+
 # BOM preservation test: verify first 3 bytes stay 0xEF 0xBB 0xBF after edit
 printf '\xEF\xBB\xBFhello\n' > "$TEST_DIR/edit_bom.txt"
 BOM_STDOUT=$(printf '%s' '{"file_path":"'"$TEST_DIR/edit_bom.txt"'","old_string":"hello","new_string":"hi"}' | "$EDIT_BIN" 2>/dev/null)

@@ -72,6 +72,15 @@ fn main() {
         None
     };
 
+    // Check for binary file (null byte in the first 8 KB). Runs on the
+    // raw bytes: a byte slice never panics at a non-character boundary,
+    // unlike a slice of the decoded string (FT-004).
+    let check_size = std::cmp::min(content_bytes.len(), 8192);
+    if content_bytes[..check_size].contains(&0) {
+        eprintln!("Error: {} is not a UTF-8 text file.", file_path);
+        std::process::exit(1);
+    }
+
     // Convert to string
     let text = match String::from_utf8(content_bytes) {
         Ok(t) => t,
@@ -87,13 +96,6 @@ fn main() {
     } else {
         "\n"
     };
-
-    // Check for binary file (null bytes in first 8KB)
-    let check_size = std::cmp::min(text.len(), 8192);
-    if text[..check_size].contains('\0') {
-        eprintln!("Error: {} is not a UTF-8 text file.", file_path);
-        std::process::exit(1);
-    }
 
     // Check old_string is not empty
     if old_string.is_empty() {
