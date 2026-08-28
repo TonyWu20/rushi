@@ -23,11 +23,15 @@ root workspace). Put the reference binaries on `PATH` so the host
 can resolve their commands:
 
 ```sh
-eval "$(bash scripts/ext-env.sh)"
+# bash / sh / zsh
+export PATH="$(bash scripts/ext-env.sh):$PATH"
+
+# fish
+set -gx PATH (bash scripts/ext-env.sh) $PATH
 ```
 
-The script builds every reference package and prints one PATH
-export that puts their `target/debug` dirs first. The host refuses
+The script builds every reference package and prints their
+`target/debug` dirs, colon-joined on one line. The host refuses
 the start when a command is missing (fail-loud, docs/ui-extension.md
 section 6). The PTY smoke test builds the binaries and sets `PATH`
 on its own.

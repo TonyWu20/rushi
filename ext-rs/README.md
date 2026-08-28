@@ -19,12 +19,16 @@ the host can resolve the commands (`statusline-ext`, `tool_result-ext`,
 `notify-ext`):
 
 ```sh
-eval "$(bash scripts/ext-env.sh)"
+# bash / sh / zsh
+export PATH="$(bash scripts/ext-env.sh):$PATH"
+
+# fish
+set -gx PATH (bash scripts/ext-env.sh) $PATH
 ```
 
 The script builds every reference package (this layer plus
-`ui_extensions/mermaid`) and prints one PATH export that puts their
-`target/debug` dirs first. The PTY smoke test builds the binaries
+`ui_extensions/mermaid`) and prints their `target/debug` dirs,
+colon-joined on one line. The PTY smoke test builds the binaries
 and sets `PATH` on its own.
 
 The `mermaid` transform reference (ui-extension-plan stage 3) is a
