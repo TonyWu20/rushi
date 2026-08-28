@@ -14,11 +14,18 @@ global entry.
 | `tool_result-rs/` | `ui_extensions/tool_result/` | `render` | the same kind owner on Rust: header plus the full body, body precedence of docs/tui.md 13.1 |
 | `notify-rs/` | `ui_extensions/notify/` | `notify` | the same bell and OSC on Rust: finished turns, burst suppression at start, tmux client-tty fallback |
 
-Each entry builds its own binary. Build with `cargo build` inside
-the entry dir; the binary lands in `./target/debug`. Put those
-directories on `PATH` so the host can resolve the commands
-(`statusline-ext`, `tool_result-ext`). The PTY smoke test builds
-both and sets `PATH` on start.
+Each entry builds its own binary. Put the binaries on `PATH` so
+the host can resolve the commands (`statusline-ext`, `tool_result-ext`,
+`notify-ext`):
+
+```sh
+eval "$(bash scripts/ext-env.sh)"
+```
+
+The script builds every reference package (this layer plus
+`ui_extensions/mermaid`) and prints one PATH export that puts their
+`target/debug` dirs first. The PTY smoke test builds the binaries
+and sets `PATH` on its own.
 
 The `mermaid` transform reference (ui-extension-plan stage 3) is a
 Rust binary in `ui_extensions/mermaid/`: a bash mermaid renderer is

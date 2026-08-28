@@ -19,12 +19,18 @@ tests).
 
 The bash references add no compiled binary on a user machine. The
 `mermaid` entry is a standalone cargo package (not a member of the
-root workspace). Build it with `cargo build` inside
-`ui_extensions/mermaid/`, then put `ui_extensions/mermaid/target/debug`
-on `PATH` so the host can resolve the `mermaid-ext` command. The
-host refuses the start when the command is missing (fail-loud,
-docs/ui-extension.md section 6). The PTY smoke test builds the
-binary and sets `PATH` on start.
+root workspace). Put the reference binaries on `PATH` so the host
+can resolve their commands:
+
+```sh
+eval "$(bash scripts/ext-env.sh)"
+```
+
+The script builds every reference package and prints one PATH
+export that puts their `target/debug` dirs first. The host refuses
+the start when a command is missing (fail-loud, docs/ui-extension.md
+section 6). The PTY smoke test builds the binaries and sets `PATH`
+on its own.
 
 The Rust ports of the bash references live in the sibling
 `ext-rs/` layer (ui-extension-plan stage 4). A user activates them
