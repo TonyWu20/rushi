@@ -20,6 +20,23 @@
       }
     },
     "stop_reason": { "type": "string", "enum": ["stop", "tool_calls", "length", "error", "aborted"] },
+    "reasoning": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+          "type": { "type": "string", "const": "reasoning" },
+          "id": { "type": "string" },
+          "status": { "type": "string" },
+          "content": { "type": "array" },
+          "summary": { "type": "array" },
+          "encrypted_content": {
+            "description": "opaque encrypted carrier. Null when the server holds no encrypted state"
+          }
+        }
+      }
+    },
     "usage": {
       "type": "object",
       "properties": {

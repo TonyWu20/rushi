@@ -413,3 +413,19 @@ This document records corrections applied to `loop-and-edit-implementation.md` a
 **Problem:** The request budget was a fixed character count. Local models have a token-based context window. Sending a request larger than the window truncated or failed. The user could not set the window per model.
 
 **Fix:** Each model defines `context_tokens`. `assemble` derives the budget with `(context_tokens - max_output_tokens) * chars_per_token`. `chars_per_token` defaults to 4. For llama.cpp, `context_tokens` must match the server `--ctx-size`. An optional `context_budget_chars` caps the derived value. Per-model `max_output_tokens` reserves output room in the window.
+
+### 56. The model request carries the full OpenAI Responses spec surface
+
+**Reference:** `bin/model`, `bin/parse`, `bin/assemble`, `bin/tui`, `schemas/events/v1/assistant_message.json`, handoff work item A
+
+**Problem:** The model request is a short subset of the OpenAI Responses spec. `bin/model` drops the `reasoning` output item on every turn. `assemble` emits only `message`, `function_call`, and `function_call_output` input items. The request lacks the `reasoning`, `include`, and `store` fields. The request omits the model's own thinking from the history on every turn.
+
+**Fix:**
+
+- `bin/model` sends the full spec surface: `store: false`, `include: ["reasoning.encrypted_content"]`, `reasoning: {effort: <configured>, summary: "auto"}`. A configured effort of `off` sends `effort: "none"`. The SSE parser captures the `reasoning` output item verbatim: `content`, `encrypted_content`, `id`, `status`, `summary`. A cut or failed stream uses the `reasoning_text` delta stream. The model output JSON gains a `reasoning` array.
+- `bin/parse` forwards the `reasoning` array onto the `assistant_message` event. The event schema gains the `reasoning` property. The server's item stays in the log unchanged.
+- `bin/assemble` emits one `reasoning` input item per old turn. The item comes after that turn's user message and before that turn's `function_call` items. It is sent verbatim, pi-style. The full form counts the item's chars in the budget. The compact form drops the item: a half-trimmed thinking item is worse than none. A summary call restores the old thinking later (handoff work item B).
+- The chat-completions fallback uses the deepseek thinking format: it captures `reasoning_content` in the response and attaches it to the next assistant message in the request.
+- The TUI keeps parsing `assistant_message` lines with the new field as semantic. A regression test covers the field and a malformed entry.
+
+**Verification:** All 11 `model` tests pass: verbatim capture from a terminal event, delta-stream rebuild of a cut stream, the failed-stream case, the completions capture, and the chat conversion. All 17 `assemble` tests pass, including item placement, compact-form dropping, and a budget test that fits only after the compact form drops the items. The TUI suite passes 175 tests. The live SGLang server at 127.0.0.1:30000 accepts the full-spec request with HTTP 200. A second request sends the captured `reasoning` item back in `input` verbatim. The server accepts it and returns a well-formed response. `assemble` on the frozen `sessions/better-ui` log still prints a model request, not an error event.

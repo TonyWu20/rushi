@@ -417,6 +417,41 @@ mod tests {
         assert!(e.get_bool("is_error").is_none());
     }
 
+    /// Regression: the assistant_message event carries a `reasoning`
+    /// field with the server's reasoning items. The parser must stay
+    /// semantic, and the field must be readable (handoff work item A).
+    #[test]
+    fn assistant_message_with_reasoning_stays_semantic() {
+        let line = r#"{"v":1,"type":"assistant_message","ts":"t","content":"x","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":10,"output_tokens":2},"reasoning":[{"type":"reasoning","id":"rs_1","status":"completed","content":[{"type":"reasoning_text","text":"plan"}],"summary":[],"encrypted_content":null}]}"#;
+        let e = Event::parse_line(line).expect("line must parse");
+        assert_eq!(e.kind(), EventKind::AssistantMessage);
+        let items = e.get("reasoning").expect("the reasoning field is present");
+        let item = items.as_array().expect("reasoning is an array");
+        assert_eq!(item[0]["type"], "reasoning");
+        assert_eq!(item[0]["id"], "rs_1");
+        assert_eq!(item[0]["content"][0]["text"], "plan");
+        // The old fields still read.
+        assert_eq!(e.get_str("content"), Some("x"));
+        assert_eq!(
+            e.get("usage").and_then(|u| u.get("input_tokens")),
+            Some(&serde_json::json!(10))
+        );
+    }
+
+    /// A reasoning entry with a malformed shape must not change the
+    /// kind. The event stays semantic, the field degrades to raw.
+    #[test]
+    fn assistant_message_with_bad_reasoning_stays_semantic() {
+        let line = r#"{"v":1,"type":"assistant_message","ts":"t","content":"x","tool_calls":[],"stop_reason":"stop","reasoning":["not-an-object"]}"#;
+        let e = Event::parse_line(line).expect("line must parse");
+        assert_eq!(e.kind(), EventKind::AssistantMessage);
+        let items = e
+            .get("reasoning")
+            .and_then(|v| v.as_array())
+            .expect("reasoning is an array");
+        assert_eq!(items, &vec![serde_json::json!("not-an-object")]);
+    }
+
     #[test]
     fn produced_events_carry_envelope() {
         let e = produce::user_message("hello");

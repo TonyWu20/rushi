@@ -1,7 +1,7 @@
 #![deny(clippy::todo, clippy::unimplemented, clippy::unreachable)]
 
 use clap::Parser;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read};
 
@@ -98,12 +98,24 @@ fn main() {
     // Build API request
     let url = format!("{}/v1/responses", base_url);
 
-    // Prepare request body
+    // Prepare the request body with the full OpenAI Responses spec
+    // surface. The server must not retain state: the session log is
+    // the store. The encrypted reasoning content is requested back so
+    // it can round-trip verbatim. Reasoning models get the configured
+    // effort with an automatic summary; "off" sends effort "none".
+    let effort = if reasoning_effort.eq_ignore_ascii_case("off") {
+        "none".to_string()
+    } else {
+        reasoning_effort
+    };
     let mut api_request = request.clone();
     api_request["max_output_tokens"] = serde_json::json!(max_output_tokens);
     api_request["stream"] = serde_json::json!(true);
+    api_request["store"] = serde_json::json!(false);
+    api_request["include"] = serde_json::json!(["reasoning.encrypted_content"]);
     api_request["reasoning"] = serde_json::json!({
-        "effort": reasoning_effort
+        "effort": effort,
+        "summary": "auto"
     });
 
     // Try responses API first
@@ -231,6 +243,11 @@ fn call_chat_completions(
 fn convert_to_chat_format(request: &serde_json::Value) -> serde_json::Value {
     let mut messages: Vec<serde_json::Value> = Vec::new();
 
+    // A reasoning item rides into the chat format as the deepseek
+    // thinking format: its thinking text becomes the reasoning_content
+    // of the assistant message that follows it.
+    let mut pending_reasoning: Option<String> = None;
+
     // Instructions become the system message
     if let Some(inst) = request.get("instructions").and_then(|i| i.as_str()) {
         if !inst.is_empty() {
@@ -251,10 +268,16 @@ fn convert_to_chat_format(request: &serde_json::Value) -> serde_json::Value {
                         .get("content")
                         .and_then(|c| c.as_str())
                         .unwrap_or("");
-                    messages.push(serde_json::json!({
+                    let mut message = serde_json::json!({
                         "role": role,
                         "content": content
-                    }));
+                    });
+                    if role == "assistant" {
+                        if let Some(thinking) = pending_reasoning.take() {
+                            message["reasoning_content"] = serde_json::json!(thinking);
+                        }
+                    }
+                    messages.push(message);
                 }
                 Some("function_call") => {
                     let call_id = item
@@ -315,6 +338,21 @@ fn convert_to_chat_format(request: &serde_json::Value) -> serde_json::Value {
                         "content": output
                     }));
                 }
+                Some("reasoning") => {
+                    let mut thinking = String::new();
+                    for list in ["content", "summary"] {
+                        if let Some(parts) = item.get(list).and_then(|p| p.as_array()) {
+                            for part in parts {
+                                if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
+                                    thinking.push_str(t);
+                                }
+                            }
+                        }
+                    }
+                    if !thinking.is_empty() {
+                        pending_reasoning = Some(thinking);
+                    }
+                }
                 _ => {}
             }
         }
@@ -366,6 +404,16 @@ fn parse_sse_response(body: &str) -> Result<String, String> {
     let mut fc_args: HashMap<String, String> = HashMap::new();
     let mut fc_order: Vec<String> = Vec::new();
 
+    // Reasoning capture. The terminal event holds the complete items
+    // and is authoritative. The delta stream is the fallback for a cut
+    // stream. Items are kept verbatim, pi-style: content, encrypted
+    // content, id, status, and summary all survive so the next
+    // request can send them back unchanged.
+    let mut reasoning_order: Vec<String> = Vec::new();
+    let mut reasoning_items: HashMap<String, serde_json::Value> = HashMap::new();
+    let mut reasoning_text: HashMap<String, String> = HashMap::new();
+    let mut reasoning_done: HashSet<String> = HashSet::new();
+
     for line in body.lines() {
         if !line.starts_with("data: ") {
             continue;
@@ -391,28 +439,69 @@ fn parse_sse_response(body: &str) -> Result<String, String> {
             }
             "response.output_item.added" | "response.output_item.done" => {
                 if let Some(item) = event.get("item") {
-                    if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
-                        let item_id = item
-                            .get("id")
-                            .and_then(|id| id.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let name = item
-                            .get("name")
-                            .and_then(|n| n.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        fc_names.entry(item_id.clone()).or_insert(name);
-                        if let Some(args) = item
-                            .get("arguments")
-                            .and_then(|a| a.as_str())
-                        {
-                            fc_args.insert(item_id.clone(), args.to_string());
+                    match item.get("type").and_then(|t| t.as_str()) {
+                        Some("function_call") => {
+                            let item_id = item
+                                .get("id")
+                                .and_then(|id| id.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let name = item
+                                .get("name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            fc_names.entry(item_id.clone()).or_insert(name);
+                            if let Some(args) = item
+                                .get("arguments")
+                                .and_then(|a| a.as_str())
+                            {
+                                fc_args.insert(item_id.clone(), args.to_string());
+                            }
+                            if !fc_order.contains(&item_id) {
+                                fc_order.push(item_id);
+                            }
                         }
-                        if !fc_order.contains(&item_id) {
-                            fc_order.push(item_id);
+                        Some("reasoning") => {
+                            let item_id = item
+                                .get("id")
+                                .and_then(|id| id.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            if !reasoning_order.contains(&item_id) {
+                                reasoning_order.push(item_id.clone());
+                            }
+                            reasoning_items.insert(item_id, item.clone());
                         }
+                        _ => {}
                     }
+                }
+            }
+            "response.reasoning_text.delta" => {
+                let item_id = event
+                    .get("item_id")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if let Some(delta) = event.get("delta").and_then(|d| d.as_str()) {
+                    reasoning_text.entry(item_id.clone()).or_default().push_str(delta);
+                }
+                if !reasoning_order.contains(&item_id) {
+                    reasoning_order.push(item_id);
+                }
+            }
+            "response.reasoning_text.done" => {
+                let item_id = event
+                    .get("item_id")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if let Some(text) = event.get("text").and_then(|t| t.as_str()) {
+                    reasoning_text.insert(item_id.clone(), text.to_string());
+                }
+                reasoning_done.insert(item_id.clone());
+                if !reasoning_order.contains(&item_id) {
+                    reasoning_order.push(item_id);
                 }
             }
             "response.function_call_arguments.delta" => {
@@ -459,6 +548,7 @@ fn parse_sse_response(body: &str) -> Result<String, String> {
 
     // The terminal event carries the full response object. Use it as
     // authoritative. The streaming deltas are only a fallback.
+    let mut reasoning_out: Vec<serde_json::Value> = Vec::new();
     if let Some(resp) = &final_response {
         if let Some(u) = resp.get("usage") {
             usage = Some(u.clone());
@@ -508,6 +598,13 @@ fn parse_sse_response(body: &str) -> Result<String, String> {
                             "arguments": arguments
                         }));
                     }
+                    // The reasoning item is the server's own item. Keep
+                    // it verbatim: content, encrypted content, id,
+                    // status, and summary all carry over to the next
+                    // request unchanged.
+                    Some("reasoning") => {
+                        reasoning_out.push(item.clone());
+                    }
                     _ => {}
                 }
             }
@@ -531,6 +628,20 @@ fn parse_sse_response(body: &str) -> Result<String, String> {
                 "name": name,
                 "arguments": args
             }));
+        }
+    }
+
+    // The terminal event may carry no reasoning items: a failed or cut
+    // stream still streamed the thinking deltas. Rebuild the items
+    // from the delta state when the terminal event gave none.
+    if reasoning_out.is_empty() && !reasoning_order.is_empty() {
+        for item_id in &reasoning_order {
+            reasoning_out.push(reasoning_item_fallback(
+                item_id,
+                &reasoning_items,
+                &reasoning_text,
+                &reasoning_done,
+            ));
         }
     }
 
@@ -563,6 +674,7 @@ fn parse_sse_response(body: &str) -> Result<String, String> {
     let mut output = serde_json::json!({
         "text": text,
         "tool_calls": tool_calls,
+        "reasoning": reasoning_out,
         "stop_reason": stop_reason,
         "usage": usage
     });
@@ -577,6 +689,47 @@ fn parse_sse_response(body: &str) -> Result<String, String> {
     }
 
     Ok(serde_json::to_string(&output).unwrap())
+}
+
+/// Rebuild one reasoning item from the streaming fallback state.
+///
+/// The item event may hold the id and the summary only, with an
+/// empty content. The delta stream holds the thinking text. Merge
+/// the two, and mark the item completed when its text is done.
+fn reasoning_item_fallback(
+    item_id: &str,
+    items: &HashMap<String, serde_json::Value>,
+    text: &HashMap<String, String>,
+    done: &HashSet<String>,
+) -> serde_json::Value {
+    let mut item = items.get(item_id).cloned().unwrap_or_else(|| {
+        serde_json::json!({
+            "type": "reasoning",
+            "id": item_id,
+            "status": "in_progress",
+            "summary": [],
+            "encrypted_content": null,
+            "content": []
+        })
+    });
+    // Fill the content from the delta stream when the item event held
+    // none: missing or empty content means the deltas carry the text.
+    let content_empty = item
+        .get("content")
+        .and_then(|c| c.as_array())
+        .is_none_or(|a| a.is_empty());
+    if content_empty {
+        let thinking = text.get(item_id).cloned().unwrap_or_default();
+        item["content"] = serde_json::json!([{
+            "type": "reasoning_text",
+            "text": thinking
+        }]);
+    }
+    if done.contains(item_id) {
+        item["status"] = serde_json::json!("completed");
+    }
+    item["type"] = serde_json::json!("reasoning");
+    item
 }
 
 fn parse_chat_response(body: &str) -> Result<String, String> {
@@ -634,9 +787,35 @@ fn parse_chat_response(body: &str) -> Result<String, String> {
 
     let usage = chat_resp.get("usage");
 
+    // The completions fallback speaks the deepseek thinking format:
+    // the thinking text rides in message.reasoning_content. Capture
+    // it as a reasoning item so the event log carries the thinking
+    // on this path too.
+    let mut reasoning: Vec<serde_json::Value> = Vec::new();
+    if let Some(rc) = chat_resp
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("reasoning_content"))
+        .and_then(|r| r.as_str())
+    {
+        if !rc.is_empty() {
+            reasoning.push(serde_json::json!({
+                "type": "reasoning",
+                "id": "reasoning_chat",
+                "status": "completed",
+                "content": [{ "type": "reasoning_text", "text": rc }],
+                "summary": [],
+                "encrypted_content": null
+            }));
+        }
+    }
+
     let output = serde_json::json!({
         "text": text,
         "tool_calls": tool_calls,
+        "reasoning": reasoning,
         "stop_reason": stop_reason,
         "usage": usage
     });
@@ -719,6 +898,122 @@ mod tests {
             serde_json::from_str(&parse_sse_response(s).unwrap()).unwrap();
         assert_eq!(out["stop_reason"], "error");
         assert!(out.get("detail").is_none());
+    }
+
+    /// The terminal event holds a reasoning item. The parser keeps it
+    /// verbatim: every key survives into the output reasoning field.
+    #[test]
+    fn terminal_stream_captures_reasoning_item_verbatim() {
+        let mut s = String::new();
+        s.push_str("data: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\"}}\n\n");
+        s.push_str(
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"output\":[",
+        );
+        s.push_str(
+            "{\"id\":\"rs_1\",\"type\":\"reasoning\",\"status\":\"completed\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"step one\"}],\"summary\":[],\"encrypted_content\":\"enc-42\",\"type2\":\"extra\"}",
+        );
+        s.push_str(
+            ",{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}],\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}",
+        );
+        s.push_str("\n\n");
+        let out: serde_json::Value =
+            serde_json::from_str(&parse_sse_response(&s).unwrap()).unwrap();
+        assert_eq!(out["text"], "done");
+        let reasoning = out["reasoning"].as_array().expect("reasoning is an array");
+        assert_eq!(reasoning.len(), 1);
+        let item = &reasoning[0];
+        // Every key of the server item survives, including extras.
+        assert_eq!(item["id"], "rs_1");
+        assert_eq!(item["status"], "completed");
+        assert_eq!(item["encrypted_content"], "enc-42");
+        assert_eq!(item["content"][0]["text"], "step one");
+        assert_eq!(item["type2"], "extra");
+    }
+
+    /// A cut stream: no terminal event. The reasoning item rebuilds
+    /// from the item event plus the reasoning_text delta stream.
+    #[test]
+    fn cut_stream_rebuilds_reasoning_from_deltas() {
+        let mut s = String::new();
+        s.push_str(
+            "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"rs_9\",\"type\":\"reasoning\",\"content\":[],\"summary\":[],\"encrypted_content\":null,\"status\":\"in_progress\"}}\n\n",
+        );
+        s.push_str(
+            "data: {\"type\":\"response.reasoning_text.delta\",\"item_id\":\"rs_9\",\"delta\":\"think \"}\n\n",
+        );
+        s.push_str(
+            "data: {\"type\":\"response.reasoning_text.delta\",\"item_id\":\"rs_9\",\"delta\":\"harder\"}\n\n",
+        );
+        let out: serde_json::Value =
+            serde_json::from_str(&parse_sse_response(&s).unwrap()).unwrap();
+        assert_eq!(out["stop_reason"], "error");
+        let item = &out["reasoning"][0];
+        assert_eq!(item["type"], "reasoning");
+        assert_eq!(item["id"], "rs_9");
+        assert_eq!(item["status"], "in_progress");
+        assert_eq!(item["content"][0]["type"], "reasoning_text");
+        assert_eq!(item["content"][0]["text"], "think harder");
+    }
+
+    /// A reasoning item with no text at all stays empty, not a crash.
+    #[test]
+    fn reasoning_item_without_text_is_empty_content() {
+        let mut s = String::new();
+        s.push_str(
+            "data: {\"type\":\"response.reasoning_text.delta\",\"item_id\":\"rs_0\",\"delta\":\"\"}\n\n",
+        );
+        s.push_str("data: {\"type\":\"response.failed\",\"response\":{\"id\":\"r1\"}}\n\n");
+        let out: serde_json::Value =
+            serde_json::from_str(&parse_sse_response(&s).unwrap()).unwrap();
+        let item = &out["reasoning"][0];
+        assert_eq!(
+            item["content"].as_array().expect("content is an array").len(),
+            1
+        );
+        assert_eq!(item["content"][0]["text"], "");
+    }
+
+    /// The completions fallback carries the deepseek thinking text.
+    #[test]
+    fn chat_response_captures_reasoning_content() {
+        let body = r#"{"choices":[{"message":{"content":"done","reasoning_content":"the plan"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3}}"#;
+        let out: serde_json::Value =
+            serde_json::from_str(&parse_chat_response(body).unwrap()).unwrap();
+        let item = &out["reasoning"][0];
+        assert_eq!(item["type"], "reasoning");
+        assert_eq!(item["content"][0]["text"], "the plan");
+    }
+
+    /// A completions response without thinking carries an empty list.
+    #[test]
+    fn chat_response_without_thinking_has_empty_reasoning() {
+        let body = r#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}"#;
+        let out: serde_json::Value =
+            serde_json::from_str(&parse_chat_response(body).unwrap()).unwrap();
+        assert!(out["reasoning"].as_array().unwrap().is_empty());
+    }
+
+    /// A reasoning item converts to the deepseek thinking format: its
+    /// text lands in the reasoning_content of the assistant message
+    /// that follows it.
+    #[test]
+    fn convert_to_chat_attaches_reasoning_content() {
+        let request = serde_json::json!({
+            "model": "m",
+            "input": [
+                {"type": "message", "role": "user", "content": "hi"},
+                {"type": "reasoning", "id": "rs_1", "content": [
+                    {"type": "reasoning_text", "text": "plan A"}
+                ], "summary": [], "status": "completed", "encrypted_content": null},
+                {"type": "message", "role": "assistant", "content": "doing"}
+            ]
+        });
+        let chat = convert_to_chat_format(&request);
+        let msgs = chat["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[1]["reasoning_content"], "plan A");
     }
 }
 
