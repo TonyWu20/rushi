@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["v", "type", "ts", "message", "new_session"],
+  "properties": {
+    "v": { "type": "integer", "const": 1 },
+    "type": { "type": "string", "const": "context_exhausted" },
+    "ts": { "type": "string", "format": "date-time" },
+    "message": { "type": "string" },
+    "new_session": {
+      "type": "string",
+      "description": "the handoff session seeded with the summary. Empty string when the summary call failed and no session was seeded."
+    }
+  }
+}

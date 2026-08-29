@@ -198,8 +198,9 @@ step:
            loop to claim (another step)
 ```
 
-`turn.sh` runs one **step**; the loop repeats until no tool calls or
-`max_steps` (default 20) is reached. `turn.sh` is idempotent in the sense of
+`turn.sh` runs one **step**; the loop repeats until the model ends the task
+(no tool calls) or an error stops a step. Correction 51 removed the old
+`max_steps` cap. `turn.sh` is idempotent in the sense of
 G1: rerunning it after a complete step appends nothing.
 
 ## 3. Tool CLI contract (refined)

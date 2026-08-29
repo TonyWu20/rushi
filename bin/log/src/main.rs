@@ -41,6 +41,7 @@ fn main() {
         "tool_call.json",
         "tool_result.json",
         "error.json",
+        "context_exhausted.json",
     ];
 
     let mut schemas: Vec<(String, serde_json::Value)> = Vec::new();

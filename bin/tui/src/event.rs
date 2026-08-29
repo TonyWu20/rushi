@@ -38,6 +38,12 @@ pub enum EventKind {
     /// The transcript suppresses the event by default. The log keeps
     /// the event (docs/ui-extension.md section 5).
     ExtStatus,
+    /// The context budget ran out after compaction. The loop ran the
+    /// automatic handoff: it summarized the session and seeded a new
+    /// session with the summary. The event's `new_session` names the
+    /// seeded session; an empty value means the summary call failed
+    /// and no session was seeded (correction 57).
+    ContextExhausted,
     /// `type` value outside the known vocabulary. Render raw JSON.
     UnknownType,
     /// Known `type` but `v` outside [`SUPPORTED_VERSIONS`] (or missing).
@@ -60,6 +66,7 @@ impl EventKind {
         EventKind::Cancel,
         EventKind::Error,
         EventKind::ExtStatus,
+        EventKind::ContextExhausted,
     ];
 
     /// The wire `type` value for a semantic kind; `None` for fallback kinds.
@@ -74,6 +81,7 @@ impl EventKind {
             EventKind::Cancel => "cancel",
             EventKind::Error => "error",
             EventKind::ExtStatus => "ext_status",
+            EventKind::ContextExhausted => "context_exhausted",
             EventKind::UnknownType | EventKind::UnsupportedVersion | EventKind::BadLine => {
                 return None
             }
@@ -93,6 +101,7 @@ impl EventKind {
             "cancel" => EventKind::Cancel,
             "error" => EventKind::Error,
             "ext_status" => EventKind::ExtStatus,
+            "context_exhausted" => EventKind::ContextExhausted,
             _ => return None,
         })
     }
@@ -369,6 +378,7 @@ mod tests {
                         | EventKind::Cancel
                         | EventKind::Error
                         | EventKind::ExtStatus
+                        | EventKind::ContextExhausted
                 ),
                 "type {wire} fell through to fallback"
             );
@@ -514,6 +524,35 @@ mod tests {
         assert_eq!(e.get_str("id"), Some("vim_mode"));
         assert_eq!(e.get("value"), Some(&json!("insert")));
         assert!(e.get_str("ts").is_some());
+    }
+
+    /// The handoff marker parses semantically. Its fields degrade
+    /// safely: a missing `new_session` reads as `None`, never crashes
+    /// (G5). An empty `new_session` is the seeded-none form (the
+    /// summary call failed).
+    #[test]
+    fn context_exhausted_line_is_semantic() {
+        let e = Event::parse_line(
+            r#"{"v":1,"type":"context_exhausted","ts":"t","message":"m","new_session":"s1_h1"}"#,
+        )
+        .expect("line must parse");
+        assert_eq!(e.kind(), EventKind::ContextExhausted);
+        assert_eq!(e.get_str("new_session"), Some("s1_h1"));
+
+        let e = Event::parse_line(
+            r#"{"v":1,"type":"context_exhausted","ts":"t","message":"m","new_session":""}"#,
+        )
+        .expect("line must parse");
+        assert_eq!(e.kind(), EventKind::ContextExhausted);
+        assert_eq!(e.get_str("new_session"), Some(""));
+
+        // The marker without a seeded session field still parses.
+        let e = Event::parse_line(
+            r#"{"v":1,"type":"context_exhausted","ts":"t","message":"m"}"#,
+        )
+        .expect("line must parse");
+        assert_eq!(e.kind(), EventKind::ContextExhausted);
+        assert_eq!(e.get_str("new_session"), None);
     }
 
     #[test]

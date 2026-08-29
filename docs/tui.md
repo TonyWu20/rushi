@@ -135,18 +135,74 @@ No `turn.sh`, no `pending/approval.json`, no `state.json` appears in this flow. 
 
 | Key | Action |
 |---|---|
-| `Enter` | Append typed text as `user_message` |
+| `Enter` | Append the typed text as `user_message`: sends the whole multi-line draft, in any modal state |
+| `Ctrl-J` | Insert mode: a hard newline (multi-line draft). Normal mode: the `j` motion |
 | `Ctrl+E` | Open `$EDITOR` for long input, then append |
 | `Ctrl+R` | `SessionPort::spawn_loop(active_session)` |
 | `Ctrl+C` | Stop loop handle; optionally append `cancel` |
 | `y` / `n` / `e` | Answer the oldest pending `approval_request`: allow / deny / edit-then-allow |
+| `h` | One-key handoff resume (correction 57). Only when the log holds a `context_exhausted` marker that seeded a session and no loop runs. Switches to the seeded session and starts its loop. The old session's local loop stops. Without those conditions, `h` stays the editor key |
 | `Tab` | Switch session |
-| `q` | Quit (stops loop; log survives) |
+| `q` ×2 | Quit the TUI. Loops keep running as orphans. Only `Ctrl+C` stops a loop |
+
+The input area is a multi-line textarea with native vim modal input
+(section 7.1), in a rounded-corner border whose color correlates with
+the model thinking level (section 7.2). The frame is customizable by
+a `frame` extension (docs/ui-extension.md: the `frame` capability
+owns the border, label, and height; the TUI renders the draft and
+cursor).
+
+### 7.1 Vim modal input
+
+The draft is a `Vec` of lines plus a modal key state machine
+(`vim_editor.rs`). The modes and the operator-pending convention are
+taken from the pi-config vim extension (`vim-modal.ts`):
+
+- **normal**: `h j k l`, `w b e`, `0 $`, `gg G`, `x` (with a count,
+  `X`), `d c y` + motion (`dd cc`, `d$` is `D`, `c$` is `C`), `yy`
+  (line yank), `p P` (with a count), `i a I A o O`, `r` (replace one
+  character, the pending `r` operator), `R` (overwrite mode), `v V`
+  (char-wise / line-wise visual)
+- **insert**: chars append, `Ctrl-J` inserts a hard newline (`Enter`
+  sends the draft, so it never reaches the editor),
+  `Backspace` joins lines at column 0, `Esc` returns to normal
+- **replace** (`R` in normal): each typed char overwrites the one
+  under the cursor; `Esc` returns to normal
+- **visual / visual-line** (`v` / `V`): `d x c y p P` act on the
+  mark-to-cursor span; `Esc` or `v` leaves visual
+
+Counts prefix operators and motions: `3dd`, `2w`, `3c`. The yank
+buffer is a single slot; a delete sets it too, like vim. The editor
+starts in insert mode (the composer's typing mode); `Esc` drops to
+normal for motions. The mode label shows in the frame title
+(`[NORMAL]`, `[INSERT]`, `[d-PENDING]`, ...), mirroring the pi
+`formatStatus` output.
+
+### 7.2 Thinking level
+
+The input-area border color correlates with the active model's
+thinking level. The level is published into the log as an
+`ext_status` event with id `model_thinking` (the shared-UI-state
+channel, docs/ui-extension.md section 5); the TUI reads the latest
+value and maps it to a border color:
+
+| Level | Meaning | Border |
+|---|---|---|
+| 0 | no thinking (default) | gray |
+| 1 | low | blue |
+| 2 | medium | cyan |
+| 3 | high | green |
+| 4+ | highest | yellow |
+
+The mapping is host presentation only: the TUI does not decide the
+level, it renders whatever the loop or a policy hook published. The
+`frame` extension may override the border color; without one, the
+host's built-in palette above applies.
 
 ## 8. Rust stack
 
 - [`ratatui`](https://crates.io/crates/ratatui) + [`crossterm`](https://crates.io/crates/crossterm) — the TUI
-- [`tui-textarea`](https://crates.io/crates/tui-textarea) — input box with history, or shell out to `$EDITOR` for long messages
+- ~~[`tui-textarea`](https://crates.io/crates/tui-textarea)~~ — dropped: the input box is now a native multi-line textarea with vim modal input (section 7.1), rendered by the host. `Ctrl+E` still shells out to `$EDITOR` for long messages
 - `serde` / `serde_json` — event envelope parsing
 - `clap` — `tui --session s1 --config harness.toml`
 - `async_trait` — `SessionPort`
@@ -199,7 +255,7 @@ fn main() {
 2. **The TUI must not know the loop internals.** `turn.sh`, `step.sh`, `claim`, `assemble` are not valid strings in the TUI source — they are config values.
 3. **The TUI must not know the storage layout.** `events.jsonl`, `state.json`, `pending/` are not valid strings in the TUI source — they are `FileSessionPort` implementation details.
 4. **Rendering must have a fallback.** Unknown event type or future `v` never crashes the TUI; it renders raw JSON with a hint.
-5. **Killing the TUI must not corrupt the session.** The log survives; the loop handle gets stopped with it (acceptable early on). Later this splits into a daemon (`harnessd`) that owns the loop and a TUI that attaches/detaches over a Unix socket — the same hexagonal boundary, with the TUI remaining an adapter.
+5. **Killing the TUI must not corrupt the session.** The log survives. Loops keep running as orphans. Only Ctrl+C stops a loop. Later this splits into a daemon (`harnessd`) that owns the loop and a TUI that attaches/detaches over a Unix socket. The TUI stays an adapter over the same hexagonal boundary.
 
 ## 11. Phase 1 implementation (illustrative, not normative)
 

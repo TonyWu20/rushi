@@ -414,6 +414,48 @@ This document records corrections applied to `loop-and-edit-implementation.md` a
 
 **Fix:** Each model defines `context_tokens`. `assemble` derives the budget with `(context_tokens - max_output_tokens) * chars_per_token`. `chars_per_token` defaults to 4. For llama.cpp, `context_tokens` must match the server `--ctx-size`. An optional `context_budget_chars` caps the derived value. Per-model `max_output_tokens` reserves output room in the window.
 
+### 51. Removed the step cap from the loop
+
+**Reference:** `loop-and-edit-tool.md` (the loop), `scripts/turn.sh`
+
+**Problem:** `turn.sh` capped each user turn at 20 model steps. At the cap it printed `max_steps reached` and exited 1. The session died mid-task with pending tool calls. The model still wanted to work.
+
+**Fix:** The loop runs until the model finishes the task. It breaks only when `claim` reports `idle`. An error still stops it. A 30-step stub model run finished at step 30 with `claim` idle and exit 0. No cap message.
+
+### 52. Auto-compact when the request outgrows context
+
+**Reference:** `loop-and-edit-implementation.md` (assemble), entry 50
+
+**Problem:** When a request outgrew the context budget, `assemble` emitted a terminal `error` event. The session could not continue. No compaction path existed.
+
+**Fix:** `assemble` now keeps the most recent events full. It compacts older tool results and assistant text into short markers. It halves the caps and the keep window down to a floor of two. It emits the terminal error only when nothing fits. New config keys: `compact_keep_events`, `compact_result_chars`, `compact_text_chars`. A five-step run with 16 KB results fit a 40 KB budget with compacted markers.
+
+### 53. Recovered tool calls embedded in assistant text
+
+**Reference:** `bin/parse`
+
+**Problem:** Some backends emit tool calls as text in the assistant `content` (`invoke` marker blocks with `parameter` blocks). `parse` saw an empty `tool_calls` array and treated the message as final text. The loop idled silently and the call never ran.
+
+**Fix:** `parse` now scans for the marker blocks when structured tool calls are absent. It extracts JSON arrays and the XML `parameter` format into calls with deterministic ids. Bad inner JSON still emits an error event and exits 2. A stub model run proved the embedded call executed: the log gained a `tool_call` and a `tool_result` event.
+
+### 54. Replaced the system prompt with the pi-derived prompt
+
+**Reference:** `config.toml` `[system_prompt]`
+
+**Problem:** The old prompt taught tool usage. It lacked planning, build-and-test, and completion discipline. The model spent its steps on read-only exploration.
+
+**Fix:** `config.toml` now carries a condensed prompt from the `pi` coding agent. It states: plan before code, write the code, build and test, never stop a task half-done, and always end with a status line that names what remains.
+
+### 55. Compact floor and step dropping end the dead-session loop
+
+**Reference:** `bin/assemble`, `config.toml` `[limits]`, FT-009
+
+**Problem:** Entry 52 halved the compact caps in three fixed stages: `8000, 4000, 2000` for results, `2000, 1000, 500` for text. The `better-ui` session grew to 604 tool results and 586 assistant messages. The full request reached about 1.47M chars against a 440k budget. Even the tightest stage stayed near 740k chars. No stage fit, so `assemble` emitted the terminal error on every turn. The session was unrecoverable: a user `Continue` only reproduced the error. Per-event caps cannot express a total-size constraint on a long session.
+
+**Fix:** `compact_search` replaces the fixed stages. It halves the caps from the base to a configurable floor (`compact_min_result_chars`, `compact_min_text_chars`; defaults 128 and 64). When the floor still does not fit, it drops the oldest step groups, one step at a time, until the request fits. A step group is one assistant message, its tool calls, and their results. User messages are never dropped: the task statement must survive. The keep window is never dropped: it is the recent context. The terminal error now fires only when the keep window and the task alone outgrow the budget. The `better-ui` session now assembles to a 380k-char request under the 440k budget with all 16 user messages kept.
+
+**Verification:** Four new `assemble` tests cover the floor halving, step grouping, drop-oldest fitting, and the still-unsatisfiable case. All 13 `assemble` tests pass. Running the fixed `assemble` on `sessions/better-ui` prints a model request, not an error event.
+
 ### 56. The model request carries the full OpenAI Responses spec surface
 
 **Reference:** `bin/model`, `bin/parse`, `bin/assemble`, `bin/tui`, `schemas/events/v1/assistant_message.json`, handoff work item A
@@ -429,3 +471,141 @@ This document records corrections applied to `loop-and-edit-implementation.md` a
 - The TUI keeps parsing `assistant_message` lines with the new field as semantic. A regression test covers the field and a malformed entry.
 
 **Verification:** All 11 `model` tests pass: verbatim capture from a terminal event, delta-stream rebuild of a cut stream, the failed-stream case, the completions capture, and the chat conversion. All 17 `assemble` tests pass, including item placement, compact-form dropping, and a budget test that fits only after the compact form drops the items. The TUI suite passes 175 tests. The live SGLang server at 127.0.0.1:30000 accepts the full-spec request with HTTP 200. A second request sends the captured `reasoning` item back in `input` verbatim. The server accepts it and returns a well-formed response. `assemble` on the frozen `sessions/better-ui` log still prints a model request, not an error event.
+
+### 57. Token-driven context budget and the automatic handoff
+
+**Reference:** `bin/assemble`, `bin/model`, `bin/claim`, `bin/log`,
+`bin/tui`, `scripts/step.sh`, `scripts/turn.sh`, `config.toml`
+`[limits]`, `schemas/events/v1/context_exhausted.json`, handoff work
+item B, FT-009, FT-010
+
+**Problem:** Three coupled gaps left a session that outgrew its
+budget dead and unrecoverable. First, the context budget was a char
+estimate (`context_budget_chars` over `chars_per_token = 4`). The
+measured ratio on this model is about 8 chars per token, so the
+harness believed a budget 2x off and never compacted early
+(FT-010). Second, the budget knob was in chars, not tokens. The
+model window is a token fact. Third, the terminal case (the keep
+window plus the task outgrow the budget) emitted a dead-end error.
+No path resumed the task (FT-009 residual risk).
+
+**Fix:**
+
+- `bin/assemble` drives the budget from measured
+  `usage.input_tokens`. The full log goes out when the last measured
+  value plus the projected growth of the appended events fits the
+  token budget. The user knob is `context_budget_tokens`. The legacy
+  `context_budget_chars` converts through the chars-per-token rate
+  when the token knob is absent. The default is the model window
+  minus the output reservation. The char heuristic survives only as
+  the pre-measurement fallback: a fresh session, a server that
+  reports no usage, and the compact candidates (which have no
+  measurement by construction). The compact candidates check
+  against the token budget times the chars-per-token fallback.
+- `bin/model` honors a request-provided `max_output_tokens` over the
+  config value. The handoff summary request carries a cheap cap.
+  The completions fallback normalizes its usage to
+  `usage.input_tokens`, so both API paths feed the same field.
+- `bin/assemble` turns the terminal case into the automatic handoff.
+  When nothing fits, it emits a `context_exhausted` event instead of
+  the dead-end error. The event carries the summary request: the
+  largest compact candidate the search tried, plus the summary
+  instructions, a cheap output cap
+  (`handoff_summary_max_tokens`, default 4096), and no tools.
+- `scripts/step.sh` runs the handoff on a `context_exhausted`
+  assemble output. One summarization call on the compacted log. It
+  seeds a new session `<base>_h<N>` with the summary plus a
+  continue-the-task instruction, copies the session `cwd`, and
+  records the `context_exhausted` marker on the old session with the
+  seeded name. A failed summary call still records the marker, with
+  an empty seed name and an error event before it.
+- `bin/claim` reports the new `exhausted` state from the marker.
+  `scripts/turn.sh` breaks on it. A user message after the marker
+  reopens normal work.
+- `bin/tui` offers the one-key resume. A `context_exhausted` event
+  is semantic (new `EventKind::ContextExhausted`). The transcript
+  names the seeded session. The status row carries the hint. The
+  `h` key switches to the seeded session and starts its loop. It
+  preempts the editor only when a seeded marker exists and no loop
+  runs. The old session's local loop stops on the switch.
+
+**Verification:** All 23 `assemble` tests pass, including the
+measured-vs-char decision, the skipped full candidate, and the
+exhausted event shape. All 14 `model` tests pass, including the
+request cap and the usage normalization. All 5 `claim` tests pass,
+including the exhausted state and the reopen-after-marker rule. All
+184 `tui` tests pass, including the marker parse, the `h` key gates,
+and the transcript line. Live run against the SGLang server at
+127.0.0.1:30000: a scratch session with a 50-token budget hit the
+terminal case. The loop summarized it, seeded `h1test_h1`, and
+recorded the marker. The claim state read `exhausted`. A turn on
+the seeded session continued the task to completion under the real
+55k-token budget. `assemble` on the frozen `sessions/better-ui`
+log now prints a 366k-char compacted request under the 440k-char
+candidate check, not the terminal error.
+
+### 58. The tool log, the slim index, and the dropped FT-008 pairs
+
+**Reference:** `bin/route`, `bin/assemble`, `bin/tui`,
+`schemas/events/v1/tool_result.json`, `scripts/step.sh`,
+`ui_extensions/statusline/`, `config.toml`,
+`docs/tool-log-design_from_human.md`, handoff work item C, FT-008
+
+**Problem:** Every tool result body sat inline in `events.jsonl`.
+A long tool output inflated every later model request, and the
+schema-error pairs that fail the tool-call schema (FT-008) replayed
+themselves in every compacted request, teaching the model its own
+mistakes. Second, the TUI kept no log of its own faults: a render
+error or a dropped key was invisible after the fact. Third, the
+range-read guideline in the system prompt was missing, and the TUI
+statusline token metrics did not match the reference
+`starship-statusline.ts`.
+
+**Fix:**
+
+- `bin/route` with a `--tool-log <path>` arg writes the full result
+  to the per-session tool log (`tools.jsonl` in the session dir, one
+  JSON record per run: raw stdout, stderr, exit, and the display
+  text). The event log gets the slim index instead: the old fields
+  plus `bytes` (the full body byte count) and `tool_log` (the log
+  file name). The index `value` carries a head-and-tail preview with
+  an elision marker naming the log. Without the arg, route keeps the
+  old inline behavior for the legacy callers.
+- `scripts/step.sh` passes the tool log path on both the normal
+  and crash-recovery route calls. A re-run of a pending call
+  overwrites the record for the same call id; the log keeps the
+  last record per id.
+- `bin/assemble` reads the tool log and resolves each tool result
+  from the full body there, falling back to the index text when the
+  log is absent (legacy logs). The full pass and the measurement
+  pass use the full bodies. The compact pass drops the old
+  schema-error pairs: a failed call and its result stay out of the
+  compacted request once they leave the keep window. Pairs inside
+  the keep window stay, so the model still sees the failure it is
+  recovering from. The event log is untouched.
+- `bin/tui` writes a TUI trace log (`tui-trace.jsonl` in the
+  session dir). One JSON record per fault: the port read and write
+  errors, the render failures, the dropped input events, the
+  malformed lines, and the loop spawn and stop. The trace write
+  takes no event-log lock and a failed trace write drops the
+  record: the trace must not take the UI down.
+- `ui_extensions/statusline` carries the reference metrics: the
+  context fullness (last measured input tokens over the model
+  window, `ctx:% (n/window)`), the cumulative in/out/sum tokens, and
+  the run total. The width parser cut at the next comma; it used to
+  strip the digits of the later keys.
+- `config.toml` back to the range-read guideline: `Use offset and
+  limit to continue reading large files.`
+
+**Verification:** All 13 `route` tests pass, including the slim
+index shape, the legacy fallback, and the per-id overwrite rule.
+All 32 `assemble` tests pass, including the tool-log preference,
+the legacy fallback, the rebuild of the display text from a legacy
+record, the keep-window rule, and the compact search that drops the
+old pairs. All 184 `tui` tests pass, including the two trace log
+tests: the record shape and the escape rejection. Live run against
+the SGLang server at 127.0.0.1:30000: a scratch session ran a real
+turn. The event log held the slim index (`bytes` 1975, `tool_log`
+pointing at `tools.jsonl`). The tool log held the full 1975-char
+body. `assemble` on that session sent the full body, not the
+preview.

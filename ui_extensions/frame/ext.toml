@@ -1,0 +1,19 @@
+# The reference `frame` extension: the input-area border.
+#
+# One process, tick-driven. It answers every `frame` op with a
+# `frame_spec` that colors the input area's rounded border to
+# correlate with the active model's thinking level, and labels the
+# frame with the current mode. The border color is the one knob the
+# spec owns: the draft content, cursor, and modal state stay
+# host-owned (docs/ui-extension.md section 10 trust boundary — an
+# extension owns the frame, not the input state).
+#
+# The host falls back to its built-in frame (gray rounded border)
+# when this extension is missing, dead, or returns a bad frame_spec
+# (the per-op G5 fallback).
+[ext]
+command = "bash"
+args = ["frame.sh"]
+caps = ["frame"]
+tick_ms = 1000
+protocol_v = 1

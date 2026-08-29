@@ -11,6 +11,7 @@ use ratatui::text::Line;
 
 use crate::event::{Event, EventKind};
 use crate::port::{LoopHandle, LoopLine, SessionId, WatchItem};
+use crate::vim_editor::Editor;
 use serde_json::Value;
 
 /// Normalized key input. crossterm-free so tests can drive the app.
@@ -27,8 +28,19 @@ pub enum Key {
     CtrlE,
     CtrlU,
     CtrlD,
+    /// The multi-line editor's newline key: in insert mode it
+    /// inserts a hard newline; in normal mode it is the `j` motion.
+    /// `Enter` sends the draft (docs/tui.md section 7).
+    CtrlJ,
     Esc,
     Quit,
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    Delete,
     Wheel(i32),
     Char(char),
 }
@@ -61,7 +73,15 @@ pub enum Action {
     /// without a session argument. The TUI activates it and opens its
     /// (possibly empty) log.
     ConfirmNewSession(String),
-    /// Quit: stop every running loop, leave the log intact.
+    /// Switch to the handoff session a `context_exhausted` event
+    /// seeded, and start the loop there. The one-key resume of the
+    /// automatic handoff (correction 57). The old session's local
+    /// loop stops when it is still running: the handoff supersedes
+    /// it.
+    Handoff(String),
+    /// Quit the TUI. Loops keep running: each lives in its own session
+    /// and survives as an orphan. Only Ctrl+C stops a loop. The log
+    /// stays intact, so a restart re-renders the live session.
     Quit,
 }
 
@@ -93,7 +113,13 @@ pub struct App {
     events: Vec<Event>,
     /// Visual lines scrolled up from the end. 0 means "follow the tail".
     scroll: usize,
-    draft: String,
+    /// The multi-line message editor with vim modal input. The draft
+    /// is `editor.lines`; sending trims and appends it as a
+    /// `user_message`.
+    editor: Editor,
+    /// The first editor line shown in the input area (the area shows
+    /// two editor lines plus its border; scrolling moves this window).
+    edit_scroll: usize,
     loops: HashMap<SessionId, LoopState>,
     status: Option<(String, Instant)>,
     watch_rx: Option<std::sync::mpsc::Receiver<WatchItem>>,
@@ -179,6 +205,16 @@ fn ext_status_map(events: &[Event]) -> (HashMap<String, Value>, VecDeque<String>
 }
 
 const STATUS_TTL: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// The `ext_status` id that carries the active model's thinking
+/// level. The loop (or a policy hook) publishes it; the TUI reads it
+/// to color the input area.
+pub const THINKING_STATUS_ID: &str = "model_thinking";
+/// The thinking levels this build knows: 0 (no thinking) through 4.
+pub const THINKING_LEVELS: u32 = 5;
+/// The level shown while no `model_thinking` event is in the log.
+pub const DEFAULT_THINKING_LEVEL: u32 = 0;
+
 /// The window in which a second `q` confirms the quit.
 const QUIT_ARM_TTL: std::time::Duration = std::time::Duration::from_secs(3);
 /// Scroll distance kept between the viewport top and the log end. The
@@ -192,7 +228,8 @@ impl App {
             active: None,
             events: Vec::new(),
             scroll: 0,
-            draft: String::new(),
+            editor: Editor::new(),
+            edit_scroll: 0,
             loops: HashMap::new(),
             status: None,
             watch_rx: None,
@@ -383,6 +420,27 @@ impl App {
         }
     }
 
+    // ── thinking level ─────────────────────────────────────────
+
+    /// The model's thinking level, 0 (none) through
+    /// [`THINKING_LEVELS`] (the highest published). The level is
+    /// published into the log as an `ext_status` event with id
+    /// `model_thinking` (the shared-UI-state channel, docs/ui-
+    /// extension.md section 5); a value outside the known range or a
+    /// missing event falls back to the default. The input area's
+    /// border color correlates to this value.
+    pub fn thinking_level(&self) -> u32 {
+        let v = self
+            .ext_status_values
+            .get(THINKING_STATUS_ID)
+            .and_then(|v| v.as_u64());
+        match v {
+            Some(n) if (n as u32) < THINKING_LEVELS => n as u32,
+            Some(_) => THINKING_LEVELS - 1,
+            None => DEFAULT_THINKING_LEVEL,
+        }
+    }
+
     // ── scroll ──────────────────────────────────────────────────
 
     /// Visual lines kept between the viewport top and the end of the
@@ -401,19 +459,89 @@ impl App {
 
     // ── draft / editor ──────────────────────────────────────────
 
-    pub fn draft(&self) -> &str {
-        &self.draft
+    /// The message editor: multi-line textarea plus the vim modal
+    /// state machine (docs/tui.md section 7.1; modes
+    /// normal/insert/replace/visual, operator-pending).
+    pub fn editor(&mut self) -> &mut Editor {
+        &mut self.editor
     }
 
+    /// The editor's scroll window, so the renderer keeps the cursor
+    /// line in view.
+    pub fn edit_scroll(&self) -> usize {
+        self.edit_scroll
+    }
+
+    /// Scroll the editor window so the cursor row is inside a window
+    /// of `height` lines. A short draft keeps scroll 0; a long one
+    /// follows the cursor.
+    pub fn editor_scroll_to_cursor(&mut self, height: usize) {
+        let row = self.editor.cursor().0;
+        let window = height.max(1).saturating_sub(1);
+        if row <= window {
+            self.edit_scroll = 0;
+        } else if row.saturating_sub(window) > self.edit_scroll {
+            self.edit_scroll = row.saturating_sub(window);
+        } else if row < self.edit_scroll {
+            self.edit_scroll = row;
+        }
+        // Never scroll past the end of the text.
+        let max_scroll = self.editor.n_lines().saturating_sub(window);
+        self.edit_scroll = self.edit_scroll.min(max_scroll);
+    }
+
+    /// The draft text as it would be sent: the editor lines joined
+    /// with newlines, trimmed.
+    pub fn draft(&self) -> String {
+        self.editor.text().trim().to_string()
+    }
+
+    /// Take the draft for sending, leaving the editor empty.
     pub fn take_draft(&mut self) -> String {
-        std::mem::take(&mut self.draft)
+        let t = self.editor.text().trim().to_string();
+        self.editor.clear();
+        self.edit_scroll = 0;
+        t
     }
 
     pub fn set_draft(&mut self, text: String) {
-        self.draft = text;
+        self.editor.set_text(&text);
+        self.edit_scroll = 0;
     }
 
-    // ── approvals ───────────────────────────────────────────────
+    /// The editor's modal state label, for the status row
+    /// (`[NORMAL]`, `[INSERT]`, ...; `[d-PENDING]` while an
+    /// operator waits for its motion). Mirrors the pi-vim
+    /// `formatStatus` output.
+    pub fn editor_mode_label(&self) -> String {
+        if let Some(p) = self.editor.pending_label() {
+            p
+        } else {
+            format!("[{}]", self.editor.mode().label())
+        }
+    }
+
+    // ── handoff ───────────────────────────────────────────────
+
+    /// The pending handoff of the active session's log: the
+    /// `new_session` of the last `context_exhausted` event that
+    /// seeded a session. `None` when the log holds no marker, or the
+    /// last marker seeded none (the summary call failed). A marker
+    /// followed by a user message is superseded by that turn's own
+    /// marker, closer to the log end.
+    pub fn pending_handoff(&self) -> Option<String> {
+        self.events
+            .iter()
+            .rev()
+            .find(|e| e.kind() == EventKind::ContextExhausted)
+            .and_then(|e| {
+                e.get_str("new_session")
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            })
+    }
+
+    // ── approvals ───────────────────────────────────────
 
     /// Oldest pending `approval_request`, or `None` when the log has no
     /// unanswered request. Derivation is log-only (G6: pending state
@@ -620,7 +748,17 @@ impl App {
                 }
             },
             Key::Enter => {
-                if self.draft.trim().is_empty() {
+                // Enter sends the whole draft; Ctrl-J inserts a
+                // newline in it (docs/tui.md: Enter = send, multi-line
+                // via Ctrl-J). The naming bar confirms on Enter.
+                if let Some(name) = self.pending_name().map(str::to_string) {
+                    if name.trim().is_empty() {
+                        self.flash("empty name — type a session name first");
+                        return Vec::new();
+                    }
+                    return vec![Action::ConfirmNewSession(name)];
+                }
+                if self.draft().is_empty() {
                     self.flash("empty message — type something first");
                     Vec::new()
                 } else if self.active.is_none() {
@@ -630,8 +768,28 @@ impl App {
                     vec![Action::SendDraft]
                 }
             }
-            Key::Backspace => {
-                self.draft.pop();
+            Key::CtrlJ => {
+                // The multi-line editor's newline key. In insert mode
+                // it splits the line; in normal mode it moves down.
+                if self.pending_name().is_some() {
+                    // The naming bar is single-line: ignore.
+                    return Vec::new();
+                }
+                if let Some(h) = self.editor().press(Key::CtrlJ) {
+                    self.flash(h);
+                }
+                Vec::new()
+            }
+            Key::Backspace | Key::Delete
+            | Key::Left | Key::Right | Key::Up | Key::Down
+            | Key::Home | Key::End => {
+                // The editor decides what these do in its current
+                // mode: in insert they edit or move (the newline key
+                // is Ctrl-J; Enter sends the draft); in normal, they
+                // are motions.
+                if let Some(h) = self.editor().press(key) {
+                    self.flash(h);
+                }
                 Vec::new()
             }
             Key::CtrlR => {
@@ -697,13 +855,32 @@ impl App {
                 Vec::new()
             }
             Key::Esc => {
-                self.draft.clear();
+                // In the editor's editing modes Esc is the vim
+                // key (to normal / cancel). In plain normal mode it
+                // keeps the old clear-draft safety behavior.
+                if self.editor().mode() == crate::vim_editor::Mode::Normal {
+                    self.set_draft(String::new());
+                } else {
+                    if let Some(h) = self.editor().press(Key::Esc) {
+                        self.flash(h);
+                    }
+                }
                 Vec::new()
             }
             Key::Char(c) => {
+                // The one-key handoff (correction 57): the log holds a
+                // seeded `context_exhausted` marker and no loop runs.
+                // It preempts the editor in that state only; in a
+                // live session `h` stays the vim left motion.
+                if c == 'h'
+                    && self.active().is_some_and(|s| !self.loop_running(s))
+                    && self.pending_handoff().is_some()
+                {
+                    return vec![Action::Handoff(self.pending_handoff().unwrap())];
+                }
                 // y / n / e answer the oldest pending approval_request
                 // (docs/tui.md section 7); without a pending request
-                // they are ordinary typing.
+                // they are ordinary keys for the editor.
                 let lower = c.to_ascii_lowercase();
                 if self.oldest_pending_approval().is_some() {
                     match lower {
@@ -713,7 +890,9 @@ impl App {
                         _ => {}
                     }
                 }
-                self.draft.push(c);
+                if let Some(h) = self.editor().press(Key::Char(c)) {
+                    self.flash(h);
+                }
                 Vec::new()
             }
         }
@@ -791,6 +970,8 @@ mod tests {
         let mut app = app_with(vec![], "s1");
         app.press(Key::Char('h'));
         app.press(Key::Char('i'));
+        // Enter sends the whole draft. The main loop's `SendDraft`
+        // handler is what clears it via `take_draft`.
         assert_eq!(app.press(Key::Enter), vec![Action::SendDraft]);
         assert_eq!(app.take_draft(), "hi");
     }
@@ -798,8 +979,28 @@ mod tests {
     #[test]
     fn enter_without_draft_does_nothing() {
         let mut app = app_with(vec![], "s1");
+        // Empty draft: no SendDraft, but a flash tells the user.
         assert!(app.press(Key::Enter).is_empty());
         assert!(app.status().is_some());
+    }
+
+    #[test]
+    fn ctrl_j_newlines_and_send_keeps_draft() {
+        // Ctrl-J is the multi-line newline key: in normal mode it is
+        // the `j` motion; in insert mode it inserts a hard newline.
+        // Enter sends regardless of the modal state.
+        let mut app = app_with(vec![], "s1");
+        app.editor().set_text("ab\ncd");
+        app.editor().mode = crate::vim_editor::Mode::Normal;
+        app.press(Key::CtrlJ);
+        assert_eq!(
+            app.editor().cursor(),
+            (1, 0),
+            "Ctrl-J is the j motion in normal mode"
+        );
+        app.press(Key::Char('i'));
+        app.press(Key::CtrlJ);
+        assert_eq!(app.draft(), "ab\n\ncd", "Ctrl-J is a newline in insert mode");
     }
 
     #[test]
@@ -1267,5 +1468,68 @@ mod tests {
         app.press(Key::Char('e'));
         assert_eq!(app.pending_name(), Some("se"));
         assert_eq!(app.draft(), "");
+    }
+
+    fn exhausted_event(new_session: &str) -> Event {
+        let mut o = serde_json::json!({
+            "v": 1,
+            "type": "context_exhausted",
+            "ts": "t",
+            "message": "context budget exhausted after compaction"
+        });
+        o["new_session"] = serde_json::json!(new_session);
+        Event::Json { obj: o }
+    }
+
+    #[test]
+    fn pending_handoff_reads_the_last_seeded_marker() {
+        let app = app_with(vec![exhausted_event("s1_h1")], "s1");
+        assert_eq!(app.pending_handoff(), Some("s1_h1".to_string()));
+
+        // The newest marker is the word: a later marker with no
+        // seeded session (a failed summary call) hides the older one.
+        let app = app_with(
+            vec![exhausted_event("s1_h1"), exhausted_event("")],
+            "s1",
+        );
+        assert_eq!(app.pending_handoff(), None);
+
+        // No marker: nothing pending.
+        let app = app_with(vec![], "s1");
+        assert_eq!(app.pending_handoff(), None);
+    }
+
+    #[test]
+    fn h_key_hands_off_when_seeded_and_idle() {
+        let mut app = app_with(vec![exhausted_event("s1_h1")], "s1");
+        assert_eq!(
+            app.press(Key::Char('h')),
+            vec![Action::Handoff("s1_h1".to_string())]
+        );
+        assert_eq!(app.draft(), "", "the key preempts the editor");
+    }
+
+    #[test]
+    fn h_key_stays_editor_motion_without_a_seed() {
+        // No marker: the key is ordinary typing in the insert-mode
+        // editor.
+        let mut app = app_with(vec![], "s1");
+        assert!(app.press(Key::Char('h')).is_empty());
+        assert_eq!(app.draft(), "h");
+
+        // A marker that seeded no session: the key stays with the
+        // editor, the user starts the session by hand.
+        let mut app = app_with(vec![exhausted_event("")], "s1");
+        assert!(app.press(Key::Char('h')).is_empty());
+        assert_eq!(app.draft(), "h");
+    }
+
+    #[test]
+    fn h_key_stays_editor_motion_while_the_loop_runs() {
+        let mut app = app_with(vec![exhausted_event("s1_h1")], "s1");
+        attach_dummy(&mut app, "s1");
+        assert!(app.loop_running(&SessionId::new("s1")));
+        assert!(app.press(Key::Char('h')).is_empty(), "the running loop owns the session");
+        assert_eq!(app.draft(), "h");
     }
 }

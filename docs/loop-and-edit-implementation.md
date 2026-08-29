@@ -90,7 +90,9 @@ sessions_root = "sessions"
 tools_root = "tools"
 
 [limits]
-max_steps = 20
+compact_keep_events = 24
+compact_result_chars = 500
+compact_text_chars = 200
 read_limit = 2000
 read_max_line_length = 2000
 read_max_bytes = 51200
@@ -395,32 +397,31 @@ exit 0
 
 ### `turn.sh` — Loop driver
 
-Reads `max_steps` and `sessions_root` from config. Calls `step.sh` by path.
+Reads `sessions_root` from config. Calls `step.sh` in a loop until `claim`
+reports `idle`. An error in a step stops the loop. Correction 51 removed
+the step cap: the model drives the loop to completion.
 
 ```bash
 #!/usr/bin/env bash
+# One loop driver per user turn.
+# Runs step.sh until claim reports the session idle.
+# No step cap: the model drives the loop to completion.
+# (correction 51: the max_steps cap is gone; an error still stops the loop.)
 set -euo pipefail
 
 SESSION="$1"
 CONFIG="${CONFIG:-config.toml}"
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-MAX_STEPS=$(awk -F'[[:space:]]*=[[:space:]]*' '/^max_steps[[:space:]]*=/{print $2; exit}' "$CONFIG")
-MAX_STEPS=${MAX_STEPS:-20}
 SESSIONS_ROOT=$(awk -F'"' '/^sessions_root[[:space:]]*=/{print $2; exit}' "$CONFIG")
-STEPS=0
+BIN_DIR="$(cd "$SCRIPT_DIR/../target/debug" && pwd)"
 
-while [ "$STEPS" -lt "$MAX_STEPS" ]; do
-  STEPS=$((STEPS + 1))
+while true; do
   "$SCRIPT_DIR/step.sh" "$SESSION" || exit 1
-  BIN_DIR="$(cd "$SCRIPT_DIR/../target/debug" && pwd)"
   STATE=$("$BIN_DIR/claim" --session "$SESSIONS_ROOT/$SESSION" | jq -r .state)
   if [ "$STATE" = "idle" ]; then
     exit 0
   fi
 done
-
-echo "max_steps reached ($MAX_STEPS)" >&2
-exit 1
 ```
 
 ### Script dependencies

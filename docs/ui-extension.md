@@ -24,7 +24,7 @@ No extension code compiles into the TUI.
 
 ## 2. In scope and out of scope
 
-Five capabilities:
+Six capabilities:
 
 | Cap | What it does |
 |---|---|
@@ -33,10 +33,16 @@ Five capabilities:
 | `transform` | Rewrites text at render time (mermaid fences, LaTeX spans) |
 | `append` | Writes whitelisted event types to the log |
 | `notify` | Terminal effects (bell, OSC), applied by the host |
+| `frame` | Owns the input-area chrome: border style, the label, and the interior height. The host renders the draft content and the cursor; the extension owns the frame, never the input state |
 
 Out of scope:
 
-- live widget replacement inside the TUI process (pi's `setEditorComponent`)
+- live widget replacement inside the TUI process (pi's `setEditorComponent`).
+  The `frame` capability is the boundary for the input area: an
+  extension owns the frame chrome (border, label, height) through a
+  declarative spec, never the input state. The TUI always renders the
+  draft, the cursor, and the key state; an extension cannot type
+  into the draft or intercept a key
 - hot reload. The update path is stop, edit, restart (section 9)
 - direct extension-to-extension IPC. All shared state flows through the log
 - audio output
@@ -80,7 +86,8 @@ TUI to extension:
 | op | payload | meaning |
 |---|---|---|
 | `event` | one full log event | a new event matching `kinds` |
-| `tick` | `{seq, width, session, model, loop_running, statuses}` | cadence ping for status extensions |
+| `tick` | `{seq, width, session, model, thinking, loop_running, statuses}` | cadence ping for status and frame extensions |
+| `frame` | `{seq, width, session, model, thinking, mode, loop_running}` | cadence ping for the frame extension; the `mode` label and `thinking` level drive its `frame_spec` |
 | `transform` | `{req, text, width, scope}` | rewrite one span |
 
 Extension to TUI:
@@ -89,6 +96,7 @@ Extension to TUI:
 |---|---|---|
 | `lines` | `{event_id, lines}` | styled lines replacing the built-in render of one event |
 | `status` | `{lines}` | the statusline row |
+| `frame_spec` | `{spec}` | the input-area frame: `{border, label, height}`. The host renders the draft and cursor; a bad `spec` keeps the last valid frame (G5) |
 | `transformed` | `{req, lines}` | result for the matching `req` |
 | `append` | `{event}` | append the event via `SessionPort` |
 | `notify` | `{kind: "bell"}` or `{kind: "osc", code, args}` | the host applies it on its own terminal |
@@ -192,6 +200,10 @@ where the core decides the sequence and an entry never claims a slot
 2. `tool_result` — a `render` kind owner
 3. `mermaid` — a Rust binary on `grok-mermaid` (Unicode art, like pi)
 4. `statusline-rs` — Rust port of item 1
+5. `frame` — bash. Owns the input-area frame: colors the rounded
+   border by the model thinking level and labels it with the editor
+   mode. Proves the `frame` capability and its trust boundary (chrome
+   only, no input state)
 
 ## 9. Distribution and lifecycle policy
 
@@ -211,6 +223,14 @@ where the core decides the sequence and an entry never claims a slot
 
 - The TUI holds no extension logic. It hosts and supervises
 - A dead extension degrades a pane, not the log
+- The `frame` extension owns the input-area chrome, not the input
+  state: a `frame_spec` may set the border style, the label, and the
+  interior height, but it cannot type into the draft, move the
+  cursor, or capture a key. The host renders the draft content, the
+  cursor, and the modal state; a frame spec is a declarative
+  description of the border. The `frame` capability is therefore
+  presentation-level trust, below `append` (a log writer). Two frame
+  owners refuse the start, like the `status` row
 - The `docs/tui.md` section 10 forbidden-string scan stays
 - Trust: an extension with `append` is a long-lived log writer.
   It holds loop-level trust, not tool-level trust. The tool contract is

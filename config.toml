@@ -9,8 +9,17 @@ arg_style = "append_session"
 [model]
 api = "responses"
 max_output_tokens = 32768
-reasoning_effort = "medium"
-chars_per_token = 4
+reasoning_effort = "xhigh"
+# Chars-per-token conversion for the pre-measurement fallback only
+# (work item B, correction 57). The context budget is driven by the
+# measured usage.input_tokens; this rate converts request chars to
+# tokens where no measurement exists: a fresh session, a server that
+# reports no usage, and the compacted candidates (which have no
+# measurement by construction). The measured ratio on this model is
+# about 8 chars per input token. Keep the value at or under the
+# measured ratio: a lower rate over-estimates tokens and compacts
+# earlier (safe); a higher rate risks sending a request over budget.
+chars_per_token = 8
 
 [model.deepseek]
 model_id = "deepseek-v4-flash"
@@ -38,7 +47,14 @@ sessions_root = "sessions"
 tools_root = "tools"
 
 [limits]
-max_steps = 20
+# Cap the model request so auto-compact engages before the context
+# reaches the zone where this model emits empty tool-call arguments
+# (FT-008). The first schema-validation failure in sessions/better-ui
+# appeared at 56.8k input tokens; none below 50k. The budget is in
+# input tokens now (work item B, correction 57): it is the knob the
+# token-driven decision compares against. The legacy char knob
+# (context_budget_chars) is read only when this one is absent.
+context_budget_tokens = 55000
 read_limit = 2000
 read_max_line_length = 2000
 read_max_bytes = 51200
@@ -48,22 +64,46 @@ tool_result_max_chars = 20000
 bash_max_output_bytes = 16000
 bash_timeout_default = 60
 bash_timeout_max = 300
+# Auto-compact knobs (docs/better-ui-root-cause.md).
+# When the request outgrows the context budget, assemble
+# truncates old events instead of ending the session.
+# Recent events stay full, older ones shrink to the caps.
+# The caps halve down to the floor, then the oldest steps
+# are dropped until the request fits (correction 55). When even
+# that does not fit, the automatic handoff takes over: one cheap
+# summarization call on the compacted log seeds a new session, and
+# the TUI offers a one-key resume there (correction 57).
+compact_keep_events = 24
+compact_result_chars = 8000
+compact_text_chars = 2000
+compact_min_result_chars = 128
+compact_min_text_chars = 64
+# The output cap of the one handoff summary call. Cheap by default:
+# the summary is a seed, not a report.
+handoff_summary_max_tokens = 4096
 
 [system_prompt]
-text = """Use the read tool — not shell commands like cat — to inspect text files.
-Results include line numbers. Use offset and limit to continue reading large files.
+# Borrowed from the pi coding agent default prompt.
+# Adapted to this harness's tool set and task discipline.
+text = """You are an expert coding assistant in a Unix agent harness.
+You help the user by reading files, running commands, editing code,
+and writing new files.
 
-Use the write tool to create files or completely replace file contents.
+Available tools:
+- read: Read file contents. Results carry line numbers.
+- write: Create or overwrite files.
+- edit: Make exact text replacements in a file.
+- bash: Execute bash commands (builds, tests, git, file search).
+- list: List the files in a directory.
 
-Use the edit tool for targeted changes to existing UTF-8 text files.
-It replaces literal old_string with new_string; by default old_string must
-appear exactly once. If it appears multiple times, provide a more specific
-old_string or set replace_all to true. Read the file first unless you just
-created or edited it in this session.
+The project can add custom tools to the list above.
 
-Use the bash tool to run shell commands: builds, tests, git, file discovery,
-and any task that the read/write/edit tools cannot handle.
-The command runs in the session working directory. Use relative paths.
-Prefer read/write/edit over bash for file operations.
-Use bash for: running tests (cargo test), checking builds (cargo build),
-git operations, searching (grep, find), and inspecting the environment."""
+Guidelines:
+- Plan first. Split the task into steps before you code.
+- Complete the steps until the task is done.
+- Build and test after changes. Run the commands that prove the change.
+- Do not stop with the work unfinished. State what remains and why.
+- Prefer read, edit, and write over bash for file work.
+- Use read to examine files instead of cat or sed.
+- Use offset and limit to continue reading large files.
+- Keep replies short. Show file paths clearly in your replies."""

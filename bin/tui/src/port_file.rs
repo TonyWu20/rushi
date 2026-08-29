@@ -24,6 +24,24 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::SyncSender;
 use std::time::Duration;
 
+/// `LogLine` — the only type that may write a session log.
+///
+/// FT-005: a regular file gets no `O_APPEND` write atomicity at any
+/// size. The `PIPE_BUF` guarantee applies to pipes only. Two
+/// concurrent writers can resolve the same end offset and corrupt
+/// each other's bytes into lines that look complete. This type
+/// closes the hole:
+///
+/// - one `LogLine` owns the full event bytes, including the trailing
+///   newline. It is the only value that reaches the log.
+/// - `commit` is the only write path. It takes an exclusive `flock`
+///   and does one `write(2)` of the whole buffer. The type has no
+///   `impl Write`, so a line cannot be appended in pieces. Concurrent
+///   appends from any number of processes serialize on the lock.
+///
+/// TUI copy of the shared capability. Keep in sync with
+/// `bin/log/src/logline.rs` and `bin/user/src/logline.rs`
+/// (deliberate duplication, phase 1; see `notes/itches.md`).
 mod logline {
     use std::io::{self, Write};
     use std::os::fd::AsRawFd;
@@ -142,6 +160,11 @@ use logline::LogLine;
 
 /// Session log file name. A storage detail; never referenced above the port.
 const LOG_FILE: &str = "events.jsonl";
+/// TUI trace log file name. A storage detail; never referenced above
+/// the port. The TUI's own errors and warnings live here, one JSON
+/// record per event, written through the same locked `LogLine`
+/// commit as the event log (docs/tool-log-design_from_human.md).
+const TRACE_FILE: &str = "tui-trace.jsonl";
 /// Working directory recorded at session start. A storage detail.
 const CWD_FILE: &str = "cwd";
 /// How often the tailer polls the log file.
@@ -176,6 +199,38 @@ impl FileSessionPort {
             config_dir: cfg.config_dir.clone(),
             config_path: cfg.config_path.clone(),
         }
+    }
+
+    /// Read the persistent loop PID artifact for a session.
+    /// Returns `None` when the file is absent or unreadable.
+    pub fn read_loop_pid(&self, session: &SessionId) -> Result<Option<i32>, BusError> {
+        let dir = self.session_dir(session)?;
+        let raw = match std::fs::read_to_string(dir.join("loop.pid")) {
+            Ok(r) => r,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(BusError::from(e)),
+        };
+        let pid = raw.trim().parse::<i32>().map_err(|_| BusError::InvalidEvent {
+            reason: "loop.pid holds no valid pid".to_string(),
+        })?;
+        Ok(Some(pid))
+    }
+
+    /// Stop a loop this TUI did not start. Reattach through the
+    /// persistent `loop.pid` artifact. Returns a message on success, or
+    /// `None` when no live loop matches this session (FT-003).
+    pub fn stop_external_loop(
+        &self,
+        session: &SessionId,
+    ) -> Result<Option<String>, BusError> {
+        let Some(pid) = self.read_loop_pid(session)? else {
+            return Ok(None);
+        };
+        if !pid_is_loop(pid, session.as_str()) {
+            return Ok(None);
+        }
+        group_stop(pid);
+        Ok(Some(format!("stopped external loop pid {pid}")))
     }
 
     /// Reject session ids that could escape the sessions root.
@@ -402,9 +457,20 @@ impl SessionPort for FileSessionPort {
             } else {
                 0
             };
+            let chunk = &data[start..];
+            // A read that races an in-flight append leaves the last line
+            // without its trailing newline. That tail segment is still
+            // being written, not a persisted malformed line. Drop it; the
+            // next read shows it in full.
+            let tail_in_progress = chunk.last() != Some(&b'\n');
+            let segs: Vec<&[u8]> = chunk.split(|b| *b == b'\n').collect();
+            let last_idx = segs.len().saturating_sub(1);
             let mut events = Vec::new();
-            for line in data[start..].split(|b| *b == b'\n') {
-                let text = String::from_utf8_lossy(line);
+            for (i, seg) in segs.iter().enumerate() {
+                if i == last_idx && tail_in_progress {
+                    continue;
+                }
+                let text = String::from_utf8_lossy(seg);
                 if let Some(ev) = Event::parse_line(&text) {
                     events.push(ev);
                 }
@@ -488,11 +554,41 @@ impl SessionPort for FileSessionPort {
         })?
     }
 
+    async fn append_trace(&self, session: &SessionId, kind: &str, message: &str) -> Result<(), BusError> {
+        let session_dir = self.session_dir(session)?;
+        let trace_path = session_dir.join(TRACE_FILE);
+        // One record per event: timestamp, kind, message. The record
+        // owns no newline; `LogLine` does. The commit is the same
+        // locked single-write path as the event log (FT-005), so a
+        // trace reader inherits the tail-drop rule for torn reads.
+        let record = serde_json::json!({
+            "v": 1,
+            "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "kind": kind,
+            "message": message,
+        });
+        let trace_line = LogLine::from_json(&record.to_string());
+        let res = tokio::task::spawn_blocking(move || -> Result<(), BusError> {
+            std::fs::create_dir_all(&session_dir)?;
+            trace_line
+                .commit(&trace_path)
+                .map_err(BusError::from)?;
+            Ok(())
+        })
+        .await;
+        match res {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(BusError::Io {
+                what: e.to_string(),
+            }),
+        }
+    }
+
     async fn spawn_loop(&self, session: &SessionId) -> Result<Box<dyn LoopHandle>, BusError> {
         let loop_cmd = self.loop_cmd.as_ref().ok_or(BusError::LoopNotConfigured)?;
         let argv = loop_cmd.argv(session);
-        let program = argv[0].clone();
-        let mut cmd = tokio::process::Command::new(&program);
+        let program = argv[0].clone();        let mut cmd = tokio::process::Command::new(&program);
         cmd.args(&argv[1..]);
         cmd.current_dir(&self.config_dir);
         cmd.env("CONFIG", &self.config_path);
@@ -522,6 +618,16 @@ impl SessionPort for FileSessionPort {
         let pid = child.id().map(|p| p as i32).ok_or_else(|| BusError::Io {
             what: "loop process has no pid".to_string(),
         })?;
+
+        // Persist the loop PID as a session artifact. A restarted TUI
+        // reads this file to reattach and stop an orphaned loop
+        // (FT-003). The PID is the process-group leader (setsid).
+        let session_dir = self.session_dir(session)?;
+        if let Err(e) = std::fs::write(session_dir.join("loop.pid"), format!("{pid}\n")) {
+            // A missing pid file degrades reattach; it must not break
+            // the loop itself. Note it and continue.
+            eprintln!("tui: cannot write loop.pid: {e}");
+        }
 
         // Output plumbing: two pump tasks (stdout, stderr) share one
         // unbounded channel; each reports EOF on a one-shot so the
@@ -697,6 +803,37 @@ fn group_alive(pid: i32) -> bool {
     // ESRCH: the group is gone (or already reaped).
     let r = unsafe { libc::kill(-pid, 0) };
     r == 0
+}
+
+/// Signal a stopped loop group: SIGTERM now, SIGKILL after a 3 s
+/// grace window. Mirrors the local handle stop escalation.
+fn group_stop(pid: i32) {
+    if group_alive(pid) {
+        unsafe { libc::kill(-pid, libc::SIGTERM) };
+    }
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(3));
+        if group_alive(pid) {
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+        }
+    });
+}
+
+/// A pid is this session's loop when its group is alive and its
+/// command line carries the session name as a whole argument. The
+/// match is exact: a recycled pid now leading a longer session's
+/// group (the handoff naming makes "s1" a substring of "s1_h1")
+/// must not pass, so it is left alone.
+fn pid_is_loop(pid: i32, session: &str) -> bool {
+    if !group_alive(pid) {
+        return false;
+    }
+    let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+        return false;
+    };
+    cmdline
+        .split(|b| *b == 0)
+        .any(|arg| arg == session.as_bytes())
 }
 
 /// Minimal JSON Schema validator for the event schemas under
@@ -882,11 +1019,261 @@ mod tests {
     }
 
     #[test]
+    fn read_events_drops_in_progress_tail_without_newline() {
+        let c = make_cfg(false, None);
+        let rt = runtime();
+        std::fs::create_dir_all(c.dir.path().join("sessions").join("s1")).unwrap();
+        // Two complete lines, then a third still being written. The
+        // tail has no trailing newline, so it is in progress, not a
+        // persisted malformed line. It must not render as bad.
+        std::fs::write(
+            log_path(&c, "s1"),
+            "{\"v\":1,\"type\":\"user_message\",\"ts\":\"t\",\"content\":\"a\"}\n\
+             {\"v\":1,\"type\":\"error\",\"ts\":\"t\",\"message\":\"ok\"}\n\
+             {\"v\":1,\"type\":\"tool_call\",\"ts\":\"t\",",
+        )
+        .unwrap();
+        let evs = block_on(&rt, c.port.read_events(&SessionId::new("s1"))).unwrap();
+        assert_eq!(evs.len(), 2);
+        assert_eq!(evs[0].kind(), EventKind::UserMessage);
+        assert_eq!(evs[1].kind(), EventKind::Error);
+        assert!(!evs.iter().any(|e| e.kind() == EventKind::BadLine));
+    }
+
+    #[test]
+    fn read_loop_pid_missing_is_none() {
+        let c = make_cfg(false, None);
+        assert_eq!(c.port.read_loop_pid(&SessionId::new("s1")).unwrap(), None);
+    }
+
+    #[test]
+    fn read_loop_pid_returns_the_stored_pid() {
+        let c = make_cfg(false, None);
+        let dir = c.dir.path().join("sessions").join("s1");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("loop.pid"), "12345\n").unwrap();
+        assert_eq!(
+            c.port.read_loop_pid(&SessionId::new("s1")).unwrap(),
+            Some(12345)
+        );
+    }
+
+    #[test]
+    fn stop_external_loop_without_artifact_is_none() {
+        let c = make_cfg(false, None);
+        assert_eq!(c.port.stop_external_loop(&SessionId::new("ghost")).unwrap(), None);
+    }
+
+    #[test]
+    fn pid_is_loop_rejects_a_dead_pid() {
+        // A pid above the system range cannot be this loop's group.
+        assert!(!pid_is_loop(999_999_999, "s1"));
+    }
+
+    #[test]
+    fn pid_is_loop_requires_a_whole_argument_match() {
+        let c = make_cfg(false, None);
+        let dir = c.dir.path().join("sessions").join("s-sub");
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("leader.pid");
+        // A live group that names only "s1_h1": the handoff naming
+        // convention (<base>_h<N>) makes "s1" a substring of the
+        // longer name. A substring check would stop "s1" into this
+        // group and kill a live handoff loop.
+        let inner = format!(
+            "echo $$ > {}; while :; do sleep 1; done",
+            pid_file.display()
+        );
+        let mut child = std::process::Command::new("setsid")
+            .args(["bash", "-c", &inner, "s1_h1"])
+            .spawn()
+            .unwrap();
+        for _ in 0..100 {
+            if pid_file.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let pid = match std::fs::read_to_string(&pid_file)
+            .ok()
+            .and_then(|r| r.trim().parse::<i32>().ok())
+        {
+            Some(p) if proc_is_alive_group_leader_named(p, "s1_h1") => p,
+            _ => {
+                eprintln!("SKIPPED: no live group leader was observable here");
+                let _ = child.wait();
+                return;
+            }
+        };
+        assert!(pid_is_loop(pid, "s1_h1"), "the exact name passes");
+        assert!(
+            !pid_is_loop(pid, "s1"),
+            "a substring of the name must not pass"
+        );
+        // Leave no orphan group behind.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn stop_external_loop_kills_a_live_orphan_group() {
+        let c = make_cfg(false, None);
+        let sid = SessionId::new("s-reattach");
+        let dir = c.dir.path().join("sessions").join("s-reattach");
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("leader.pid");
+        // Spawn a session-leader loop that stays alive in a loop and
+        // keeps the session name in its command line. It records its
+        // own pid. A std launch keeps the test free of a tokio reaper.
+        let inner = format!(
+            "echo $$ > {}; while :; do sleep 1; done",
+            pid_file.display()
+        );
+        let mut child = std::process::Command::new("setsid")
+            .args(["bash", "-c", &inner, "s-reattach"])
+            .spawn()
+            .unwrap();
+        // Wait for the leader to record its pid.
+        for _ in 0..100 {
+            if pid_file.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let raw = match std::fs::read_to_string(&pid_file) {
+            Ok(r) => r,
+            Err(_) => {
+                eprintln!("SKIPPED: the leader did not record its pid here");
+                let _ = child.wait();
+                return;
+            }
+        };
+        let pid: i32 = match raw.trim().parse() {
+            Ok(p) => p,
+            Err(_) => {
+                eprintln!("SKIPPED: the recorded pid is not numeric");
+                let _ = child.wait();
+                return;
+            }
+        };
+        // Require a live group leader that names the session. If this
+        // environment cannot produce one, skip the kill assertion.
+        if !proc_is_alive_group_leader_named(pid, "s-reattach") {
+            eprintln!("SKIPPED: no live group leader was observable here");
+            let _ = child.wait();
+            return;
+        }
+        std::fs::write(dir.join("loop.pid"), format!("{pid}\n")).unwrap();
+        let msg = c.port.stop_external_loop(&sid).unwrap();
+        assert!(msg.is_some(), "expected a stop message, got none");
+        // Poll until the group dies. The stop escalates SIGKILL after a
+        // 3 s grace window. A killed leader lingers as a zombie until
+        // reaped, so treat a zombie (or a gone /proc entry) as dead.
+        let mut dead = false;
+        for _ in 0..35 {
+            if proc_is_dead_or_zombie(pid) {
+                dead = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(dead, "the orphan group leader must die within the escalation window");
+        let _ = child.wait();
+    }
+
+    /// A pid is dead when /proc/<pid> is gone or the process is a
+    /// zombie (killed, awaiting reap). A running process is not dead.
+    fn proc_is_dead_or_zombie(pid: i32) -> bool {
+        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(s) => s,
+            Err(_) => return true,
+        };
+        let close = match stat.rfind(')') {
+            Some(i) => i,
+            None => return true,
+        };
+        let rest: Vec<&str> = stat[close + 1..]
+            .split(' ')
+            .filter(|s| !s.is_empty())
+            .collect();
+        matches!(rest.first().copied(), Some("Z"))
+    }
+
+    /// A pid is a live group leader that names the session when /proc
+    /// shows it alive and non-zombie, its pgrp equals its pid, and its
+    /// command line names the session.
+    fn proc_is_alive_group_leader_named(pid: i32, session: &str) -> bool {
+        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        // Fields after the (comm): state ppid pgrp ... The comm field
+        // may hold spaces, so split at the last closing paren.
+        let close = match stat.rfind(')') {
+            Some(i) => i,
+            None => return false,
+        };
+        let rest: Vec<&str> = stat[close + 1..].split(' ').filter(|s| !s.is_empty()).collect();
+        if rest.len() < 3 {
+            return false;
+        }
+        let state = rest[0];
+        let pgrp = rest[2];
+        if state.starts_with('Z') {
+            return false;
+        }
+        pgrp == pid.to_string().as_str() && cmdline_names_session(pid, session)
+    }
+
+    /// The command line of a pid names the session when any NUL-joined
+    /// argv field contains the session id.
+    fn cmdline_names_session(pid: i32, session: &str) -> bool {
+        let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+            return false;
+        };
+        cmdline
+            .split(|b| *b == 0)
+            .any(|a| a == session.as_bytes())
+    }
+
+    #[test]
     fn read_events_missing_session_is_empty_not_error() {
         let c = make_cfg(false, None);
         let rt = runtime();
         let evs = block_on(&rt, c.port.read_events(&SessionId::new("ghost"))).unwrap();
         assert!(evs.is_empty());
+    }
+
+    #[test]
+    fn append_trace_writes_a_timestamped_record_to_the_session_dir() {
+        let c = make_cfg(false, None);
+        let rt = runtime();
+        let sid = SessionId::new("s1");
+        block_on(&rt, c.port.append_trace(&sid, "loop_spawn", "loop started")).unwrap();
+        block_on(&rt, c.port.append_trace(&sid, "port", "event append failed: io")).unwrap();
+        let trace_path = c.dir.path().join("sessions").join("s1").join("tui-trace.jsonl");
+        let text = std::fs::read_to_string(trace_path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "one record per trace event");
+        let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(first["v"], 1);
+        assert_eq!(first["kind"], "loop_spawn");
+        assert_eq!(first["message"], "loop started");
+        assert!(first["ts"].is_string(), "the record carries a timestamp");
+        let second: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(second["kind"], "port");
+        // The trace log is its own file: the event log holds no trace.
+        let log = std::fs::read_to_string(log_path(&c, "s1"));
+        assert!(log.is_err(), "append_trace must not touch the event log");
+    }
+
+    #[test]
+    fn append_trace_rejects_an_id_that_escapes_the_sessions_root() {
+        let c = make_cfg(false, None);
+        let rt = runtime();
+        let sid = SessionId::new("../escape");
+        let err = block_on(&rt, c.port.append_trace(&sid, "render", "x")).unwrap_err();
+        assert!(matches!(err, BusError::Io { .. }), "{err:?}");
     }
 
     #[test]

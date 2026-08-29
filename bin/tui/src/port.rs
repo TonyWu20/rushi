@@ -177,6 +177,16 @@ pub trait SessionPort: Send + Sync {
     /// JSON Schema when the schema file exists (G3).
     async fn append_event(&self, session: &SessionId, event: &Event) -> Result<(), BusError>;
 
+    /// Append one TUI trace record to the session trace log.
+    ///
+    /// The TUI writes its own errors and warnings to a trace a human
+    /// can read on their own (docs/tool-log-design_from_human.md):
+    /// render failures, port errors, malformed-line hints, key
+    /// handling faults, and loop spawn/stop events. Each record
+    /// carries a timestamp. A failed trace write must not take the
+    /// UI down: callers may drop the result.
+    async fn append_trace(&self, session: &SessionId, kind: &str, message: &str) -> Result<(), BusError>;
+
     /// Start the loop for a session and return its handle. The command
     /// that runs comes from config; the TUI passes it a session id only.
     async fn spawn_loop(&self, session: &SessionId) -> Result<Box<dyn LoopHandle>, BusError>;

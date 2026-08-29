@@ -20,11 +20,79 @@ if [ -f "$SESSION_DIR/cwd" ]; then
 fi
 
 route_cmd() {
+  # The per-session tool log takes the full tool output; the event log
+  # gets the slim index (docs/tool-log-design_from_human.md).
   if [ -n "$TOOL_CWD" ]; then
-    "$BIN_DIR/route" --tools "$TOOL_DIR" --cwd "$TOOL_CWD" "$@"
+    "$BIN_DIR/route" --tools "$TOOL_DIR" --cwd "$TOOL_CWD" \
+      --tool-log "$SESSION_DIR/tools.jsonl" "$@"
   else
-    "$BIN_DIR/route" --tools "$TOOL_DIR" "$@"
+    "$BIN_DIR/route" --tools "$TOOL_DIR" \
+      --tool-log "$SESSION_DIR/tools.jsonl" "$@"
   fi
+}
+
+# The automatic handoff (correction 57). One cheap summarization call
+# on the compacted log. It seeds a new session with the summary and
+# records the `context_exhausted` marker on this session. The TUI
+# offers a one-key resume in the seeded session. A failed summary
+# call still records the exhaustion; it just seeds no session.
+run_handoff() {
+  local session_dir="$2"
+  local ts new_session base next d name suffix
+  local summary_req="$WORKDIR/summary-request.json"
+  local summary_out="$WORKDIR/summary-output.json"
+  local summary="" seed="" new_session_final="" detail
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+  # The handoff chain stays under the original base name: x -> x_h1,
+  # x_h1 -> x_h2. A plain session name is its own base.
+  if [[ "$1" =~ ^(.*)_h([0-9]+)$ ]]; then
+    base="${BASH_REMATCH[1]}"
+  else
+    base="$1"
+  fi
+  next=1
+  for d in "$SESSIONS_ROOT/${base}"_h*; do
+    [[ -d "$d" ]] || continue
+    name="$(basename "$d")"
+    suffix="${name#"${base}"_h}"
+    if [[ "$suffix" =~ ^[0-9]+$ ]] && (( suffix + 1 > next )); then
+      next=$((suffix + 1))
+    fi
+  done
+  new_session="${base}_h${next}"
+
+  jq -c '.summary_request' "$WORKDIR/model-request.json" > "$summary_req"
+  if "$BIN_DIR/model" --config "$CONFIG" < "$summary_req" > "$summary_out" 2>/dev/null \
+     && [[ "$(jq -r '.stop_reason // ""' "$summary_out" 2>/dev/null)" != "error" ]]; then
+    summary="$(jq -r '.text // ""' "$summary_out")"
+  fi
+
+  if [[ -n "$summary" ]]; then
+    seed="${summary}
+
+---
+Handoff: the session \"$1\" ran out of context. The summary above is your only context about it. Continue the task from where it left off. Re-read any file the summary references before acting on it."
+    mkdir -p "$SESSIONS_ROOT/$new_session"
+    [[ -f "$session_dir/cwd" ]] && cp "$session_dir/cwd" "$SESSIONS_ROOT/$new_session/cwd"
+    jq -cn --arg ts "$ts" --arg c "$seed" \
+      '{v:1, type:"user_message", ts:$ts, content:$c}' \
+      | "$BIN_DIR/log" --session "$SESSIONS_ROOT/$new_session" --schemas "$SCHEMA_DIR" || exit 1
+    new_session_final="$new_session"
+  else
+    detail="$(jq -r '.detail // "the summary call did not run"' "$summary_out" 2>/dev/null)"
+    detail="${detail:-the summary call did not run}"
+    jq -cn --arg ts "$ts" --arg d "$detail" \
+      '{v:1, type:"error", ts:$ts, message:("handoff summary call failed: " + $d)}' \
+      | "$BIN_DIR/log" --session "$session_dir" --schemas "$SCHEMA_DIR" || exit 1
+  fi
+
+  # Record the handoff on this session. The marker names the seeded
+  # session (empty string when none was seeded). It is the last
+  # event of the log: claim reports the exhausted state from it.
+  jq -c --arg ns "$new_session_final" 'del(.summary_request) | . + {new_session: $ns}' \
+    "$WORKDIR/model-request.json" \
+    | "$BIN_DIR/log" --session "$session_dir" --schemas "$SCHEMA_DIR" || exit 1
 }
 
 "$BIN_DIR/claim" --session "$SESSION_DIR" > "$WORKDIR/claim.json" || exit 1
@@ -32,6 +100,13 @@ STATE=$(jq -r .state "$WORKDIR/claim.json")
 
 # 2. idle: nothing owed. Append nothing (G1 idempotent replay).
 if [ "$STATE" = "idle" ]; then
+  exit 0
+fi
+
+# 2.5. exhausted: the handoff closed this session (correction 57).
+# Nothing is owed here. The seeded session holds the task. The TUI
+# resumes there with one key.
+if [ "$STATE" = "exhausted" ]; then
   exit 0
 fi
 
@@ -49,6 +124,12 @@ fi
 "$BIN_DIR/assemble" --session "$SESSION_DIR" --config "$CONFIG" > "$WORKDIR/model-request.json" || exit 1
 if jq -e '.type == "error"' "$WORKDIR/model-request.json" > /dev/null; then
   "$BIN_DIR/log" --session "$SESSION_DIR" --schemas "$SCHEMA_DIR" < "$WORKDIR/model-request.json" || exit 1
+  exit 0
+fi
+
+# 4.5. context_exhausted: the automatic handoff (correction 57).
+if jq -e '.type == "context_exhausted"' "$WORKDIR/model-request.json" > /dev/null; then
+  run_handoff "$SESSION" "$SESSION_DIR"
   exit 0
 fi
 

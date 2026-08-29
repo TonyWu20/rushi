@@ -16,6 +16,7 @@ mod highlight;
 mod port;
 mod port_file;
 mod render;
+mod vim_editor;
 
 use std::io::Write;
 use std::time::Duration;
@@ -29,6 +30,7 @@ use ratatui::Terminal;
 
 use app::{Action, App, Decision, Key};
 use config::TuiConfig;
+use event::EventKind;
 use port::{SessionId, SessionPort, TailCursor, WatchItem};
 use port_file::FileSessionPort;
 
@@ -77,6 +79,7 @@ fn key_input(k: &cevent::KeyEvent) -> Option<Key> {
         return match k.code {
             cevent::KeyCode::Char('c') => Some(Key::CtrlC),
             cevent::KeyCode::Char('e') => Some(Key::CtrlE),
+            cevent::KeyCode::Char('j') => Some(Key::CtrlJ),
             cevent::KeyCode::Char('q') => Some(Key::Quit),
             cevent::KeyCode::Char('r') => Some(Key::CtrlR),
             cevent::KeyCode::Char('u') => Some(Key::CtrlU),
@@ -94,6 +97,13 @@ fn key_input(k: &cevent::KeyEvent) -> Option<Key> {
         cevent::KeyCode::PageUp => Some(Key::PgUp),
         cevent::KeyCode::PageDown => Some(Key::PgDn),
         cevent::KeyCode::Esc => Some(Key::Esc),
+        cevent::KeyCode::Left => Some(Key::Left),
+        cevent::KeyCode::Right => Some(Key::Right),
+        cevent::KeyCode::Up => Some(Key::Up),
+        cevent::KeyCode::Down => Some(Key::Down),
+        cevent::KeyCode::Home => Some(Key::Home),
+        cevent::KeyCode::End => Some(Key::End),
+        cevent::KeyCode::Delete => Some(Key::Delete),
         _ => None,
     }
 }
@@ -145,7 +155,19 @@ fn main() {
     }
 
     if let Some(id) = active {
-        let events = rt.block_on(port.read_events(&id)).unwrap_or_default();
+        let events = match rt.block_on(port.read_events(&id)) {
+            Ok(evs) => evs,
+            Err(e) => {
+                trace(
+                    &rt,
+                    &port,
+                    Some(&id),
+                    "port",
+                    &format!("event read failed: {e}"),
+                );
+                Vec::new()
+            }
+        };
         app.set_active(id.clone(), events.clone());
         app.set_watch_rx(port.watch(&id, TailCursor::end()));
         host.send_history(&events);
@@ -168,6 +190,18 @@ fn main() {
                 // (docs/ui-extension.md section 4 history rule).
                 let evs = app.events();
                 let ev = evs.last().cloned().expect("a watch event was just pushed");
+                // A malformed line the transcript now shows is a
+                // TUI-side finding: leave it in the trace log so it
+                // is readable without a human report (FT-001).
+                if ev.kind() == EventKind::BadLine {
+                    let raw = ev
+                        .raw_line()
+                        .unwrap_or("")
+                        .chars()
+                        .take(80)
+                        .collect::<String>();
+                    trace(&rt, &port, app.active(), "malformed_line", &raw);
+                }
                 host.forward_event((evs.len() - 1) as u64, &ev);
             }
         }
@@ -178,17 +212,34 @@ fn main() {
             match item {
                 ext::ExtItem::LinesCached { .. }
                 | ext::ExtItem::StatusUpdated { .. }
+                | ext::ExtItem::FrameUpdated { .. }
                 | ext::ExtItem::TransformedCached { .. } => {}
                 ext::ExtItem::AppendReq { ext: name, event } => {
                     let Some(sid) = app.active().cloned() else {
                         app.flash(format!("ext {name} append failed: no active session"));
+                        trace(
+                            &rt,
+                            &port,
+                            None,
+                            "port",
+                            &format!("ext {name} append skipped: no active session"),
+                        );
                         continue;
                     };
                     let type_name = event.get("type").and_then(|t| t.as_str()).unwrap_or("?");
                     let ev = event::Event::Json { obj: event.clone() };
                     match rt.block_on(port.append_event(&sid, &ev)) {
                         Ok(()) => app.flash(format!("ext {name} appended {type_name}")),
-                        Err(e) => app.flash(format!("ext {name} append failed: {e}")),
+                        Err(e) => {
+                            trace(
+                                &rt,
+                                &port,
+                                Some(&sid),
+                                "port",
+                                &format!("ext {name} append failed: {e}"),
+                            );
+                            app.flash(format!("ext {name} append failed: {e}"));
+                        }
                     }
                 }
                 ext::ExtItem::AppendRejected { ext: name, reason } => {
@@ -231,12 +282,30 @@ fn main() {
                 while cevent::poll(Duration::from_millis(1)).unwrap_or(false) {
                     match cevent::read() {
                         Ok(e) => evs.push(e),
-                        Err(_) => break,
+                        Err(err) => {
+                            trace(
+                                &rt,
+                                &port,
+                                app.active(),
+                                "key",
+                                &format!("input event read failed: {err}"),
+                            );
+                            break;
+                        }
                     }
                 }
             }
             Ok(false) => {}
-            Err(_) => break 'ui,
+            Err(err) => {
+                trace(
+                    &rt,
+                    &port,
+                    app.active(),
+                    "key",
+                    &format!("input poll failed: {err}; the TUI exits"),
+                );
+                break 'ui;
+            }
         }
 
         let mut actions = Vec::new();
@@ -272,11 +341,17 @@ fn main() {
                         continue;
                     };
                     let content = app.take_draft();
-                    let text = content.trim().to_string();
-                    let ev = event::produce::user_message(&text);
+                    let ev = event::produce::user_message(&content);
                     match rt.block_on(port.append_event(&sid, &ev)) {
                         Ok(()) => app.flash("message sent"),
                         Err(e) => {
+                            trace(
+                                &rt,
+                                &port,
+                                Some(&sid),
+                                "port",
+                                &format!("user message append failed: {e}"),
+                            );
                             // Keep the text: the user must not lose a
                             // message that failed to land in the log.
                             app.set_draft(content);
@@ -338,7 +413,16 @@ fn main() {
                             Decision::Deny => "approval appended: deny",
                             Decision::Edit => "edited approval appended",
                         }),
-                        Err(e) => app.flash(e.to_string()),
+                        Err(e) => {
+                            trace(
+                                &rt,
+                                &port,
+                                Some(&sid),
+                                "port",
+                                &format!("approval append failed: {e}"),
+                            );
+                            app.flash(e.to_string());
+                        }
                     }
                 }
                 Action::RunLoop => {
@@ -349,9 +433,19 @@ fn main() {
                         Ok(handle) => {
                             let lines = handle.take_lines().unwrap_or_else(empty_lines);
                             app.attach_loop(sid, handle, lines);
+                            trace(&rt, &port, app.active(), "loop_spawn", "loop started");
                             app.flash("loop started");
                         }
-                        Err(e) => app.flash(e.to_string()),
+                        Err(e) => {
+                            trace(
+                                &rt,
+                                &port,
+                                Some(&sid),
+                                "loop_spawn",
+                                &format!("loop spawn failed: {e}"),
+                            );
+                            app.flash(e.to_string());
+                        }
                     }
                 }
                 Action::StopLoop => {
@@ -359,15 +453,67 @@ fn main() {
                         continue;
                     };
                     let handle = app.loops_mut_for(&sid).and_then(|st| st.handle.take());
-                    if let Some(h) = handle {
-                        h.stop();
-                        app.flash("loop stop requested");
-                        // A stop is a decision worth surviving a
-                        // restart: append the cancel event
-                        // (docs/tui.md section 5).
-                        let ev = event::produce::cancel("turn");
-                        if let Err(e) = rt.block_on(port.append_event(&sid, &ev)) {
-                            app.flash(e.to_string());
+                    match handle {
+                        Some(h) => {
+                            h.stop();
+                            trace(&rt, &port, Some(&sid), "loop_stop", "loop stop requested");
+                            app.flash("loop stop requested");
+                            // A stop is a decision worth surviving a
+                            // restart: append the cancel event
+                            // (docs/tui.md section 5).
+                            let ev = event::produce::cancel("turn");
+                            if let Err(e) = rt.block_on(port.append_event(&sid, &ev)) {
+                                trace(
+                                    &rt,
+                                    &port,
+                                    Some(&sid),
+                                    "port",
+                                    &format!("cancel event append failed: {e}"),
+                                );
+                                app.flash(e.to_string());
+                            }
+                        }
+                        None => {
+                            // No local handle: the loop may live on from
+                            // an earlier TUI. Reattach through the
+                            // persistent loop.pid and stop it (FT-003).
+                            match port.stop_external_loop(&sid) {
+                                Ok(Some(msg)) => {
+                                    trace(&rt, &port, Some(&sid), "loop_stop", &msg);
+                                    app.flash(msg);
+                                    let ev = event::produce::cancel("turn");
+                                    if let Err(e) = rt.block_on(port.append_event(&sid, &ev)) {
+                                        trace(
+                                            &rt,
+                                            &port,
+                                            Some(&sid),
+                                            "port",
+                                            &format!("cancel event append failed: {e}"),
+                                        );
+                                        app.flash(e.to_string());
+                                    }
+                                }
+                                Ok(None) => {
+                                    trace(
+                                        &rt,
+                                        &port,
+                                        Some(&sid),
+                                        "loop_stop",
+                                        "no running loop to stop",
+                                    );
+                                    app.flash("no running loop to stop");
+                                }
+                                Err(e) => {
+                                    trace(
+                                        &rt,
+                                        &port,
+                                        Some(&sid),
+                                        "loop_stop",
+                                        &format!("external loop stop failed: {e}"),
+                                    );
+                                    app.flash(e.to_string());
+                                }
+                            }
                         }
                     }
                 }
@@ -386,12 +532,36 @@ fn main() {
                     }
                 }
                 Action::CycleSessions(delta) => {
-                    let list = rt.block_on(port.list_sessions()).unwrap_or_default();
+                    let list = match rt.block_on(port.list_sessions()) {
+                        Ok(list) => list,
+                        Err(e) => {
+                            trace(
+                                &rt,
+                                &port,
+                                app.active(),
+                                "port",
+                                &format!("session list read failed: {e}"),
+                            );
+                            Vec::new()
+                        }
+                    };
                     app.set_sessions(list);
                     let target = app.cycle_target(delta);
                     if let Some(id) = target {
                         if Some(&id) != app.active() {
-                            let events = rt.block_on(port.read_events(&id)).unwrap_or_default();
+                            let events = match rt.block_on(port.read_events(&id)) {
+                                Ok(evs) => evs,
+                                Err(e) => {
+                                    trace(
+                                        &rt,
+                                        &port,
+                                        Some(&id),
+                                        "port",
+                                        &format!("event read failed: {e}"),
+                                    );
+                                    Vec::new()
+                                }
+                            };
                             app.set_active(id.clone(), events.clone());
                             app.set_watch_rx(port.watch(&id, TailCursor::end()));
                             // Event ids restart per session: clear the
@@ -406,7 +576,19 @@ fn main() {
                 }
                 Action::ConfirmNewSession(name) => {
                     let sid = SessionId::new(&name);
-                    let events = rt.block_on(port.read_events(&sid)).unwrap_or_default();
+                    let events = match rt.block_on(port.read_events(&sid)) {
+                        Ok(evs) => evs,
+                        Err(e) => {
+                            trace(
+                                &rt,
+                                &port,
+                                Some(&sid),
+                                "port",
+                                &format!("event read failed: {e}"),
+                            );
+                            Vec::new()
+                        }
+                    };
                     app.set_active(sid.clone(), events.clone());
                     app.set_watch_rx(port.watch(&sid, TailCursor::end()));
                     if let Ok(list) = rt.block_on(port.list_sessions()) {
@@ -416,14 +598,71 @@ fn main() {
                     host.clear_replies();
                     host.send_history(&events);
                 }
-                Action::Quit => {
-                    // Stop every loop before leaving; the log survives.
-                    for (_sid, h) in app.detach_all_handles() {
+                Action::Handoff(name) => {
+                    // The one-key resume of the automatic handoff
+                    // (correction 57). Switch to the seeded session
+                    // and start its loop. The old session's local loop
+                    // stops when it still runs: the handoff
+                    // supersedes it.
+                    let Some(old_sid) = app.active().cloned() else {
+                        continue;
+                    };
+                    let new_sid = SessionId::new(&name);
+                    if new_sid == old_sid {
+                        continue;
+                    }
+                    if let Some(h) = app.loops_mut_for(&old_sid).and_then(|st| st.handle.take())
+                    {
                         h.stop();
                     }
-                    // Stop every extension group: SIGTERM now, SIGKILL
-                    // escalation in the background. No orphan process
-                    // outlives the TUI (docs/ui-extension.md section 7).
+                    // Keep the old session's events and reattach on a
+                    // failed start: the user lands back where the
+                    // marker lives.
+                    let old_events = app.events().to_vec();
+                    let events = match rt.block_on(port.read_events(&new_sid)) {
+                        Ok(evs) => evs,
+                        Err(e) => {
+                            trace(
+                                &rt,
+                                &port,
+                                Some(&new_sid),
+                                "port",
+                                &format!("event read failed: {e}"),
+                            );
+                            Vec::new()
+                        }
+                    };
+                    app.set_active(new_sid.clone(), events.clone());
+                    app.set_watch_rx(port.watch(&new_sid, TailCursor::end()));
+                    if let Ok(list) = rt.block_on(port.list_sessions()) {
+                        app.set_sessions(list);
+                    }
+                    host.clear_replies();
+                    host.send_history(&events);
+                    match rt.block_on(port.spawn_loop(&new_sid)) {
+                        Ok(handle) => {
+                            let lines = handle.take_lines().unwrap_or_else(empty_lines);
+                            app.attach_loop(new_sid, handle, lines);
+                            app.flash(format!("handoff to {name} — loop started"));
+                        }
+                        Err(e) => {
+                            app.set_active(old_sid.clone(), old_events);
+                            app.set_watch_rx(port.watch(&old_sid, TailCursor::end()));
+                            app.flash(format!("handoff to {name} failed: {e}"));
+                        }
+                    }
+                }
+                Action::Quit => {
+                    // Loops keep running after the TUI exits. Each loop
+                    // lives in its own session (setsid) and survives as
+                    // an orphan. Dropping the handles does not stop the
+                    // groups. Ctrl+C is the only loop interrupt
+                    // (docs/tui.md section 5).
+                    let _ = app.detach_all_handles();
+                    // Extensions still die with the TUI: SIGTERM now,
+                    // SIGKILL escalation in the background. No orphan
+                    // extension outlives the TUI (docs/ui-extension.md
+                    // section 7).
                     host.stop();
                     return finish(&mut term);
                 }
@@ -448,15 +687,26 @@ fn main() {
             session: app.active().map(|s| s.as_str()),
             model: cfg.active_model.as_deref(),
             loop_running: app.active().is_some_and(|s| app.loop_running(s)),
+            thinking: app.thinking_level(),
             statuses: app.ext_statuses(),
         };
         host.pump_ticks(&tick);
+        // The frame owner also gets a cadence ping so its frame_spec
+        // reply stays live (border color tracks the thinking level).
+        host.pump_frame(&tick, &app.editor_mode_label());
         host.poll_transforms();
         host.poll_status();
 
         // 5. Draw.
         let mut cursor: Option<(u16, u16)> = None;
         if let Err(e) = term.draw(|f| render::draw(f, &mut app, &mut cursor, &host)) {
+            trace(
+                &rt,
+                &port,
+                app.active(),
+                "render",
+                &format!("draw failed: {e}"),
+            );
             eprintln!("tui: draw failed: {e}");
             break;
         }
@@ -465,6 +715,24 @@ fn main() {
         }
     }
     finish(&mut term);
+}
+
+/// Write one TUI trace record to the active session's trace log
+/// (docs/tool-log-design_from_human.md). With no session there is
+/// no session dir to hold the trace: the record is dropped. Start-up
+/// failures before a session stay on stderr (fail loud at start).
+/// The trace must not take the UI down: write failures are dropped.
+fn trace(
+    rt: &tokio::runtime::Runtime,
+    port: &FileSessionPort,
+    session: Option<&SessionId>,
+    kind: &str,
+    message: &str,
+) {
+    let Some(sid) = session else {
+        return;
+    };
+    let _ = rt.block_on(port.append_trace(sid, kind, message));
 }
 
 /// A lines stream that is empty: for handles without output.

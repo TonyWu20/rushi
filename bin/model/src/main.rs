@@ -106,10 +106,9 @@ fn main() {
     let effort = if reasoning_effort.eq_ignore_ascii_case("off") {
         "none".to_string()
     } else {
-        reasoning_effort
+        reasoning_effort.clone()
     };
     let mut api_request = request.clone();
-    api_request["max_output_tokens"] = serde_json::json!(max_output_tokens);
     api_request["stream"] = serde_json::json!(true);
     api_request["store"] = serde_json::json!(false);
     api_request["include"] = serde_json::json!(["reasoning.encrypted_content"]);
@@ -117,6 +116,7 @@ fn main() {
         "effort": effort,
         "summary": "auto"
     });
+    apply_output_budget(&mut api_request, max_output_tokens);
 
     // Try responses API first
     let result = call_responses_api(&url, &api_key, &api_request, &model_name);
@@ -138,6 +138,15 @@ fn main() {
             });
             println!("{}", error_event);
         }
+    }
+}
+
+/// The config output cap is the default. A request-provided
+/// `max_output_tokens` wins: the handoff summary request carries a
+/// cheap cap of its own (correction 57).
+fn apply_output_budget(request: &mut serde_json::Value, config_max: u64) {
+    if request.get("max_output_tokens").is_none() {
+        request["max_output_tokens"] = serde_json::json!(config_max);
     }
 }
 
@@ -787,6 +796,22 @@ fn parse_chat_response(body: &str) -> Result<String, String> {
 
     let usage = chat_resp.get("usage");
 
+    // Normalize the completions usage to the responses names. The
+    // event log carries `usage.input_tokens` on every
+    // assistant_message; the token-driven budget (work item B) reads
+    // that field on both API paths.
+    let mut usage_map: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    if let Some(u) = usage {
+        if let Some(v) = u.get("prompt_tokens").and_then(|v| v.as_u64()) {
+            usage_map.insert("input_tokens".to_string(), serde_json::json!(v));
+        }
+        if let Some(v) = u.get("completion_tokens").and_then(|v| v.as_u64()) {
+            usage_map.insert("output_tokens".to_string(), serde_json::json!(v));
+        }
+    }
+    let usage_norm: Option<serde_json::Value> =
+        if usage_map.is_empty() { None } else { Some(serde_json::Value::Object(usage_map)) };
+
     // The completions fallback speaks the deepseek thinking format:
     // the thinking text rides in message.reasoning_content. Capture
     // it as a reasoning item so the event log carries the thinking
@@ -817,7 +842,7 @@ fn parse_chat_response(body: &str) -> Result<String, String> {
         "tool_calls": tool_calls,
         "reasoning": reasoning,
         "stop_reason": stop_reason,
-        "usage": usage
+        "usage": usage_norm
     });
 
     Ok(serde_json::to_string(&output).unwrap())
@@ -991,6 +1016,40 @@ mod tests {
         let out: serde_json::Value =
             serde_json::from_str(&parse_chat_response(body).unwrap()).unwrap();
         assert!(out["reasoning"].as_array().unwrap().is_empty());
+    }
+
+    /// The config output cap is the default; a request-provided cap
+    /// wins (the handoff summary request, correction 57).
+    #[test]
+    fn output_budget_honors_request_value() {
+        let mut request = serde_json::json!({"model": "m"});
+        apply_output_budget(&mut request, 32768);
+        assert_eq!(request["max_output_tokens"], 32768);
+        let mut request = serde_json::json!({"model": "m", "max_output_tokens": 4096});
+        apply_output_budget(&mut request, 32768);
+        assert_eq!(request["max_output_tokens"], 4096, "the request cap wins");
+    }
+
+    /// The completions usage normalizes to the responses names, so
+    /// both API paths feed the same `usage.input_tokens` field that
+    /// the token-driven budget reads (work item B).
+    #[test]
+    fn chat_response_normalizes_usage_to_input_tokens() {
+        let body = r#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":120,"completion_tokens":7}}"#;
+        let out: serde_json::Value =
+            serde_json::from_str(&parse_chat_response(body).unwrap()).unwrap();
+        assert_eq!(out["usage"]["input_tokens"], 120);
+        assert_eq!(out["usage"]["output_tokens"], 7);
+        assert!(out["usage"].get("prompt_tokens").is_none());
+    }
+
+    /// A completions response without usage reports null, as before.
+    #[test]
+    fn chat_response_without_usage_is_null() {
+        let body = r#"{"choices":[{"message":{"content":"ok"}}]}"#;
+        let out: serde_json::Value =
+            serde_json::from_str(&parse_chat_response(body).unwrap()).unwrap();
+        assert_eq!(out["usage"], serde_json::Value::Null);
     }
 
     /// A reasoning item converts to the deepseek thinking format: its

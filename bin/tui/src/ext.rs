@@ -61,7 +61,7 @@ const DEFAULT_TICK_MS: u64 = 1000;
 /// reply (ui-extension-plan stage 4 open items: status staleness).
 const INITIAL_STATUS_GRACE: Duration = Duration::from_secs(10);
 /// The capability names a manifest may list.
-pub const CAPS: &[&str] = &["render", "status", "transform", "append", "notify"];
+pub const CAPS: &[&str] = &["render", "status", "transform", "append", "notify", "frame"];
 
 /// One parsed and validated `ext.toml` (docs/ui-extension.md section 3).
 #[derive(Debug, Clone)]
@@ -176,6 +176,10 @@ pub struct Discovery {
     pub transform_owners: HashMap<String, usize>,
     /// Extension name -> index into [`Discovery::exts`].
     pub index_by_name: HashMap<String, usize>,
+    /// The single `frame` owner index, if one exists. The frame owns
+    /// the input-area rendering (border style, border color, the
+    /// label); one owner across the whole sequence, like `status`.
+    pub frame_owner: Option<usize>,
 }
 
 impl Discovery {
@@ -222,6 +226,26 @@ pub fn discover(cfg: &TuiConfig) -> Result<Discovery, ExtError> {
     }
     let status_owner = status.into_iter().next();
 
+    // The frame row allows one owner across the whole sequence, like
+    // the status row: the input-area rendering is one surface.
+    let frames: Vec<usize> = (0..exts.len())
+        .filter(|&i| exts[i].manifest.caps.iter().any(|c| c == "frame"))
+        .collect();
+    if frames.len() > 1 {
+        let names = frames
+            .iter()
+            .map(|&i| exts[i].manifest.manifest_path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(" and ");
+        return Err(ExtError {
+            message: format!(
+                "two or more extensions own the `frame` capability: {names}. \
+                 The host allows one owner across the whole sequence."
+            ),
+        });
+    }
+    let frame_owner = frames.into_iter().next();
+
     let mut kind_owners = HashMap::new();
     let mut transform_owners = HashMap::new();
     for (i, e) in exts.iter().enumerate() {
@@ -241,6 +265,7 @@ pub fn discover(cfg: &TuiConfig) -> Result<Discovery, ExtError> {
     Ok(Discovery {
         exts,
         status_owner,
+        frame_owner,
         kind_owners,
         transform_owners,
         index_by_name,
@@ -422,6 +447,44 @@ fn parse_color(v: &Value) -> Option<Color> {
     })
 }
 
+/// Validate the `frame_spec` reply payload. The wire shape is an
+/// object:
+///
+/// ```json
+/// {"border": "rounded|plain|double|thick",
+///  "label": {"lines": [...], "style": {"fg":..., "bg":..., "bold":...}},
+///  "height": 2}
+/// ```
+///
+/// Every field is optional; a missing field keeps the host's
+/// built-in value. A malformed shape is `None` (G5: the last valid
+/// frame survives).
+fn frame_spec_value(v: &Value) -> Option<FrameSpec> {
+    let obj = v.as_object()?;
+    let mut border = None;
+    let mut label = None;
+    let mut height = None;
+    if let Some(b) = obj.get("border").and_then(|x| x.as_str()) {
+        let parsed = FrameBorderStyle::parse(b)?;
+        border = Some(parsed);
+    }
+    if let Some(l) = obj.get("label") {
+        if !l.is_null() {
+            let lines = lines_value(&l["lines"])?;
+            let style = wire_style(l.get("style").and_then(|s| s.as_object()));
+            label = Some((lines, style));
+        }
+    }
+    if let Some(h) = obj.get("height").and_then(|x| x.as_u64()) {
+        height = Some((h.min(64)) as usize);
+    }
+    Some(FrameSpec {
+        border,
+        label,
+        height,
+    })
+}
+
 fn wire_style(obj: Option<&Map<String, Value>>) -> Style {
     let mut s = Style::default();
     if let Some(o) = obj {
@@ -482,6 +545,10 @@ pub enum ExtItem {
     /// not read it in Stage 1.
     #[allow(dead_code)]
     StatusUpdated { ext: String },
+    /// A valid `frame_spec` reply replaced the input-area frame.
+    /// Informational: the frame re-renders on the next draw.
+    #[allow(dead_code)]
+    FrameUpdated { ext: String },
     /// A matching `transformed` reply completed its request.
     /// The `req` field is informational for logs; the main loop does
     /// not read it in Stage 1.
@@ -535,6 +602,49 @@ pub enum StatusRow {
     Builtin,
 }
 
+/// The input-area frame spec of a `frame` extension reply
+/// (docs/ui-extensions design: the input area is customizable by an
+/// external extension, not hardwired into the TUI).
+///
+/// The host composes the spec with the draft content: the extension
+/// owns the *frame* (border style, the label, the height, the label
+/// style), never the input state — an extension cannot type into the
+/// draft, the same trust boundary as `append`
+/// (docs/ui-extension.md section 10).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrameSpec {
+    /// The border style; `None` uses the host's rounded default.
+    pub border: Option<FrameBorderStyle>,
+    /// The title label, as a styled line. `None` shows the host's
+    /// built-in label (the editor mode).
+    pub label: Option<(Vec<ExtLine>, Style)>,
+    /// The interior height in rows; `None` uses the host default
+    /// (two draft lines).
+    pub height: Option<usize>,
+}
+
+/// The border shapes a frame reply may ask for (the host renders
+/// them with `ratatui::widgets::Block::border_type`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameBorderStyle {
+    Rounded,
+    Plain,
+    Double,
+    Thick,
+}
+
+impl FrameBorderStyle {
+    fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "rounded" => FrameBorderStyle::Rounded,
+            "plain" | "single" => FrameBorderStyle::Plain,
+            "double" => FrameBorderStyle::Double,
+            "thick" => FrameBorderStyle::Thick,
+            _ => return None,
+        })
+    }
+}
+
 /// The payload of one `tick` op (docs/ui-extension.md section 4).
 #[derive(Debug)]
 pub struct TickPayload<'a> {
@@ -542,6 +652,10 @@ pub struct TickPayload<'a> {
     pub session: Option<&'a str>,
     pub model: Option<&'a str>,
     pub loop_running: bool,
+    /// The active model's thinking level (the `model_thinking`
+    /// ext_status value). Frame extensions recolor the border to
+    /// correlate with it.
+    pub thinking: u32,
     /// Latest `ext_status` values, id to value. The statusline
     /// consumes shared UI state through this map.
     pub statuses: &'a HashMap<String, Value>,
@@ -625,6 +739,8 @@ struct SlotShared {
     pub lines_cache: Mutex<HashMap<u64, Vec<ExtLine>>>,
     /// The last valid `status` reply (G5: a bad reply keeps it).
     pub last_status: Mutex<Option<Vec<ExtLine>>>,
+    /// The last valid `frame` reply (G5: a bad reply keeps it).
+    pub last_frame: Mutex<Option<FrameSpec>>,
     /// When the last valid `status` reply landed (or `None` since
     /// the generation started). The staleness check reads it.
     pub last_status_reply: Mutex<Option<Instant>>,
@@ -642,6 +758,11 @@ struct SlotShared {
     /// with [`mark_dead`]).
     pub dead: AtomicBool,
     pub tick: Mutex<TickClock>,
+    /// The `frame` op's own deadline. A frame owner may also declare
+    /// the `status` cap; one shared clock would let `pump_ticks`
+    /// re-arm the deadline every cycle, so `pump_frame` always sees a
+    /// future deadline and the `frame` op is never sent.
+    pub frame_tick: Mutex<TickClock>,
 }
 
 struct HostInner {
@@ -688,6 +809,7 @@ impl ExtHost {
                     send_rx: Mutex::new(Some(send_rx)),
                     lines_cache: Mutex::new(HashMap::new()),
                     last_status: Mutex::new(None),
+                    last_frame: Mutex::new(None),
                     last_status_reply: Mutex::new(None),
                     gen_started: Mutex::new(Instant::now()),
                     status_stale: AtomicBool::new(false),
@@ -695,6 +817,10 @@ impl ExtHost {
                     tick: Mutex::new(TickClock {
                         // The first tick fires on the first pump, so a
                         // status row shows as soon as the process is up.
+                        next_at: Instant::now(),
+                        seq: 0,
+                    }),
+                    frame_tick: Mutex::new(TickClock {
                         next_at: Instant::now(),
                         seq: 0,
                     }),
@@ -903,6 +1029,7 @@ impl ExtHost {
                 "op": "tick",
                 "seq": seq,
                 "width": p.width,
+                "thinking": p.thinking,
                 "loop_running": p.loop_running,
                 "statuses": Value::Object(Map::from_iter(
                     p.statuses.iter().map(|(k, v)| (k.clone(), v.clone()))
@@ -916,6 +1043,46 @@ impl ExtHost {
             }
             self.send_op(i, &obj);
         }
+    }
+
+    /// Send a `frame` op to the frame owner on its tick cadence. The
+    /// frame extension replies `frame_spec` to customize the input
+    /// area (border, label, height). A missing or dead owner sends
+    /// nothing; the built-in frame shows.
+    pub fn pump_frame(&self, p: &TickPayload, mode: &str) {
+        let Some(i) = self.disc.frame_owner else {
+            return;
+        };
+        let s = &self.inner.slots[i];
+        if *s.state.lock().unwrap() == SlotState::Skipped {
+            return;
+        }
+        let now = Instant::now();
+        let seq = {
+            let mut t = s.frame_tick.lock().unwrap();
+            if now < t.next_at {
+                return;
+            }
+            t.seq += 1;
+            t.next_at = now + Duration::from_millis(s.manifest.tick_ms);
+            t.seq
+        };
+        let mut obj = json!({
+            "v": 1,
+            "op": "frame",
+            "seq": seq,
+            "width": p.width,
+            "thinking": p.thinking,
+            "mode": mode,
+            "loop_running": p.loop_running,
+        });
+        if let Some(ses) = p.session {
+            obj["session"] = json!(ses);
+        }
+        if let Some(m) = p.model {
+            obj["model"] = json!(m);
+        }
+        self.send_op(i, &obj);
     }
 
     /// Mark a status extension stale: no valid `status` reply for
@@ -1156,6 +1323,23 @@ impl ExtHost {
             .cloned()
     }
 
+    /// The input-area frame spec (the `frame` owner's last valid
+    /// `frame_spec` reply, or the built-in rendering when no frame
+    /// extension exists or its reply is missing).
+    pub fn frame_spec(&self) -> Option<FrameSpec> {
+        let Some(i) = self.disc.frame_owner else {
+            return None;
+        };
+        let s = &self.inner.slots[i];
+        if !matches!(
+            *s.state.lock().unwrap(),
+            SlotState::Running | SlotState::Restarting
+        ) {
+            return None;
+        }
+        s.last_frame.lock().unwrap().clone()
+    }
+
     /// The statusline row content (docs/ui-extension-plan stage 1
     /// layout).
     pub fn status_row(&self) -> StatusRow {
@@ -1378,6 +1562,17 @@ impl HostInner {
                 slot.status_stale.store(false, Ordering::SeqCst);
                 self.replies_version.fetch_add(1, Ordering::SeqCst);
                 let _ = self.out_tx.try_send(ExtItem::StatusUpdated {
+                    ext: slot.name.clone(),
+                });
+            }
+            "frame_spec" => {
+                let Some(spec) = frame_spec_value(&v["spec"]) else {
+                    // G5: keep the last valid frame.
+                    return;
+                };
+                *slot.last_frame.lock().unwrap() = Some(spec);
+                self.replies_version.fetch_add(1, Ordering::SeqCst);
+                let _ = self.out_tx.try_send(ExtItem::FrameUpdated {
                     ext: slot.name.clone(),
                 });
             }
@@ -2003,6 +2198,140 @@ protocol_v = 1
         assert!(msg.contains("s2/ext.toml"), "{msg}");
     }
 
+    // ── frame capability ───────────────────────────────────────
+
+    #[test]
+    fn discovery_frame_owner_resolves_and_conflict_refuses() {
+        let dir = TempDir::new().unwrap();
+        let global = dir.path().join("ui_extensions");
+        write_ext(
+            &global,
+            "f1",
+            "[ext]\ncommand = \"bash\"\ncaps = [\"frame\"]\nprotocol_v = 1\n",
+        );
+        let mut cfg = cfg_for(dir.path());
+        cfg.ext_dir = Some(global.clone());
+        let disc = discover(&cfg).unwrap();
+        assert_eq!(disc.frame_owner, Some(0), "a single frame owner resolves");
+        // A second frame owner refuses the start, like the status row.
+        write_ext(
+            &global,
+            "f2",
+            "[ext]\ncommand = \"bash\"\ncaps = [\"frame\"]\nprotocol_v = 1\n",
+        );
+        let err = discover(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("f1/ext.toml"), "{msg}");
+        assert!(msg.contains("f2/ext.toml"), "{msg}");
+    }
+
+    #[test]
+    fn frame_spec_value_parses_full_and_partial() {
+        let v = json!({
+            "border": "double",
+            "label": {"lines": ["compose"], "style": {"fg": "cyan", "bold": true}},
+            "height": 3,
+        });
+        let spec = frame_spec_value(&v).unwrap();
+        assert_eq!(spec.border, Some(FrameBorderStyle::Double));
+        assert_eq!(spec.height, Some(3));
+        let (lines, style) = spec.label.unwrap();
+        assert_eq!(lines.len(), 1);
+        // A styled label keeps its wire style; the host renders it.
+        assert_eq!(style, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+        // A partial spec: missing fields keep the host built-in.
+        let v = json!({"border": "rounded"});
+        let spec = frame_spec_value(&v).unwrap();
+        assert_eq!(spec.border, Some(FrameBorderStyle::Rounded));
+        assert_eq!(spec.label, None);
+        assert_eq!(spec.height, None);
+        // An unknown border shape is malformed: G5 keeps the last
+        // valid frame.
+        let v = json!({"border": "circular"});
+        assert!(frame_spec_value(&v).is_none());
+    }
+
+    #[test]
+    fn frame_reply_caches_the_spec() {
+        let dir = TempDir::new().unwrap();
+        let global = dir.path().join("ui_extensions");
+        write_ext(
+            &global,
+            "f1",
+            "[ext]\ncommand = \"cat\"\ncaps = [\"frame\"]\nprotocol_v = 1\n",
+        );
+        let mut cfg = cfg_for(dir.path());
+        cfg.ext_dir = Some(global);
+        let disc = discover(&cfg).unwrap();
+        let host = ExtHost::new(&disc, &cfg);
+        let i = disc.frame_owner.expect("a frame owner");
+        // Before a reply: no frame spec (the built-in frame shows).
+        assert!(host.frame_spec().is_none());
+        // A valid frame_spec reply lands in the slot.
+        host.reply_line(
+            i,
+            r#"{"v":1,"op":"frame_spec","spec":{"border":"thick","height":4}}"#,
+        );
+        let spec = host.frame_spec().expect("a valid frame_spec reply caches");
+        assert_eq!(spec.border, Some(FrameBorderStyle::Thick));
+        assert_eq!(spec.height, Some(4));
+        // A bad frame_spec reply keeps the last valid one (G5).
+        host.reply_line(i, r#"{"v":1,"op":"frame_spec","spec":"nonsense"}"#);
+        assert!(host
+            .frame_spec()
+            .expect("G5: the last valid frame survives")
+            .height
+            .is_some());
+        let _ = dir;
+        let _ = host;
+    }
+
+    #[test]
+    fn dual_cap_extension_gets_frame_ops_despite_tick_cadence() {
+        let tmp = TempDir::new().unwrap();
+        // One extension declares both caps. `pump_ticks` consumes the
+        // status cadence on every pump; the `frame` op must ride its
+        // own clock. On a shared clock, `pump_ticks` re-arms the
+        // deadline microseconds before `pump_frame` checks it, so the
+        // frame op is never sent and no frame_spec reply ever lands.
+        let manifest = "[ext]\ncommand = \"bash\"\nargs = [\"dual.sh\"]\ncaps = [\"status\",\"frame\"]\ntick_ms = 50\nprotocol_v = 1\n";
+        let script = r#"while IFS= read -r line; do
+  case "$line" in
+    *'"op":"frame"'*)
+      printf '{"v":1,"op":"frame_spec","spec":{"border":"rounded"}}\n'
+      ;;
+    *'"op":"tick"'*)
+      printf '{"v":1,"op":"status","lines":[["on",null]]}\n'
+      ;;
+  esac
+done
+"#;
+        let host = host_with(&tmp, "dual", manifest, script);
+        host.start();
+        let empty = std::collections::HashMap::new();
+        let p = crate::ext::TickPayload {
+            width: 80,
+            session: Some("s1"),
+            model: None,
+            thinking: 0,
+            loop_running: false,
+            statuses: &empty,
+        };
+        let due = Instant::now() + Duration::from_millis(2000);
+        let mut saw_frame = false;
+        while Instant::now() < due {
+            host.pump_ticks(&p);
+            host.pump_frame(&p, "INSERT");
+            if host.frame_spec().is_some() {
+                saw_frame = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(saw_frame, "the frame owner's frame_spec reply lands");
+        host.stop();
+    }
+
     // ── wire style and lines payloads ─────────────────────────────
 
     #[test]
@@ -2206,6 +2535,7 @@ done
                 width: 80,
                 session: Some("s1"),
                 model: Some("test-model"),
+                thinking: 0,
                 loop_running: false,
                 statuses: &statuses,
             };
@@ -2524,7 +2854,8 @@ exec sleep 30
                 width: 80,
                 session: Some("s"),
                 model: None,
-                loop_running: false,
+                thinking: 0,
+            loop_running: false,
                 statuses: &empty,
             };
             host.pump_ticks(&p);
@@ -2543,7 +2874,8 @@ exec sleep 30
                 width: 80,
                 session: Some("s"),
                 model: None,
-                loop_running: false,
+                thinking: 0,
+            loop_running: false,
                 statuses: &empty,
             };
             host.pump_ticks(&p);
@@ -2575,7 +2907,8 @@ exec sleep 30
                 width: 80,
                 session: Some("s"),
                 model: None,
-                loop_running: false,
+                thinking: 0,
+            loop_running: false,
                 statuses: &empty,
             };
             host.pump_ticks(&p);
@@ -2618,7 +2951,8 @@ done
                 width: 80,
                 session: Some("s"),
                 model: None,
-                loop_running: false,
+                thinking: 0,
+            loop_running: false,
                 statuses: &empty,
             };
             host.pump_ticks(&p);

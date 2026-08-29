@@ -200,3 +200,150 @@ FT-006 fix).
 `PATH` export (`scripts/ext-env.sh`). The design keeps the
 refusal: a missing command stays a start-time error, not a
 runtime skip.
+
+## FT-008 — Empty tool-call arguments at long context
+
+**Symptom:** `sessions/better-ui/events.jsonl` holds 55 tool
+results with text "Tool arguments failed schema validation:
+<field>." The field is `command` (49) or `file_path` (6). Every
+`arguments` value is the empty object `{}`. No failure appears
+below 50k input tokens. Failures cluster at 56k–73k and at
+93k–112k input tokens.
+
+**Root cause:** Context-length dependent model failure, not a
+harness request defect. The local Qwen3.8-27B-NVFP4 model
+(SGLang at `127.0.0.1:30000`) stochastically emits a tool call
+whose arguments are the two-character string `"{}"`. The stream
+completes with `status=completed`; SGLang passes the empty
+arguments through verbatim. An A/B test on 2026-08-29 ruled out
+the harness fields: at 110k input tokens, a pi-shaped request
+(no `reasoning` field) glitched in 2 of 4 runs; `reasoning`
+`medium` and `xhigh` glitched in 0 of 4 each. The same glitch
+also fired once inside a pi session at 40k tokens. The pi
+session context stays short, so the user sees it rarely there.
+The NVFP4 4-bit quantization lowers the model's structured
+output fidelity at long context.
+
+**Fix:** No harness code defect. `route` rejects the empty
+object with the field-level error from corrections entry 35
+(`docs/loop-and-edit-implementation-corrections.md`). The model
+re-issues the call with full arguments. All 55 recorded
+failures recover within one turn: 3–6 log lines to the next
+success, zero unrecovered, no stalled loop.
+
+**Verification:** No code change to verify. The log confirms the
+recovery pattern: no failure lacks a later success.
+
+**Residual risk:** Two open items. First, context management:
+the better-ui loop's own 2026-08-29 18:15 config rewrite set
+`context_budget_chars = 660000` with `compact_result_chars =
+80000`. The request then reached about 1.2M chars. No compact
+stage fits the budget, and the loop exited with "Context budget
+exceeded after compaction." Closed by FT-009: the compact floor
+and the drop-oldest-steps pass now keep the session alive.
+The same defect killed the session on 2026-08-29 at 10:13 UTC
+under the current config. See FT-009. Correction 58 removes the
+self-priming load on top of it: the compact pass drops the old
+schema-error pairs out of the model request, so the history
+stops teaching the model its own empty-argument failures. Second,
+a `bin/model`
+observability gap: it substitutes `{}` when a terminal event
+omits the `arguments` key, so a server-side drop would look
+identical to a model-side empty call. SGLang always sends the key
+in the captures, so the gap does not fire in this deployment.
+
+## FT-009 — Session dies and stays dead after a failed compact
+
+**Symptom:** `sessions/better-ui` logged three terminal errors
+(2026-08-29 10:13:53, 10:13:55, 10:15:16 UTC):
+"Context budget exceeded after compaction. Start a new session
+or reduce scope." The last one followed the user's `Continue`
+message. No turn made progress after the errors. The session was
+unrecoverable without a config change or a new session.
+
+**Root cause:** The auto-compact of corrections entry 52 halved
+the caps in three fixed stages: `8000, 4000, 2000` for results,
+`2000, 1000, 500` for text, with keep windows `24, 12, 6, 3, 2`.
+The session log held 604 tool results, 586 assistant messages,
+and 16 user messages: about 1.47M projected chars against the
+440k budget. The tightest stage still projected near 740k chars,
+so all 15 stage combinations failed and `assemble` emitted the
+terminal error. Each turn re-ran `assemble` on the same log,
+re-emitted the error, and `claim` returned `idle`. Per-event
+caps cannot express a total-size constraint: the compacted size
+of old events grows with the session length, and the fixed floor
+sat above the budget for this log. The 18:15 rewrite incident
+recorded in FT-008 is the same defect under wider caps.
+
+**Fix:** Corrections entry 55. `compact_search` halves the caps
+from the config base down to the floor
+(`compact_min_result_chars = 128`, `compact_min_text_chars = 64`).
+When the floor still does not fit, it drops the oldest step
+groups, one at a time, until the request fits. User messages and
+the keep window are never dropped. The terminal error now fires
+only when the task statement plus the keep window alone outgrow
+the budget. The config base caps (`8000`/`2000`) stay. They
+choose the first stage's fidelity. The `context_budget_chars`
+value of 440000 stays. It pins the request under the FT-008
+degradation zone of this model (about 55k input tokens). It is
+not a tuning error.
+
+**Verification:** The fixed `assemble` on `sessions/better-ui`
+prints a 380628-char model request under the 440000-char budget.
+It keeps all 16 user messages, including the `Continue` message.
+Older items carry the `[compacted:]` markers at the working
+stage. Four new tests cover the floor halving, step grouping,
+the drop-oldest fit, and the still-unsatisfiable case. All 13
+`assemble` tests pass. The log stays intact: dropping affects
+the model request only, never the event log.
+
+**Residual risk:** Closed by corrections entry 57. A session whose
+keep window plus user messages alone outgrow the budget no longer
+dies. `assemble` emits a `context_exhausted` event instead of the
+terminal error. The loop summarizes the compacted log, seeds a new
+session with the summary, and records the marker with the seeded
+name. `claim` reports the `exhausted` state. The TUI resumes in the
+seeded session with one key. See FT-010 for the token-budget half
+of the fix.
+
+## FT-010 — The char-based context budget ran 2x off
+
+**Symptom:** The harness derived its context budget as
+`context_tokens * chars_per_token` with `chars_per_token = 4`.
+Measured on the better-ui session, the model counted about 8 chars
+per input token. The harness believed its budget was about 229k
+tokens. It was about 114k. The request reached the degradation zone
+without the compact engaging.
+
+**Root cause:** The char heuristic was the budget driver. The owner
+flagged the char-based idea as naive and kept it for lack of
+harness experience (handoff document, coupled factor 3). No token
+measurement existed anywhere in the budget path. The user knob was
+in chars, not tokens.
+
+**Fix:** Corrections entry 57. The budget is in tokens now. The
+user knob is `context_budget_tokens`. The full-log decision runs on
+the last measured `usage.input_tokens` plus the projected growth of
+the appended events. The char heuristic survives only as the
+pre-measurement fallback: a fresh session, a server that reports no
+usage, and the compact candidates. The default budget is the model
+window minus the output reservation. `config.toml` sets the knob to
+55000 tokens, the FT-008 degradation-zone bound, and the
+chars-per-token rate to the measured 8.
+
+**Verification:** `assemble` on the frozen `sessions/better-ui`
+log now compacts against the token budget. The printed request is
+366283 chars, under the 440k-char candidate check. It carries the
+measured estimate (257454 input tokens on the last measured turn)
+instead of the 2x-off char math. The assemble test
+`full_log_fits_is_driven_by_measured_tokens` pins the decision:
+the char fallback fits a 131k-token budget where the measured
+110k-plus-growth estimate fails a 55k-token budget.
+
+**Residual risk:** The compact candidates check against the token
+budget times the chars-per-token rate. The rate is a single global
+estimate. A content mix that deviates from the measured ratio
+shifts the check. Keep the configured rate at or under the
+measured ratio: a low rate over-estimates and compacts earlier. A
+high rate risks sending a request over the window.
+

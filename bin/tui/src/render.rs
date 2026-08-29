@@ -13,19 +13,46 @@
 //! result text that is a complete JSON document gets JSON syntax
 //! highlighting (item 4). The log file stays the record.
 //!
-//! Nothing here branches on loop internals; the only cross-event data is
-//! the tool_call id -> name map, which is presentation (docs/tui.md 10.1).
+//! The input area is a multi-line textarea in a rounded-corner border
+//! whose color tracks the active model's thinking level, and is
+//! customizable by a `frame` extension (docs/ui-extensions design:
+//! the input area is not hardwired into the TUI; an external process
+//! owns its frame through the `frame_spec` reply, never its content).
 
 use ratatui::layout::Constraint;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Block, Paragraph, BorderType};
 use ratatui::Frame;
 use std::collections::HashMap;
 
 use crate::app::App;
 use crate::event::{Event, EventKind};
 use crate::highlight;
+
+/// The input-area border colors, one per thinking level. Level 0 is
+/// the idle gray (no thinking published); higher levels warm the
+/// border from blue through green toward the "thinking" green.
+fn thinking_border(level: u32) -> Color {
+    match level {
+        0 => Color::DarkGray,
+        1 => Color::Blue,
+        2 => Color::Cyan,
+        3 => Color::Green,
+        _ => Color::Yellow,
+    }
+}
+
+/// Map the frame spec's border choice to a ratatui border type. The
+/// default (a `None` border on the spec) is the rounded corners.
+fn border_style(b: crate::ext::FrameBorderStyle) -> BorderType {
+    match b {
+        crate::ext::FrameBorderStyle::Rounded => BorderType::Rounded,
+        crate::ext::FrameBorderStyle::Plain => BorderType::Plain,
+        crate::ext::FrameBorderStyle::Double => BorderType::Double,
+        crate::ext::FrameBorderStyle::Thick => BorderType::Thick,
+    }
+}
 
 const LABEL: &str = " ";
 /// Uniform left gutter in visual columns: label, gap, then content.
@@ -330,6 +357,49 @@ fn event_lines(
             // Shared UI state: the transcript shows no row for the
             // event (docs/ui-extension.md section 5). The log keeps
             // the event.
+        }
+        EventKind::ContextExhausted => {
+            let msg = e
+                .get_str("message")
+                .unwrap_or("")
+                .to_string();
+            let ns = e
+                .get_str("new_session")
+                .unwrap_or("")
+                .to_string();
+            let st = Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD);
+            let mut spans = vec![Span::styled(
+                format!("{LABEL}[context exhausted]"),
+                st,
+            )];
+            let wrapped = if msg.is_empty() {
+                Vec::new()
+            } else {
+                wrap_styled(vec![(Style::default(), msg)], wrap_w)
+            };
+            if let Some(first) = wrapped.first() {
+                spans.push(Span::raw("  "));
+                spans.extend(first.spans.iter().cloned());
+            }
+            out.push(Line::from(spans));
+            // The message body follows under the gutter, like the
+            // error event. An empty `wrapped` leaves the header alone.
+            if !wrapped.is_empty() {
+                out.extend(guttered(&wrapped[1..], &gutter));
+            }
+            // The seeded handoff session. The status row carries the
+            // one-key hint; this line names the target.
+            if !ns.is_empty() {
+                out.push(Line::from(vec![
+                    Span::raw(gutter.clone()),
+                    Span::styled(
+                        format!("handoff session: {ns}"),
+                        st,
+                    ),
+                ]));
+            }
         }
         EventKind::Error => {
             let msg = e
@@ -882,9 +952,7 @@ fn render_message_content(
 /// relevant one, and terminal clipping always eats the right end.
 pub fn help_line(running: bool) -> String {
     let run_key = if running { "Ctrl+C stop" } else { "Ctrl+R run" };
-    format!(
-        " q×2 quit · {run_key} · Ctrl+E edit · Enter send · y/n/e · Tab · PgUp/Dn Ctrl+U/D wheel"
-    )
+    format!(" q×2 quit · {run_key} · Ctrl+E edit · Enter send · vim Esc · y/n/e · Tab · PgUp/Dn")
 }
 
 /// The status/help row content as terminal lines (one per row).
@@ -937,12 +1005,26 @@ fn status_rows(
             format!(" {hint}"),
             Style::default().fg(Color::Red).add_modifier(Modifier::DIM),
         ))],
-        crate::ext::StatusRow::Builtin => match last_line {
-            Some(l) => vec![Line::from(Span::styled(
-                format!(" » {}", trunc(&l, row_width.saturating_sub(4))),
-                dim,
-            ))],
-            None => vec![Line::from(Span::styled(help_line(running), dim))],
+        crate::ext::StatusRow::Builtin => {
+            // The pending handoff hint wins the built-in slot: it is
+            // the action that unblocks the session. The flash still
+            // wins over it (it names the result of the user's own
+            // key press).
+            if let Some(name) = app.pending_handoff() {
+                return vec![Line::from(Span::styled(
+                    format!(" context exhausted — press h to hand off to {name} · q×2 quit "),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ))];
+            }
+            match last_line {
+                Some(l) => vec![Line::from(Span::styled(
+                    format!(" » {}", trunc(&l, row_width.saturating_sub(4))),
+                    dim,
+                ))],
+                None => vec![Line::from(Span::styled(help_line(running), dim))],
+            }
         },
     }
 }
@@ -1071,6 +1153,16 @@ pub fn draw(
     //   input line (1)
     //   help/status row (1)
     let banner = app.oldest_pending_approval().is_some();
+    // The input-area frame: the `frame` extension's last valid spec,
+    // or the host built-in (rounded border, thinking-level color).
+    // The frame owns the border style, label, and interior height;
+    // it never owns the draft content (docs/ui-extensions design:
+    // the input area is customizable, not hardwired).
+    let frame = host.frame_spec();
+    let input_interior = frame.as_ref().and_then(|f| f.height).unwrap_or(2);
+    // The bordered box is the interior rows plus a top and bottom
+    // border row each.
+    let input_area_h = (input_interior + 2) as u16;
     // Status/help row content, computed before the layout: the layout
     // reserves one terminal row per status line. A status extension
     // reply may carry two lines (the narrow two-line layout,
@@ -1081,13 +1173,13 @@ pub fn draw(
         vec![
             Constraint::Min(2),
             Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(input_area_h),
             Constraint::Length(status_n),
         ]
     } else {
         vec![
             Constraint::Min(3),
-            Constraint::Length(1),
+            Constraint::Length(input_area_h),
             Constraint::Length(status_n),
         ]
     };
@@ -1143,35 +1235,146 @@ pub fn draw(
         row += 1;
     }
 
-    // input line
+    // input area: a bordered, rounded-corner box showing two (or the
+    // frame spec's) editor lines, colored by the thinking level. The
+    // frame extension may override the border style, label, and
+    // interior height; the draft content and cursor stay host-owned.
     let i_area = rows[row];
     let naming = app.pending_name().is_some();
-    let prefix = if naming { " new session: " } else { " > " };
-    let text = if naming {
-        app.pending_name().unwrap_or_default().to_string()
+    let border_type = frame
+        .as_ref()
+        .and_then(|f| f.border)
+        .map(border_style)
+        .unwrap_or(BorderType::Rounded);
+    let border_color = frame
+        .as_ref()
+        .and_then(|f| f.label.as_ref())
+        .and_then(|(_, s)| s.fg)
+        .unwrap_or_else(|| thinking_border(app.thinking_level()));
+    // The box border. A frame label replaces the built-in title.
+    let title = if let Some((flabel, lstyle)) =
+        frame.as_ref().and_then(|f| f.label.as_ref())
+    {
+        Line::from(Span::styled(
+            flabel
+                .iter()
+                .take(1)
+                .map(|l| l.text.clone())
+                .collect::<Vec<_>>()
+                .join(" "),
+            lstyle.clone(),
+        ))
     } else {
-        app.draft().to_string()
+        Line::from(Span::styled(
+            app.editor_mode_label(),
+            Style::default()
+                .fg(Color::Black)
+                .bg(border_color)
+                .add_modifier(Modifier::BOLD),
+        ))
     };
-    let mut spans = vec![Span::styled(
-        prefix,
-        Style::default().add_modifier(Modifier::BOLD),
-    )];
-    spans.push(Span::raw(text.clone()));
-    if naming {
-        spans.push(Span::styled(
-            "_",
-            Style::default().add_modifier(Modifier::BOLD),
-        ));
+    let input_block = Block::bordered()
+        .border_type(border_type)
+        .border_style(Style::default().fg(border_color))
+        .title(title);
+    let inner_i = input_block.inner(i_area);
+    f.render_widget(input_block, i_area);
+
+    // The editor lines. `naming` shows the single-line name input
+    // (the session-name bar, pre-active-session). Otherwise the
+    // multi-line editor, scrolled by `edit_scroll`. Keep the cursor
+    // row visible in the window of `input_interior` lines.
+    if !naming {
+        app.editor_scroll_to_cursor(input_interior);
     }
-    f.render_widget(Paragraph::new(Line::from(spans)), i_area);
-    if !app.should_quit() {
-        let x = if naming {
-            // One past the rendered `_` underline.
-            (prefix.chars().count() + text.chars().count() + 1).min(i_area.width as usize)
+    let scroll = app.edit_scroll();
+    let ed_lines: Vec<String> = if naming {
+        vec![app.pending_name().unwrap_or_default().to_string()]
+    } else {
+        app.editor().display(scroll, input_interior)
+    };
+    // One paragraph per editor line. No line-level highlight; the
+    // cursor row shows a single inverted block cell at the caret
+    // column so the position is always visible, and the hardware
+    // cursor sits just after it.
+    let cursor_row = if naming {
+        0
+    } else {
+        let (r, _c) = app.editor().cursor();
+        r.saturating_sub(app.edit_scroll())
+    };
+    let cursor_col = if naming {
+        // One past the rendered trailing `_`: the `> ` prefix plus
+        // the name plus the underscore.
+        app.pending_name().map_or(3, |n| 3 + n.chars().count())
+    } else {
+        let (_r, c) = app.editor().cursor();
+        c
+    };
+    let top = inner_i.y;
+    for (j, l) in ed_lines.iter().enumerate() {
+        let y = top + j as u16;
+        if y >= top + inner_i.height {
+            break;
+        }
+        let sub = ratatui::layout::Rect {
+            x: inner_i.x,
+            y,
+            width: inner_i.width,
+            height: 1,
+        };
+        let line = if naming && j == 0 {
+            Line::from(vec![
+                Span::styled("> ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(l.clone()),
+                Span::styled("_", Style::default().add_modifier(Modifier::BOLD)),
+            ])
+        } else if j == cursor_row {
+            // The cursor row: render the characters up to the caret in
+            // normal style, then a block cell at the caret position
+            // (blank when the caret sits past the last character).
+            // Only this one cell is inverted so the caret is always
+            // visible even when the hardware cursor is not blinking.
+            // The rest of the line stays plain.
+            let chars: Vec<char> = l.chars().collect();
+            let cc = cursor_col.min(chars.len());
+            let before: String = chars[..cc].iter().collect();
+            let after: String = chars[cc..].iter().collect();
+            let caret_char = if cc < chars.len() {
+                // Block cursor over the character at the caret.
+                Some(chars[cc])
+            } else {
+                // Caret past the end of the line: blank block cell.
+                Some(' ')
+            };
+            let style = Style::default().bg(Color::White).fg(Color::Black);
+            let mut spans = Vec::new();
+            if !before.is_empty() {
+                spans.push(Span::raw(before));
+            }
+            if let Some(ch) = caret_char {
+                spans.push(Span::styled(ch.to_string(), style));
+            }
+            if !after.is_empty() {
+                spans.push(Span::raw(after));
+            }
+            Line::from(spans)
         } else {
-            (2 + text.chars().count()).min(i_area.width as usize)
-        } as u16;
-        *cursor = Some((i_area.x + x, i_area.y));
+            Line::from(Span::raw(l.clone()))
+        };
+        f.render_widget(Paragraph::new(line), sub);
+    }
+    // The cursor position: on the cursor line, past the cursor
+    // column.
+    if !app.should_quit() {
+        let cy = inner_i.y + cursor_row as u16;
+        // The hardware cursor lands on the block cell (the visible
+        // caret). At end-of-line, `cursor_col` points at the blank
+        // block cell we appended, which is still inside the row.
+        let cx = inner_i.x + cursor_col as u16;
+        if cy < inner_i.y + inner_i.height {
+            *cursor = Some((cx.min(inner_i.x + inner_i.width), cy));
+        }
     }
     row += 1;
 
@@ -1353,6 +1556,45 @@ mod tests {
                 "line {i:02} missing from the transcript"
             );
         }
+    }
+
+    /// The handoff marker renders its message and names the seeded
+    /// session (correction 57). The one-key hint lives on the status
+    /// row, not in the transcript.
+    #[test]
+    fn context_exhausted_line_names_the_handoff_session() {
+        let evs = vec![
+            Event::parse_line(
+                r#"{"v":1,"type":"user_message","ts":"t","content":"the task"}"#,
+            )
+            .unwrap(),
+            Event::parse_line(
+                r#"{"v":1,"type":"context_exhausted","ts":"t","message":"context budget exhausted after compaction. Run the handoff.","new_session":"s1_h1"}"#,
+            )
+            .unwrap(),
+        ];
+        let app = app_with_session(evs);
+        let joined = join(&build_transcript_lines(&app, 80, None));
+        assert!(
+            joined.contains("[context exhausted]"),
+            "the marker label renders: {joined}"
+        );
+        assert!(joined.contains("handoff session: s1_h1"), "the seed is named");
+        assert!(joined.contains("the task"), "the log history still renders");
+    }
+
+    /// A marker that seeded no session (a failed summary call) shows
+    /// no handoff line; the transcript still renders the marker.
+    #[test]
+    fn context_exhausted_line_without_a_seed_shows_no_handoff() {
+        let evs = vec![Event::parse_line(
+            r#"{"v":1,"type":"context_exhausted","ts":"t","message":"m","new_session":""}"#,
+        )
+        .unwrap()];
+        let app = app_with_session(evs);
+        let joined = join(&build_transcript_lines(&app, 80, None));
+        assert!(joined.contains("[context exhausted]"));
+        assert!(!joined.contains("handoff session:"), "no seed, no line");
     }
 
     #[test]
