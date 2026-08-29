@@ -2,18 +2,20 @@
 
 Problems to solve.
 
-## LogLine is a three-way copy (2026-08-29)
+## LogLine is a four-way copy (2026-08-30)
 
 `LogLine`, the only type that may write a session log (FT-005),
-lives in three places:
+lives in four places:
 
 1. `bin/log/src/logline.rs`
 2. `bin/user/src/logline.rs`
 3. `bin/tui/src/port_file.rs` (embedded `mod logline`)
+4. `bin/route/src/logline.rs` (the per-session tool log,
+   correction 58)
 
 The duplication follows the phase-1 policy (no shared crate). It
 joins the validator as a promotion candidate for a shared
-`core`/`bin/common` crate. Keep the three copies in sync. Do not
+`core`/`bin/common` crate. Keep the four copies in sync. Do not
 grow them in parallel.
 
 ## Event schema validator is now a third copy (2026-08-27)

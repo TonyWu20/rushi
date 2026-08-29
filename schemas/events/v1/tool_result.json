@@ -8,6 +8,8 @@
     "ts": { "type": "string", "format": "date-time" },
     "id": { "type": "string" },
     "value": { "type": "object" },
-    "is_error": { "type": "boolean" }
+    "is_error": { "type": "boolean" },
+    "bytes": { "type": "integer" },
+    "tool_log": { "type": "string" }
   }
 }

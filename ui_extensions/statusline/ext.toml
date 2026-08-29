@@ -7,6 +7,10 @@
 # - cumulative usage summed over assistant_message.usage events;
 #   the host re-sends every usage-bearing message at start, so the
 #   totals survive a TUI restart from the log alone
+# - context fullness, the number to watch for compaction: the last
+#   measured request input tokens over the model window, in the
+#   starship-statusline style (`ctx <pct>% (<tokens>/<window>)`);
+#   the window is the active model's context_tokens in $CONFIG
 # - ext_status values published by other extensions
 # Narrow terminals (< 100 cols) get the two-line layout.
 [ext]
