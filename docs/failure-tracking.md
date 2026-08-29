@@ -245,7 +245,11 @@ The same defect killed the session on 2026-08-29 at 10:13 UTC
 under the current config. See FT-009. Correction 58 removes the
 self-priming load on top of it: the compact pass drops the old
 schema-error pairs out of the model request, so the history
-stops teaching the model its own empty-argument failures. Second,
+stops teaching the model its own empty-argument failures.
+The follow-up (correction 59) addresses the misattribution seen in
+the 2026-08-30 revived turn: seven consecutive rejections with no
+recovery, and the model's reasoning blaming the tool layer. The
+rejection text now carries the resend instruction. Second,
 a `bin/model`
 observability gap: it substitutes `{}` when a terminal event
 omits the `arguments` key, so a server-side drop would look

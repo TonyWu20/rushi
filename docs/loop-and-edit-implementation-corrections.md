@@ -609,3 +609,28 @@ turn. The event log held the slim index (`bytes` 1975, `tool_log`
 pointing at `tools.jsonl`). The tool log held the full 1975-char
 body. `assemble` on that session sent the full body, not the
 preview.
+
+### 59. The schema rejection teaches the model the resend
+
+**Reference:** `bin/route`, `docs/bash-tool.md`, FT-008
+
+**Problem:** The rejection text was a bare "Tool arguments failed
+schema validation: <field>." The FT-008 glitch (the local NVFP4
+model emits `arguments: {}` at long context) recovered on its own
+in 55 of 55 historical runs. The revived better-ui turn of 2026-08-30
+broke the pattern: seven consecutive empty-argument rejections with
+no success before the user stop. The model's own reasoning blamed
+the tool layer ("the tool layer is still flaky"). It read its own
+empty calls as a harness fault and re-sent the identical call.
+
+**Fix:** `route` appends the resend instruction to the rejection.
+The first sentence keeps the stable prefix that the `assemble`
+compact pass keys the FT-008 pairs off. The missing-field case
+names the fields and ends with "Resend the call with all required
+fields filled in.". The non-object and bad-JSON cases end with
+"Resend the call with a JSON object.".
+
+**Verification:** The `route` suite passes, including the new
+`validate_args` tests for the multi-field list, the single-field
+case, the valid call, and the non-object value. The prefix match in
+`assemble` is unchanged: it keys off the first sentence.

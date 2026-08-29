@@ -277,7 +277,7 @@ Algorithm:
 
 1. For each `tool_call` event:
 2. Load `tools/<name>/tool.toml`. If no manifest exists, emit `tool_result` with `is_error: true` and `value.text` equal to "Unknown tool <name>." Do not spawn a process.
-3. Validate `arguments` against the manifest's `[tool.schema]`. If validation fails, emit `tool_result` with `is_error: true` and `value.text` equal to "Tool arguments failed schema validation: <field>." Do not spawn a process.
+3. Validate `arguments` against the manifest's `[tool.schema]`. If validation fails, emit `tool_result` with `is_error: true` and `value.text` starting with "Tool arguments failed schema validation: <field>.". The suffix teaches the model the resend (correction 59): the missing-field case ends with "Required fields are missing from the call. Resend the call with all required fields filled in.", the non-object case with "The arguments value must be a JSON object. Resend the call with a JSON object.", and the bad-JSON-string case with "The arguments string is not valid JSON. Resend the call with a JSON object." Do not spawn a process.
 4. Spawn subprocess: `command args`. Write `arguments` JSON to stdin. Enforce the manifest's `timeout_ms` (default 30000). On timeout, kill the process and emit `tool_result` with `is_error: true` and `value.text` equal to "Tool timed out after <timeout_ms> ms."
 5. Read stdout. If stdout is a JSON object with a `text` field, use it as `value`. If stdout is non-JSON text, wrap it as `{"text": "<stdout>"}`. If stdout is JSON but not an object, wrap it as `{"text": "<compact JSON>"}`. If stdout is a JSON object without a `text` field, wrap it as `{"text": "<compact JSON>"}`.
 6. If exit code is 0: emit `tool_result` with `is_error: false`.

@@ -77,7 +77,7 @@ The `parameters` object matches `[tool.schema]` in the manifest. Route
 validates input against this schema before spawning the tool. An input
 missing the `command` field is rejected by route before the tool starts.
 The rejection produces a `tool_result` with `is_error: true` and text
-"Tool arguments failed schema validation: command."
+"Tool arguments failed schema validation: command. Required fields are missing from the call. Resend the call with all required fields filled in."
 
 ## 4. Execution
 
@@ -230,7 +230,7 @@ On timeout, the JSON `exit_code` field is 143 and `timed_out` is true.
 
 An input missing the `command` field is rejected by route schema
 validation before the tool starts. The `tool_result` has `is_error: true`
-and text "Tool arguments failed schema validation: command."
+and text "Tool arguments failed schema validation: command. Required fields are missing from the call. Resend the call with all required fields filled in."
 
 ## 7. Security
 

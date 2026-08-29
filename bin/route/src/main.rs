@@ -350,7 +350,7 @@ fn main() {
                     Ok(v) => v,
                     Err(_) => {
                         let o = Outcome::not_run(
-                            "Tool arguments failed schema validation: invalid JSON."
+                            "Tool arguments failed schema validation: invalid JSON. The arguments string is not valid JSON. Resend the call with a JSON object."
                                 .to_string(),
                         );
                         println!("{}", emit_result(&o, &ts, tc_id, &args));
@@ -375,9 +375,19 @@ fn main() {
 
         let schema = manifest.1.get("schema").unwrap();
         if let Some(field) = validate_args(&tc_args, schema) {
-            let o = Outcome::not_run(format!(
-                "Tool arguments failed schema validation: {field}."
-            ));
+            // The first sentence is the stable prefix: the compact pass
+            // in `assemble` keys the schema-error pairs off it.
+            // The suffix tells the model what to fix (correction 59).
+            let o = if field == "arguments" {
+                Outcome::not_run(
+                    "Tool arguments failed schema validation: arguments. The arguments value must be a JSON object. Resend the call with a JSON object."
+                        .to_string(),
+                )
+            } else {
+                Outcome::not_run(format!(
+                    "Tool arguments failed schema validation: {field}. Required fields are missing from the call. Resend the call with all required fields filled in."
+                ))
+            };
             println!("{}", emit_result(&o, &ts, tc_id, &args));
             continue;
         }
@@ -490,16 +500,17 @@ fn process_stdout(stdout: &str, max_chars: usize) -> String {
 
 fn validate_args(args: &serde_json::Value, schema: &serde_json::Value) -> Option<String> {
     if let Some(obj) = args.as_object() {
+        let mut missing: Vec<String> = Vec::new();
         if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
             for req in required {
                 if let Some(field) = req.as_str() {
                     if !obj.contains_key(field) {
-                        return Some(field.to_string());
+                        missing.push(field.to_string());
                     }
                 }
             }
         }
-        return None;
+        return (!missing.is_empty()).then(|| missing.join(", "));
     }
     Some("arguments".to_string())
 }
@@ -620,6 +631,32 @@ mod tests {
         let o = Outcome::not_run("Tool arguments failed schema validation: file_path.".to_string());
         assert!(o.is_error());
         assert_eq!(o.display_text(usize::MAX), "Tool arguments failed schema validation: file_path.");
+    }
+
+    #[test]
+    fn validate_args_lists_the_missing_required_fields() {
+        let schema = serde_json::json!({"required": ["command", "timeout_secs"]});
+        assert_eq!(
+            validate_args(&serde_json::json!({}), &schema),
+            Some("command, timeout_secs".to_string())
+        );
+        assert_eq!(
+            validate_args(&serde_json::json!({"command": "pwd"}), &schema),
+            Some("timeout_secs".to_string())
+        );
+        assert_eq!(
+            validate_args(&serde_json::json!({"command": "pwd", "timeout_secs": 5}), &schema),
+            None
+        );
+    }
+
+    #[test]
+    fn validate_args_flags_a_non_object_arguments_value() {
+        let schema = serde_json::json!({"required": ["command"]});
+        assert_eq!(
+            validate_args(&serde_json::json!(["cmd"]), &schema),
+            Some("arguments".to_string())
+        );
     }
 
     #[test]
