@@ -582,7 +582,9 @@ statusline token metrics did not match the reference
   schema-error pairs: a failed call and its result stay out of the
   compacted request once they leave the keep window. Pairs inside
   the keep window stay, so the model still sees the failure it is
-  recovering from. The event log is untouched.
+  recovering from. Correction 60 supersedes the keep-window clause:
+  every schema-error pair goes out of the request, keep window
+  included. The event log is untouched.
 - `bin/tui` writes a TUI trace log (`tui-trace.jsonl` in the
   session dir). One JSON record per fault: the port read and write
   errors, the render failures, the dropped input events, the
@@ -634,3 +636,45 @@ fields filled in.". The non-object and bad-JSON cases end with
 `validate_args` tests for the multi-field list, the single-field
 case, the valid call, and the non-object value. The prefix match in
 `assemble` is unchanged: it keys off the first sentence.
+
+### 60. The request drops every schema-error pair, keep window included
+
+**Reference:** `bin/assemble`, `docs/handoff-compaction-request-format.md`,
+FT-008
+
+**Problem:** Correction 58 dropped the old schema-error pairs from
+the compacted region. The keep window still carried its pairs
+("the model may still be recovering from the failure"). The same
+logic that the standard harnesses use: keep the recent tool error
+visible so the model fixes the call in turn. A controlled A/B on
+the better-ui request of 2026-08-30 refuted it for this
+deployment: the request with all 10 pairs glitched in 3 of 3 runs.
+With the 9 oldest pairs out and the newest kept, it glitched in
+2 of 3. With no pairs at all, it was clean in 3 of 3. The single
+newest pair still primes the empty-arguments pattern on this
+NVFP4 model. The failure history is not a learning signal here.
+It is a repetition template.
+
+**Fix:** `assemble` drops every schema-error pair from the model
+request, in every pass. The full pass, the compact pass, the
+keep window, and the step-drop candidates all key off the full
+pair set. The event log and the tool log keep the pairs: the
+audit is intact. Correction 59 stays: a new rejection still
+reaches the log with the resend instruction. This model recovers
+from a clean context, not from its own error history.
+
+**Deviation note:** Standard agent loops keep the newest tool
+error in context; the model reads it and fixes the next call.
+That pattern presumes a model that learns from its own errors.
+The A/B above measures that this one does not: one newest pair
+already breaks 2 of 3 calls. The drop-all design is correct for
+this deployment. If the active model changes, re-run the A/B.
+A clean model should switch back to keep-newest.
+
+**Verification:** The `assemble` suite passes (32 tests),
+including `compact_search_drops_old_schema_error_pairs` (the
+keep-tail pair is now out) and the new
+`compact_search_full_pass_drops_schema_error_pairs`. `assemble`
+on `sessions/better-ui` now sends a request with zero
+schema-error pairs. Three `model` calls on that request produce
+full-argument `bash` calls, not empty ones.

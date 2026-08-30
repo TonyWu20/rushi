@@ -79,8 +79,10 @@ trackable and replayable from the log.
 - The split interacts with the context budget through the slim index.
   The index carries `bytes`, the full body byte count. The compact
   pass drops the old schema-error pairs (FT-008) out of the
-  compacted request. The keep window keeps its pairs, so the failure
-  the model recovers from stays in view.
+  compacted request. Correction 60 extends the drop to every pair,
+  keep window included: the failure history primes the next call
+  on the local NVFP4 model, so no pair survives in the model
+  request.
 
 ## Related
 

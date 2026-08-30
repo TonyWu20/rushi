@@ -256,6 +256,17 @@ omits the `arguments` key, so a server-side drop would look
 identical to a model-side empty call. SGLang always sends the key
 in the captures, so the gap does not fire in this deployment.
 
+**Corrigendum (2026-08-30, correction 60):** The root-cause
+line above is wrong. The empty-argument calls are not a
+stochastic model glitch. The same model makes no such calls in
+pi, where the context holds no failure history. A controlled A/B
+on the better-ui request: all 10 schema-error pairs in the input
+glitch in 3 of 3 runs. Nine out, the newest kept, glitch in 2 of
+3. No pairs at all, clean in 3 of 3. The failure pairs in the
+request prime the next call. The harness controls the trigger
+through what it sends. Correction 60 drops every schema-error
+pair from the model request, keep window included.
+
 ## FT-009 — Session dies and stays dead after a failed compact
 
 **Symptom:** `sessions/better-ui` logged three terminal errors

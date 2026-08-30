@@ -204,15 +204,13 @@ fn is_schema_error_text(text: &str) -> bool {
     text.starts_with(SCHEMA_ERROR_PREFIX)
 }
 
-/// The call ids of old schema-validation failures: the result events
-/// before the split point whose text is a schema-validation error.
+/// The call ids of schema-validation failures (FT-008).
 ///
-/// The failed pair (the call plus its error result) self-priming
-/// (FT-008): each old pair in the request pushes the next call
-/// toward the same empty-arguments glitch. The compact form drops
-/// the pair from the request. The event log and the tool log keep
-/// it. Pairs inside the keep window stay: the model may still be
-/// recovering from the failure.
+/// The failed pair (the call plus its error result) self-priming:
+/// the model re-emits its own empty-arguments call when it sees the
+/// failure in the input. Correction 60: the request drops the pair
+/// in every position, keep window included. The event log and the
+/// tool log keep it.
 fn schema_error_pair_ids(events: &[&Ev], split: usize) -> HashSet<String> {
     let mut ids: HashSet<String> = HashSet::new();
     for &ev in events.iter().take(split) {
@@ -509,9 +507,19 @@ fn compact_search(
     req_chars: impl Fn(&Vec<serde_json::Value>) -> usize,
 ) -> Result<Vec<serde_json::Value>, Vec<serde_json::Value>> {
     let SearchConfig { base, min, keep_events, clip_chars } = cfg;
-    let no_pairs: HashSet<String> = HashSet::new();
+    // Schema-error pairs self-prime the next call (FT-008,
+    // correction 60). The request drops every pair, keep window
+    // included. The full pass drops them too: a fitting log is no
+    // reason to hand the model its own failures.
+    let no_schema_errors = schema_error_pair_ids(events, events.len());
     if include_full {
-        let full = build_items(events, events.len(), &Caps { result: 0, text: 0 }, clip_chars, &no_pairs);
+        let full = build_items(
+            events,
+            events.len(),
+            &Caps { result: 0, text: 0 },
+            clip_chars,
+            &no_schema_errors,
+        );
         if req_chars(&full) <= budget {
             return Ok(full);
         }
@@ -521,10 +529,10 @@ fn compact_search(
     let mut caps = base;
     loop {
         for keep in &keeps {
-            // Old schema-error pairs go out of the compacted region;
-            // the keep window still carries its pairs (FT-008).
-            let drop = schema_error_pair_ids(events, events.len().saturating_sub(*keep));
-            let items = build_items(events, *keep, &caps, clip_chars, &drop);
+            // Every schema-error pair goes out of the request
+            // (correction 60): old and keep window alike.
+            let drop = &no_schema_errors;
+            let items = build_items(events, *keep, &caps, clip_chars, drop);
             if req_chars(&items) <= budget {
                 return Ok(items);
             }
@@ -550,11 +558,11 @@ fn compact_search(
     let groups = step_groups(events);
     let mut keep_idx: Vec<usize> = (0..events.len()).collect();
     // The candidate the summary request is built from: the floored
-    // caps at the smallest keep window, no drops yet. Old schema-error
-    // pairs are dropped from the compacted region (FT-008).
-    let drop0 = schema_error_pair_ids(events, events.len().saturating_sub(keep));
+    // caps at the smallest keep window, no drops yet. Every
+    // schema-error pair is out of the request (correction 60).
+    let drop0 = &no_schema_errors;
     let mut last: Vec<serde_json::Value> =
-        build_items(events, keep, &caps, clip_chars, &drop0);
+        build_items(events, keep, &caps, clip_chars, drop0);
     for &(start, end) in &groups {
         // User groups are never dropped. Groups that touch the keep
         // tail are never dropped: the tail is the recent context.
@@ -567,7 +575,7 @@ fn compact_search(
         }
         keep_idx.retain(|i| !(start..end).contains(i));
         let sel: Vec<&Ev> = keep_idx.iter().map(|i| events[*i]).collect();
-        let drop = schema_error_pair_ids(&sel, sel.len().saturating_sub(keep));
+        let drop = schema_error_pair_ids(&sel, sel.len());
         let items = build_items(&sel, keep, &caps, clip_chars, &drop);
         if req_chars(&items) <= budget {
             return Ok(items);
@@ -1091,8 +1099,9 @@ not json at all
         assert!(res.is_empty(), "the failed result must be out");
     }
 
-    /// Pairs inside the keep window are not dropped: the model may
-    /// still be recovering from the failure.
+    /// An empty drop set keeps the pair at the mechanism level.
+    /// The compact search supplies the full drop set (correction
+    /// 60), so the keep window's pairs go out too.
     #[test]
     fn compact_items_keep_pairs_inside_the_keep_window() {
         let ev = Ev::Assistant {
@@ -1131,8 +1140,8 @@ not json at all
         assert!(schema_error_pair_ids(&refs, 0).is_empty());
     }
 
-    /// A compact search drops old schema-error pairs out of the
-    /// request while the keep window keeps its pair and the task
+    /// The compact search drops every schema-error pair from the
+    /// request, keep window included (correction 60). The task
     /// statement survives.
     #[test]
     fn compact_search_drops_old_schema_error_pairs() {
@@ -1178,14 +1187,63 @@ not json at all
         .expect("the compacted request must fit");
         let s = serde_json::to_string(&out).unwrap();
         assert!(s.contains("the task"), "the task statement must survive");
-        // The keep tail keeps its failed pair: it is the recovery
-        // context. The oldest step is step 0, an even index, so r0 is
-        // the oldest failed pair.
+        // Correction 60: no failed pair survives in the request.
+        // The oldest pair r0 and the keep-tail pair r28 are both
+        // out: the history of empty-argument failures self-priming
+        // the next call (FT-008).
         assert!(!s.contains("\"call_id\":\"r0\""), "the old failed pair must be out");
         let last_even = 28;
         assert!(
-            s.contains(&format!("\"call_id\":\"r{last_even}\"")),
-            "the keep tail keeps its failed pair"
+            !s.contains(&format!("\"call_id\":\"r{last_even}\"")),
+            "the keep-tail failed pair must be out too"
+        );
+    }
+
+    /// The full pass drops the schema-error pairs even when the log
+    /// fits the budget (correction 60). A fitting log is no reason
+    /// to hand the model its own failures.
+    #[test]
+    fn compact_search_full_pass_drops_schema_error_pairs() {
+        let mut events: Vec<Ev> = vec![Ev::User {
+            text: "the task".to_string(),
+        }];
+        events.push(Ev::Assistant {
+            text: "x".to_string(),
+            calls: vec![Call {
+                id: "f1".to_string(),
+                name: "bash".to_string(),
+                args_str: "{}".to_string(),
+            }],
+            reasoning: vec![],
+            usage_input: None,
+        });
+        events.push(ev_schema_error("f1"));
+        events.push(Ev::User {
+            text: "continue".to_string(),
+        });
+        let refs: Vec<&Ev> = events.iter().collect();
+        let req_chars = |items: &Vec<serde_json::Value>| {
+            serde_json::to_string(items).unwrap().len()
+        };
+        // A wide budget: the full log fits, the full pass runs.
+        let out = compact_search(
+            &refs,
+            1_000_000,
+            SearchConfig {
+                base: Caps { result: 8000, text: 2000 },
+                min: Caps { result: 128, text: 64 },
+                keep_events: 4,
+                clip_chars: 20000,
+            },
+            true,
+            &req_chars,
+        )
+        .expect("the full log fits the budget");
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(s.contains("the task"), "the task statement survives");
+        assert!(
+            !s.contains("\"call_id\":\"f1\""),
+            "the failed pair must be out of the full pass"
         );
     }
 
