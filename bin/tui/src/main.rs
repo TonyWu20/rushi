@@ -20,6 +20,7 @@ mod vim_editor;
 
 use std::io::Write;
 use std::time::Duration;
+use std::time::Instant;
 
 use clap::Parser;
 use crossterm::event as cevent;
@@ -170,6 +171,10 @@ fn main() {
         };
         app.set_active(id.clone(), events.clone());
         app.set_watch_rx(port.watch(&id, TailCursor::end()));
+        // Reattach a live loop from an earlier TUI (FT-003): the
+        // persistent probe marks the session running, so the status
+        // bit shows the real state, not this process's memory.
+        resync_external_loop(&rt, &port, &mut app, &id);
         host.send_history(&events);
     } else {
         // No session argument: ask for a new session name instead of
@@ -179,6 +184,7 @@ fn main() {
     }
 
     let mut last_width: usize = 0;
+    let mut last_loop_probe = Instant::now();
     'ui: loop {
         // 1. New log events for the active session.
         while let Some(item) = app.drain_watch() {
@@ -429,6 +435,37 @@ fn main() {
                     let Some(sid) = app.active().cloned() else {
                         continue;
                     };
+                    // The persistent probe is the one source of truth
+                    // for loop liveness across a TUI restart (FT-003).
+                    // It blocks a duplicate start, external or local.
+                    match port.external_loop_pid(&sid) {
+                        Ok(Some(pid)) => {
+                            app.attach_external_loop(sid.clone());
+                            trace(
+                                &rt,
+                                &port,
+                                Some(&sid),
+                                "loop_spawn",
+                                &format!("skipped: a live loop holds the session (pid {pid})"),
+                            );
+                            app.flash("loop already active");
+                            continue;
+                        }
+                        Ok(None) => {
+                            app.clear_loop_running(&sid);
+                        }
+                        Err(e) => {
+                            trace(
+                                &rt,
+                                &port,
+                                Some(&sid),
+                                "loop_spawn",
+                                &format!("external loop probe failed: {e}"),
+                            );
+                            app.flash(e.to_string());
+                            continue;
+                        }
+                    }
                     match rt.block_on(port.spawn_loop(&sid)) {
                         Ok(handle) => {
                             let lines = handle.take_lines().unwrap_or_else(empty_lines);
@@ -480,6 +517,7 @@ fn main() {
                             match port.stop_external_loop(&sid) {
                                 Ok(Some(msg)) => {
                                     trace(&rt, &port, Some(&sid), "loop_stop", &msg);
+                                    app.clear_loop_running(&sid);
                                     app.flash(msg);
                                     let ev = event::produce::cancel("turn");
                                     if let Err(e) = rt.block_on(port.append_event(&sid, &ev)) {
@@ -501,6 +539,7 @@ fn main() {
                                         "loop_stop",
                                         "no running loop to stop",
                                     );
+                                    app.clear_loop_running(&sid);
                                     app.flash("no running loop to stop");
                                 }
                                 Err(e) => {
@@ -569,6 +608,7 @@ fn main() {
                             // history (docs/ui-extension.md section 4).
                             host.clear_replies();
                             host.send_history(&events);
+                            resync_external_loop(&rt, &port, &mut app, &id);
                         }
                     } else {
                         app.flash("no sessions to cycle");
@@ -597,6 +637,7 @@ fn main() {
                     app.flash(format!("session {name} opened"));
                     host.clear_replies();
                     host.send_history(&events);
+                    resync_external_loop(&rt, &port, &mut app, &sid);
                 }
                 Action::Handoff(name) => {
                     // The one-key resume of the automatic handoff
@@ -639,16 +680,39 @@ fn main() {
                     }
                     host.clear_replies();
                     host.send_history(&events);
-                    match rt.block_on(port.spawn_loop(&new_sid)) {
-                        Ok(handle) => {
-                            let lines = handle.take_lines().unwrap_or_else(empty_lines);
-                            app.attach_loop(new_sid, handle, lines);
-                            app.flash(format!("handoff to {name} — loop started"));
-                        }
-                        Err(e) => {
+                    // Reattach the target's persistent loop state and
+                    // block a double start (FT-003): a live loop for
+                    // the target would get a second start here.
+                    resync_external_loop(&rt, &port, &mut app, &new_sid);
+                    match port.external_loop_pid(&new_sid) {
+                        Ok(Some(pid)) => {
+                            // A live loop owns the target session: a
+                            // second start would double-append to its
+                            // log. Stay on the old session.
                             app.set_active(old_sid.clone(), old_events);
                             app.set_watch_rx(port.watch(&old_sid, TailCursor::end()));
-                            app.flash(format!("handoff to {name} failed: {e}"));
+                            trace(
+                                &rt,
+                                &port,
+                                Some(&new_sid),
+                                "handoff",
+                                &format!("blocked: a live loop holds the session (pid {pid})"),
+                            );
+                            app.flash(format!("handoff to {name} failed: a loop is already active"));
+                        }
+                        _ => {
+                            match rt.block_on(port.spawn_loop(&new_sid)) {
+                                Ok(handle) => {
+                                    let lines = handle.take_lines().unwrap_or_else(empty_lines);
+                                    app.attach_loop(new_sid, handle, lines);
+                                    app.flash(format!("handoff to {name} — loop started"));
+                                }
+                                Err(e) => {
+                                    app.set_active(old_sid.clone(), old_events);
+                                    app.set_watch_rx(port.watch(&old_sid, TailCursor::end()));
+                                    app.flash(format!("handoff to {name} failed: {e}"));
+                                }
+                            }
                         }
                     }
                 }
@@ -696,6 +760,15 @@ fn main() {
         host.pump_frame(&tick, &app.editor_mode_label());
         host.poll_transforms();
         host.poll_status();
+        // 4.6 The persistent loop probe, once a second (FT-003): it
+        // flips the running bit when an external loop finishes, and
+        // marks it when another TUI started a loop for this session.
+        if last_loop_probe.elapsed() >= Duration::from_secs(1) {
+            last_loop_probe = Instant::now();
+            if let Some(sid) = app.active().cloned() {
+                resync_external_loop(&rt, &port, &mut app, &sid);
+            }
+        }
 
         // 5. Draw.
         let mut cursor: Option<(u16, u16)> = None;
@@ -739,6 +812,54 @@ fn trace(
 fn empty_lines() -> tokio::sync::mpsc::UnboundedReceiver<port::LoopLine> {
     let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
     rx
+}
+
+/// Reattach the persistent loop state of one session (FT-003):
+/// probe the session's `loop.pid`, mark the app state to match. The
+/// probe is the one source of truth for loop liveness across a TUI
+/// restart. A probe failure keeps the current state: it must not take
+/// the UI down. State transitions trace a record.
+fn resync_external_loop(
+    rt: &tokio::runtime::Runtime,
+    port: &FileSessionPort,
+    app: &mut App,
+    sid: &SessionId,
+) {
+    match port.external_loop_pid(sid) {
+        Ok(Some(pid)) => {
+            if !app.loop_running(sid) {
+                app.attach_external_loop(sid.clone());
+                trace(
+                    rt,
+                    port,
+                    Some(sid),
+                    "loop_reattach",
+                    &format!("live external loop (pid {pid})"),
+                );
+            }
+        }
+        Ok(None) => {
+            if app.is_external_loop(sid) {
+                app.clear_loop_running(sid);
+                trace(
+                    rt,
+                    port,
+                    Some(sid),
+                    "loop_reattach",
+                    "no live loop group for the session",
+                );
+            }
+        }
+        Err(e) => {
+            trace(
+                rt,
+                port,
+                Some(sid),
+                "port",
+                &format!("external loop probe failed: {e}"),
+            );
+        }
+    }
 }
 
 fn edit_in_terminal(

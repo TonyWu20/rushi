@@ -216,6 +216,22 @@ impl FileSessionPort {
         Ok(Some(pid))
     }
 
+    /// Probe for a live loop of this session. Returns the group leader
+    /// pid when the session's `loop.pid` names a live process group
+    /// whose command line carries the session id, else `None` (FT-003
+    /// reattach). A recycled pid or a dead group is not this session's
+    /// loop.
+    pub fn external_loop_pid(&self, session: &SessionId) -> Result<Option<i32>, BusError> {
+        let Some(pid) = self.read_loop_pid(session)? else {
+            return Ok(None);
+        };
+        if pid_is_loop(pid, session.as_str()) {
+            Ok(Some(pid))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Stop a loop this TUI did not start. Reattach through the
     /// persistent `loop.pid` artifact. Returns a message on success, or
     /// `None` when no live loop matches this session (FT-003).
@@ -1062,6 +1078,83 @@ mod tests {
     fn stop_external_loop_without_artifact_is_none() {
         let c = make_cfg(false, None);
         assert_eq!(c.port.stop_external_loop(&SessionId::new("ghost")).unwrap(), None);
+    }
+
+    #[test]
+    fn external_loop_pid_without_artifact_is_none() {
+        let c = make_cfg(false, None);
+        assert_eq!(
+            c.port.external_loop_pid(&SessionId::new("ghost")).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn external_loop_pid_dead_pid_is_none() {
+        let c = make_cfg(false, None);
+        let dir = c.dir.path().join("sessions").join("s1");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("loop.pid"), "999999999\n").unwrap();
+        assert_eq!(
+            c.port.external_loop_pid(&SessionId::new("s1")).unwrap(),
+            None,
+            "a dead pid is not this session's loop"
+        );
+    }
+
+    #[test]
+    fn external_loop_pid_reports_a_live_orphan_group() {
+        let c = make_cfg(false, None);
+        let sid = SessionId::new("s-probe");
+        let dir = c.dir.path().join("sessions").join("s-probe");
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("leader.pid");
+        // A live session-leader group that keeps the session name in
+        // its command line, like a real loop.
+        let inner = format!(
+            "echo $$ > {}; while :; do sleep 1; done",
+            pid_file.display()
+        );
+        let mut child = std::process::Command::new("setsid")
+            .args(["bash", "-c", &inner, "s-probe"])
+            .spawn()
+            .unwrap();
+        for _ in 0..100 {
+            if pid_file.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let pid = match std::fs::read_to_string(&pid_file)
+            .ok()
+            .and_then(|r| r.trim().parse::<i32>().ok())
+        {
+            Some(p) if proc_is_alive_group_leader_named(p, "s-probe") => p,
+            _ => {
+                eprintln!("SKIPPED: no live group leader was observable here");
+                let _ = child.wait();
+                return;
+            }
+        };
+        std::fs::write(dir.join("loop.pid"), format!("{pid}\n")).unwrap();
+        assert_eq!(
+            c.port.external_loop_pid(&sid).unwrap(),
+            Some(pid),
+            "the live group naming the session passes the probe"
+        );
+        // Kill the group. The probe must clear within the window.
+        // A killed leader lingers as a zombie until reaped, so poll.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+        let mut cleared = false;
+        for _ in 0..50 {
+            if c.port.external_loop_pid(&sid).unwrap().is_none() {
+                cleared = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(cleared, "the killed group must clear the probe");
+        let _ = child.wait();
     }
 
     #[test]

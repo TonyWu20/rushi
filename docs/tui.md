@@ -138,8 +138,8 @@ No `turn.sh`, no `pending/approval.json`, no `state.json` appears in this flow. 
 | `Enter` | Append the typed text as `user_message`: sends the whole multi-line draft, in any modal state |
 | `Ctrl-J` | Insert mode: a hard newline (multi-line draft). Normal mode: the `j` motion |
 | `Ctrl+E` | Open `$EDITOR` for long input, then append |
-| `Ctrl+R` | `SessionPort::spawn_loop(active_session)` |
-| `Ctrl+C` | Stop loop handle; optionally append `cancel` |
+| `Ctrl+R` | `SessionPort::spawn_loop(active_session)`. The persistent `loop.pid` probe blocks the start when a live loop holds the session (FT-003) |
+| `Ctrl+C` | Stop the loop and append a `cancel` event. A local handle stops its group. Without one, the `loop.pid` probe stops the external group (FT-003) |
 | `y` / `n` / `e` | Answer the oldest pending `approval_request`: allow / deny / edit-then-allow |
 | `h` | One-key handoff resume (correction 57). Only when the log holds a `context_exhausted` marker that seeded a session and no loop runs. Switches to the seeded session and starts its loop. The old session's local loop stops. Without those conditions, `h` stays the editor key |
 | `Tab` | Switch session |
@@ -350,6 +350,14 @@ Stop sends `SIGTERM` to the group. A 3 s grace timer escalates to
 `SIGKILL`. A tokio reaper task waits for the child and for both
 output pumps to hit EOF, then sends `Exited` exactly once. `Exited`
 always trails the last output line.
+
+On a TUI restart the app state is empty. The port probe
+(`external_loop_pid`) reads `loop.pid`. It confirms the group is live
+and names the session. It marks the session running without a local
+handle. The probe runs at start, on every session switch, and once a
+second in the main loop. The `[running]` bit shows real loop state,
+not this process's memory. `Ctrl+R` blocks on the probe. `Ctrl+C`
+resolves through the probe when no local handle exists (FT-003).
 
 ### 13.4 Tailer semantics
 

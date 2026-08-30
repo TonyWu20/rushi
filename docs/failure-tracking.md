@@ -59,7 +59,15 @@ it did not start.
 writes `<session_dir>/loop.pid` with the group leader PID. On `Ctrl+C`,
 when no local handle exists, the TUI reads `loop.pid`, confirms the PID
 is still this session's loop, and stops the process group. A recycled
-PID that no longer names this session is left alone.
+PID that no longer names this session is left alone. The TUI
+reattaches at start and on every session switch. `external_loop_pid`
+reads `loop.pid`, confirms the group is live and names the session, and
+marks the session running without a local handle. The main loop
+re-probes the active session once a second. The `[running]` bit shows
+real loop state, not this process's memory. `Ctrl+R` blocks on the
+probe. It refuses a second start for a live session. `Ctrl+C` emits
+the stop intent regardless of local state. Main resolves it through
+the probe when no local handle exists.
 
 **Verification:** `stop_external_loop` probes the group and reads
 `/proc/<pid>/cmdline`. It kills only a live PID whose command line names
@@ -68,7 +76,8 @@ the session. A live test
 loop, confirms it is a live group leader naming the session, stops it
 through the reattach path, and confirms the group dies. The leader is
 spotted as a zombie until reaped, so the death check treats a zombie as
-dead.
+dead. Unit tests `external_loop_pid_reports_a_live_orphan_group` and
+`external_loop_pid_dead_pid_is_none` cover the probe.
 
 ## FT-004 — `edit` panics when a multi-byte character straddles byte 8192
 

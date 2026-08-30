@@ -60,8 +60,13 @@ pub enum Action {
     /// Cycle to the next/previous session, then reload its log.
     CycleSessions(i32),
     /// `SessionPort::spawn_loop(active)` (docs/tui.md key Ctrl+R).
+    /// Main gates the spawn on the persistent loop probe (FT-003): a
+    /// live loop for the session blocks the start, across a TUI
+    /// restart.
     RunLoop,
     /// Stop the active session's loop and append a `cancel` event.
+    /// With no local handle, main stops the external group through the
+    /// persistent `loop.pid` (FT-003).
     StopLoop,
     /// Append the draft as a `user_message` (docs/tui.md key Enter).
     SendDraft,
@@ -472,6 +477,13 @@ impl App {
         self.edit_scroll
     }
 
+    /// How many lines the draft currently holds (at least 1). The
+    /// renderer sizes the input box to this so a multi-line message is
+    /// shown in full, not just a two-line scroll window.
+    pub fn draft_lines(&self) -> usize {
+        self.editor.n_lines()
+    }
+
     /// Scroll the editor window so the cursor row is inside a window
     /// of `height` lines. A short draft keeps scroll 0; a long one
     /// follows the cursor.
@@ -602,6 +614,31 @@ impl App {
         st.lines_rx = Some(lines);
         st.running = true;
         st.exit_code = None;
+    }
+
+    /// Register a live loop this TUI did not start (FT-003): the
+    /// persistent probe found a live group for the session. The state
+    /// marks the session running without a local handle. Stop goes
+    /// through the port's external path. Idempotent.
+    pub fn attach_external_loop(&mut self, sid: SessionId) {
+        let st = self.loops.entry(sid).or_default();
+        st.running = true;
+        st.exit_code = None;
+    }
+
+    /// Clear the running flag of one session's loop state. The
+    /// persistent probe found no live group (FT-003). A session with
+    /// no loop state is a no-op.
+    pub fn clear_loop_running(&mut self, sid: &SessionId) {
+        if let Some(st) = self.loops.get_mut(sid) {
+            st.running = false;
+        }
+    }
+
+    /// True when the session's loop runs without a local handle: this
+    /// TUI did not start it, the persistent probe reattached it.
+    pub fn is_external_loop(&self, sid: &SessionId) -> bool {
+        self.loop_state(sid).is_some_and(|s| s.running && s.handle.is_none())
     }
 
     pub fn loop_state(&self, sid: &SessionId) -> Option<&LoopState> {
@@ -793,26 +830,26 @@ impl App {
                 Vec::new()
             }
             Key::CtrlR => {
+                // The duplicate-start guard is not here: main resolves
+                // it through the persistent loop.pid probe (FT-003),
+                // so a restarted TUI blocks a second loop for a live
+                // session instead of starting one.
                 if self.active.is_none() {
                     self.flash("no session to run the loop for");
-                    return Vec::new();
+                    Vec::new()
+                } else {
+                    vec![Action::RunLoop]
                 }
-                let sid = self.active.clone().unwrap();
-                if self.loop_running(&sid) {
-                    self.flash("loop already running");
-                    return Vec::new();
-                }
-                vec![Action::RunLoop]
             }
             Key::CtrlC => {
-                let Some(sid) = self.active.clone() else {
-                    return Vec::new();
-                };
-                if !self.loop_running(&sid) {
-                    self.flash("no loop running");
-                    return Vec::new();
+                // The stop resolves in main against the persistent
+                // loop.pid probe (FT-003): it stops a live loop this
+                // TUI did not start. Main flashes the outcome.
+                if self.active.is_none() {
+                    Vec::new()
+                } else {
+                    vec![Action::StopLoop]
                 }
-                vec![Action::StopLoop]
             }
             Key::CtrlE => {
                 if self.active.is_none() {
@@ -855,15 +892,13 @@ impl App {
                 Vec::new()
             }
             Key::Esc => {
-                // In the editor's editing modes Esc is the vim
-                // key (to normal / cancel). In plain normal mode it
-                // keeps the old clear-draft safety behavior.
-                if self.editor().mode() == crate::vim_editor::Mode::Normal {
-                    self.set_draft(String::new());
-                } else {
-                    if let Some(h) = self.editor().press(Key::Esc) {
-                        self.flash(h);
-                    }
+                // Esc only ever cancels: it drops the editing mode to
+                // normal and cancels a pending operator. It must never
+                // touch the draft text — vim's Esc cancels, it does
+                // not delete. The draft is cleared only by send (Enter)
+                // or an explicit delete motion.
+                if let Some(h) = self.editor().press(Key::Esc) {
+                    self.flash(h);
                 }
                 Vec::new()
             }
@@ -1004,23 +1039,32 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_r_runs_loop_once_only() {
+    fn ctrl_r_emits_the_spawn_intent() {
         let mut app = app_with(vec![], "s1");
         assert_eq!(app.press(Key::CtrlR), vec![Action::RunLoop]);
-        // Simulate the main thread attaching the loop.
+        // Simulate the main thread attaching the loop. The duplicate
+        // guard is not in the app state: main resolves it through the
+        // persistent loop.pid probe (FT-003), so a second press still
+        // emits the intent.
         attach_dummy(&mut app, "s1");
         assert!(app.loop_running(&SessionId::new("s1")));
-        assert!(app.press(Key::CtrlR).is_empty(), "second Ctrl+R is ignored");
+        assert_eq!(app.press(Key::CtrlR), vec![Action::RunLoop]);
     }
 
     #[test]
-    fn ctrl_c_stops_only_when_running() {
+    fn ctrl_c_emits_the_stop_intent() {
         let mut app = app_with(vec![], "s1");
-        assert!(app.press(Key::CtrlC).is_empty());
-        assert!(app.status().is_some());
-
+        // No loop known: the key still emits the intent. Main
+        // resolves the stop through the persistent loop.pid probe
+        // (FT-003), which stops a loop this TUI did not start.
+        assert_eq!(app.press(Key::CtrlC), vec![Action::StopLoop]);
         attach_dummy(&mut app, "s1");
         assert_eq!(app.press(Key::CtrlC), vec![Action::StopLoop]);
+        let mut none = App::new();
+        assert!(
+            none.press(Key::CtrlC).is_empty(),
+            "no session: no intent"
+        );
     }
 
     #[test]
