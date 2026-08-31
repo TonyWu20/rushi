@@ -74,7 +74,6 @@ mod logline {
             let mut file = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .write(true)
                 .open(path)?;
             let fd = file.as_raw_fd();
             if unsafe { libc::flock(fd, libc::LOCK_EX) } != 0 {
@@ -210,9 +209,12 @@ impl FileSessionPort {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(BusError::from(e)),
         };
-        let pid = raw.trim().parse::<i32>().map_err(|_| BusError::InvalidEvent {
-            reason: "loop.pid holds no valid pid".to_string(),
-        })?;
+        let pid = raw
+            .trim()
+            .parse::<i32>()
+            .map_err(|_| BusError::InvalidEvent {
+                reason: "loop.pid holds no valid pid".to_string(),
+            })?;
         Ok(Some(pid))
     }
 
@@ -235,10 +237,7 @@ impl FileSessionPort {
     /// Stop a loop this TUI did not start. Reattach through the
     /// persistent `loop.pid` artifact. Returns a message on success, or
     /// `None` when no live loop matches this session (FT-003).
-    pub fn stop_external_loop(
-        &self,
-        session: &SessionId,
-    ) -> Result<Option<String>, BusError> {
+    pub fn stop_external_loop(&self, session: &SessionId) -> Result<Option<String>, BusError> {
         let Some(pid) = self.read_loop_pid(session)? else {
             return Ok(None);
         };
@@ -559,9 +558,7 @@ impl SessionPort for FileSessionPort {
                     }
                 }
             }
-            event_line
-                .commit(&log_path)
-                .map_err(BusError::from)?;
+            event_line.commit(&log_path).map_err(BusError::from)?;
             Ok(())
         })
         .await;
@@ -570,7 +567,12 @@ impl SessionPort for FileSessionPort {
         })?
     }
 
-    async fn append_trace(&self, session: &SessionId, kind: &str, message: &str) -> Result<(), BusError> {
+    async fn append_trace(
+        &self,
+        session: &SessionId,
+        kind: &str,
+        message: &str,
+    ) -> Result<(), BusError> {
         let session_dir = self.session_dir(session)?;
         let trace_path = session_dir.join(TRACE_FILE);
         // One record per event: timestamp, kind, message. The record
@@ -586,9 +588,7 @@ impl SessionPort for FileSessionPort {
         let trace_line = LogLine::from_json(&record.to_string());
         let res = tokio::task::spawn_blocking(move || -> Result<(), BusError> {
             std::fs::create_dir_all(&session_dir)?;
-            trace_line
-                .commit(&trace_path)
-                .map_err(BusError::from)?;
+            trace_line.commit(&trace_path).map_err(BusError::from)?;
             Ok(())
         })
         .await;
@@ -604,7 +604,8 @@ impl SessionPort for FileSessionPort {
     async fn spawn_loop(&self, session: &SessionId) -> Result<Box<dyn LoopHandle>, BusError> {
         let loop_cmd = self.loop_cmd.as_ref().ok_or(BusError::LoopNotConfigured)?;
         let argv = loop_cmd.argv(session);
-        let program = argv[0].clone();        let mut cmd = tokio::process::Command::new(&program);
+        let program = argv[0].clone();
+        let mut cmd = tokio::process::Command::new(&program);
         cmd.args(&argv[1..]);
         cmd.current_dir(&self.config_dir);
         cmd.env("CONFIG", &self.config_path);
@@ -1077,7 +1078,10 @@ mod tests {
     #[test]
     fn stop_external_loop_without_artifact_is_none() {
         let c = make_cfg(false, None);
-        assert_eq!(c.port.stop_external_loop(&SessionId::new("ghost")).unwrap(), None);
+        assert_eq!(
+            c.port.stop_external_loop(&SessionId::new("ghost")).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -1270,7 +1274,10 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        assert!(dead, "the orphan group leader must die within the escalation window");
+        assert!(
+            dead,
+            "the orphan group leader must die within the escalation window"
+        );
         let _ = child.wait();
     }
 
@@ -1306,7 +1313,10 @@ mod tests {
             Some(i) => i,
             None => return false,
         };
-        let rest: Vec<&str> = stat[close + 1..].split(' ').filter(|s| !s.is_empty()).collect();
+        let rest: Vec<&str> = stat[close + 1..]
+            .split(' ')
+            .filter(|s| !s.is_empty())
+            .collect();
         if rest.len() < 3 {
             return false;
         }
@@ -1324,9 +1334,7 @@ mod tests {
         let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
             return false;
         };
-        cmdline
-            .split(|b| *b == 0)
-            .any(|a| a == session.as_bytes())
+        cmdline.split(|b| *b == 0).any(|a| a == session.as_bytes())
     }
 
     #[test]
@@ -1343,8 +1351,17 @@ mod tests {
         let rt = runtime();
         let sid = SessionId::new("s1");
         block_on(&rt, c.port.append_trace(&sid, "loop_spawn", "loop started")).unwrap();
-        block_on(&rt, c.port.append_trace(&sid, "port", "event append failed: io")).unwrap();
-        let trace_path = c.dir.path().join("sessions").join("s1").join("tui-trace.jsonl");
+        block_on(
+            &rt,
+            c.port.append_trace(&sid, "port", "event append failed: io"),
+        )
+        .unwrap();
+        let trace_path = c
+            .dir
+            .path()
+            .join("sessions")
+            .join("s1")
+            .join("tui-trace.jsonl");
         let text = std::fs::read_to_string(trace_path).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2, "one record per trace event");

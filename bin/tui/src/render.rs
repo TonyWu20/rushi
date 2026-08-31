@@ -22,7 +22,7 @@
 use ratatui::layout::Constraint;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph, BorderType};
+use ratatui::widgets::{Block, BorderType, Paragraph};
 use ratatui::Frame;
 use std::collections::HashMap;
 
@@ -359,21 +359,12 @@ fn event_lines(
             // the event.
         }
         EventKind::ContextExhausted => {
-            let msg = e
-                .get_str("message")
-                .unwrap_or("")
-                .to_string();
-            let ns = e
-                .get_str("new_session")
-                .unwrap_or("")
-                .to_string();
+            let msg = e.get_str("message").unwrap_or("").to_string();
+            let ns = e.get_str("new_session").unwrap_or("").to_string();
             let st = Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD);
-            let mut spans = vec![Span::styled(
-                format!("{LABEL}[context exhausted]"),
-                st,
-            )];
+            let mut spans = vec![Span::styled(format!("{LABEL}[context exhausted]"), st)];
             let wrapped = if msg.is_empty() {
                 Vec::new()
             } else {
@@ -394,10 +385,7 @@ fn event_lines(
             if !ns.is_empty() {
                 out.push(Line::from(vec![
                     Span::raw(gutter.clone()),
-                    Span::styled(
-                        format!("handoff session: {ns}"),
-                        st,
-                    ),
+                    Span::styled(format!("handoff session: {ns}"), st),
                 ]));
             }
         }
@@ -952,7 +940,9 @@ fn render_message_content(
 /// relevant one, and terminal clipping always eats the right end.
 pub fn help_line(running: bool) -> String {
     let run_key = if running { "Ctrl+C stop" } else { "Ctrl+R run" };
-    format!(" q×2 quit · {run_key} · Ctrl+E edit · Enter send · vim Esc · y/n/e · Tab · PgUp/Dn")
+    format!(
+        " q×2 quit · {run_key} · Ctrl+E edit · Enter send · Ctrl-J ⏎ · vim · y/n/e · Tab · PgUp/Dn"
+    )
 }
 
 /// The status/help row content as terminal lines (one per row).
@@ -1025,7 +1015,7 @@ fn status_rows(
                 ))],
                 None => vec![Line::from(Span::styled(help_line(running), dim))],
             }
-        },
+        }
     }
 }
 
@@ -1159,7 +1149,13 @@ pub fn draw(
     // it never owns the draft content (docs/ui-extensions design:
     // the input area is customizable, not hardwired).
     let frame = host.frame_spec();
-    let input_interior = frame.as_ref().and_then(|f| f.height).unwrap_or(2);
+    // Default interior: fit the draft (2..=6 lines) so a multi-line
+    // message is shown in full. A `frame` extension's explicit height
+    // still overrides (the input area is customizable, not hardwired).
+    let input_interior = frame
+        .as_ref()
+        .and_then(|f| f.height)
+        .unwrap_or_else(|| app.draft_lines().clamp(2, 6));
     // The bordered box is the interior rows plus a top and bottom
     // border row each.
     let input_area_h = (input_interior + 2) as u16;
@@ -1252,9 +1248,7 @@ pub fn draw(
         .and_then(|(_, s)| s.fg)
         .unwrap_or_else(|| thinking_border(app.thinking_level()));
     // The box border. A frame label replaces the built-in title.
-    let title = if let Some((flabel, lstyle)) =
-        frame.as_ref().and_then(|f| f.label.as_ref())
-    {
+    let title = if let Some((flabel, lstyle)) = frame.as_ref().and_then(|f| f.label.as_ref()) {
         Line::from(Span::styled(
             flabel
                 .iter()
@@ -1262,11 +1256,13 @@ pub fn draw(
                 .map(|l| l.text.clone())
                 .collect::<Vec<_>>()
                 .join(" "),
-            lstyle.clone(),
+            *lstyle,
         ))
     } else {
         Line::from(Span::styled(
-            app.editor_mode_label(),
+            app.editor()
+                .command_line_label()
+                .unwrap_or_else(|| app.editor_mode_label()),
             Style::default()
                 .fg(Color::Black)
                 .bg(border_color)
@@ -1311,6 +1307,9 @@ pub fn draw(
         let (_r, c) = app.editor().cursor();
         c
     };
+    // The search command line owns the input: the prompt renders in
+    // the box title and the text-area cursor block stays off.
+    let in_command_line = app.editor().command_line_label().is_some();
     let top = inner_i.y;
     for (j, l) in ed_lines.iter().enumerate() {
         let y = top + j as u16;
@@ -1329,34 +1328,26 @@ pub fn draw(
                 Span::raw(l.clone()),
                 Span::styled("_", Style::default().add_modifier(Modifier::BOLD)),
             ])
-        } else if j == cursor_row {
-            // The cursor row: render the characters up to the caret in
-            // normal style, then a block cell at the caret position
-            // (blank when the caret sits past the last character).
-            // Only this one cell is inverted so the caret is always
+        } else if j == cursor_row && !in_command_line {
+            // The cursor row: render the characters up to the caret
+            // in normal style, then one inverted block cell. Only
+            // this one cell is inverted so the caret is always
             // visible even when the hardware cursor is not blinking.
-            // The rest of the line stays plain.
-            let chars: Vec<char> = l.chars().collect();
-            let cc = cursor_col.min(chars.len());
-            let before: String = chars[..cc].iter().collect();
-            let after: String = chars[cc..].iter().collect();
-            let caret_char = if cc < chars.len() {
-                // Block cursor over the character at the caret.
-                Some(chars[cc])
-            } else {
-                // Caret past the end of the line: blank block cell.
-                Some(' ')
-            };
+            // The rest of the line stays plain. In the on-char
+            // modes (normal, replace, visual) the block covers the
+            // char under the cursor, so that char is drawn exactly
+            // once (the highlighted cell); the insert caret is a
+            // blank block cell that keeps the char under it.
+            let (before, caret, after) =
+                cursor_line_spans(l, cursor_col, app.editor().mode().cursor_on_char());
             let style = Style::default().bg(Color::White).fg(Color::Black);
             let mut spans = Vec::new();
             if !before.is_empty() {
-                spans.push(Span::raw(before));
+                spans.push(Span::raw(before.iter().collect::<String>()));
             }
-            if let Some(ch) = caret_char {
-                spans.push(Span::styled(ch.to_string(), style));
-            }
+            spans.push(Span::styled(caret.to_string(), style));
             if !after.is_empty() {
-                spans.push(Span::raw(after));
+                spans.push(Span::raw(after.iter().collect::<String>()));
             }
             Line::from(spans)
         } else {
@@ -1364,16 +1355,24 @@ pub fn draw(
         };
         f.render_widget(Paragraph::new(line), sub);
     }
-    // The cursor position: on the cursor line, past the cursor
-    // column.
+    // The cursor position: on the cursor line, on the block cell.
+    // In command-line mode it lands on the prompt in the box title.
     if !app.should_quit() {
-        let cy = inner_i.y + cursor_row as u16;
-        // The hardware cursor lands on the block cell (the visible
-        // caret). At end-of-line, `cursor_col` points at the blank
-        // block cell we appended, which is still inside the row.
-        let cx = inner_i.x + cursor_col as u16;
-        if cy < inner_i.y + inner_i.height {
+        if let Some(prompt) = app.editor().command_line_label() {
+            let prompt_w = prompt.chars().count().saturating_sub(1);
+            let cx = inner_i.x + 1 + prompt_w as u16;
+            let cy = inner_i.y.saturating_sub(1);
             *cursor = Some((cx.min(inner_i.x + inner_i.width), cy));
+        } else {
+            let cy = inner_i.y + cursor_row as u16;
+            // The hardware cursor lands on the block cell (the
+            // visible caret). At end-of-line, `cursor_col` points
+            // at the blank block cell, which is still inside the
+            // row.
+            let cx = inner_i.x + cursor_col as u16;
+            if cy < inner_i.y + inner_i.height {
+                *cursor = Some((cx.min(inner_i.x + inner_i.width), cy));
+            }
         }
     }
     row += 1;
@@ -1394,6 +1393,22 @@ pub fn draw(
             height: 1,
         };
         f.render_widget(Paragraph::new(l.clone()), sub);
+    }
+}
+
+/// The spans of the editor cursor row: `(before, caret, after)`.
+/// `on_char` is true when the mode rests on the character at the
+/// caret (normal / replace / visual): the block covers that char,
+/// so it is drawn once and the line continues from the next char.
+/// In insert the caret is a blank block cell and the char under it
+/// stays drawn.
+fn cursor_line_spans(line: &str, col: usize, on_char: bool) -> (Vec<char>, char, Vec<char>) {
+    let chars: Vec<char> = line.chars().collect();
+    let cc = col.min(chars.len());
+    if on_char && cc < chars.len() {
+        (chars[..cc].to_vec(), chars[cc], chars[cc + 1..].to_vec())
+    } else {
+        (chars[..cc].to_vec(), ' ', chars[cc..].to_vec())
     }
 }
 
@@ -1579,7 +1594,10 @@ mod tests {
             joined.contains("[context exhausted]"),
             "the marker label renders: {joined}"
         );
-        assert!(joined.contains("handoff session: s1_h1"), "the seed is named");
+        assert!(
+            joined.contains("handoff session: s1_h1"),
+            "the seed is named"
+        );
         assert!(joined.contains("the task"), "the log history still renders");
     }
 
@@ -2206,5 +2224,54 @@ mod tests {
             show(&builtin),
             "ext None must match the built-in path"
         );
+    }
+}
+
+#[cfg(test)]
+mod cursor_span_tests {
+    use super::cursor_line_spans;
+
+    fn text(before: &[char], caret: char, after: &[char]) -> String {
+        let mut s: String = before.iter().collect();
+        s.push(caret);
+        s.extend(after.iter());
+        s
+    }
+
+    /// Bug: the on-char cursor used to draw the covered char a
+    /// second time (`[t]this`). The covered char must appear
+    /// exactly once.
+    #[test]
+    fn on_char_cursor_does_not_duplicate_the_covered_char() {
+        // Cursor on `t` of "this" (the reported `[t]this` case).
+        let (b, c, a) = cursor_line_spans("this", 0, true);
+        assert_eq!(text(&b, c, &a), "this", "the covered char is drawn once");
+        // Cursor on `i`: `th[i]is` must stay `this`.
+        let (b, c, a) = cursor_line_spans("this", 2, true);
+        assert_eq!(text(&b, c, &a), "this");
+        // Last char of the line.
+        let (b, c, a) = cursor_line_spans("this", 3, true);
+        assert_eq!(text(&b, c, &a), "this");
+    }
+
+    #[test]
+    fn insert_caret_keeps_the_char_under_it() {
+        // Insert mode, caret between `b` and `c` of "abc": a blank
+        // block at the caret, the char under it stays.
+        let (b, c, a) = cursor_line_spans("abc", 2, false);
+        assert_eq!(c, ' ');
+        assert_eq!(text(&b, c, &a), "ab c");
+        // Caret past the end of the line.
+        let (b, c, a) = cursor_line_spans("ab", 2, false);
+        assert_eq!(text(&b, c, &a), "ab ");
+    }
+
+    #[test]
+    fn empty_line_caret() {
+        let (_b, c, _a) = cursor_line_spans("", 0, false);
+        assert_eq!(c, ' ');
+        // On-char on an empty line degrades to the blank cell.
+        let (_b, c, _a) = cursor_line_spans("", 0, true);
+        assert_eq!(c, ' ');
     }
 }

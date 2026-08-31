@@ -135,11 +135,12 @@ No `turn.sh`, no `pending/approval.json`, no `state.json` appears in this flow. 
 
 | Key | Action |
 |---|---|
-| `Enter` | Append the typed text as `user_message`: sends the whole multi-line draft, in any modal state |
+| `Enter` | In the search command line: run the search. Otherwise: append the typed text as `user_message`: sends the whole multi-line draft, in any modal state |
 | `Ctrl-J` | Insert mode: a hard newline (multi-line draft). Normal mode: the `j` motion |
 | `Ctrl+E` | Open `$EDITOR` for long input, then append |
-| `Ctrl+R` | `SessionPort::spawn_loop(active_session)`. The persistent `loop.pid` probe blocks the start when a live loop holds the session (FT-003) |
-| `Ctrl+C` | Stop the loop and append a `cancel` event. A local handle stops its group. Without one, the `loop.pid` probe stops the external group (FT-003) |
+| `Ctrl+R` | In normal mode with pending redo state: redo. Otherwise: `SessionPort::spawn_loop(active_session)`. The persistent `loop.pid` probe blocks the start when a live loop holds the session (FT-003) |
+| `Ctrl+C` | With an active session: stop the loop and append a `cancel` event. A local handle stops its group. Without one, the `loop.pid` probe stops the external group (FT-003). Without an active session: the editor's insert-exit key (insert/replace to normal) |
+| `Ctrl+U` | In the search command line: clear the input. In the idle composer's insert mode: kill the current line. Otherwise: half-page up in the log |
 | `y` / `n` / `e` | Answer the oldest pending `approval_request`: allow / deny / edit-then-allow |
 | `h` | One-key handoff resume (correction 57). Only when the log holds a `context_exhausted` marker that seeded a session and no loop runs. Switches to the seeded session and starts its loop. The old session's local loop stops. Without those conditions, `h` stays the editor key |
 | `Tab` | Switch session |
@@ -155,28 +156,63 @@ cursor).
 ### 7.1 Vim modal input
 
 The draft is a `Vec` of lines plus a modal key state machine
-(`vim_editor.rs`). The modes and the operator-pending convention are
-taken from the pi-config vim extension (`vim-modal.ts`):
+(`vim_editor.rs`). The port follows the pinned `@burneikis/pi-vim`
+reference (the flake-pinned rev, plus its `dw`/paste compat fixes):
+motions, operators, text objects, registers, search, dot-repeat,
+and the mode handlers. The design record is `docs/vim-editor-design.md`.
 
-- **normal**: `h j k l`, `w b e`, `0 $`, `gg G`, `x` (with a count,
-  `X`), `d c y` + motion (`dd cc`, `d$` is `D`, `c$` is `C`), `yy`
-  (line yank), `p P` (with a count), `i a I A o O`, `r` (replace one
-  character, the pending `r` operator), `R` (overwrite mode), `v V`
-  (char-wise / line-wise visual)
-- **insert**: chars append, `Ctrl-J` inserts a hard newline (`Enter`
-  sends the draft, so it never reaches the editor),
-  `Backspace` joins lines at column 0, `Esc` returns to normal
+- **normal**: `h j k l`, `w b e W B E`, `0 $ ^`, `gg G`, `f F t T`
+  (with `;` / `,`), `{ }`, `%`, `x X`, `d c y` + motion or text
+  object (`dd cc yy >> <<` are linewise; `d$` is `D`, `c$` is `C`,
+  `yy` is `Y`), `s` (change one char), `S` (change the line), `p P`
+  (with a count; `"reg` selects the register, `A-Z` append), `i a I
+  A o O` (counted `O` repeats the line, like vim), `r` (replace one
+  character), `R` (overwrite mode), `J`, `~`, `.` (dot repeat), `u`
+  (undo), `Ctrl-R` (redo), `v V` (char-wise / line-wise visual).
+  `Esc` cancels pending state: the operator, the count, the `g`
+  prefix (like vim; the pinned reference leaks the count).
+  `dw` / `dW` / `yw` / `cw` on the last word of a line consume to
+  the end of the line (the neovim rule; the pinned reference stops
+  one char short)
+- **insert**: chars insert, `Ctrl-J` inserts a hard newline (`Enter`
+  sends the draft, so it never reaches the editor), `Backspace`
+  joins lines at column 0, `Ctrl+C` / `Esc` return to normal (`Esc`
+  steps the caret back one char, the vim rule). `Shift+A` jumps the
+  caret to the end of the current line and keeps insert mode (host
+  extension; the reference base editor would just type `A`).
 - **replace** (`R` in normal): each typed char overwrites the one
-  under the cursor; `Esc` returns to normal
-- **visual / visual-line** (`v` / `V`): `d x c y p P` act on the
-  mark-to-cursor span; `Esc` or `v` leaves visual
+  under the cursor; `Backspace` restores the original; `Shift+A`
+  jumps to the line end, where typing appends; `Esc` returns to
+  normal
+- **visual / visual-line** (`v` / `V`): `d c y p P > < ~ J` act on
+  the mark-to-cursor span; after an operator the caret returns to the
+  mark; `Esc` leaves visual
+- **command line** (`/` or `?` in normal or visual): the pattern
+  types into the box title (`/pat█`); `Enter` runs the search and
+  returns to the opening mode, `Esc` or a backspace on the empty
+  buffer cancels, `Ctrl-U` clears the input. `n` / `N` repeat the
+  last search; `*` / `#` search the word under the cursor
 
-Counts prefix operators and motions: `3dd`, `2w`, `3c`. The yank
-buffer is a single slot; a delete sets it too, like vim. The editor
+Counts prefix operators and motions: `3dd`, `2w`, `3c`. Operator and
+motion counts multiply (`2d3w` is six words). The register set holds
+named registers (`a-z`), the unnamed `"`, the black hole `_`, and
+numbered registers; a delete yanks into them, like vim. `p` inserts
+the char-wise register after the cursor char, `P` before it; a
+linewise register pastes below / above the cursor line. The editor
 starts in insert mode (the composer's typing mode); `Esc` drops to
 normal for motions. The mode label shows in the frame title
 (`[NORMAL]`, `[INSERT]`, `[d-PENDING]`, ...), mirroring the pi
 `formatStatus` output.
+
+The cursor block: in normal, replace, and visual modes the inverted
+block covers the char under the caret, so the line renders that char
+exactly once (no duplicate to the right). In insert mode the block is
+a blank cell at the caret and the char under it stays rendered. In
+command-line mode the block sits on the prompt in the box title.
+
+The arrow / home / end / delete keys map onto their vim equivalents in
+normal mode: `Down`/`Enter` = `j`, `Up`/`Backspace` = `k`, `Left` =
+`h`, `Right` = `l`, `Home` = `0`, `End` = `$`, `Delete` = `x`.
 
 ### 7.2 Thinking level
 

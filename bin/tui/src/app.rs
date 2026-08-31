@@ -11,7 +11,7 @@ use ratatui::text::Line;
 
 use crate::event::{Event, EventKind};
 use crate::port::{LoopHandle, LoopLine, SessionId, WatchItem};
-use crate::vim_editor::Editor;
+use crate::vim_editor::{Editor, Mode};
 use serde_json::Value;
 
 /// Normalized key input. crossterm-free so tests can drive the app.
@@ -638,7 +638,8 @@ impl App {
     /// True when the session's loop runs without a local handle: this
     /// TUI did not start it, the persistent probe reattached it.
     pub fn is_external_loop(&self, sid: &SessionId) -> bool {
-        self.loop_state(sid).is_some_and(|s| s.running && s.handle.is_none())
+        self.loop_state(sid)
+            .is_some_and(|s| s.running && s.handle.is_none())
     }
 
     pub fn loop_state(&self, sid: &SessionId) -> Option<&LoopState> {
@@ -788,6 +789,13 @@ impl App {
                 // Enter sends the whole draft; Ctrl-J inserts a
                 // newline in it (docs/tui.md: Enter = send, multi-line
                 // via Ctrl-J). The naming bar confirms on Enter.
+                if self.editor().mode() == Mode::CommandLine {
+                    // The search command line runs its query on Enter.
+                    if let Some(h) = self.editor().press(Key::Enter) {
+                        self.flash(h);
+                    }
+                    return Vec::new();
+                }
                 if let Some(name) = self.pending_name().map(str::to_string) {
                     if name.trim().is_empty() {
                         self.flash("empty name — type a session name first");
@@ -817,9 +825,14 @@ impl App {
                 }
                 Vec::new()
             }
-            Key::Backspace | Key::Delete
-            | Key::Left | Key::Right | Key::Up | Key::Down
-            | Key::Home | Key::End => {
+            Key::Backspace
+            | Key::Delete
+            | Key::Left
+            | Key::Right
+            | Key::Up
+            | Key::Down
+            | Key::Home
+            | Key::End => {
                 // The editor decides what these do in its current
                 // mode: in insert they edit or move (the newline key
                 // is Ctrl-J; Enter sends the draft); in normal, they
@@ -830,10 +843,15 @@ impl App {
                 Vec::new()
             }
             Key::CtrlR => {
-                // The duplicate-start guard is not here: main resolves
-                // it through the persistent loop.pid probe (FT-003),
-                // so a restarted TUI blocks a second loop for a live
-                // session instead of starting one.
+                // Redo (the pi-vim mapping). The duplicate-start
+                // guard is not here: main resolves it through the
+                // persistent loop.pid probe (FT-003), so a restarted
+                // TUI blocks a second loop for a live session instead
+                // of starting one.
+                if self.editor().mode() == Mode::Normal && self.editor().has_redo() {
+                    self.editor().redo();
+                    return Vec::new();
+                }
                 if self.active.is_none() {
                     self.flash("no session to run the loop for");
                     Vec::new()
@@ -844,8 +862,13 @@ impl App {
             Key::CtrlC => {
                 // The stop resolves in main against the persistent
                 // loop.pid probe (FT-003): it stops a live loop this
-                // TUI did not start. Main flashes the outcome.
+                // TUI did not start. Main flashes the outcome. In a
+                // pre-session editor, Ctrl-C is the vim insert-exit
+                // key and the editor decides.
                 if self.active.is_none() {
+                    if let Some(h) = self.editor().press(Key::CtrlC) {
+                        self.flash(h);
+                    }
                     Vec::new()
                 } else {
                     vec![Action::StopLoop]
@@ -870,9 +893,19 @@ impl App {
                 Vec::new()
             }
             Key::CtrlU => {
-                // Half-page up, like vim: back toward the head of the
-                // log. From the tail (scroll 0) this moves up half a
-                // viewport.
+                // In the search command line it clears the input
+                // (the pi-vim mapping). In the idle composer's
+                // insert mode it kills the current line (the base
+                // editor's Ctrl-U). Otherwise it is the half-page
+                // log scroll.
+                if self.editor().mode() == Mode::CommandLine {
+                    self.editor().press(Key::CtrlU);
+                    return Vec::new();
+                }
+                if self.editor().mode() == Mode::Insert && self.active.is_none() {
+                    self.editor().clear_current_line();
+                    return Vec::new();
+                }
                 self.scroll_up(self.half_page());
                 Vec::new()
             }
@@ -1035,7 +1068,11 @@ mod tests {
         );
         app.press(Key::Char('i'));
         app.press(Key::CtrlJ);
-        assert_eq!(app.draft(), "ab\n\ncd", "Ctrl-J is a newline in insert mode");
+        assert_eq!(
+            app.draft(),
+            "ab\n\ncd",
+            "Ctrl-J is a newline in insert mode"
+        );
     }
 
     #[test]
@@ -1061,10 +1098,7 @@ mod tests {
         attach_dummy(&mut app, "s1");
         assert_eq!(app.press(Key::CtrlC), vec![Action::StopLoop]);
         let mut none = App::new();
-        assert!(
-            none.press(Key::CtrlC).is_empty(),
-            "no session: no intent"
-        );
+        assert!(none.press(Key::CtrlC).is_empty(), "no session: no intent");
     }
 
     #[test]
@@ -1532,10 +1566,7 @@ mod tests {
 
         // The newest marker is the word: a later marker with no
         // seeded session (a failed summary call) hides the older one.
-        let app = app_with(
-            vec![exhausted_event("s1_h1"), exhausted_event("")],
-            "s1",
-        );
+        let app = app_with(vec![exhausted_event("s1_h1"), exhausted_event("")], "s1");
         assert_eq!(app.pending_handoff(), None);
 
         // No marker: nothing pending.
@@ -1573,7 +1604,118 @@ mod tests {
         let mut app = app_with(vec![exhausted_event("s1_h1")], "s1");
         attach_dummy(&mut app, "s1");
         assert!(app.loop_running(&SessionId::new("s1")));
-        assert!(app.press(Key::Char('h')).is_empty(), "the running loop owns the session");
+        assert!(
+            app.press(Key::Char('h')).is_empty(),
+            "the running loop owns the session"
+        );
         assert_eq!(app.draft(), "h");
+    }
+
+    #[test]
+    fn shift_a_appends_at_the_line_end_in_the_composer() {
+        // The idle composer is in insert mode: Shift+a jumps the
+        // caret to the end of the current line, typing continues
+        // there, and Enter still sends the whole draft.
+        let mut app = App::new();
+        app.editor().set_text("hi there");
+        app.editor().row = 0;
+        app.editor().col = 2;
+        app.press(Key::Char('A'));
+        assert_eq!(app.editor().cursor(), (0, 8));
+        app.press(Key::Char('!'));
+        assert_eq!(app.draft(), "hi there!");
+    }
+
+    #[test]
+    fn enter_in_the_search_command_line_runs_the_search() {
+        let mut app = App::new();
+        app.editor().set_text("abc abc");
+        app.editor().mode = crate::vim_editor::Mode::Normal;
+        app.press(Key::Char('/'));
+        app.press(Key::Char('b'));
+        app.press(Key::Char('c'));
+        assert_eq!(
+            app.editor().mode(),
+            crate::vim_editor::Mode::CommandLine,
+            "/ starts the command line"
+        );
+        assert!(
+            app.press(Key::Enter).is_empty(),
+            "the search runs in the editor, not a draft send"
+        );
+        assert_eq!(app.editor().mode(), crate::vim_editor::Mode::Normal);
+        assert_eq!(
+            app.editor().cursor(),
+            (0, 1),
+            "the caret lands on the first match"
+        );
+        assert_eq!(
+            app.draft(),
+            "abc abc",
+            "the draft text is the search buffer"
+        );
+    }
+
+    #[test]
+    fn ctrl_c_without_a_session_leaves_the_editor() {
+        let mut app = App::new();
+        app.editor().set_text("abc");
+        assert_eq!(app.editor().mode(), crate::vim_editor::Mode::Insert);
+        assert!(
+            app.press(Key::CtrlC).is_empty(),
+            "no session: no stop intent"
+        );
+        assert_eq!(app.editor().mode(), crate::vim_editor::Mode::Normal);
+        assert_eq!(app.draft(), "abc", "the text is untouched");
+    }
+
+    #[test]
+    fn ctrl_r_redoes_before_starting_the_loop() {
+        let mut app = app_with(vec![], "s1");
+        app.editor().set_text("abc");
+        app.editor().mode = crate::vim_editor::Mode::Normal;
+        app.press(Key::Char('i'));
+        app.press(Key::Char('X'));
+        app.press(Key::Esc);
+        app.press(Key::Char('u'));
+        assert_eq!(app.draft(), "abc", "the undo restored the text");
+        assert!(
+            app.press(Key::CtrlR).is_empty(),
+            "the redo swallows the key instead of starting the loop"
+        );
+        assert_eq!(app.draft(), "Xabc", "the redo restored the change");
+        // Without redo state the key falls through to the loop intent.
+        assert_eq!(app.press(Key::CtrlR), vec![Action::RunLoop]);
+    }
+
+    #[test]
+    fn ctrl_u_kills_the_line_in_the_idle_composer() {
+        let mut app = App::new();
+        app.editor().set_text("one\ntwo");
+        app.editor().mode = crate::vim_editor::Mode::Insert;
+        app.editor().row = 1;
+        app.editor().col = 1;
+        assert!(app.press(Key::CtrlU).is_empty());
+        assert_eq!(
+            app.editor().text(),
+            "one\n",
+            "the current line is emptied, structure kept"
+        );
+    }
+
+    #[test]
+    fn ctrl_u_scrolls_the_log_outside_insert_mode() {
+        let events = (0..50)
+            .map(|i| produce::user_message(&format!("log line {i}")))
+            .collect();
+        let mut app = app_with(events, "s1");
+        app.editor().set_text("abc");
+        app.editor().mode = crate::vim_editor::Mode::Normal;
+        let before = app.scroll();
+        assert!(app.press(Key::CtrlU).is_empty());
+        assert!(
+            app.scroll() > before,
+            "normal mode keeps the half-page log scroll"
+        );
     }
 }

@@ -971,8 +971,8 @@ impl ExtHost {
                     }
                 }
             } else {
-                for gi in base..events.len() {
-                    let e = &events[gi];
+                for (offset, e) in events[base..].iter().enumerate() {
+                    let gi = base + offset;
                     let ty = e.type_name();
                     if !m.kinds.is_empty() {
                         let t = match ty {
@@ -1327,9 +1327,7 @@ impl ExtHost {
     /// `frame_spec` reply, or the built-in rendering when no frame
     /// extension exists or its reply is missing).
     pub fn frame_spec(&self) -> Option<FrameSpec> {
-        let Some(i) = self.disc.frame_owner else {
-            return None;
-        };
+        let i = self.disc.frame_owner?;
         let s = &self.inner.slots[i];
         if !matches!(
             *s.state.lock().unwrap(),
@@ -1686,11 +1684,7 @@ fn writer_thread(slot: Arc<SlotShared>) {
     let Some(rx) = slot.send_rx.lock().unwrap().take() else {
         return;
     };
-    loop {
-        let msg = match rx.recv() {
-            Ok(m) => m,
-            Err(_) => break,
-        };
+    while let Ok(msg) = rx.recv() {
         let mut guard = slot.stdin.lock().unwrap();
         let Some(w) = guard.as_mut() else {
             // Between generations: the op has no target. Drop it.
@@ -1778,17 +1772,15 @@ fn spawn_gen(
     // argv pointer table are built here, in the parent; the child
     // path below is libc calls only, no heap.
     let argv_ptrs: Vec<*const libc::c_char> = {
-        let mut v: Vec<*const libc::c_char> =
-            argv.iter().map(|s| s.as_ptr()).collect();
+        let mut v: Vec<*const libc::c_char> = argv.iter().map(|s| s.as_ptr()).collect();
         v.push(std::ptr::null());
         v
     };
-    let cwd_c = CString::new(m.dir.as_os_str().as_bytes().to_vec())
-        .map_err(|e| e.to_string())?;
-    let config_c = CString::new(config_path.as_os_str().as_bytes().to_vec())
-        .map_err(|e| e.to_string())?;
-    let ext_dir_c = CString::new(m.dir.as_os_str().as_bytes().to_vec())
-        .map_err(|e| e.to_string())?;
+    let cwd_c = CString::new(m.dir.as_os_str().as_bytes().to_vec()).map_err(|e| e.to_string())?;
+    let config_c =
+        CString::new(config_path.as_os_str().as_bytes().to_vec()).map_err(|e| e.to_string())?;
+    let ext_dir_c =
+        CString::new(m.dir.as_os_str().as_bytes().to_vec()).map_err(|e| e.to_string())?;
 
     unsafe {
         let pid = libc::fork();
@@ -1835,6 +1827,7 @@ fn spawn_gen(
 
 /// The monitor thread: wait, restart with the backoff budget, then
 /// dead. The stop flag ends the loop without a restart.
+#[allow(clippy::too_many_arguments)]
 fn monitor_thread(
     slot: Arc<SlotShared>,
     inner: Arc<HostInner>,
@@ -1983,7 +1976,7 @@ protocol_v = 1
         write_ext(
             dir.path(),
             "a",
-            &format!("[ext]\ncommand = \"bash\"\nprotocol_v = 1\n"),
+            "[ext]\ncommand = \"bash\"\nprotocol_v = 1\n",
         );
         let m = load_manifest(&dir.path().join("a")).unwrap();
         assert_eq!(m.name, "a");
@@ -2238,7 +2231,12 @@ protocol_v = 1
         let (lines, style) = spec.label.unwrap();
         assert_eq!(lines.len(), 1);
         // A styled label keeps its wire style; the host renders it.
-        assert_eq!(style, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+        assert_eq!(
+            style,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        );
         // A partial spec: missing fields keep the host built-in.
         let v = json!({"border": "rounded"});
         let spec = frame_spec_value(&v).unwrap();
@@ -2337,7 +2335,7 @@ done
     #[test]
     fn style_hex_and_tokens() {
         let s = wire_style(Some(
-            &json!({"fg": "#f00", "bg": "#00ff00", "bold": true})
+            json!({"fg": "#f00", "bg": "#00ff00", "bold": true})
                 .as_object()
                 .unwrap(),
         ));
@@ -2348,10 +2346,10 @@ done
                 .bg(Color::Rgb(0, 255, 0))
                 .add_modifier(Modifier::BOLD)
         );
-        let s = wire_style(Some(&json!({"fg": "cyan"}).as_object().unwrap()));
+        let s = wire_style(Some(json!({"fg": "cyan"}).as_object().unwrap()));
         assert_eq!(s, Style::default().fg(Color::Cyan));
         // An unknown token degrades to no color.
-        let s = wire_style(Some(&json!({"fg": "chartreuse"}).as_object().unwrap()));
+        let s = wire_style(Some(json!({"fg": "chartreuse"}).as_object().unwrap()));
         assert_eq!(s, Style::default());
     }
 
@@ -2855,7 +2853,7 @@ exec sleep 30
                 session: Some("s"),
                 model: None,
                 thinking: 0,
-            loop_running: false,
+                loop_running: false,
                 statuses: &empty,
             };
             host.pump_ticks(&p);
@@ -2875,7 +2873,7 @@ exec sleep 30
                 session: Some("s"),
                 model: None,
                 thinking: 0,
-            loop_running: false,
+                loop_running: false,
                 statuses: &empty,
             };
             host.pump_ticks(&p);
@@ -2908,7 +2906,7 @@ exec sleep 30
                 session: Some("s"),
                 model: None,
                 thinking: 0,
-            loop_running: false,
+                loop_running: false,
                 statuses: &empty,
             };
             host.pump_ticks(&p);
@@ -2952,7 +2950,7 @@ done
                 session: Some("s"),
                 model: None,
                 thinking: 0,
-            loop_running: false,
+                loop_running: false,
                 statuses: &empty,
             };
             host.pump_ticks(&p);
