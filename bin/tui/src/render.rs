@@ -1117,6 +1117,75 @@ fn ext_lines_guttered(lines: &[crate::ext::ExtLine], width: usize) -> Vec<Line<'
     guttered(&wrapped, &gutter)
 }
 
+/// The waiting-message cap of the steering block: the header row plus
+/// the listed rows stay inside five terminal rows. The rest counts
+/// in the `+N more` row. The full content renders in the transcript
+/// when the loop answers the message.
+const PENDING_MESSAGE_CAP: usize = 3;
+
+/// The steering block of the active session (docs/tui_feature_
+/// requests_from_human.md 2026-08-31, stage 1): one header row with
+/// the count and the delivery hint, then one preview row per
+/// unconsumed `user_message` event, capped at [`PENDING_MESSAGE_CAP`]
+/// plus a `+N more` row.
+///
+/// The header names the delivery the loop actually performs:
+/// - loop running: steering, injected at the next step
+/// - loop stopped: the messages wait for a loop start
+///
+/// Each row owns one terminal row: previews truncate to the width.
+pub fn pending_steering_lines(app: &App, running: bool, row_width: usize) -> Vec<Line<'static>> {
+    let pending = app.pending_user_messages();
+    if pending.is_empty() {
+        return Vec::new();
+    }
+    let n = pending.len();
+    let what = if n == 1 {
+        "1 message waiting".to_string()
+    } else {
+        format!("{n} messages waiting")
+    };
+    let header_text = if running {
+        format!("{what} — steering, injected at the next step")
+    } else {
+        format!("{what} — no loop running · Ctrl+R run")
+    };
+    let mut out: Vec<Line<'static>> = vec![Line::from(Span::styled(
+        format!(
+            " {}",
+            // The leading space and the truncation ellipsis each own
+            // one column: the budget leaves room for both.
+            trunc(&header_text, row_width.saturating_sub(2))
+        ),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ))];
+    for (i, ev) in pending.iter().enumerate().take(PENDING_MESSAGE_CAP) {
+        let content = ev
+            .get_str("content")
+            .unwrap_or("")
+            .lines()
+            .next()
+            .unwrap_or("");
+        let prefix = format!("  {}. ", i + 1);
+        let max = row_width.saturating_sub(prefix.chars().count()).saturating_sub(1);
+        out.push(Line::from(Span::raw(format!(
+            "{prefix}{}",
+            trunc(content, max)
+        ))));
+    }
+    if n > PENDING_MESSAGE_CAP {
+        out.push(Line::from(Span::styled(
+            format!("  +{} more", n - PENDING_MESSAGE_CAP),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        )));
+    }
+    out
+}
+
 /// The whole frame: bordered panel with session title, transcript,
 /// optional approval banner, input line, and the status/help row.
 /// When a status extension exists, its row owns that last line
@@ -1177,6 +1246,7 @@ pub fn draw(
 
     // Rows inside the border:
     //   transcript (fill)
+    //   waiting messages (0..=4, only when messages wait)
     //   approval banner (1, only when pending)
     //   input line (1)
     //   help/status row (1)
@@ -1209,20 +1279,18 @@ pub fn draw(
     // ui-extension-plan stage 2).
     let status_lines = status_rows(app, host, running, inner.width as usize);
     let status_n = status_lines.len() as u16;
-    let constraints = if banner {
-        vec![
-            Constraint::Min(2),
-            Constraint::Length(1),
-            Constraint::Length(input_area_h),
-            Constraint::Length(status_n),
-        ]
-    } else {
-        vec![
-            Constraint::Min(3),
-            Constraint::Length(input_area_h),
-            Constraint::Length(status_n),
-        ]
-    };
+    // The waiting-message block owns one layout cell for its rows
+    // (docs/tui_feature_requests_from_human.md 2026-08-31, stage 1).
+    let pending_rows = pending_steering_lines(app, running, inner.width as usize);
+    let mut constraints: Vec<Constraint> = vec![Constraint::Min(2)];
+    if !pending_rows.is_empty() {
+        constraints.push(Constraint::Length(pending_rows.len() as u16));
+    }
+    if banner {
+        constraints.push(Constraint::Length(1));
+    }
+    constraints.push(Constraint::Length(input_area_h));
+    constraints.push(Constraint::Length(status_n));
     let rows = ratatui::layout::Layout::vertical(constraints).split(inner);
 
     // transcript
@@ -1254,6 +1322,27 @@ pub fn draw(
     }
 
     let mut row = 1usize;
+    // waiting messages: the steering list of the active session
+    // (docs/tui_feature_requests_from_human.md 2026-08-31, stage 1).
+    // One layout cell for the block; one row per line, like the
+    // status rows.
+    if !pending_rows.is_empty() {
+        let p_area = rows[row];
+        for (i, l) in pending_rows.iter().enumerate() {
+            if i as u16 >= p_area.height {
+                break;
+            }
+            let sub = ratatui::layout::Rect {
+                x: p_area.x,
+                y: p_area.y + i as u16,
+                width: p_area.width,
+                height: 1,
+            };
+            f.render_widget(Paragraph::new(l.clone()), sub);
+        }
+        row += 1;
+    }
+
     // approval banner
     if banner {
         let p = app.oldest_pending_approval().unwrap();
@@ -2280,6 +2369,68 @@ mod tests {
             show(&builtin),
             "ext None must match the built-in path"
         );
+    }
+
+    #[test]
+    fn steering_block_is_empty_when_nothing_waits() {
+        let app = app_with_session(vec![
+            produce::user_message("hi"),
+            Event::parse_line(
+                r#"{"v":1,"type":"assistant_message","ts":"t","content":"yo"}"#,
+            )
+            .unwrap(),
+        ]);
+        assert!(pending_steering_lines(&app, true, 80).is_empty());
+    }
+
+    #[test]
+    fn steering_header_names_the_delivery() {
+        let app = app_with_session(vec![produce::user_message("fix the test")]);
+        let running = join(&pending_steering_lines(&app, true, 80));
+        assert!(running.contains("1 message waiting"), "{running}");
+        assert!(
+            running.contains("steering, injected at the next step"),
+            "{running}"
+        );
+        assert!(running.contains("fix the test"), "{running}");
+
+        let stopped = join(&pending_steering_lines(&app, false, 80));
+        assert!(stopped.contains("Ctrl+R run"), "{stopped}");
+        assert!(
+            !stopped.contains("steering"),
+            "the stopped header must not promise the next step: {stopped}"
+        );
+    }
+
+    #[test]
+    fn steering_block_caps_the_list_and_counts_the_rest() {
+        let evs: Vec<Event> = (0..6)
+            .map(|i| produce::user_message(&format!("msg {i}")))
+            .collect();
+        let app = app_with_session(evs);
+        let joined = join(&pending_steering_lines(&app, true, 80));
+        assert!(joined.contains("6 messages waiting"), "{joined}");
+        assert!(joined.contains("msg 0"), "{joined}");
+        assert!(joined.contains("msg 2"), "{joined}");
+        assert!(!joined.contains("msg 3"), "{joined}");
+        assert!(joined.contains("+3 more"), "{joined}");
+    }
+
+    #[test]
+    fn steering_rows_stay_inside_the_width() {
+        // Every row owns one terminal row: no row may wrap past the
+        // reserved width.
+        let app = app_with_session(vec![produce::user_message(&"x".repeat(200))]);
+        let lines = pending_steering_lines(&app, true, 40);
+        assert!(!lines.is_empty());
+        for l in &lines {
+            let w: usize = l
+                .spans
+                .iter()
+                .map(|s| s.content.chars().count())
+                .sum();
+            assert!(w <= 40, "row is {w} columns, the row owns 40");
+        }
     }
 }
 

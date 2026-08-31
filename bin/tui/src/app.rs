@@ -556,6 +556,28 @@ impl App {
             })
     }
 
+    // ── pending user messages ─────────────────────────────────
+
+    /// The unconsumed `user_message` events of the active session,
+    /// in log order. A message is consumed when the loop answers
+    /// it: an `assistant_message` event follows it in the log. A
+    /// message sent while the loop is busy stays pending until the
+    /// next step answers it (the loop's steering behavior;
+    /// docs/tui_feature_requests_from_human.md 2026-08-31, stage 1).
+    /// The derivation is log-only, like
+    /// [`App::oldest_pending_approval`]: it survives a TUI restart.
+    pub fn pending_user_messages(&self) -> Vec<&Event> {
+        let last_answered = self
+            .events
+            .iter()
+            .rposition(|e| e.kind() == EventKind::AssistantMessage);
+        let from = last_answered.map(|i| i + 1).unwrap_or(0);
+        self.events[from..]
+            .iter()
+            .filter(|e| e.kind() == EventKind::UserMessage)
+            .collect()
+    }
+
     // ── approvals ───────────────────────────────────────
 
     /// Oldest pending `approval_request`, or `None` when the log has no
@@ -1575,6 +1597,58 @@ mod tests {
         // No marker: nothing pending.
         let app = app_with(vec![], "s1");
         assert_eq!(app.pending_handoff(), None);
+    }
+
+    #[test]
+    fn pending_user_messages_empty_without_events() {
+        let app = app_with(vec![], "s1");
+        assert!(app.pending_user_messages().is_empty());
+    }
+
+    #[test]
+    fn pending_user_messages_stop_at_the_last_answer() {
+        // Answered messages drop off: only the messages after the
+        // last `assistant_message` stay pending.
+        let evs = vec![
+            ev(r#"{"v":1,"type":"user_message","ts":"t","content":"a"}"#),
+            ev(r#"{"v":1,"type":"assistant_message","ts":"t","content":"A"}"#),
+            ev(r#"{"v":1,"type":"user_message","ts":"t","content":"b"}"#),
+            ev(r#"{"v":1,"type":"assistant_message","ts":"t","content":"B"}"#),
+            ev(r#"{"v":1,"type":"user_message","ts":"t","content":"c"}"#),
+        ];
+        let app = app_with(evs, "s1");
+        let p = app.pending_user_messages();
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].get_str("content"), Some("c"));
+    }
+
+    #[test]
+    fn busy_time_messages_wait_together() {
+        // Two messages land while the loop is busy. Both wait for
+        // the next step's answer, in log order.
+        let evs = vec![
+            ev(r#"{"v":1,"type":"user_message","ts":"t","content":"a"}"#),
+            ev(r#"{"v":1,"type":"assistant_message","ts":"t","content":"A"}"#),
+            ev(r#"{"v":1,"type":"user_message","ts":"t","content":"b"}"#),
+            ev(r#"{"v":1,"type":"user_message","ts":"t","content":"c"}"#),
+        ];
+        let app = app_with(evs, "s1");
+        let p = app.pending_user_messages();
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[0].get_str("content"), Some("b"));
+        assert_eq!(p[1].get_str("content"), Some("c"));
+    }
+
+    #[test]
+    fn pending_user_messages_survive_a_cancel() {
+        // A cancel kills the in-flight step. The unanswered message
+        // still waits for the next loop run.
+        let evs = vec![
+            ev(r#"{"v":1,"type":"user_message","ts":"t","content":"a"}"#),
+            ev(r#"{"v":1,"type":"cancel","ts":"t","target":"turn"}"#),
+        ];
+        let app = app_with(evs, "s1");
+        assert_eq!(app.pending_user_messages().len(), 1);
     }
 
     #[test]

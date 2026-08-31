@@ -131,6 +131,20 @@ No `turn.sh`, no `pending/approval.json`, no `state.json` appears in this flow. 
 └─────────────────────────────────────────────────────┘
 ```
 
+When unconsumed `user_message` events sit in the log, a waiting-
+messages block (the steering block) renders between the transcript
+and the input box. It holds one header row with the count and the
+delivery hint, then up to three message preview rows, then a
+`+N more` row for the rest. The block is computed at draw time
+from the active session's events. A message is consumed when an
+`assistant_message` event follows it in the log (docs/tui_feature_
+requests_from_human.md, 2026-08-31, stage 1):
+
+- loop running: `N message(s) waiting — steering, injected at the
+  next step`
+- loop stopped: `N message(s) waiting — no loop running · Ctrl+R
+  run`
+
 ## 7. Key bindings
 
 | Key | Action |
