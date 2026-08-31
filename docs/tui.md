@@ -174,16 +174,15 @@ and the mode handlers. The design record is `docs/vim-editor-design.md`.
   `dw` / `dW` / `yw` / `cw` on the last word of a line consume to
   the end of the line (the neovim rule; the pinned reference stops
   one char short)
-- **insert**: chars insert, `Ctrl-J` inserts a hard newline (`Enter`
-  sends the draft, so it never reaches the editor), `Backspace`
-  joins lines at column 0, `Ctrl+C` / `Esc` return to normal (`Esc`
-  steps the caret back one char, the vim rule). `Shift+A` jumps the
-  caret to the end of the current line and keeps insert mode (host
-  extension; the reference base editor would just type `A`).
+- **insert**: chars insert (`Shift+A` types `A` at the caret, like
+  the reference base editor), `Ctrl-J` inserts a hard newline
+  (`Enter` sends the draft, so it never reaches the editor),
+  `Backspace` joins lines at column 0, `Ctrl+C` / `Esc` return to
+  normal (`Esc` steps the caret back one char, the vim rule).
 - **replace** (`R` in normal): each typed char overwrites the one
-  under the cursor; `Backspace` restores the original; `Shift+A`
-  jumps to the line end, where typing appends; `Esc` returns to
-  normal
+  under the cursor (`Shift+A` types `A` at the caret, like the
+  reference base editor); `Backspace` restores the original; `Esc`
+  returns to normal
 - **visual / visual-line** (`v` / `V`): `d c y p P > < ~ J` act on
   the mark-to-cursor span; after an operator the caret returns to the
   mark; `Esc` leaves visual

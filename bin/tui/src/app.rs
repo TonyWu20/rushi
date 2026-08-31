@@ -1612,18 +1612,17 @@ mod tests {
     }
 
     #[test]
-    fn shift_a_appends_at_the_line_end_in_the_composer() {
-        // The idle composer is in insert mode: Shift+a jumps the
-        // caret to the end of the current line, typing continues
-        // there, and Enter still sends the whole draft.
+    fn shift_a_types_uppercase_a_in_the_composer() {
+        // The idle composer is in insert mode: Shift+a types `A`
+        // at the caret; Enter still sends the whole draft.
         let mut app = App::new();
         app.editor().set_text("hi there");
         app.editor().row = 0;
         app.editor().col = 2;
         app.press(Key::Char('A'));
-        assert_eq!(app.editor().cursor(), (0, 8));
+        assert_eq!(app.editor().cursor(), (0, 3));
         app.press(Key::Char('!'));
-        assert_eq!(app.draft(), "hi there!");
+        assert_eq!(app.draft(), "hiA! there");
     }
 
     #[test]

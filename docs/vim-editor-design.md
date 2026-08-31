@@ -126,10 +126,8 @@ and the vim state. The state fields mirror `state.ts`:
 
 ### Insert
 
-- chars insert at the caret; `Shift+A` jumps the caret to the end
-  of the current line and keeps insert mode (host extension for the
-  idle composer; the reference base editor would just type `A` — a
-  typed uppercase `A` is therefore unreachable in insert mode);
+- chars insert at the caret; `Shift+A` types `A` at the caret, like
+  the reference base editor;
   `Ctrl-J` (host-normalized to `Enter`
   for the editor) splits the line; `Backspace` removes the char left
   of the caret, and joins lines at column 0.
@@ -137,16 +135,13 @@ and the vim state. The state fields mirror `state.ts`:
   climbs to the previous line. Counted `O` copies the inserted line
   below before returning.
 - `Ctrl+C`: to normal without stepping back.
-- typing is recorded for dot-repeat (backspace pops the record). A
-  `Shift+A` jump inside a recorded insert change is not part of the
-  recorded text; replay types the recorded chars without the jump.
+- typing is recorded for dot-repeat (backspace pops the record).
 
 ### Replace (`R`)
 
 - a typed char overwrites the char under the cursor (last char of a
   line is overwritten, not appended); at end of line it appends.
-- `Shift+A` jumps to the end of the line; overtyping continues
-  there (host extension, as in insert mode).
+  `Shift+A` types `A` at the caret, like the reference base editor.
 - `Backspace` restores the original char (the replace stack) and
   steps back. `Enter` splits the line. `Esc`: to normal, step back.
 

@@ -528,12 +528,6 @@ impl Editor {
                     self.delete_char_at(self.col);
                 }
             }
-            Key::Char('A') => {
-                // Shift+a: jump the caret to the end of the current
-                // line and keep insert mode (host extension; the
-                // reference base editor would just type `A`).
-                self.col = line_len(&self.lines, self.row);
-            }
             Key::Char(c) => {
                 if self.is_recording_insert() {
                     self.record_insert_text(c);
@@ -636,11 +630,6 @@ impl Editor {
                 if self.is_recording_insert() {
                     self.record_insert_text('\n');
                 }
-            }
-            Key::Char('A') => {
-                // Shift+a: jump to the end of the line; overtyping
-                // continues there (appends past the last char).
-                self.col = line_len(&self.lines, self.row);
             }
             Key::Char(c) if (c as u32) >= 32 => {
                 self.push_undo();
@@ -4755,35 +4744,36 @@ mod tests {
     }
 
     #[test]
-    fn shift_a_jumps_to_line_end_in_insert_mode() {
-        // The idle composer starts in insert mode: Shift+a jumps
-        // the caret to the line end and typing continues there.
+    fn shift_a_types_uppercase_a_in_insert_mode() {
+        // Shift+a types `A` at the caret, like the reference base
+        // editor (the old host extension jumped the caret instead).
         let mut e = ed("hello\nworld");
         e.row = 0;
         e.col = 2;
         e.press(Key::Char('A'));
         assert_eq!(e.mode(), Mode::Insert);
-        assert_eq!(e.cursor(), (0, 5));
-        e.press(Key::Char('!'));
-        assert_eq!(e.text(), "hello!\nworld");
+        assert_eq!(e.text(), "heAllo\nworld");
     }
 
     #[test]
-    fn shift_a_at_line_end_stays_put() {
+    fn shift_a_at_line_end_appends_the_char() {
         let mut e = ed("ab");
         e.col = 2;
         e.press(Key::Char('A'));
-        assert_eq!(e.cursor(), (0, 2));
+        assert_eq!(e.text(), "abA");
+        assert_eq!(e.cursor(), (0, 3));
     }
 
     #[test]
-    fn shift_a_in_replace_mode_appends_past_last_char() {
+    fn shift_a_types_uppercase_a_in_replace_mode() {
+        // Shift+a types `A` at the caret, like the reference base
+        // editor (the old host extension jumped the caret instead).
         let mut e = norm("abc", 0, 0, &["R"]);
         assert_eq!(e.mode(), Mode::Replace);
         press(&mut e, &["A"]);
-        assert_eq!(e.cursor(), (0, 3), "the jump lands past the last char");
-        press(&mut e, &["X", "esc"]);
-        assert_eq!(e.text(), "abcX");
+        assert_eq!(e.cursor(), (0, 1), "the overtype steps one char right");
+        press(&mut e, &["esc"]);
+        assert_eq!(e.text(), "Abc");
     }
 
     #[test]
