@@ -77,6 +77,29 @@ fn trunc(s: &str, max: usize) -> String {
     out
 }
 
+/// Clip a styled row to `max` visual columns. Each character is one
+/// column (the Nerd Font glyphs the statusline extension ships are
+/// one column wide). A status row owns one reserved terminal row,
+/// and an overflow would wrap to the next row.
+fn clip_spans(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut used = 0usize;
+    for span in spans {
+        let n = span.content.chars().count();
+        if used + n > max {
+            let keep = max.saturating_sub(used);
+            if keep > 0 {
+                let cut: String = span.content.chars().take(keep).collect();
+                out.push(Span::styled(cut, span.style));
+            }
+            break;
+        }
+        used += n;
+        out.push(span);
+    }
+    out
+}
+
 /// Wrap `text` at `wrap_w`, one gutter-prefixed line each, capped at
 /// `cap` lines with a hint for the remainder.
 fn body(text: &str, style: Style, cap: usize, wrap_w: usize, gutter: &str) -> Vec<Line<'static>> {
@@ -981,7 +1004,19 @@ fn status_rows(
             let rows: Vec<Line<'static>> = lines
                 .iter()
                 .take(2)
-                .map(|l| Line::from(Span::styled(l.text.clone(), l.style)))
+                .map(|l| {
+                    let spans: Vec<Span<'static>> = l
+                        .spans
+                        .iter()
+                        .map(|s| Span::styled(s.text.clone(), s.style))
+                        .collect();
+                    // A status row owns one reserved terminal row. A
+                    // too-wide row would wrap, so the host clips it
+                    // to the row width (the extension's own width is
+                    // the last tick's; the terminal may have resized
+                    // since).
+                    Line::from(clip_spans(spans, row_width))
+                })
                 .collect();
             // An empty reply must not erase the row slot (the help
             // content shares it): reserve one blank row.
@@ -1074,7 +1109,10 @@ pub fn build_transcript_lines(
 fn ext_lines_guttered(lines: &[crate::ext::ExtLine], width: usize) -> Vec<Line<'static>> {
     let gutter = " ".repeat(GUTTER);
     let wrap_w = width.saturating_sub(GUTTER).max(4);
-    let segs: Vec<(Style, String)> = lines.iter().map(|l| (l.style, l.text.clone())).collect();
+    let segs: Vec<(Style, String)> = lines
+        .iter()
+        .flat_map(|l| l.spans.iter().map(|s| (s.style, s.text.clone())))
+        .collect();
     let wrapped = wrap_styled(segs, wrap_w);
     guttered(&wrapped, &gutter)
 }
@@ -1149,13 +1187,19 @@ pub fn draw(
     // it never owns the draft content (docs/ui-extensions design:
     // the input area is customizable, not hardwired).
     let frame = host.frame_spec();
-    // Default interior: fit the draft (2..=6 lines) so a multi-line
-    // message is shown in full. A `frame` extension's explicit height
-    // still overrides (the input area is customizable, not hardwired).
+    // The interior width a draft line wraps to: the input box spans the
+    // full main-interior width, its border takes two columns. Every
+    // wrapping / sizing / scroll below keys off this so a long line
+    // breaks at the box edge instead of running off it.
+    let input_wrap_w = inner.width.saturating_sub(2) as usize;
+    // Default interior: fit the draft (2..=6 display rows) so a
+    // multi-line message is shown in full. A `frame` extension's
+    // explicit height still overrides (the input area is customizable,
+    // not hardwired).
     let input_interior = frame
         .as_ref()
         .and_then(|f| f.height)
-        .unwrap_or_else(|| app.draft_lines().clamp(2, 6));
+        .unwrap_or_else(|| app.draft_lines(input_wrap_w).clamp(2, 6));
     // The bordered box is the interior rows plus a top and bottom
     // border row each.
     let input_area_h = (input_interior + 2) as u16;

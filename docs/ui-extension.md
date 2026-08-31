@@ -101,9 +101,12 @@ Extension to TUI:
 | `append` | `{event}` | append the event via `SessionPort` |
 | `notify` | `{kind: "bell"}` or `{kind: "osc", code, args}` | the host applies it on its own terminal |
 
-`lines` is an array of `[text, style]` pairs.
+`lines` is an array of line items.
+A line item is a bare string, a `[text, style]` pair, or an array
+of `[text, style]` pairs (a multi-span line; the host draws the
+spans left to right on one row).
 `style` is `{fg, bg, bold}`. Values are theme tokens or hex strings.
-The host converts pairs to `Span::styled`.
+The host converts each span to a `Span::styled`.
 No raw ANSI crosses the channel.
 `lines` are width-independent. The host wraps to the pane width.
 Every message carries `"v": 1`.

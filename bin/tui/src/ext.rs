@@ -398,13 +398,61 @@ fn command_exists(command: &str) -> bool {
         .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(command).is_file()))
 }
 
-/// One styled line from an extension reply. The host converts the
+/// One styled span from an extension reply. The host converts the
 /// wire style `{fg, bg, bold}` to a `Span` style; no raw ANSI
 /// crosses the channel (docs/ui-extension.md section 4).
 #[derive(Debug, Clone, PartialEq)]
-pub struct ExtLine {
+pub struct ExtSpan {
     pub text: String,
     pub style: Style,
+}
+
+/// One line of an extension reply, in display order. A line is a
+/// list of spans. The wire shape is a string, a `[text, style]` pair
+/// (a single-span line), or an array of `[text, style]` pairs (a
+/// multi-span line; docs/ui-extension.md section 4).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtLine {
+    /// The span texts joined in order. For a single-span line it is
+    /// the full line text.
+    pub text: String,
+    /// The first span's style. A line-level consumer that needs one
+    /// style uses this; the full fidelity lives in `spans`.
+    pub style: Style,
+    /// Every span of the line, in display order. One entry for a
+    /// single-span line.
+    pub spans: Vec<ExtSpan>,
+}
+
+impl ExtLine {
+    /// One span with the terminal default style.
+    pub fn plain(text: impl Into<String>) -> Self {
+        Self::styled(text, Style::default())
+    }
+
+    /// One span with one style.
+    pub fn styled(text: impl Into<String>, style: Style) -> Self {
+        let t: String = text.into();
+        ExtLine {
+            spans: vec![ExtSpan {
+                text: t.clone(),
+                style,
+            }],
+            text: t,
+            style,
+        }
+    }
+
+    /// A line of several spans. The `text` field joins the span
+    /// texts; the `style` field is the first span's style.
+    pub fn multi(spans: Vec<ExtSpan>) -> Self {
+        let text = spans.iter().map(|s| s.text.clone()).collect();
+        let style = spans
+            .first()
+            .map(|s| s.style)
+            .unwrap_or_else(Style::default);
+        ExtLine { text, style, spans }
+    }
 }
 
 /// A color value in a wire style: a hex string (`#rgb`, `#rrggbb`)
@@ -502,26 +550,46 @@ fn wire_style(obj: Option<&Map<String, Value>>) -> Style {
 }
 
 /// Validate the `lines` payload of a `lines`, `status`, or
-/// `transformed` reply. A valid payload is an array of `[text,
-/// style]` pairs or bare strings. An invalid shape is `None`: the
-/// per-op G5 fallback applies and the TUI stays up.
+/// `transformed` reply. A valid payload is an array of line items.
+/// A line item is a bare string, a `[text, style]` pair, or an
+/// array of `[text, style]` pairs (a multi-span line; the host
+/// draws the spans left to right on one row). An invalid shape is
+/// `None`: the per-op G5 fallback applies and the TUI stays up.
 fn lines_value(v: &Value) -> Option<Vec<ExtLine>> {
     let arr = v.as_array()?;
-    let mut out = Vec::with_capacity(arr.len());
+    let mut out: Vec<ExtLine> = Vec::with_capacity(arr.len());
     for item in arr {
         match item {
-            Value::String(t) => out.push(ExtLine {
-                text: t.clone(),
-                style: Style::default(),
-            }),
-            Value::Array(pair) if pair.len() == 2 => {
+            Value::String(t) => out.push(ExtLine::plain(t.clone())),
+            Value::Array(pair) if pair.len() == 2 && pair[0].is_string() => {
                 let text = pair[0].as_str()?.to_string();
                 let style = match &pair[1] {
                     Value::Object(o) => wire_style(Some(o)),
                     Value::Null => Style::default(),
                     _ => return None,
                 };
-                out.push(ExtLine { text, style });
+                out.push(ExtLine::styled(text, style));
+            }
+            Value::Array(spans) => {
+                // A multi-span line: each element is a [text, style] pair.
+                let mut parsed: Vec<ExtSpan> = Vec::with_capacity(spans.len());
+                for sp in spans {
+                    let pair = sp.as_array()?;
+                    if pair.len() != 2 {
+                        return None;
+                    }
+                    let text = pair[0].as_str()?.to_string();
+                    let style = match &pair[1] {
+                        Value::Object(o) => wire_style(Some(o)),
+                        Value::Null => Style::default(),
+                        _ => return None,
+                    };
+                    parsed.push(ExtSpan { text, style });
+                }
+                if parsed.is_empty() {
+                    return None;
+                }
+                out.push(ExtLine::multi(parsed));
             }
             _ => return None,
         }
@@ -2382,6 +2450,57 @@ done
         );
     }
 
+    #[test]
+    fn multi_span_line_payload() {
+        // A powerline footer line: three styled spans on one row.
+        let ok = json!([["⎖", {"fg": "#24273a", "bg": "#24273a"}],
+                        [["⎖", {"fg": "#24273a", "bg": "#24273a"}],
+                         [" dir ", {"fg": "#cad3f5", "bg": "#24273a", "bold": true}],
+                         ["⎗", null]]]);
+        let lines = lines_value(&ok).unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].spans.len(), 1, "a one-item span list is one span");
+        let multi = &lines[1];
+        assert_eq!(multi.spans.len(), 3);
+        assert_eq!(multi.text, "⎖ dir ⎗", "the text field joins the span texts");
+        assert_eq!(
+            multi.spans[0].style,
+            Style::default()
+                .fg(Color::Rgb(0x24, 0x27, 0x3a))
+                .bg(Color::Rgb(0x24, 0x27, 0x3a))
+        );
+        assert_eq!(
+            multi.spans[1].style,
+            Style::default()
+                .fg(Color::Rgb(0xca, 0xd3, 0xf5))
+                .bg(Color::Rgb(0x24, 0x27, 0x3a))
+                .add_modifier(Modifier::BOLD)
+        );
+        assert_eq!(multi.spans[2].text, "⎗");
+        assert_eq!(
+            multi.spans[2].style,
+            Style::default(),
+            "a null span style is plain"
+        );
+        // The legacy single-span form parses to a one-span line.
+        let one = lines_value(&json!([[["text", null]]])).unwrap();
+        assert_eq!(one[0].spans.len(), 1);
+        assert_eq!(one[0].text, "text");
+        // Invalid multi-span shapes (G5 fallback, never a crash).
+        assert!(
+            lines_value(&json!([[]])).is_none(),
+            "an empty span list is invalid"
+        );
+        assert!(
+            lines_value(&json!([[[["text", null]]]])).is_none(),
+            "a bare string inside the span list is invalid"
+        );
+        assert!(
+            lines_value(&json!([[[["text", null, 3]]]])).is_none(),
+            "a 3-tuple span is invalid"
+        );
+    }
+
     // ── host process behavior ─────────────────────────────────────
 
     /// A discovery with one extension whose command is a bash
@@ -2539,10 +2658,10 @@ done
             };
             host.pump_ticks(&p);
             if host.status_row()
-                == StatusRow::Lines(vec![ExtLine {
-                    text: "stat row".into(),
-                    style: Style::default().add_modifier(Modifier::BOLD),
-                }])
+                == StatusRow::Lines(vec![ExtLine::styled(
+                    "stat row",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )])
             {
                 saw_tick = true;
                 break;

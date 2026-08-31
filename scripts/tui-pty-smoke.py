@@ -609,8 +609,8 @@ def wait_markers(master, pid, screen, markers, deadline):
 def ext_statusline_real():
     """A real session on the reference layer.
 
-    The statusline shows live dir, git, model, and usage stats. The
-    two-line layout shows on the 80-col smoke pty. Restarting the
+    The statusline shows live dir, git, model, and usage stats.
+    The two-line layout shows on the 80-col smoke pty. Restarting the
     TUI mid-session keeps the stats: they are recomputed from the
     log. The finished turn rings the terminal (raw BEL in the
     stream).
@@ -618,7 +618,9 @@ def ext_statusline_real():
     tmp = tempfile.mkdtemp(prefix="tui-ext-real-")
     cfg, sessions = layer_config(tmp, REPO + "/ui_extensions", active_model="smoke-model")
     seed_session(sessions, EXT_SESSION, seed_events())
-    stats_marker = "smoke-model in:125 out:55 sum:180"
+    # The powerline footer splits the model pill and the stats pill,
+    # so the two markers are separate.
+    stats_marker = "in:125 out:55 sum:180"
     ok = True
     master, pid = spawn(EXT_SESSION, cfg)
     screen = Screen(24, 80)
@@ -626,13 +628,13 @@ def ext_statusline_real():
         deadline = time.time() + 8.0
         seen, _ = wait_markers(
             master, pid, screen,
-            ["[ext] tool:call_1", "(git:none)", stats_marker],
+            ["[ext] tool:call_1", "git:none", "smoke-model", stats_marker],
             deadline,
         )
         if not alive(pid):
             print("FAIL ext-statusline-real: process died during startup")
             return False
-        missing = [m for m in ["[ext] tool:call_1", "(git:none)", stats_marker] if m not in seen]
+        missing = [m for m in ["[ext] tool:call_1", "git:none", "smoke-model", stats_marker] if m not in seen]
         if missing:
             print(f"FAIL ext-statusline-real: markers not seen: {missing}")
             print("screen was:\n" + screen.text())
@@ -812,10 +814,10 @@ def ext_statusline_slowgit():
     """The reference statusline under a slow git.
 
     A PATH wrapper makes every git call take 4 s (a cold cache).
-    A tick reply must never wait on git: the row shows within 4 s,
-    and the stale hint never appears while a refresh is in flight
-    (a synchronous tick handler crosses the 3 x tick_ms bound and
-    shows the hint, which is the regression this case guards).
+    The row shows within 4 s, and the stale hint never appears while
+    a refresh is in flight (a synchronous tick handler crosses the
+    3 x tick_ms bound and shows the hint, which is the regression
+    this case guards).
     """
     tmp = tempfile.mkdtemp(prefix="tui-ext-slowgit-")
     cfg, sessions = layer_config(tmp, REPO + "/ui_extensions", active_model="smoke-model")
@@ -829,7 +831,9 @@ def ext_statusline_slowgit():
     with open(bindir + "/git", "w") as f:
         f.write('#!/bin/sh\nsleep 4\nexec "' + real_git + '" "$@"\n')
     os.chmod(bindir + "/git", 0o755)
-    stats_marker = "smoke-model in:125 out:55 sum:180"
+    # The powerline footer splits the model pill and the stats pill,
+    # so the row marker is the stats pill text alone.
+    stats_marker = "in:125 out:55 sum:180"
     master, pid = spawn(EXT_SESSION, cfg, prepend_path=bindir)
     screen = Screen(24, 80)
     raw = b""
@@ -1071,28 +1075,30 @@ def ext_rus():
 
     The ext-rs layer loads the Rust ports of the stage 2 bash
     references (ui-extension-plan stage 4). The statusline shows
-    the same content as the bash reference: git, session, loop
-    state, cumulative usage from the log. The tool_result renderer
-    shows its [ext] header for the seeded result. The exit
+    the same powerline footer as the bash reference: git, session,
+    loop state, cumulative usage from the log. The tool_result
+    renderer shows its [ext] header for the seeded result. The exit
     criterion: every surface has a bash and a Rust reference.
     """
     tmp = tempfile.mkdtemp(prefix="tui-ext-rus-")
     cfg, sessions = layer_config(tmp, REPO + "/ext-rs", active_model="smoke-model")
     seed_session(sessions, EXT_SESSION, seed_events())
-    stats_marker = "smoke-model in:125 out:55 sum:180"
+    # The powerline footer splits the model pill and the stats
+    # pill, so the two markers are separate.
+    stats_marker = "in:125 out:55 sum:180"
     master, pid = spawn(EXT_SESSION, cfg)
     screen = Screen(24, 80)
     try:
         deadline = time.time() + 8.0
         seen, _ = wait_markers(
             master, pid, screen,
-            ["[ext] tool:call_1", "(git:none)", stats_marker],
+            ["[ext] tool:call_1", "git:none", "smoke-model", stats_marker],
             deadline,
         )
         if not alive(pid):
             print("FAIL ext-rus: process died during startup")
             return False
-        missing = [m for m in ["[ext] tool:call_1", "(git:none)", stats_marker] if m not in seen]
+        missing = [m for m in ["[ext] tool:call_1", "git:none", "smoke-model", stats_marker] if m not in seen]
         if missing:
             print(f"FAIL ext-rus: markers not seen: {missing}")
             print("screen was:\n" + screen.text())

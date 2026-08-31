@@ -1,5 +1,8 @@
 # The reference statusline extension (ui-extension-plan stage 2).
-# One process, tick-driven. The row shows:
+# One process, tick-driven. The row is a powerline footer: rounded
+# pill segments with Nerd Font glyphs (U+E0B6 caps, U+E0B4 arrows
+# and end cap), each span carrying its own hex colors. The row
+# shows:
 # - the live dir (the config dir, where the TUI and loop operate)
 # - git branch + dirty mark, TTL-cached at 3 s (the design's tick
 #   cost note: no git spawn on every tick)
@@ -12,7 +15,8 @@
 #   starship-statusline style (`ctx <pct>% (<tokens>/<window>)`);
 #   the window is the active model's context_tokens in $CONFIG
 # - ext_status values published by other extensions
-# Narrow terminals (< 100 cols) get the two-line layout.
+# Narrow terminals (< 100 cols) get the two-line layout. A row
+# that overflows the terminal drops its lowest-priority pills.
 [ext]
 command = "bash"
 args = ["statusline.sh"]

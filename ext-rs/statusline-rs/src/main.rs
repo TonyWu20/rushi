@@ -3,7 +3,15 @@
 //! ui_extensions/statusline/.
 //!
 //! One long-lived process. It answers every `tick` op with a status
-//! row. The row shows:
+//! row. The row is a powerline footer: rounded pill segments with
+//! Nerd Font glyphs (the left hard divider U+E0B6 caps each pill;
+//! the right hard divider U+E0B4 joins the pills and closes the
+//! line). The palette is Catppuccin Macchiato, the starship-statusline
+//! reference's. Each pill is one or more styled spans on the wire
+//! (docs/ui-extension.md section 4); the host draws the spans left
+//! to right on one row.
+//!
+//! The row shows:
 //! - live dir: the config dir, where the TUI and the loop operate
 //!   ($CONFIG is exported by the host)
 //! - git branch + dirty mark, TTL-cached at 3 s so a tick never
@@ -12,6 +20,12 @@
 //! - cumulative usage summed over assistant_message.usage events;
 //!   the host re-sends every usage-bearing message at start, so the
 //!   totals survive a TUI restart from the log alone
+//! - context fullness, the number to watch for compaction: the last
+//!   measured request input tokens over the model window, in the
+//!   starship-statusline style (ctx <pct>% (<tokens>/<window>)). The
+//!   window is the active model's context_tokens from $CONFIG; the
+//!   metric is the last usage event's input_tokens, not the
+//!   cumulative totals. The section hides until both are known.
 //! - ext_status values that other extensions published into the log;
 //!   the row consumes them through the tick payload's `statuses` map
 //!
@@ -28,6 +42,21 @@ use std::time::{Duration, Instant};
 /// The git cache TTL: a tick never spawns git more than once per
 /// interval (the design's tick-cost note).
 const GIT_TTL: Duration = Duration::from_secs(3);
+
+/// Nerd Font glyphs: the left hard divider caps a pill; the right
+/// hard divider joins the pills and closes the line.
+const SEP_L: &str = "\u{E0B6}";
+const SEP_R: &str = "\u{E0B4}";
+// Catppuccin Macchiato, the starship-statusline reference palette.
+const DIR_BG: &str = "24273a"; // base
+const GIT_BG: &str = "363a4f"; // surface0
+const SESS_BG: &str = "74c7ec"; // azure
+const MODEL_BG: &str = "c6a0f6"; // mauve
+const STATS_BG: &str = "494d64"; // surface1
+const RUN_BG: &str = "a6da95"; // green: the loop is running
+const IDLE_BG: &str = "89b4fa"; // blue: the loop is idle
+const TXT: &str = "cad3f5"; // text, on dark backgrounds
+const TXT_DARK: &str = "1e2030"; // mantle, on light backgrounds
 
 /// The shared git state: branch, dirty count, last refresh time.
 type GitCache = (String, u64, Option<Instant>);
@@ -53,8 +82,7 @@ fn git_refresh(dir: &str, cache: &Arc<Mutex<GitCache>>) {
     let now = Instant::now();
     let stale = {
         let c = cache.lock().unwrap();
-        c.2
-            .map(|last| now.duration_since(last) >= GIT_TTL)
+        c.2.map(|last| now.duration_since(last) >= GIT_TTL)
             .unwrap_or(true)
     };
     if !stale {
@@ -117,22 +145,154 @@ fn status_text(statuses: &Value) -> String {
 fn short_dir(dir: &str) -> String {
     let chars: Vec<char> = dir.chars().collect();
     if chars.len() > 16 {
-        format!("...{}", chars[chars.len() - 16..].iter().collect::<String>())
+        format!(
+            "...{}",
+            chars[chars.len() - 16..].iter().collect::<String>()
+        )
     } else {
         dir.to_string()
     }
+}
+
+/// One powerline segment: the pill body text and its colors.
+#[derive(Debug, Clone)]
+struct Seg {
+    text: String,
+    fg: &'static str,
+    bg: &'static str,
+}
+
+/// One wire span: a `[text, style]` pair. An empty fg or bg is a
+/// terminal default.
+fn span(text: &str, fg: &str, bg: &str, bold: bool) -> Value {
+    let mut style = serde_json::Map::new();
+    if !fg.is_empty() {
+        style.insert("fg".into(), json!(format!("#{fg}")));
+    }
+    if !bg.is_empty() {
+        style.insert("bg".into(), json!(format!("#{bg}")));
+    }
+    if bold {
+        style.insert("bold".into(), json!(true));
+    }
+    json!([text, style])
+}
+
+/// The span list of one pill row from the segments, in display
+/// order. The row is [cap, body, arrow, cap, body, ..., endcap];
+/// the cap and arrow colors follow the reference.
+fn row_spans(segs: &[Seg]) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    let mut prev_bg: &str = "";
+    for s in segs {
+        if !prev_bg.is_empty() {
+            out.push(span(SEP_R, prev_bg, s.bg, false));
+        }
+        out.push(span(SEP_L, s.bg, s.bg, false));
+        out.push(span(&format!(" {} ", s.text), s.fg, s.bg, true));
+        prev_bg = s.bg;
+    }
+    out.push(span(SEP_R, prev_bg, "", false));
+    out
+}
+
+/// The column count of one row: each segment is one cap (1) plus
+/// its body (text length plus two spaces), plus one arrow per join
+/// and the end cap (2 per segment).
+fn row_cols(segs: &[Seg]) -> usize {
+    segs.iter().map(|s| s.text.chars().count() + 4).sum()
+}
+
+/// Fit a row to `w` columns: drop the lowest-priority tail segments
+/// until it fits. The head segment never drops.
+fn fit(segs: &[Seg], w: usize) -> Vec<Seg> {
+    let mut keep = segs.to_vec();
+    while row_cols(&keep) > w && keep.len() > 1 {
+        keep.pop();
+    }
+    keep
+}
+
+/// k/M abbreviation, the starship-statusline fmtNum rule.
+fn fmt_num(n: u64) -> String {
+    if n < 1000 {
+        n.to_string()
+    } else if n < 1_000_000 {
+        format!("{:.1}k", n as f64 / 1000.0)
+    } else {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    }
+}
+
+/// The context-fullness section, starship-statusline style:
+/// `ctx <pct>% (<tokens>/<window>)`. Both numbers need to be
+/// known, so the section hides until the last usage event and the
+/// config window are both in hand.
+fn ctx_text(last_in: u64, window: Option<u64>) -> Option<String> {
+    let w = window?;
+    if last_in == 0 || w == 0 {
+        return None;
+    }
+    let pct10 = last_in.saturating_mul(1000) / w;
+    let pct = format!("{}.{}", pct10 / 10, pct10 % 10);
+    Some(format!("ctx:{pct}% ({}/{})", fmt_num(last_in), fmt_num(w)))
+}
+
+/// The active model's context window from $CONFIG (config.toml):
+/// a `[model."<name>"]` section carrying a plain `context_tokens`
+/// key. `None` when the model or the value is unknown: the ctx
+/// section hides.
+fn ctx_window_of(model: &str) -> Option<u64> {
+    let config = std::env::var("CONFIG").ok()?;
+    let raw = std::fs::read_to_string(config).ok()?;
+    let mut in_section = false;
+    let mut found: Option<u64> = None;
+    for line in raw.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("[model.") {
+            let name = rest.split(']').next().unwrap_or("");
+            in_section = name.trim_matches('"') == model;
+            found = None;
+            continue;
+        }
+        if t.starts_with('[') {
+            in_section = false;
+            continue;
+        }
+        if in_section {
+            if let Some(v) = t.strip_prefix("context_tokens") {
+                let v = v
+                    .trim_start()
+                    .trim_start_matches('=')
+                    .trim()
+                    .trim_matches('"')
+                    .trim();
+                found = v.parse().ok();
+            }
+        }
+    }
+    found
 }
 
 fn main() {
     let dir = live_dir();
     let mut in_total: u64 = 0;
     let mut out_total: u64 = 0;
+    let mut cached_total: u64 = 0;
+    // The last request's measured input tokens. Context fullness
+    // rides on this value, not the cumulative totals.
+    let mut last_in: u64 = 0;
+    // The context window cache, keyed on the model name. The model
+    // name comes from the tick payload; the window is the model's
+    // context_tokens in $CONFIG. A model change re-parses; the same
+    // model reuses the value.
+    let mut ctx_model = String::new();
+    let mut ctx_window: Option<u64> = None;
     // The git cache starts "fresh": the first tick skips the git
     // spawn and the row shows git:none; the first TTL refresh lands
     // about 3 s in, on a background thread. A tick reply never
     // waits on a slow git (the staleness bound is 3 x tick_ms).
-    let git: Arc<Mutex<GitCache>> =
-        Arc::new(Mutex::new((String::new(), 0, Some(Instant::now()))));
+    let git: Arc<Mutex<GitCache>> = Arc::new(Mutex::new((String::new(), 0, Some(Instant::now()))));
 
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -151,8 +311,7 @@ fn main() {
                 // usage-bearing message at start, so the totals
                 // survive a TUI restart from the log alone.
                 let ev = &v["event"];
-                if ev.get("type").and_then(|t| t.as_str()) == Some("assistant_message")
-                {
+                if ev.get("type").and_then(|t| t.as_str()) == Some("assistant_message") {
                     if let Some(usage) = ev.get("usage").and_then(|u| u.as_object()) {
                         in_total += usage
                             .get("input_tokens")
@@ -160,6 +319,14 @@ fn main() {
                             .unwrap_or(0);
                         out_total += usage
                             .get("output_tokens")
+                            .and_then(|x| x.as_u64())
+                            .unwrap_or(0);
+                        cached_total += usage
+                            .get("cached_tokens")
+                            .and_then(|x| x.as_u64())
+                            .unwrap_or(0);
+                        last_in = usage
+                            .get("input_tokens")
                             .and_then(|x| x.as_u64())
                             .unwrap_or(0);
                     }
@@ -182,47 +349,108 @@ fn main() {
                     .and_then(|m| m.as_str())
                     .filter(|m| !m.is_empty())
                     .unwrap_or("no-model");
-                let running = v.get("loop_running").and_then(|r| r.as_bool()).unwrap_or(false);
-                let st = if running { "running" } else { "idle" };
+                let running = v
+                    .get("loop_running")
+                    .and_then(|r| r.as_bool())
+                    .unwrap_or(false);
                 let stt = status_text(v.get("statuses").unwrap_or(&Value::Null));
-                let dirty_mark = if dirty > 0 {
-                    format!("*({dirty})")
+
+                // The context window is keyed on the model name from
+                // the tick. The model rarely changes; the re-parse
+                // only fires on a switch.
+                if model != ctx_model {
+                    ctx_window = ctx_window_of(model);
+                    ctx_model = model.to_string();
+                }
+
+                // The pill texts. The git pill shows git:none at
+                // start; the dirty mark is a trailing *N.
+                let git_txt = if branch.is_empty() {
+                    "git:none".to_string()
                 } else {
-                    String::new()
-                };
-                let branch_s: &str = if branch.is_empty() { "none" } else { &branch };
-                let totals = format!("in:{in_total} out:{out_total} sum:{}", in_total + out_total);
-                let lines: Vec<(String, Value)> = if width >= 100 {
-                    let mut l = format!(
-                        " [{}] (git:{branch_s}{dirty_mark}) {sess} {model} {st} {totals}",
-                        short_dir(&dir)
-                    );
-                    if !stt.is_empty() {
-                        l.push_str(&format!(" st:{stt}"));
+                    let mut t = format!("git:{branch}");
+                    if dirty > 0 {
+                        t.push_str(&format!(" *{dirty}"));
                     }
-                    let l = l.chars().take(width).collect::<String>();
-                    vec![(l, json!({"fg": "darkgray"}))]
+                    t.chars().take(24).collect::<String>()
+                };
+                // The state pill colors with the loop state: green
+                // running, blue idle.
+                let (state_txt, state_bg): (&str, &'static str) = if running {
+                    ("running", RUN_BG)
                 } else {
-                    let l1 = format!(
-                        " [{}] (git:{branch_s}{dirty_mark}) {sess} {st}",
-                        short_dir(&dir)
-                    )
-                    .chars()
-                    .take(width)
-                    .collect::<String>();
-                    let mut l2 = format!("{model} {totals}");
-                    if !stt.is_empty() {
-                        l2.push_str(&format!(" st:{stt}"));
-                    }
-                    let l2 = l2.chars().take(width).collect::<String>();
-                    vec![
-                        (l1, json!({"fg": "darkgray"})),
-                        (l2, json!({"fg": "darkgray"})),
-                    ]
+                    ("idle", IDLE_BG)
                 };
-                let payload: Vec<Value> =
-                    lines.into_iter().map(|(t, s)| json!([t, s])).collect();
-                let reply = json!({"v": 1, "op": "status", "lines": payload});
+                // The stats pill: the cumulative totals, the cached
+                // total when the session saw any, the ctx section
+                // when both its inputs are known, and the ext_status
+                // values at the tail.
+                let mut stats =
+                    format!("in:{in_total} out:{out_total} sum:{}", in_total + out_total);
+                if cached_total > 0 {
+                    stats.push_str(&format!(" R:{}", fmt_num(cached_total)));
+                }
+                if let Some(c) = ctx_text(last_in, ctx_window) {
+                    stats.push_str(&format!(" {c}"));
+                }
+                if !stt.is_empty() {
+                    stats.push_str(&format!(" st:{stt}"));
+                }
+
+                // One segment per pill, in priority order: the head
+                // (dir) never drops; the tail drops first on
+                // overflow.
+                let segs: Vec<Seg> = vec![
+                    Seg {
+                        text: short_dir(&dir),
+                        fg: TXT,
+                        bg: DIR_BG,
+                    },
+                    Seg {
+                        text: git_txt,
+                        fg: TXT,
+                        bg: GIT_BG,
+                    },
+                    Seg {
+                        text: sess.to_string(),
+                        fg: TXT,
+                        bg: SESS_BG,
+                    },
+                    Seg {
+                        text: model.to_string(),
+                        fg: TXT_DARK,
+                        bg: MODEL_BG,
+                    },
+                    Seg {
+                        text: state_txt.to_string(),
+                        fg: TXT_DARK,
+                        bg: state_bg,
+                    },
+                    Seg {
+                        text: stats,
+                        fg: TXT,
+                        bg: STATS_BG,
+                    },
+                ];
+                let lines: Vec<Value> = if width >= 100 {
+                    let keep = fit(&segs, width);
+                    vec![Value::Array(row_spans(&keep))]
+                } else {
+                    // Two-line layout: the state and stats pills
+                    // move to the second row with the model. Each
+                    // row fits the width on its own.
+                    let l1: Vec<Seg> = vec![
+                        segs[0].clone(),
+                        segs[1].clone(),
+                        segs[2].clone(),
+                        segs[4].clone(),
+                    ];
+                    let l2: Vec<Seg> = vec![segs[3].clone(), segs[5].clone()];
+                    let k1 = fit(&l1, width);
+                    let k2 = fit(&l2, width);
+                    vec![Value::Array(row_spans(&k1)), Value::Array(row_spans(&k2))]
+                };
+                let reply = json!({"v": 1, "op": "status", "lines": lines});
                 let _ = writeln!(out, "{reply}");
                 let _ = out.flush();
             }

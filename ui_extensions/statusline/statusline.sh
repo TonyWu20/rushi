@@ -20,6 +20,16 @@
 # - ext_status values that other extensions published into the log;
 #   the row consumes them through the tick payload's `statuses` map
 #
+# The row is a powerline footer: rounded pill segments with Nerd
+# Font glyphs, the starship-statusline reference look. The left hard
+# divider U+E0B6 caps each pill; the right hard divider U+E0B4 is
+# the arrow between pills (the previous pill's color over the next
+# pill's background) and the end cap. The palette is Catppuccin
+# Macchiato, the reference's. Each pill is one or more styled spans
+# on the wire (docs/ui-extension.md section 4); the host draws the
+# spans left to right on one row. Requires a Nerd Font in the
+# terminal, like the reference.
+#
 # Layout: one line on wide terminals, two lines when the terminal is
 # narrow (width under 100). The host reserves one terminal row per
 # line.
@@ -233,12 +243,88 @@ usage_text() {
   printf '%s' "$t"
 }
 
+# ── Powerline footer ───────────────────────────────────────────
+# Nerd Font glyphs: the left hard divider caps a pill; the right
+# hard divider joins the pills and closes the line.
+SEP_L=$'\uE0B6'
+SEP_R=$'\uE0B4'
+# ASCII unit separator: packs one segment record "text fg bg bold".
+REP=$'\x1f'
+# Catppuccin Macchiato, the starship-statusline reference palette.
+DIR_BG=24273a   # base
+GIT_BG=363a4f   # surface0
+SESS_BG=74c7ec  # azure
+MODEL_BG=c6a0f6 # mauve
+STATS_BG=494d64 # surface1
+RUN_BG=a6da95   # green: the loop is running
+IDLE_BG=89b4fa  # blue: the loop is idle
+TXT=cad3f5      # text, on dark backgrounds
+TXT_DARK=1e2030 # mantle, on light backgrounds
+
+# One span on the wire: a [text, style] JSON pair. An empty fg or
+# bg field leaves the terminal default.
+span_json() {
+  # $1 text, $2 fg, $3 bg, $4 bold(0|1)
+  local o=""
+  [ -n "$2" ] && o="\"fg\":\"#$2\""
+  [ -n "$3" ] && o="${o:+$o,}\"bg\":\"#$3\""
+  [ "$4" = 1 ] && o="${o:+$o,}\"bold\":true"
+  printf '[%s,{%s}]' "\"$(esc "$1")\"" "$o"
+}
+
+# One segment record: "text fg bg bold", packed with $REP.
+seg() {
+  printf '%s%s%s%s%s%s%s' "$1" "$REP" "$2" "$REP" "$3" "$REP" "$4"
+}
+
+# The span JSON of one pill row from segment records, in display
+# order. The row is [cap, body, arrow, cap, body, ..., endcap]; the
+# cap and arrow colors follow the reference.
+row_json() {
+  local out="" s text rest fg bg bold prev_bg=""
+  for s in "$@"; do
+    text=${s%%"$REP"*}
+    rest=${s#*"$REP"}
+    fg=${rest%%"$REP"*}
+    rest=${rest#*"$REP"}
+    bg=${rest%%"$REP"*}
+    bold=${rest#*"$REP"}
+    [ -n "$prev_bg" ] && out="${out:+$out,}$(span_json "$SEP_R" "$prev_bg" "$bg" 0)"
+    out="${out:+$out,}$(span_json "$SEP_L" "$bg" "$bg" 0),$(span_json " $text " "$fg" "$bg" 1)"
+    prev_bg=$bg
+  done
+  out="${out:+$out,}$(span_json "$SEP_R" "$prev_bg" "" 0)"
+  printf '[%s]' "$out"
+}
+
+# The row's column count: each segment is one cap (1) plus its body
+# (text length plus two spaces), plus one arrow per join and the
+# end cap (2 per segment).
+row_cols() {
+  local total=0 s text
+  for s in "$@"; do
+    text=${s%%"$REP"*}
+    total=$(( total + ${#text} + 4 ))
+  done
+  printf '%s' "$total"
+}
+
+# Fit a row to `w` columns: drop the lowest-priority tail segments
+# until the row fits. The head segment never drops. The survivors
+# land in the global REPLY_SEGS.
+row_fit() {
+  local w=$1
+  shift
+  local -a keep=("$@")
+  while [ "$(row_cols "${keep[@]}")" -gt "$w" ] && [ "${#keep[@]}" -gt 1 ]; do
+    unset "keep[${#keep[@]}-1]"
+  done
+  REPLY_SEGS=("${keep[@]}")
+}
+
 emit_status() {
   # $1 width, $2 session, $3 model, $4 running(0|1), $5 tick line
   local width=$1 sess=$2 model=$3 run=$4 tickline=$5
-  local dirty="" st
-  [ "$git_dirty" -gt 0 ] 2>/dev/null && dirty="*(${git_dirty})"
-  [ "$run" = "1" ] && st="running" || st="idle"
   local stt
   stt=$(status_text "$tickline")
 
@@ -255,24 +341,42 @@ emit_status() {
     dir="...${dir: -16}"
   fi
 
-  local usage
-  usage="$(usage_text)"
+  # The pill texts. The git pill shows git:none at start; the
+  # dirty mark is a trailing *N. The state pill colors with the
+  # loop state: green running, blue idle.
+  local git_txt="git:${git_branch:-none}"
+  [ "$git_dirty" -gt 0 ] 2>/dev/null && git_txt="$git_txt *$git_dirty"
+  git_txt="${git_txt:0:24}"
+  local sess_txt="${sess:-no-session}"
+  local model_txt="${model:-no-model}"
+  local state_bg=$IDLE_BG state_txt="idle"
+  [ "$run" = "1" ] && state_bg=$RUN_BG && state_txt="running"
+  local stats
+  stats="$(usage_text)"
+  [ -n "$stt" ] && stats="$stats st:${stt}"
+
+  # One record per pill, in priority order: the head (dir) never
+  # drops; the tail drops first on overflow.
+  local -a segs=(
+    "$(seg "$dir" "$TXT" "$DIR_BG" 1)"
+    "$(seg "$git_txt" "$TXT" "$GIT_BG" 1)"
+    "$(seg "$sess_txt" "$TXT" "$SESS_BG" 1)"
+    "$(seg "$model_txt" "$TXT_DARK" "$MODEL_BG" 1)"
+    "$(seg "$state_txt" "$TXT_DARK" "$state_bg" 1)"
+    "$(seg "$stats" "$TXT" "$STATS_BG" 1)"
+  )
 
   if [ "$width" -ge 100 ]; then
-    local line
-    line=" [$dir] (git:${git_branch:-none}${dirty}) ${sess:-no-session} ${model:-no-model} ${st} ${usage}"
-    [ -n "$stt" ] && line="$line st:${stt}"
-    line="${line:0:width}"
-    printf '{"v":1,"op":"status","lines":[["%s",{"fg":"darkgray"}]]}\n' "$(esc "$line")"
+    row_fit "$width" "${segs[@]}"
+    printf '{"v":1,"op":"status","lines":[%s]}\n' "$(row_json "${REPLY_SEGS[@]}")"
   else
-    local l1 l2
-    l1=" [$dir] (git:${git_branch:-none}${dirty}) ${sess:-no-session} ${st}"
-    l2="${model:-no-model} ${usage}"
-    [ -n "$stt" ] && l2="$l2 st:${stt}"
-    l1="${l1:0:width}"
-    l2="${l2:0:width}"
-    printf '{"v":1,"op":"status","lines":[["%s",{"fg":"darkgray"}],["%s",{"fg":"darkgray"}]]}\n' \
-      "$(esc "$l1")" "$(esc "$l2")"
+    # Two-line layout: the state and stats pills move to the second
+    # row with the model. Each row fits the width on its own.
+    row_fit "$width" "${segs[0]}" "${segs[1]}" "${segs[2]}" "${segs[4]}"
+    local -a l1=("${REPLY_SEGS[@]}")
+    row_fit "$width" "${segs[3]}" "${segs[5]}"
+    printf '{"v":1,"op":"status","lines":[%s,%s]}\n' \
+      "$(row_json "${l1[@]}")" "$(row_json "${REPLY_SEGS[@]}")"
   fi
 }
 
