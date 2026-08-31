@@ -371,3 +371,32 @@ shifts the check. Keep the configured rate at or under the
 measured ratio: a low rate over-estimates and compacts earlier. A
 high rate risks sending a request over the window.
 
+## FT-011 — Shift+A hides the capital A in the TUI composer
+
+**Symptom:** In the TUI composer, Shift+A types nothing. The caret
+jumps to the end of the current line instead. In insert mode the
+jump keeps insert mode. In replace mode overtyping continues at
+the line end. The user cannot type a capital A at the caret in
+either typing mode.
+
+**Root cause:** A host extension in `bin/tui/src/vim_editor.rs`.
+The commit that shipped the vim-modal input (90e3bb9) added a
+`Key::Char('A')` arm to `insert_press` and `replace_press`. It
+moved the caret to the line end instead of the char path. The
+reference pi-vim base editor passes every char through. The port
+made the capital A unreachable in the two typing modes. The port
+commit 7b1367f named the jump a documented extension, not a
+defect.
+
+**Fix:** Removed the `Key::Char('A')` arms from `insert_press` and
+`replace_press` (`bin/tui/src/vim_editor.rs`, commit ef55518).
+Shift+A now falls into the generic `Key::Char(c)` arm and types
+`A` at the caret, like the reference base editor. The insert and
+replace doc notes dropped the extension text.
+
+**Verification:** Regression tests `shift_a_types_uppercase_a_in_insert_mode`,
+`shift_a_at_line_end_appends_the_char`,
+`shift_a_types_uppercase_a_in_replace_mode`, and
+`shift_a_types_uppercase_a_in_the_composer` pin the behavior.
+All 269 tui tests pass.
+
