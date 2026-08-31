@@ -7,8 +7,12 @@
 #   ($CONFIG is exported by the host)
 # - git branch + dirty mark, TTL-cached at 3 s so a tick never
 #   spawns git more than once per 3 s (the design's tick-cost note)
-# - session, model, and loop state from the tick payload
+# - model from the tick payload. The session name and the loop state
+#   stay in the host's top bar (frame title); the footer does not
+#   duplicate them
 # - cumulative usage summed over assistant_message.usage events;
+#   the numbers shorten to k/M/B, the reference fmtNum rule, with a
+#   trailing .0 dropped (5500 -> 5.5k, 5000 -> 5k, 1200000 -> 1.2M)
 #   the host re-sends every usage-bearing message at start, so the
 #   totals survive a TUI restart from the log alone
 # - context fullness, the number to watch for compaction: the last
@@ -16,7 +20,8 @@
 #   starship-statusline style (ctx <pct>% (<tokens>/<window>)). The
 #   window is the active model's context_tokens from $CONFIG; the
 #   metric is the last usage event's input_tokens, not the
-#   cumulative totals. The section hides until both are known.
+#   cumulative totals. The section hides until both are known. Both
+#   numbers shorten with the same k/M/B rule.
 # - ext_status values that other extensions published into the log;
 #   the row consumes them through the tick payload's `statuses` map
 #
@@ -32,7 +37,10 @@
 #
 # Layout: one line on wide terminals, two lines when the terminal is
 # narrow (width under 100). The host reserves one terminal row per
-# line.
+# line. Line 1 carries dir, git, and model; line 2 carries the
+# stats pill alone. Overflow drops the model pill first, then the
+# git pill; the dir and stats pills never drop, so the token
+# indicator keeps its space.
 
 set -u
 DIR="$(dirname "${CONFIG:-.}")"
@@ -217,23 +225,34 @@ ctx_text() {
   printf 'ctx:%s%% (%s/%s)' "$pct" "$tok" "$win"
 }
 
-# k/M abbreviation, the starship-statusline fmtNum rule.
+# k/M/B abbreviation, the starship-statusline fmtNum rule, with a
+# trailing .0 dropped: 5500 -> 5.5k, 5000 -> 5k, 1200000 -> 1.2M,
+# 1500000000 -> 1.5B.
 _fmt_num() {
-  local n=$1
-  if [ "$n" -lt 1000 ]; then
-    printf '%s' "$n"
-  elif [ "$n" -lt 1000000 ]; then
-    awk "BEGIN{printf \"%.1fk\", $n/1000}"
-  else
-    awk "BEGIN{printf \"%.1fM\", $n/1000000}"
+  local n=$1 scale=1 unit=""
+  if [ "$n" -ge 1000000000 ]; then
+    scale=1000000000 unit=B
+  elif [ "$n" -ge 1000000 ]; then
+    scale=1000000 unit=M
+  elif [ "$n" -ge 1000 ]; then
+    scale=1000 unit=k
   fi
+  [ -n "$unit" ] || { printf '%s' "$n"; return 0; }
+  local v
+  v=$(awk -v n="$n" -v s="$scale" '
+    BEGIN {
+      v = n / s
+      if (v == int(v)) printf "%d", v
+      else printf "%.1f", v
+    }')
+  printf '%s%s' "$v" "$unit"
 }
 
 # The usage totals from one tick: the cumulative line, plus the
 # cached total when the session saw any, plus the ctx section when
 # both its inputs are known.
 usage_text() {
-  local t="in:${in_total} out:${out_total} sum:$((in_total + out_total))"
+  local t="in:$( _fmt_num "$in_total" ) out:$( _fmt_num "$out_total" ) sum:$( _fmt_num $(( in_total + out_total )) )"
   if [ "$cached_total" -gt 0 ] 2>/dev/null; then
     t="$t R:$( _fmt_num "$cached_total" )"
   fi
@@ -251,13 +270,12 @@ SEP_R=$'\uE0B4'
 # ASCII unit separator: packs one segment record "text fg bg bold".
 REP=$'\x1f'
 # Catppuccin Macchiato, the starship-statusline reference palette.
+# The backgrounds match the reference: dark base/surface pills, one
+# light mauve pill for the model.
 DIR_BG=24273a   # base
 GIT_BG=363a4f   # surface0
-SESS_BG=74c7ec  # azure
 MODEL_BG=c6a0f6 # mauve
 STATS_BG=494d64 # surface1
-RUN_BG=a6da95   # green: the loop is running
-IDLE_BG=89b4fa  # blue: the loop is idle
 TXT=cad3f5      # text, on dark backgrounds
 TXT_DARK=1e2030 # mantle, on light backgrounds
 
@@ -323,8 +341,8 @@ row_fit() {
 }
 
 emit_status() {
-  # $1 width, $2 session, $3 model, $4 running(0|1), $5 tick line
-  local width=$1 sess=$2 model=$3 run=$4 tickline=$5
+  # $1 width, $2 model, $3 tick line
+  local width=$1 model=$2 tickline=$3
   local stt
   stt=$(status_text "$tickline")
 
@@ -347,36 +365,36 @@ emit_status() {
   local git_txt="git:${git_branch:-none}"
   [ "$git_dirty" -gt 0 ] 2>/dev/null && git_txt="$git_txt *$git_dirty"
   git_txt="${git_txt:0:24}"
-  local sess_txt="${sess:-no-session}"
   local model_txt="${model:-no-model}"
-  local state_bg=$IDLE_BG state_txt="idle"
-  [ "$run" = "1" ] && state_bg=$RUN_BG && state_txt="running"
   local stats
   stats="$(usage_text)"
   [ -n "$stt" ] && stats="$stats st:${stt}"
 
-  # One record per pill, in priority order: the head (dir) never
-  # drops; the tail drops first on overflow.
-  local -a segs=(
-    "$(seg "$dir" "$TXT" "$DIR_BG" 1)"
-    "$(seg "$git_txt" "$TXT" "$GIT_BG" 1)"
-    "$(seg "$sess_txt" "$TXT" "$SESS_BG" 1)"
-    "$(seg "$model_txt" "$TXT_DARK" "$MODEL_BG" 1)"
-    "$(seg "$state_txt" "$TXT_DARK" "$state_bg" 1)"
-    "$(seg "$stats" "$TXT" "$STATS_BG" 1)"
-  )
+  # One record per pill. The head (dir) never drops; the model and
+  # git pills drop in that order on overflow; the stats pill keeps
+  # its space (the token indicator wins the width fight).
+  local dir_seg git_seg model_seg stats_seg
+  dir_seg="$(seg "$dir" "$TXT" "$DIR_BG" 1)"
+  git_seg="$(seg "$git_txt" "$TXT" "$GIT_BG" 1)"
+  model_seg="$(seg "$model_txt" "$TXT_DARK" "$MODEL_BG" 1)"
+  stats_seg="$(seg "$stats" "$TXT" "$STATS_BG" 1)"
 
   if [ "$width" -ge 100 ]; then
-    row_fit "$width" "${segs[@]}"
-    printf '{"v":1,"op":"status","lines":[%s]}\n' "$(row_json "${REPLY_SEGS[@]}")"
+    # One line: reserve the stats pill and its join arrow, then fit
+    # dir, git, and model into the rest. The join arrow shares the
+    # tail cap of the fitted row, so the reservation is the stats
+    # width minus one. The tail-drop order is model first, then git.
+    local rest_w=$(( width - $(row_cols "$stats_seg") + 1 ))
+    row_fit "$rest_w" "$dir_seg" "$git_seg" "$model_seg"
+    printf '{"v":1,"op":"status","lines":[%s]}\n' \
+      "$(row_json "${REPLY_SEGS[@]}" "$stats_seg")"
   else
-    # Two-line layout: the state and stats pills move to the second
-    # row with the model. Each row fits the width on its own.
-    row_fit "$width" "${segs[0]}" "${segs[1]}" "${segs[2]}" "${segs[4]}"
+    # Two-line layout: line 1 is dir, git, model; line 2 is the
+    # stats pill alone. Each row fits the width on its own.
+    row_fit "$width" "$dir_seg" "$git_seg" "$model_seg"
     local -a l1=("${REPLY_SEGS[@]}")
-    row_fit "$width" "${segs[3]}" "${segs[5]}"
     printf '{"v":1,"op":"status","lines":[%s,%s]}\n' \
-      "$(row_json "${l1[@]}")" "$(row_json "${REPLY_SEGS[@]}")"
+      "$(row_json "${l1[@]}")" "$(row_json "$stats_seg")"
   fi
 }
 
@@ -401,13 +419,8 @@ on_tick() {
     [ -n "$width" ] || width=80
     ;;
   esac
-  local sess=""
-  local m_sess='"session":"'
-  case "$1" in *"$m_sess"*)
-    sess="${1#*"$m_sess"}"
-    sess="${sess%%\"*}"
-    ;;
-  esac
+  # The tick also carries session and loop_running. The footer does
+  # not consume them: the host top bar shows both.
   local model=""
   local m_model='"model":"'
   case "$1" in *"$m_model"*)
@@ -415,12 +428,7 @@ on_tick() {
     model="${model%%\"*}"
     ;;
   esac
-  local m_run='"loop_running":true'
-  if [[ "$1" == *"$m_run"* ]]; then
-    emit_status "$width" "$sess" "$model" 1 "$1"
-  else
-    emit_status "$width" "$sess" "$model" 0 "$1"
-  fi
+  emit_status "$width" "$model" "$1"
 }
 
 while IFS= read -r line; do

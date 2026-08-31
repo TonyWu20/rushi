@@ -16,8 +16,12 @@
 //!   ($CONFIG is exported by the host)
 //! - git branch + dirty mark, TTL-cached at 3 s so a tick never
 //!   spawns git more than once per 3 s (the design tick-cost note)
-//! - session, model, and loop state from the tick payload
+//! - model from the tick payload. The session name and the loop
+//!   state stay in the host's top bar (frame title); the footer
+//!   does not duplicate them
 //! - cumulative usage summed over assistant_message.usage events;
+//!   the numbers shorten to k/M/B, the reference fmtNum rule, with
+//!   a trailing .0 dropped (5500 -> 5.5k, 5000 -> 5k, 1.2M)
 //!   the host re-sends every usage-bearing message at start, so the
 //!   totals survive a TUI restart from the log alone
 //! - context fullness, the number to watch for compaction: the last
@@ -25,13 +29,17 @@
 //!   starship-statusline style (ctx <pct>% (<tokens>/<window>)). The
 //!   window is the active model's context_tokens from $CONFIG; the
 //!   metric is the last usage event's input_tokens, not the
-//!   cumulative totals. The section hides until both are known.
+//!   cumulative totals. The section hides until both are known. Both
+//!   numbers shorten with the same k/M/B rule.
 //! - ext_status values that other extensions published into the log;
 //!   the row consumes them through the tick payload's `statuses` map
 //!
 //! Layout: one line on wide terminals, two lines when the terminal
 //! is narrow (width under 100). The host reserves one terminal row
-//! per line.
+//! per line. Line 1 carries dir, git, and model; line 2 carries the
+//! stats pill alone. Overflow drops the model pill first, then the
+//! git pill; the dir and stats pills never drop, so the token
+//! indicator keeps its space.
 
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
@@ -48,13 +56,12 @@ const GIT_TTL: Duration = Duration::from_secs(3);
 const SEP_L: &str = "\u{E0B6}";
 const SEP_R: &str = "\u{E0B4}";
 // Catppuccin Macchiato, the starship-statusline reference palette.
+// The backgrounds match the reference: dark base/surface pills, one
+// light mauve pill for the model.
 const DIR_BG: &str = "24273a"; // base
 const GIT_BG: &str = "363a4f"; // surface0
-const SESS_BG: &str = "74c7ec"; // azure
 const MODEL_BG: &str = "c6a0f6"; // mauve
 const STATS_BG: &str = "494d64"; // surface1
-const RUN_BG: &str = "a6da95"; // green: the loop is running
-const IDLE_BG: &str = "89b4fa"; // blue: the loop is idle
 const TXT: &str = "cad3f5"; // text, on dark backgrounds
 const TXT_DARK: &str = "1e2030"; // mantle, on light backgrounds
 
@@ -213,14 +220,26 @@ fn fit(segs: &[Seg], w: usize) -> Vec<Seg> {
     keep
 }
 
-/// k/M abbreviation, the starship-statusline fmtNum rule.
+/// k/M/B abbreviation, the starship-statusline fmtNum rule, with a
+/// trailing .0 dropped: 5500 -> 5.5k, 5000 -> 5k, 1200000 -> 1.2M,
+/// 1500000000 -> 1.5B.
 fn fmt_num(n: u64) -> String {
     if n < 1000 {
-        n.to_string()
-    } else if n < 1_000_000 {
-        format!("{:.1}k", n as f64 / 1000.0)
+        return n.to_string();
+    }
+    let (scale, unit) = if n < 1_000_000 {
+        (1000.0, "k")
+    } else if n < 1_000_000_000 {
+        (1_000_000.0, "M")
     } else {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
+        (1_000_000_000.0, "B")
+    };
+    let v = n as f64 / scale;
+    let s = format!("{v:.1}");
+    if s.ends_with(".0") {
+        format!("{}{unit}", s.trim_end_matches(".0"))
+    } else {
+        format!("{s}{unit}")
     }
 }
 
@@ -339,20 +358,14 @@ fn main() {
                     (c.0.clone(), c.1)
                 };
                 let width = v.get("width").and_then(|w| w.as_u64()).unwrap_or(80) as usize;
-                let sess = v
-                    .get("session")
-                    .and_then(|s| s.as_str())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("no-session");
                 let model = v
                     .get("model")
                     .and_then(|m| m.as_str())
                     .filter(|m| !m.is_empty())
                     .unwrap_or("no-model");
-                let running = v
-                    .get("loop_running")
-                    .and_then(|r| r.as_bool())
-                    .unwrap_or(false);
+                // The tick also carries session and loop_running.
+                // The footer does not consume them: the host top
+                // bar shows both.
                 let stt = status_text(v.get("statuses").unwrap_or(&Value::Null));
 
                 // The context window is keyed on the model name from
@@ -362,9 +375,9 @@ fn main() {
                     ctx_window = ctx_window_of(model);
                     ctx_model = model.to_string();
                 }
-
-                // The pill texts. The git pill shows git:none at
-                // start; the dirty mark is a trailing *N.
+                // The tick also carries session and loop_running.
+                // The footer does not consume them: the host top
+                // bar shows both.
                 let git_txt = if branch.is_empty() {
                     "git:none".to_string()
                 } else {
@@ -374,19 +387,16 @@ fn main() {
                     }
                     t.chars().take(24).collect::<String>()
                 };
-                // The state pill colors with the loop state: green
-                // running, blue idle.
-                let (state_txt, state_bg): (&str, &'static str) = if running {
-                    ("running", RUN_BG)
-                } else {
-                    ("idle", IDLE_BG)
-                };
-                // The stats pill: the cumulative totals, the cached
-                // total when the session saw any, the ctx section
-                // when both its inputs are known, and the ext_status
-                // values at the tail.
-                let mut stats =
-                    format!("in:{in_total} out:{out_total} sum:{}", in_total + out_total);
+                // The stats pill: the cumulative totals (k/M/B
+                // shortened), the cached total when the session saw
+                // any, the ctx section when both its inputs are
+                // known, and the ext_status values at the tail.
+                let mut stats = format!(
+                    "in:{} out:{} sum:{}",
+                    fmt_num(in_total),
+                    fmt_num(out_total),
+                    fmt_num(in_total + out_total)
+                );
                 if cached_total > 0 {
                     stats.push_str(&format!(" R:{}", fmt_num(cached_total)));
                 }
@@ -397,58 +407,50 @@ fn main() {
                     stats.push_str(&format!(" st:{stt}"));
                 }
 
-                // One segment per pill, in priority order: the head
-                // (dir) never drops; the tail drops first on
-                // overflow.
-                let segs: Vec<Seg> = vec![
-                    Seg {
-                        text: short_dir(&dir),
-                        fg: TXT,
-                        bg: DIR_BG,
-                    },
-                    Seg {
-                        text: git_txt,
-                        fg: TXT,
-                        bg: GIT_BG,
-                    },
-                    Seg {
-                        text: sess.to_string(),
-                        fg: TXT,
-                        bg: SESS_BG,
-                    },
-                    Seg {
-                        text: model.to_string(),
-                        fg: TXT_DARK,
-                        bg: MODEL_BG,
-                    },
-                    Seg {
-                        text: state_txt.to_string(),
-                        fg: TXT_DARK,
-                        bg: state_bg,
-                    },
-                    Seg {
-                        text: stats,
-                        fg: TXT,
-                        bg: STATS_BG,
-                    },
-                ];
+                // One segment per pill. The head (dir) never drops;
+                // the model and git pills drop in that order on
+                // overflow; the stats pill keeps its space (the
+                // token indicator wins the width fight).
+                let dir_seg = Seg {
+                    text: short_dir(&dir),
+                    fg: TXT,
+                    bg: DIR_BG,
+                };
+                let git_seg = Seg {
+                    text: git_txt,
+                    fg: TXT,
+                    bg: GIT_BG,
+                };
+                let model_seg = Seg {
+                    text: model.to_string(),
+                    fg: TXT_DARK,
+                    bg: MODEL_BG,
+                };
+                let stats_seg = Seg {
+                    text: stats,
+                    fg: TXT,
+                    bg: STATS_BG,
+                };
                 let lines: Vec<Value> = if width >= 100 {
-                    let keep = fit(&segs, width);
-                    vec![Value::Array(row_spans(&keep))]
+                    // One line: reserve the stats pill and its join
+                    // arrow, then fit dir, git, and model into the
+                    // rest. The tail-drop order is model first,
+                    // then git.
+                    let stats_cols = row_cols(&[stats_seg.clone()]);
+                    let rest_w = width.saturating_sub(stats_cols.saturating_sub(1));
+                    let l1 = fit(&[dir_seg.clone(), git_seg.clone(), model_seg], rest_w);
+                    let mut row = l1;
+                    row.push(stats_seg);
+                    vec![Value::Array(row_spans(&row))]
                 } else {
-                    // Two-line layout: the state and stats pills
-                    // move to the second row with the model. Each
-                    // row fits the width on its own.
-                    let l1: Vec<Seg> = vec![
-                        segs[0].clone(),
-                        segs[1].clone(),
-                        segs[2].clone(),
-                        segs[4].clone(),
-                    ];
-                    let l2: Vec<Seg> = vec![segs[3].clone(), segs[5].clone()];
-                    let k1 = fit(&l1, width);
-                    let k2 = fit(&l2, width);
-                    vec![Value::Array(row_spans(&k1)), Value::Array(row_spans(&k2))]
+                    // Two-line layout: line 1 is dir, git, model;
+                    // line 2 is the stats pill alone. Each row fits
+                    // the width on its own.
+                    let l1 = fit(&[dir_seg.clone(), git_seg.clone(), model_seg], width);
+                    vec![
+                        Value::Array(row_spans(&l1)),
+                        Value::Array(row_spans(&[stats_seg])),
+                    ]
                 };
                 let reply = json!({"v": 1, "op": "status", "lines": lines});
                 let _ = writeln!(out, "{reply}");

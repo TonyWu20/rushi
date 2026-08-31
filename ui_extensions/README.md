@@ -12,7 +12,7 @@ tests).
 
 | Entry | Language | Capability | What it proves |
 | --- | --- | --- | --- |
-| `statusline/` | bash | `status` | tick-driven powerline footer: rounded pills with Nerd Font glyphs (U+E0B6 caps, U+E0B4 arrows and end cap), Catppuccin Macchiato span colors; live dir, git (TTL 3 s), session, model, loop state, cumulative usage from the log, ext_status consumption; two-line layout under 100 cols |
+| `statusline/` | bash | `status` | tick-driven powerline footer: rounded pills with Nerd Font glyphs (U+E0B6 caps, U+E0B4 arrows and end cap), Catppuccin Macchiato span colors; live dir, git (TTL 3 s), model, cumulative usage from the log (numbers shorten to k/M/B), ext_status consumption; line 1 is dir, git, model, line 2 is the stats pill alone, one line on wide terminals |
 | `tool_result/` | bash | `render` | the kind owner for `tool_result`; styled header plus the full body |
 | `notify/` | bash | `notify` | bell and OSC for finished turns, tmux client-tty fallback, burst suppression on history resend |
 | `mermaid/` | Rust | `transform` | `fence:mermaid` code blocks rendered as Unicode art by a Rust binary (stage 3) |
