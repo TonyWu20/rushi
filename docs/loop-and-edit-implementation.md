@@ -67,7 +67,6 @@ rust-unix-harness/
 api = "responses"
 max_output_tokens = 32768
 reasoning_effort = "medium"
-chars_per_token = 4
 
 [model.deepseek]
 model_id = "deepseek-v4-flash"
@@ -117,7 +116,7 @@ The `[model]` table holds defaults. Each `[model.<name>]` table defines one mode
 
 `max_output_tokens` bounds the generated output. The value includes reasoning tokens. A per-model value overrides the default. `reasoning_effort` sets the thinking level. Allowed values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. `none` disables thinking. The value maps to the `reasoning.effort` field in the request.
 
-`context_tokens` is the model's context window. `assemble` derives the request budget from it. The formula is `(context_tokens - max_output_tokens) * chars_per_token`. `chars_per_token` estimates characters per token. Set `context_tokens` to match the server for local models. llama.cpp sets the window with `--ctx-size`. `context_budget_chars` is optional. If set in `[limits]`, it caps the derived budget. These values are frozen call config.
+`context_tokens` is the model's context window. Set `context_tokens` to match the server for local models. llama.cpp sets the window with `--ctx-size`. The request budget is in input tokens: `context_budget_tokens` in `[limits]`. The decision is in token space only (correction 62): `assemble` compares the measured `usage.input_tokens` of the log against the budget. The growth of appended events projects at the measured per-event token growth. No char mechanism: no chars-per-token rate, no char budget. These values are frozen call config.
 
 ## Models
 
@@ -178,9 +177,8 @@ Algorithm:
    - `error` → skip. Error events are terminal. The loop stops before `assemble` runs again.
 3. Apply `tool_result_max_chars` cap to each tool result text. If clipped, append `[tool result clipped: N -> M chars]` to the text. The full value stays in the log. The clip is deterministic. Same log produces the same clipped bytes.
 4. Load tool schemas from `tools/*/tool.toml`. Sort by tool name. Serialize each schema to `{"type":"function","name": <name>, "description": <desc>, "parameters": <params>}`. The `name` field is top level. This is the Responses API shape.
-5. Derive the context budget from the active model. The formula is `(context_tokens - max_output_tokens) * chars_per_token`. An explicit `context_budget_chars` in `[limits]` caps the value.
-6. Compute the char count of the request. If it exceeds the budget, emit one `error` event to stdout with message "Context budget exceeded. Start a new session or reduce scope." Exit 0. `step.sh` checks for this event before running `model`.
-7. Otherwise, output `ModelRequest` JSON to stdout. Exit 0.
+5. Decide the request form in token space (correction 62). The last measured `usage.input_tokens` of the log, plus the projected growth of the appended events at the measured per-event token growth, is the estimate. While the estimate fits `context_budget_tokens`, the full log goes out. When it outgrows the budget, the session engages the sticky compact form once: the caps freeze at the base caps, the keep window halves down to two, and the oldest step groups drop out, one lever move per over-budget reading. The lever state persists in `sessions/<s>/compact.json`. The levers never move back. The compact region is byte-stable between lever moves, so the provider prefix cache holds. When the drop count reaches its max and the estimate still outgrows the budget, the `context_exhausted` event ends the turn with the handoff summary request (correction 57). The provider window is the backstop of a session without usage data.
+6. Output the `ModelRequest` JSON to stdout. Exit 0.
 
 The `ModelRequest`:
 

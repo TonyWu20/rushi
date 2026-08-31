@@ -678,3 +678,113 @@ keep-tail pair is now out) and the new
 on `sessions/better-ui` now sends a request with zero
 schema-error pairs. Three `model` calls on that request produce
 full-argument `bash` calls, not empty ones.
+
+### 61. The trimmed content keeps head and tail and points at the full record
+
+**Reference:** `bin/assemble`, `sessions/better-ui`,
+`docs/tool-log-design_from_human.md`
+
+**Problem:** The compact pass trimmed old tool results, assistant
+text, and call args head-only. The marker read
+`[compacted: N -> M chars]` and said nothing about where the full
+body lived. The full-pass clip did the same at
+`tool_result_max_chars`. In `sessions/better-ui` the model re-issued
+an old trimmed call and reproduced the truncated form, marker
+included. The harness ran that garbage: `sh: [compacted:: command
+not found`, exit 127. The model later called the tool output
+"unreliable" and spent rounds re-reading a diff through a temp
+file. The output arrived elided. The session cancelled with the
+task unfinished. A trim that discards the record without pointing
+at the record made the tool results untrustworthy.
+
+**Fix:** `assemble` trims head and tail only. `head_tail_cut`
+takes the first half of the cap for the head and the rest for the
+tail. The marker names the gap: `[compacted: N chars total, M
+elided from the middle.]`. Every trimmed piece carries a pointer to
+the full record. A tool result with a tool log record points at
+`tools.jsonl` with the call id and a `jq` fetch command. A result
+without a record, the legacy inline body, points at the event
+log. A trimmed call arg points at the `tool_call` event by call
+id. A trimmed text points at the `assistant_message` event. The
+paths resolve against the tool working directory. The system
+prompt now carries a `Full tool records` block: the session log
+path and the `jq` recipe, so the model fetches the full body
+instead of guessing it.
+
+**Verification:** The `assemble` suite passes (35 tests),
+including `trim_keeps_head_and_tail_and_points_at_the_full_record`,
+`compact_tool_result_points_at_the_tool_log_record`, and
+`clipped_full_result_points_at_the_tool_log_record`. `assemble`
+on `sessions/better-ui` now emits its compacted markers with the
+pointer to the `sessions/better-ui/tools.jsonl` record, and the
+request instructions carry the `Full tool records` block.
+
+### 62. The compact form is sticky, decided in token space, and byte-stable between moves
+
+**Reference:** `bin/assemble`, `config.toml`,
+`scripts/cache-e2e.sh`, `sessions/better-ui`
+
+**Problem:** The auto-compact of the char era re-derived its
+candidate on every request build. It searched a char budget against
+char estimates at a chars-per-token rate, and it picked the first
+cap, keep window, or drop count that fit. Between two consecutive
+runs that search could land on a different candidate: a halved cap
+level, a moved keep boundary, or a re-searched drop set. Each move
+re-rendered the compact region. The provider prefix cache holds a
+request only while its prefix is byte-stable, so a re-rendered
+compact region invalidated the cache on every step. In
+`sessions/better-ui` the sustained over-budget era hit a 32.4% hit
+rate, 560 of 825 steps reprocessed the full prefix, and 51.05M of
+75.5M input tokens were reprocessed. The char mechanism also made
+the decision incoherent with the provider: the budget, the
+estimates, and the caps were all in chars, while the provider
+window and the measured `usage.input_tokens` are in tokens.
+
+**Fix:** No char mechanism survives. `assemble` decides the
+request form in token space. The token budget
+(`context_budget_tokens`) compares against the measured
+`usage.input_tokens` of the log, plus the projected growth of the
+appended events at the measured per-event token growth. No
+chars-per-token rate, no char budget knob, no char estimate.
+
+Once the estimate outgrows the budget, the session engages the
+sticky compact form once, at the base caps. The engagement persists
+in `sessions/<s>/compact.json`: the frozen caps, the current keep
+window, the current drop count, the last measurement, and the
+measured per-group drop savings. After that the compact form never
+gives the log back.
+
+The levers move forward only. An over-budget reading moves one
+lever per run. The keep window halves down to two. Then the drop
+count jumps by the measured per-group savings, or by one group
+until the first drop is measured. The caps freeze at engagement.
+The drop count only grows. The compact region re-renders only when
+a lever moves. In between moves the request is byte-stable on the
+same log, and the provider prefix cache holds. A lever move is a
+single controlled cache miss: the keep halving diverges at the keep
+boundary, near the tail. A drop diverges at the dropped group, the
+one deliberate context surgery.
+
+The blind crawl is the degraded path. No measurement after
+engagement means no token data. The drop count grows one group per
+run until the first measurement recalibrates the jump, or the handoff
+takes over at the max drop count.
+
+When the drop count reaches its max and the estimate still
+outgrows the budget, the `context_exhausted` event ends the turn
+with the handoff summary request (correction 57). The provider
+window is the backstop of a session without usage data: the full
+log goes out until the window closes, then the provider error
+stops the turn.
+
+**Verification:** The `assemble` suite passes (36 tests),
+including `decide_form_halves_the_keep_window`,
+`decide_form_jump_is_measured`, `compact_candidate_is_byte_stable_between_runs`,
+and `compact_state_round_trips_and_corrupt_reengages`. On a copy of
+`sessions/better-ui`, four consecutive runs on the same state emit
+byte-identical requests (1,765,791 bytes each). The compact request
+at the base caps is 1.77M chars, about 221k tokens: under the
+262k provider window. A v1 state file re-engages at the base caps.
+The config caps return to 500/200, coherent with the 55k token
+budget. The 8000/2000 values of the char era outgrew both the
+budget and the window.

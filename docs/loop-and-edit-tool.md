@@ -412,11 +412,18 @@ created or edited it in this session.
    (read, bash later). `assemble` adds a safety cap of
    `tool_result_max_chars` (default 20000) on any tool result text, with
    `[tool result clipped: N -> M chars]`; the full value stays in the log.
-3. **Context budget fails loud.** `assemble` computes an estimated char count;
-   if it exceeds `context_budget_chars` (default 180000) and no compaction is
-   implemented yet, it emits an `error` event telling the user to start a new
-   session or reduce scope. It never silently drops history. (Compaction is the
-   next milestone after real sessions exist.)
+3. **Context budget in tokens, fails loud at the handoff.** `assemble`
+   estimates the request in input tokens: the measured `usage.input_tokens`
+   of the log plus the projected growth of appended events at the measured
+   per-event token growth. While the estimate fits `context_budget_tokens`
+   (default 55000, the FT-008 zone), the full log goes out. When it outgrows
+   the budget, the sticky compact form engages once (correction 62): the caps
+   freeze, the keep window halves down to two, the oldest step groups drop
+   out, one lever move per over-budget reading, byte-stable between moves
+   for the provider prefix cache. When the drop count reaches its max and the
+   estimate still outgrows the budget, the `context_exhausted` event ends the
+   turn with the handoff summary request (correction 57). It never silently
+   drops history.
 4. **Prefix stability.** System prompt, tool schemas, and past messages are
    byte-identical across requests within a session. No timestamps/PIDs/temp
    paths in the prefix.

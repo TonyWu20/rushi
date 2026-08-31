@@ -51,6 +51,26 @@
       newline, drop the final segment as in progress. Show it on the
       next read once the append lands.
 
+## New requests (2026-08-31)
+
+- [ ] Show user messages that wait for the busy loop. Render them
+      like `pi` renders `steering` and `follow-ups`.
+      Today: while the loop is busy, the TUI still accepts input.
+      Enter appends a `user_message` to the log and the loop picks
+      it up at its next step. The TUI shows nothing about it.
+      The user does not know if the input was acknowledged, or
+      when the loop will process it.
+      Needed: a pending list of unconsumed `user_message` events
+      per session. Show the waiting messages, with a count, like
+      `pi`'s `steering` (injected at the next step) and
+      `follow-ups` (processed after the loop ends).
+- [ ] Show thinking content behind a toggle, like `pi`.
+      Extends the 2026-08-29 item "Display and control the model's
+      thinking (reasoning) block". Beyond capturing thinking into
+      the log and rendering it as a collapsible dimmed block, add
+      a toggle that shows or hides thinking blocks. The toggle
+      follows `pi`'s thinking display.
+
 ## Pending corrections (2026-08-29)
 
 The "never truncate" rule in item 1 applies to the `content` field

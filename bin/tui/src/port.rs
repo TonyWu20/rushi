@@ -185,7 +185,12 @@ pub trait SessionPort: Send + Sync {
     /// handling faults, and loop spawn/stop events. Each record
     /// carries a timestamp. A failed trace write must not take the
     /// UI down: callers may drop the result.
-    async fn append_trace(&self, session: &SessionId, kind: &str, message: &str) -> Result<(), BusError>;
+    async fn append_trace(
+        &self,
+        session: &SessionId,
+        kind: &str,
+        message: &str,
+    ) -> Result<(), BusError>;
 
     /// Start the loop for a session and return its handle. The command
     /// that runs comes from config; the TUI passes it a session id only.

@@ -64,9 +64,16 @@ trackable and replayable from the log.
   `events.jsonl`. A session that replays carries its tool activity
   with it. No global tree.
 - `assemble` feeds the full body to the model, read from the tool log.
-  No summary, no on-demand fetch by call id. The compact pass still
-  caps the body; it caps the body from the log, not the index. The
-  legacy fallback: a session without the log gets the index text.
+  No summary of the body. Correction 61 trims it head and tail:
+  the compact caps and the full-pass clip keep the first half of
+  the cap as the head and the rest as the tail. The marker names
+  the elided middle and points at the full record: the `tools.jsonl`
+  path, the call id, and a `jq` fetch command. A session without
+  the log points at the inline event log instead. The system prompt
+  carries the `Full tool records` block with the fetch recipe, so
+  the model retrieves the body from disk when it needs more than
+  the preview. Legacy fallback: a session without the log gets the
+  index text.
 - The slim `tool_result` points into the tool log by file name
   (`tool_log`) and by call id lookup (`id`). The record list is in
   order; a re-run of a pending call appends the new record for the

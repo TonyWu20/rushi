@@ -10,16 +10,6 @@ arg_style = "append_session"
 api = "responses"
 max_output_tokens = 32768
 reasoning_effort = "xhigh"
-# Chars-per-token conversion for the pre-measurement fallback only
-# (work item B, correction 57). The context budget is driven by the
-# measured usage.input_tokens; this rate converts request chars to
-# tokens where no measurement exists: a fresh session, a server that
-# reports no usage, and the compacted candidates (which have no
-# measurement by construction). The measured ratio on this model is
-# about 8 chars per input token. Keep the value at or under the
-# measured ratio: a lower rate over-estimates tokens and compacts
-# earlier (safe); a higher rate risks sending a request over budget.
-chars_per_token = 8
 
 [model.deepseek]
 model_id = "deepseek-v4-flash"
@@ -51,9 +41,9 @@ tools_root = "tools"
 # reaches the zone where this model emits empty tool-call arguments
 # (FT-008). The first schema-validation failure in sessions/better-ui
 # appeared at 56.8k input tokens; none below 50k. The budget is in
-# input tokens now (work item B, correction 57): it is the knob the
-# token-driven decision compares against. The legacy char knob
-# (context_budget_chars) is read only when this one is absent.
+# input tokens (correction 62): the token-only decision compares the
+# measured usage.input_tokens growth against it. No char mechanism.
+# No chars-per-token rate. No char budget knob.
 context_budget_tokens = 55000
 read_limit = 2000
 read_max_line_length = 2000
@@ -64,20 +54,28 @@ tool_result_max_chars = 20000
 bash_max_output_bytes = 16000
 bash_timeout_default = 60
 bash_timeout_max = 300
-# Auto-compact knobs (docs/better-ui-root-cause.md).
-# When the request outgrows the context budget, assemble
-# truncates old events instead of ending the session.
-# Recent events stay full, older ones shrink to the caps.
-# The caps halve down to the floor, then the oldest steps
-# are dropped until the request fits (correction 55). When even
-# that does not fit, the automatic handoff takes over: one cheap
-# summarization call on the compacted log seeds a new session, and
-# the TUI offers a one-key resume there (correction 57).
+# Auto-compact knobs (correction 62: the sticky cache-first form).
+# The token budget engages the compact form once, at the base caps
+# below. After that the compact form is sticky: the caps freeze,
+# the keep window halves down to two, and the oldest step groups
+# drop out. Each over-budget reading moves one lever: a keep
+# halving, or a drop jump sized by the measured per-group savings.
+# The levers never move back. The compact region re-renders only
+# when a lever moves, so the request prefix stays byte-stable for
+# the provider prefix cache in between. The lever state persists in
+# the session dir as compact.json. When the drop count reaches its
+# max and the estimate still outgrows the budget, the automatic
+# handoff takes over: one cheap summarization call on the compacted
+# log seeds a new session, and the TUI offers a one-key resume
+# there (correction 57).
+#
+# The caps are the freeze values. They are coherent with the token
+# budget: the compact request must fit under it. The 8000/2000
+# values of the char era broke that coherence: the compact request
+# outgrew both the budget and the provider window.
 compact_keep_events = 24
-compact_result_chars = 8000
-compact_text_chars = 2000
-compact_min_result_chars = 128
-compact_min_text_chars = 64
+compact_result_chars = 500
+compact_text_chars = 200
 # The output cap of the one handoff summary call. Cheap by default:
 # the summary is a seed, not a report.
 handoff_summary_max_tokens = 4096

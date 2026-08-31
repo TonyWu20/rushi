@@ -652,8 +652,7 @@ fn main() {
                     if new_sid == old_sid {
                         continue;
                     }
-                    if let Some(h) = app.loops_mut_for(&old_sid).and_then(|st| st.handle.take())
-                    {
+                    if let Some(h) = app.loops_mut_for(&old_sid).and_then(|st| st.handle.take()) {
                         h.stop();
                     }
                     // Keep the old session's events and reattach on a
@@ -698,22 +697,22 @@ fn main() {
                                 "handoff",
                                 &format!("blocked: a live loop holds the session (pid {pid})"),
                             );
-                            app.flash(format!("handoff to {name} failed: a loop is already active"));
+                            app.flash(format!(
+                                "handoff to {name} failed: a loop is already active"
+                            ));
                         }
-                        _ => {
-                            match rt.block_on(port.spawn_loop(&new_sid)) {
-                                Ok(handle) => {
-                                    let lines = handle.take_lines().unwrap_or_else(empty_lines);
-                                    app.attach_loop(new_sid, handle, lines);
-                                    app.flash(format!("handoff to {name} — loop started"));
-                                }
-                                Err(e) => {
-                                    app.set_active(old_sid.clone(), old_events);
-                                    app.set_watch_rx(port.watch(&old_sid, TailCursor::end()));
-                                    app.flash(format!("handoff to {name} failed: {e}"));
-                                }
+                        _ => match rt.block_on(port.spawn_loop(&new_sid)) {
+                            Ok(handle) => {
+                                let lines = handle.take_lines().unwrap_or_else(empty_lines);
+                                app.attach_loop(new_sid, handle, lines);
+                                app.flash(format!("handoff to {name} — loop started"));
                             }
-                        }
+                            Err(e) => {
+                                app.set_active(old_sid.clone(), old_events);
+                                app.set_watch_rx(port.watch(&old_sid, TailCursor::end()));
+                                app.flash(format!("handoff to {name} failed: {e}"));
+                            }
+                        },
                     }
                 }
                 Action::Quit => {

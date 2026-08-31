@@ -547,10 +547,8 @@ mod tests {
         assert_eq!(e.get_str("new_session"), Some(""));
 
         // The marker without a seeded session field still parses.
-        let e = Event::parse_line(
-            r#"{"v":1,"type":"context_exhausted","ts":"t","message":"m"}"#,
-        )
-        .expect("line must parse");
+        let e = Event::parse_line(r#"{"v":1,"type":"context_exhausted","ts":"t","message":"m"}"#)
+            .expect("line must parse");
         assert_eq!(e.kind(), EventKind::ContextExhausted);
         assert_eq!(e.get_str("new_session"), None);
     }
