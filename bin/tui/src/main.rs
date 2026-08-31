@@ -8,6 +8,7 @@
 #![deny(clippy::todo, clippy::unimplemented, clippy::unreachable)]
 
 mod app;
+mod color;
 mod config;
 mod editor;
 mod event;

@@ -184,6 +184,23 @@ pub struct Editor {
     redo_stack: Vec<Snapshot>,
 }
 
+/// One visible row of the editor.
+///
+/// A long draft line is word-wrapped to the terminal width instead of
+/// being clipped at the border: `text` is one wrapped piece and `caret`
+/// is the display column of the cursor within `text` when the cursor
+/// falls on this row (`None` otherwise). The host renders `text` into a
+/// 1-row paragraph and puts the hardware cursor at `caret` — which is
+/// what makes a wrapped line usable: scrolling the editor, navigating
+/// past the box edge and pasting into it all keep the caret in view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorRow {
+    pub text: String,
+    /// Display column of the cursor within `text`; `None` when the
+    /// cursor is not on this row.
+    pub caret: Option<usize>,
+}
+
 impl Default for Editor {
     fn default() -> Self {
         Self::new()
@@ -238,6 +255,65 @@ fn leading_whitespace(line: &str) -> String {
 
 fn clamp_line(n_lines: usize, line: usize) -> usize {
     line.min(n_lines.saturating_sub(1))
+}
+
+/// Hard-wrap one logical editor line into rows of at most `width`
+/// display columns. The input box is a composer, not a viewer: nothing
+/// is truncated, every character stays visible on some row.
+///
+/// Display width is the character count (the host composer is ASCII;
+/// this matches the transcript `wrap_flow`, which makes the same
+/// assumption). A break falls mid-word when a word runs wider than the
+/// box; the caret position maps onto this wrap with plain integer
+/// division (see `caret_display`).
+fn wrap_row(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    let cs: Vec<char> = text.chars().collect();
+    if cs.is_empty() {
+        return vec![String::new()];
+    }
+    cs.chunks(width)
+        .map(|chunk| chunk.iter().collect())
+        .collect()
+}
+
+/// Map the cursor — the logical character index `col` within `line`
+/// (where `col` may equal the line's length: end-of-line) — to the
+/// display position the caret lands on once `line` is wrapped to
+/// `width` columns: `(row, col_in_row)`, both measured within this
+/// line's wrap. `display_rows` and `cursor_display` add the display
+/// rows of the preceding lines for the global row.
+///
+/// This is exact for the character-based hard wrap `wrap_row` uses:
+/// fragment `f` of a wrapped line covers source columns
+/// `[f * width, (f + 1) * width)`, so the fragment owning column `c`
+/// is `c / width` and the caret column within it is `c % width`.
+fn caret_display(line: &str, width: usize, col: usize) -> (usize, usize) {
+    if width == 0 {
+        return (0, col);
+    }
+    let n = line.chars().count();
+    let target = col.min(n);
+    if target == 0 {
+        return (0, 0);
+    }
+    // The caret sits just past the character at index `target - 1`.
+    let prev = target - 1;
+    let row = prev / width;
+    let ccol = (prev % width) + 1;
+    if ccol < width {
+        return (row, ccol);
+    }
+    // The caret is one past a full-width row.
+    if target < n {
+        // More characters follow, so the next row exists.
+        return (row + 1, 0);
+    }
+    // End-of-line on a line whose last row is exactly full: the caret
+    // stays on that last row, one column past its final character.
+    (row, width)
 }
 
 // ── the editor core ─────────────────────────────────────────────
@@ -324,18 +400,82 @@ impl Editor {
         }
     }
 
-    /// The visible lines at `scroll` (the index of the first
-    /// visible line), at most `height` rows.
-    pub fn display(&self, scroll: usize, height: usize) -> Vec<String> {
-        let n = self.n_lines();
-        let start = scroll.min(n.saturating_sub(1));
-        let end = start.saturating_add(height).min(n);
-        self.lines[start..end].to_vec()
-    }
-
     /// The cursor position in the document: `(row, col)`.
     pub fn cursor(&self) -> (usize, usize) {
         (self.row, self.col)
+    }
+
+    /// The visible display rows at `scroll` (the index of the first
+    /// visible *display row*), at most `height` rows, with long lines
+    /// word-wrapped to `width` columns. Both `scroll` and `height` are
+    /// in display-row units, so a long logical line can occupy several
+    /// rows; the window is a slice of the flattened, wrapped view.
+    ///
+    /// A logical line longer than the box yields several rows. Each
+    /// row carries `text` (one wrapped piece) and, when the cursor
+    /// falls on that piece, `caret` — the display column within the
+    /// piece where the hardware cursor must land (end-of-line points
+    /// one past the last character, at the block cell).
+    pub fn display_rows(&self, scroll: usize, height: usize, width: usize) -> Vec<EditorRow> {
+        // `scroll` and `height` are in *display-row* units, not logical
+        // lines: the editor box shows `height` visual rows starting at
+        // the `scroll`-th display row. Flatten the wrapped rows with
+        // their absolute display-row index, then take the window. This
+        // matches `display_row_count` (the total row count) and the
+        // scroll offset `App` keeps, which is derived from
+        // `cursor_display`.
+        if width == 0 || height == 0 {
+            return Vec::new();
+        }
+        let mut all: Vec<EditorRow> = Vec::new();
+        for (i, line) in self.lines.iter().enumerate() {
+            // Where the cursor lands, in display-row/col, within this
+            // line's wrap (`None` when the cursor is on another line).
+            let (caret_row, caret_col) = if i == self.row {
+                caret_display(line, width, self.col)
+            } else {
+                (usize::MAX, 0)
+            };
+            for (ci, chunk) in wrap_row(line, width).into_iter().enumerate() {
+                let caret = (ci == caret_row).then_some(caret_col);
+                all.push(EditorRow { text: chunk, caret });
+            }
+        }
+        if scroll >= all.len() {
+            return Vec::new();
+        }
+        all[scroll..scroll.saturating_add(height).min(all.len())].to_vec()
+    }
+
+    /// The document rows the cursor occupies: `(row, col)` where both
+    /// are measured in display rows/columns of a wrap at `width`. A
+    /// cursor in a wrapped line is scrolled to the visible window and
+    /// its caret lands on the wrapping piece that contains it, so the
+    /// caret never falls off the box edge.
+    pub fn cursor_display(&self, width: usize) -> (usize, usize) {
+        if width == 0 {
+            return (self.row, self.col);
+        }
+        let mut disp_row = 0usize;
+        for (i, line) in self.lines.iter().enumerate() {
+            if i == self.row {
+                let (cr, cc) = caret_display(line, width, self.col);
+                return (disp_row + cr, cc);
+            }
+            disp_row += wrap_row(line, width).len();
+        }
+        (disp_row, 0)
+    }
+
+    /// The total number of display rows the document wraps to at
+    /// `width` (at least 1). Used to size the input box and bound the
+    /// scroll.
+    pub fn display_row_count(&self, width: usize) -> usize {
+        let mut total = 0usize;
+        for line in self.lines.iter() {
+            total += wrap_row(line, width).len();
+        }
+        total.max(1)
     }
 
     /// The current mode, for the status row and the border color.
@@ -4879,5 +5019,91 @@ mod tests {
         assert_eq!(e.command_line_label().as_deref(), Some("/\u{2588}"));
         press(&mut e, &["esc"]);
         assert_eq!(e.mode(), Mode::Normal);
+    }
+
+    // ── line wrapping in the input area ────────────
+
+    /// The rendered text of each display row (for assertions).
+    fn row_texts(rows: &[EditorRow]) -> Vec<&str> {
+        rows.iter().map(|r| r.text.as_str()).collect()
+    }
+
+    #[test]
+    fn wrap_row_hard_breaks_at_the_width() {
+        assert_eq!(wrap_row("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+        assert_eq!(wrap_row("abc", 4), vec!["abc"]);
+    }
+
+    #[test]
+    fn wrap_row_never_overflows_the_width() {
+        // No fragment is ever longer than the box, even for a long
+        // run of spaces or a long word: the line is sliced every
+        // `width` characters.
+        for piece in wrap_row("alpha beta gamma", 8) {
+            assert!(piece.chars().count() <= 8, "overflow `{piece}`");
+        }
+        assert_eq!(wrap_row(&"x".repeat(9), 8), vec!["xxxxxxxx", "x"]);
+        // Wrapping is lossless: joining the rows reproduces the line.
+        let joined: String =
+            wrap_row("the quick brown fox jumps over the lazy dog", 12).join("");
+        assert_eq!(joined, "the quick brown fox jumps over the lazy dog");
+    }
+
+    #[test]
+    fn wrap_row_keeps_empty_lines_empty() {
+        assert_eq!(wrap_row("", 80), vec![""]);
+    }
+
+    #[test]
+    fn display_row_counts_wrapped_lines() {
+        let mut e = Editor::new();
+        e.set_text(&"hello world\nfoo".to_string());
+        // "hello world" is 11 chars: two rows at 10 columns, one at 80.
+        assert_eq!(e.display_row_count(10), 3); // 2 + 1
+        assert_eq!(e.display_row_count(80), 2); // 1 + 1
+    }
+
+    #[test]
+    fn display_rows_wrap_and_window_from_the_scroll_row() {
+        let mut e = Editor::new();
+        e.set_text(&"one two three four five\nx".to_string());
+        // At width 8 "one two three four five" (22 chars) slices into
+        // three rows; "x" is one more.
+        assert_eq!(e.display_row_count(8), 4);
+        assert_eq!(
+            row_texts(&e.display_rows(0, 4, 8)),
+            vec!["one two ", "three fo", "ur five", "x"]
+        );
+        // Scrolled two display rows down, a two-row window shows the tail.
+        assert_eq!(row_texts(&e.display_rows(2, 2, 8)), vec!["ur five", "x"]);
+    }
+
+    #[test]
+    fn cursor_display_maps_the_caret_to_the_wrapped_row() {
+        // "aaaa bbbb cccc" is 14 chars; it slices at 8 into
+        // "aaaa bbb" (0..=7) / "b cccc" (8..=13). "dddd" is a third row.
+        let e = norm("aaaa bbbb cccc\ndddd", 0, 0, &[]);
+        assert_eq!(e.display_row_count(8), 3); // 2 + 1
+
+        // Document col 4 is the 'b' of the 2nd "aaaa" run; it sits on the
+        // first display row (chars 0..=7), at display column 4.
+        let at = norm("aaaa bbbb cccc\ndddd", 0, 4, &[]);
+        assert_eq!(at.cursor(), (0, 4));
+        assert_eq!(at.cursor_display(8), (0, 4));
+
+        // Col 8 begins the 2nd display row; the caret sits at the start
+        // of that row, display column 0.
+        let at = norm("aaaa bbbb cccc\ndddd", 0, 8, &[]);
+        assert_eq!(at.cursor_display(8), (1, 0));
+
+        // Col 11 lands mid-second-row at display column 3.
+        let at = norm("aaaa bbbb cccc\ndddd", 0, 11, &[]);
+        assert_eq!(at.cursor_display(8), (1, 3));
+
+        // End-of-line (col 14, one past the last char, 14 total) sits just
+        // past the 2nd row's text: display column 6.
+        let at = norm("aaaa bbbb cccc\ndddd", 0, 14, &[]);
+        assert_eq!(at.cursor(), (0, 14));
+        assert_eq!(at.cursor_display(8), (1, 6));
     }
 }

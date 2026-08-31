@@ -477,18 +477,21 @@ impl App {
         self.edit_scroll
     }
 
-    /// How many lines the draft currently holds (at least 1). The
-    /// renderer sizes the input box to this so a multi-line message is
-    /// shown in full, not just a two-line scroll window.
-    pub fn draft_lines(&self) -> usize {
-        self.editor.n_lines()
+    /// How many display rows the draft wraps to at `width` columns
+    /// (at least 1). The renderer sizes the input box to this so a
+    /// long line wraps to the box instead of running off the edge, and
+    /// a multi-line message is shown in full, not just a two-line
+    /// scroll window.
+    pub fn draft_lines(&self, width: usize) -> usize {
+        self.editor.display_row_count(width)
     }
 
     /// Scroll the editor window so the cursor row is inside a window
-    /// of `height` lines. A short draft keeps scroll 0; a long one
-    /// follows the cursor.
-    pub fn editor_scroll_to_cursor(&mut self, height: usize) {
-        let row = self.editor.cursor().0;
+    /// of `height` display rows. A short draft keeps scroll 0; a long
+    /// one follows the cursor. `width` is the box interior width, so a
+    /// wrapped cursor line scrolls on display rows, not logical lines.
+    pub fn editor_scroll_to_cursor(&mut self, height: usize, width: usize) {
+        let row = self.editor.cursor_display(width).0;
         let window = height.max(1).saturating_sub(1);
         if row <= window {
             self.edit_scroll = 0;
@@ -498,7 +501,7 @@ impl App {
             self.edit_scroll = row;
         }
         // Never scroll past the end of the text.
-        let max_scroll = self.editor.n_lines().saturating_sub(window);
+        let max_scroll = self.editor.display_row_count(width).saturating_sub(window);
         self.edit_scroll = self.edit_scroll.min(max_scroll);
     }
 

@@ -1292,16 +1292,20 @@ pub fn draw(
         .and_then(|(_, s)| s.fg)
         .unwrap_or_else(|| thinking_border(app.thinking_level()));
     // The box border. A frame label replaces the built-in title.
-    let title = if let Some((flabel, lstyle)) = frame.as_ref().and_then(|f| f.label.as_ref()) {
-        Line::from(Span::styled(
+    let title = if let Some((flabel, _)) = frame.as_ref().and_then(|f| f.label.as_ref()) {
+        // Each label line is a list of styled spans; the title is
+        // the first line's spans, in order.
+        Line::from(
             flabel
-                .iter()
-                .take(1)
-                .map(|l| l.text.clone())
-                .collect::<Vec<_>>()
-                .join(" "),
-            *lstyle,
-        ))
+                .first()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| Span::styled(s.text.clone(), s.style))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+        )
     } else {
         Line::from(Span::styled(
             app.editor()
@@ -1322,34 +1326,42 @@ pub fn draw(
 
     // The editor lines. `naming` shows the single-line name input
     // (the session-name bar, pre-active-session). Otherwise the
-    // multi-line editor, scrolled by `edit_scroll`. Keep the cursor
-    // row visible in the window of `input_interior` lines.
+    // multi-line editor, scrolled by `edit_scroll`. Long lines wrap at
+    // the box edge (`input_wrap_w`); the box shows a window of
+    // `input_interior` display rows, and the cursor stays in view.
     if !naming {
-        app.editor_scroll_to_cursor(input_interior);
+        app.editor_scroll_to_cursor(input_interior, input_wrap_w);
     }
     let scroll = app.edit_scroll();
     let ed_lines: Vec<String> = if naming {
         vec![app.pending_name().unwrap_or_default().to_string()]
     } else {
-        app.editor().display(scroll, input_interior)
+        app.editor()
+            .display_rows(scroll, input_interior, input_wrap_w)
+            .into_iter()
+            .map(|r| r.text)
+            .collect()
     };
     // One paragraph per editor line. No line-level highlight; the
     // cursor row shows a single inverted block cell at the caret
     // column so the position is always visible, and the hardware
-    // cursor sits just after it.
+    // cursor sits just after it. In wrapped mode the cursor row/col
+    // are display-row based: the cursor may sit on a wrapped fragment
+    // of a long line.
     let cursor_row = if naming {
         0
     } else {
-        let (r, _c) = app.editor().cursor();
-        r.saturating_sub(app.edit_scroll())
+        app.editor()
+            .cursor_display(input_wrap_w)
+            .0
+            .saturating_sub(app.edit_scroll())
     };
     let cursor_col = if naming {
         // One past the rendered trailing `_`: the `> ` prefix plus
         // the name plus the underscore.
         app.pending_name().map_or(3, |n| 3 + n.chars().count())
     } else {
-        let (_r, c) = app.editor().cursor();
-        c
+        app.editor().cursor_display(input_wrap_w).1
     };
     // The search command line owns the input: the prompt renders in
     // the box title and the text-area cursor block stays off.
