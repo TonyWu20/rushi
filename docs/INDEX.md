@@ -63,6 +63,7 @@ not built).
 | `tui-extension-design-review.md`              | Review              | 2026-08-28   | Round-1 critique of `ui-extension.md`. All findings folded into the spec                                                                                    |
 | `ui-extension-plan.md`                        | Plan                | 2026-08-28   | Staged work breakdown for `ui-extension.md`: stages 0-4, acceptance per stage                                                                                |
 | `ft-005-logline.md`                           | Implemented         | 2026-08-29   | Record for FT-005: motivation from the ruxe type-level-disjointness post, two-writer interleave analysis, LogLine capability design and tests             |
+| `skill-system.md`                               | Proposal            | 2026-09-02   | Feature request: agent-invoked skills — short-lived, directory-discovered capability packages (manifest + entry + resources), Unix-philosophy framing. First skill is `tui-capture` |
 
 Status legend:
 
