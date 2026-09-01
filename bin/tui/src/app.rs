@@ -130,8 +130,9 @@ pub struct App {
     watch_rx: Option<std::sync::mpsc::Receiver<WatchItem>>,
     quitting: bool,
     /// Armed since the first `q`; a second `q` inside the window quits.
-    /// Any other key disarms. Mistouch safety (single-key `q` is too
-    /// easy to hit by accident mid-typing).
+    /// Any other key disarms. Arms only while the quit gate is open
+    /// (normal mode, empty draft; FT-012). Mistouch safety (single-
+    /// key `q` is too easy to hit by accident mid-typing).
     quit_arm: Option<Instant>,
     /// The new-session name being typed, when the user started `tui`
     /// without a session argument. `None` means the name input is off.
@@ -552,6 +553,15 @@ impl App {
         self.editor.text().trim().to_string()
     }
 
+    /// The quit gate (docs/tui.md section 7, FT-012): the quit key
+    /// (`q`, `Ctrl+Q`) arms and fires only in normal mode with an
+    /// empty draft, like the pi Ctrl-d rule that blocks the exit
+    /// key over a live prompt. In every other state `q` is plain
+    /// text for the editor.
+    fn quit_gate_open(&self) -> bool {
+        self.editor.mode() == Mode::Normal && self.editor.text().trim().is_empty()
+    }
+
     /// Take the draft for sending, leaving the editor empty.
     pub fn take_draft(&mut self) -> String {
         let t = self.editor.text().trim().to_string();
@@ -840,17 +850,42 @@ impl App {
             }
         }
         match key {
-            Key::Quit => match self.quit_arm {
-                Some(at) if at.elapsed() < QUIT_ARM_TTL => {
-                    self.quitting = true;
-                    vec![Action::Quit]
-                }
-                _ => {
-                    self.quit_arm = Some(Instant::now());
-                    self.flash("press q again to quit");
+            Key::Quit => {
+                // The quit gate (docs/tui.md section 7, FT-012):
+                // the key arms and fires only in normal mode with
+                // an empty draft, like the pi Ctrl-d rule. In every
+                // other state it is a plain `q`: it types into the
+                // name input, the search box, or the composer.
+                if self.quit_gate_open() {
+                    match self.quit_arm {
+                        Some(at) if at.elapsed() < QUIT_ARM_TTL => {
+                            self.quitting = true;
+                            vec![Action::Quit]
+                        }
+                        _ => {
+                            self.quit_arm = Some(Instant::now());
+                            self.flash("press q again to quit");
+                            Vec::new()
+                        }
+                    }
+                } else if self.pending_name.is_some() {
+                    // The name input is up: `q` is a name char.
+                    self.pending_name.as_mut().unwrap().push('q');
+                    Vec::new()
+                } else if self.editor.mode() == Mode::Normal {
+                    // Normal mode types nothing: the draft holds
+                    // text, so the gate stays closed. Hint the
+                    // escape instead of acting.
+                    self.flash("clear the draft, then q q quits");
+                    Vec::new()
+                } else {
+                    // A typing mode or the search box: `q` is text.
+                    if let Some(h) = self.editor().press(Key::Char('q')) {
+                        self.flash(h);
+                    }
                     Vec::new()
                 }
-            },
+            }
             Key::Enter => {
                 // Enter sends the whole draft; Ctrl-J inserts a
                 // newline in it (docs/tui.md: Enter = send, multi-line
@@ -1248,18 +1283,24 @@ mod tests {
     fn quit_needs_two_q_within_the_window() {
         let mut app = app_with(vec![], "s1");
         assert!(!app.should_quit());
+        // The gate (FT-012): the editor starts in insert mode, where
+        // `q` is text. Esc drops to normal; the draft is empty, so
+        // the gate is open.
+        app.press(Key::Esc);
         // First q arms: no action, just a status hint.
         assert!(app.press(Key::Quit).is_empty());
         assert!(!app.should_quit(), "first q only arms the quit");
         assert!(app.status().is_some());
         // Typing another key disarms.
         let mut app = app_with(vec![], "s1");
+        app.press(Key::Esc);
         app.press(Key::Quit);
         app.press(Key::Char('x'));
         assert!(app.press(Key::Quit).is_empty(), "disarmed: q arms again");
         assert!(!app.should_quit());
         // A quick second q confirms.
         let mut app = app_with(vec![], "s1");
+        app.press(Key::Esc);
         app.press(Key::Quit);
         assert_eq!(app.press(Key::Quit), vec![Action::Quit]);
         assert!(app.should_quit());
@@ -1269,8 +1310,69 @@ mod tests {
     }
 
     #[test]
+    fn q_types_a_char_in_insert_mode() {
+        // The gate (FT-012): insert mode types `q`; it never arms
+        // the quit. A second q types a second q, not a quit.
+        let mut app = app_with(vec![], "s1");
+        assert!(app.press(Key::Quit).is_empty());
+        assert_eq!(app.draft(), "q");
+        assert!(!app.should_quit());
+        assert!(app.press(Key::Quit).is_empty());
+        assert_eq!(app.draft(), "qq");
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn q_types_a_char_in_replace_mode() {
+        let mut app = app_with(vec![], "s1");
+        app.editor().set_text("abc");
+        app.press(Key::Esc);
+        app.press(Key::Char('R'));
+        assert!(app.press(Key::Quit).is_empty());
+        assert_eq!(app.draft(), "qbc");
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn q_types_into_the_search_command_line() {
+        let mut app = app_with(vec![], "s1");
+        app.editor().set_text("alpha beta");
+        app.press(Key::Esc);
+        app.press(Key::Char('/'));
+        assert!(app.press(Key::Quit).is_empty());
+        assert_eq!(
+            app.editor().command_line_label(),
+            Some("/q\u{2588}".to_string())
+        );
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn q_types_into_the_name_input() {
+        let mut app = App::new();
+        app.start_naming();
+        assert!(app.press(Key::Quit).is_empty());
+        assert_eq!(app.pending_name(), Some("q"));
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn q_hints_the_gate_with_a_nonempty_draft() {
+        // Normal mode, draft not empty: the gate is closed and the
+        // key leaves the text intact. The hint states the escape.
+        let mut app = app_with(vec![], "s1");
+        app.editor().set_text("hi");
+        app.press(Key::Esc);
+        assert!(app.press(Key::Quit).is_empty());
+        assert!(!app.should_quit());
+        assert_eq!(app.status(), Some("clear the draft, then q q quits"));
+        assert_eq!(app.draft(), "hi");
+    }
+
+    #[test]
     fn expired_arm_requires_a_fresh_q() {
         let mut app = app_with(vec![], "s1");
+        app.press(Key::Esc);
         app.press(Key::Quit);
         // Simulate the window closing.
         app.quit_arm = Some(Instant::now() - QUIT_ARM_TTL - std::time::Duration::from_millis(1));

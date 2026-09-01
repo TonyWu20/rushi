@@ -400,3 +400,43 @@ replace doc notes dropped the extension text.
 `shift_a_types_uppercase_a_in_the_composer` pin the behavior.
 All 269 tui tests pass.
 
+## FT-012 — `q` in a typing mode blocks the letter and quits the
+TUI mid-draft
+
+**Symptom:** In the composer's insert mode, `q` types nothing. The
+status row flashes `press q again to quit`. A second `q` inside
+3 s quits the TUI and drops the half-typed draft. The same block
+hits the search command line (`/q...` cannot be typed) and the
+new-session name input.
+
+**Root cause:** `key_input` (`bin/tui/src/main.rs`) maps
+`Char('q')` to `Key::Quit` before any character path. `App::press`
+(`bin/tui/src/app.rs`) handled `Key::Quit` at the app level, before
+the editor saw the key, in every mode. The two-step quit arm
+preempted the editor's character input. The Shift+A defect (FT-011)
+was the same class: a key intercepted above the editor that a typed
+char never reaches.
+
+**Fix:** The quit gate (the pi Ctrl-d rule, docs/tui.md section 7):
+`q` and `Ctrl+Q` arm and fire only in normal mode with an empty
+draft. In every other state the key is plain text: it types into
+the composer (insert/replace), the search box (command line), or
+the name input. Normal mode with a non-empty draft shows the hint
+`clear the draft, then q q quits` and leaves the text intact.
+
+**Verification:** Regression tests in `bin/tui/src/app.rs`:
+`q_types_a_char_in_insert_mode`, `q_types_a_char_in_replace_mode`,
+`q_types_into_the_search_command_line`,
+`q_types_into_the_name_input`, and
+`q_hints_the_gate_with_a_nonempty_draft`. The existing
+`quit_needs_two_q_within_the_window` and
+`expired_arm_requires_a_fresh_q` now Esc to normal mode first. All
+314 tui tests pass.
+
+**Open item:** Two other keys preempt the editor under a condition,
+by documented design (docs/tui.md section 7): `y` / `n` / `e`
+answer the oldest pending `approval_request`, and `h` resumes the
+pending handoff. While those conditions hold, the three letters
+(and `h`) do not type in a typing mode. Left as is: the block is
+the feature, not a defect.
+

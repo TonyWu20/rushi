@@ -183,7 +183,7 @@ The spinner shows one braille frame per redraw, about 100 ms.
 | `y` / `n` / `e` | Answer the oldest pending `approval_request`: allow / deny / edit-then-allow |
 | `h` | One-key handoff resume (correction 57). Only when the log holds a `context_exhausted` marker that seeded a session and no loop runs. Switches to the seeded session and starts its loop. The old session's local loop stops. Without those conditions, `h` stays the editor key |
 | `Tab` | Switch session |
-| `q` ×2 | Quit the TUI. Loops keep running as orphans. Only `Ctrl+C` stops a loop |
+| `q` ×2 | Quit the TUI, only in normal mode with an empty draft (the pi Ctrl-d rule, FT-012). In every other state `q` is plain text: it types into the composer, the search box, or the name input. `Ctrl+Q` follows the same gate. Loops keep running as orphans. Only `Ctrl+C` stops a loop |
 
 The input area is a multi-line textarea with native vim modal input
 (section 7.1), in a rounded-corner border whose color correlates with
@@ -392,8 +392,11 @@ and verification record.
   at `v: 1`.
 - `cancel` events carry `target: "turn"`.
 - Quit is two-step: the first `q` arms, a second `q` inside 3 s
-  quits, any other key disarms. `Ctrl+Q` maps to the same key. This
-  deviates from the single `q` of section 7 for mistouch safety.
+  quits, any other key disarms. `Ctrl+Q` maps to the same key. The
+  quit gate (FT-012) applies to both: the key arms and fires only in
+  normal mode with an empty draft; in every other state it types a
+  plain `q` into the active input. This deviates from the single `q`
+  of section 7 for mistouch safety.
 - Text content wraps across lines: user/assistant messages and tool
   output wrap at the pane width, capped per event with a `… +N more
   lines` hint. Newlines in the text are hard breaks.
