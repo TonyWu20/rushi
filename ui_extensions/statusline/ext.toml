@@ -7,9 +7,13 @@
 # - git branch + dirty mark, TTL-cached at 3 s (the design's tick
 #   cost note: no git spawn on every tick)
 # - session, model, and loop state from the tick payload
-# - cumulative usage summed over assistant_message.usage events;
-#   the host re-sends every usage-bearing message at start, so the
-#   totals survive a TUI restart from the log alone
+# - cumulative usage summed over assistant_message and
+#   compaction_summary usage events. The summary call's usage joins
+#   the cumulative totals. It does not move the context fullness
+#   metric: the ctx section reads the last assistant_message input
+#   only. The host re-sends every usage-bearing event of the listed
+#   kinds at start, so the totals survive a TUI restart from the
+#   log alone
 # - context fullness, the number to watch for compaction: the last
 #   measured request input tokens over the model window, in the
 #   starship-statusline style (`ctx <pct>% (<tokens>/<window>)`);
@@ -24,6 +28,6 @@
 command = "bash"
 args = ["statusline.sh"]
 caps = ["status"]
-kinds = ["assistant_message"]
+kinds = ["assistant_message", "compaction_summary"]
 tick_ms = 1000
 protocol_v = 1

@@ -19,11 +19,16 @@
 //! - model from the tick payload. The session name and the loop
 //!   state stay in the host's top bar (frame title); the footer
 //!   does not duplicate them
-//! - cumulative usage summed over assistant_message.usage events;
-//!   the numbers shorten to k/M/B, the reference fmtNum rule, with
+//! - cumulative usage summed over assistant_message.usage and
+//!   compaction_summary.usage events. The summary call's usage
+//!   joins the totals; the context fullness metric stays on the
+//!   last assistant_message input (docs/auto-compact-plan.md
+//!   section 4.6)
+//! - the numbers shorten to k/M/B, the reference fmtNum rule, with
 //!   a trailing .0 dropped (5500 -> 5.5k, 5000 -> 5k, 1.2M)
-//!   the host re-sends every usage-bearing message at start, so the
-//!   totals survive a TUI restart from the log alone
+//!   the host re-sends every usage-bearing event of the listed
+//!   kinds at start, so the totals survive a TUI restart from the
+//!   log alone
 //! - context fullness, the number to watch for compaction: the last
 //!   measured request input tokens over the model window, in the
 //!   starship-statusline style (ctx <pct>% (<tokens>/<window>)). The
@@ -318,10 +323,16 @@ fn main() {
         match v.get("op").and_then(|o| o.as_str()) {
             Some("event") => {
                 // Cumulative usage: the host re-sends every
-                // usage-bearing message at start, so the totals
-                // survive a TUI restart from the log alone.
+                // usage-bearing message of the listed kinds at
+                // start, so the totals survive a TUI restart from
+                // the log alone. The compaction_summary usage joins
+                // the cumulative totals. It does not move the
+                // context fullness metric: the ctx section reads
+                // the last assistant_message input only
+                // (docs/auto-compact-plan.md section 4.6).
                 let ev = &v["event"];
-                if ev.get("type").and_then(|t| t.as_str()) == Some("assistant_message") {
+                let ty = ev.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                if ty == "assistant_message" || ty == "compaction_summary" {
                     if let Some(usage) = ev.get("usage").and_then(|u| u.as_object()) {
                         in_total += usage
                             .get("input_tokens")
@@ -335,10 +346,12 @@ fn main() {
                             .get("cached_tokens")
                             .and_then(|x| x.as_u64())
                             .unwrap_or(0);
-                        last_in = usage
-                            .get("input_tokens")
-                            .and_then(|x| x.as_u64())
-                            .unwrap_or(0);
+                        if ty == "assistant_message" {
+                            last_in = usage
+                                .get("input_tokens")
+                                .and_then(|x| x.as_u64())
+                                .unwrap_or(0);
+                        }
                     }
                 }
             }

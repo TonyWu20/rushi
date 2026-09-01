@@ -10,11 +10,15 @@
 # - model from the tick payload. The session name and the loop state
 #   stay in the host's top bar (frame title); the footer does not
 #   duplicate them
-# - cumulative usage summed over assistant_message.usage events;
-#   the numbers shorten to k/M/B, the reference fmtNum rule, with a
+# - cumulative usage summed over assistant_message and
+#   compaction_summary usage events; the summary call's usage joins
+#   the totals, the context fullness metric stays on the last
+#   assistant_message input. The numbers shorten to k/M/B, the
+#   reference fmtNum rule, with a
 #   trailing .0 dropped (5500 -> 5.5k, 5000 -> 5k, 1200000 -> 1.2M)
-#   the host re-sends every usage-bearing message at start, so the
-#   totals survive a TUI restart from the log alone
+#   the host re-sends every usage-bearing message of the listed
+#   kinds at start, so the totals survive a TUI restart from the
+#   log alone
 # - context fullness, the number to watch for compaction: the last
 #   measured request input tokens over the model window, in the
 #   starship-statusline style (ctx <pct>% (<tokens>/<window>)). The
@@ -151,39 +155,50 @@ esc() {
   printf '%s' "$s"
 }
 
-# One line: the usage totals from a compact "in out cached" triple.
+# One line: the usage totals from a compact "type in out cached"
+# quad. The type is the event that carries the usage. The context
+# fullness metric moves on the last assistant_message input only:
+# the summary call's usage joins the cumulative totals, not the ctx
+# indicator (docs/auto-compact-plan.md section 4.6).
 usage_add() {
-  # $1 = "in out cached", or empty when the event carries no usage.
+  # $1 = "type in out cached", or empty when the event carries no
+  # usage.
   [ -n "$1" ] || return 0
-  local in out cached
+  local ty in out cached
   # Function-local positionals: the main loop's read keeps its own.
   set -- $1
-  in=${1:-0}
-  out=${2:-0}
-  cached=${3:-0}
+  ty=${1:-assistant_message}
+  in=${2:-0}
+  out=${3:-0}
+  cached=${4:-0}
   in_total=$(( in_total + in ))
   out_total=$(( out_total + out ))
   cached_total=$(( cached_total + cached ))
   # The last measured request is the context-fullness source.
-  last_in=$in
+  # The summary call's usage does not move it.
+  [ "$ty" = "assistant_message" ] && last_in=$in
 }
 
 # Extract "in out cached" from one op line. jq when available; a sed
 # fallback for machines without it. The fallback anchors on the
 # flat `"usage":{...}` object, so tool_calls with nested objects
-# earlier in the line cannot fragment the match.
+# earlier in the line cannot fragment the match. The usage source is
+# an assistant_message or a compaction_summary event (the summary
+# call's usage joins the cumulative totals; docs/auto-compact-
+# plan.md section 4.6).
 usage_pair() {
   local line=$1
   if [ "$USE_JQ" = 1 ]; then
     printf '%s' "$line" | jq -r '
       select((.op // "") == "event")
-      | select((.event.type // "") == "assistant_message")
-      | .event.usage // empty
-      | "\(.input_tokens // 0) \(.output_tokens // 0) \(.cached_tokens // 0)"
+      | select((.event.type // "") == "assistant_message"
+               or (.event.type // "") == "compaction_summary")
+      | "\(.event.type) \(.event.usage.input_tokens // 0) \(.event.usage.output_tokens // 0) \(.event.usage.cached_tokens // 0)"
     ' 2>/dev/null
     return 0
   fi
-  local in out cached
+  local ty in out cached
+  case "$line" in *'"type":"compaction_summary"'*) ty="compaction_summary" ;; *) ty="assistant_message" ;; esac
   in=$(printf '%s' "$line" | sed -n \
     's/.*"usage":{[^}]*"input_tokens":\([0-9]*\).*/\1/p')
   out=$(printf '%s' "$line" | sed -n \
@@ -191,7 +206,7 @@ usage_pair() {
   cached=$(printf '%s' "$line" | sed -n \
     's/.*"usage":{[^}]*"cached_tokens":\([0-9]*\).*/\1/p')
   if [ -n "$in" ] && [ -n "$out" ]; then
-    printf '%s %s %s\n' "$in" "$out" "${cached:-0}"
+    printf '%s %s %s %s\n' "$ty" "$in" "$out" "${cached:-0}"
   fi
 }
 
