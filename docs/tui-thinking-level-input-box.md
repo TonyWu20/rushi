@@ -204,10 +204,11 @@ section 5. This ship makes the entry live.
 ## 9. Trade-offs, recorded
 
 - The effort-to-level mapping lives in `bin/model`, next to the
-  resolution it must match. The seven documented efforts
-  collapse into the host palette's five colors: `minimal`
-  shares the low bucket with `low`, and `max` shares the top
-  bucket with `xhigh` (the `4+` row of the spec's table).
+  resolution it must match. The six accepted thinking levels
+  (`minimal`, `low`, `medium`, `high`, `xhigh`, `max` — `none`
+  turns thinking off) collapse into the host palette's five colors:
+  `minimal` shares the low bucket with `low`, and `max` shares the
+  top bucket with `xhigh` (the `4+` row of the spec's table).
 - The on-change gate scans a 4096-line tail. A marker older than
   the window republishes the same value once. It is a no-op for
   the TUI, which takes the last event.
