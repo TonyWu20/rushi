@@ -77,6 +77,35 @@ executable, when present, is a tool `route` runs) and not a daemon
   supervised-execution path; a skill is a naming / packaging layer
   over tools plus prose.
 
+**Trust: if executables are accepted, how do we know one is not
+malicious?** We do not try to *detect* malice — static analysis of
+arbitrary binaries is undecidable. We instead **bound the blast
+radius** and **raise the cost of an attack**:
+
+- **Prefer `route` tools over bundled binaries.** A skill's
+  "executable" is a *named existing tool* on the `route` path, not
+  a new bundled binary. The host already supervises it; no new
+  code is introduced, so the malicious-binary question is moot for
+  the common case.
+- **Fence bundled code like an extension.** A skill that ships its
+  own script / binary gets the same fences: no network unless
+  `caps` declares it, fs-write only under the repo, enforced
+  timeout, least privilege. What a bad payload can do is bounded to
+  those fences.
+- **Version control + review + pinning.** A skill's executable is a
+  repo file, so it is diff-able, reviewable, and version-pinned. A
+  malicious change is a malicious *commit*, caught by the same
+  review that catches a malicious commit anywhere in this repo. The
+  answer is the trust model of the repo itself: you trust the tree
+  and review its diffs.
+- **No auto-invocation.** A skill runs only when the agent —
+  already trusted to run the `bash` tool — invokes it; never on
+  external input.
+
+The first skill (`tui-capture`) is prompt-only and wraps an
+*existing* repo script via `bash`, so it ships zero new
+executables.
+
 ## 3. The first skill: `tui-capture`
 
 The concrete need this started from. To verify a TUI change the
@@ -115,7 +144,10 @@ What this repo adds, in the Unix direction: a skill is *a command on
 a search path with a manifest* — not a protocol server (no JSON-RPC,
 no daemon) and not just a prompt to follow. The executable entry
 point, when present, is a tool on the existing supervised path;
-discovery is a directory scan exposed as a command.
+discovery is a directory scan exposed as a command. Where this repo
+*diverges* from Agent Skills: the index is not resident in the
+prompt — it is an on-demand command result (section 6), so the cached
+prefix is untouched by the skill set.
 
 ## 5. Proposed shape
 
@@ -136,10 +168,12 @@ discovery is a directory scan exposed as a command.
   caps        = []             # network / fs-write, mirroring the ext host
   ```
   The user manual is `skills/<name>/SKILL.md`.
-- **Discovery = `skills --list`** (the endorsed form). A command that
-  prints the flat index — `name — one-line description`,
-  deterministically ordered. The agent and the TUI both read from
-  this one source. A sibling `skills show <name>` prints the full
+- **Discovery = `skills --list`** (the endorsed form). A command the
+  agent runs **on demand** (like `bash`): it prints the flat index
+  — `name — one-line description`, deterministically ordered. It is
+  a *tool result* (transcript tail), not something the prompt
+  carries (section 6). The TUI's autocompletion window reads from
+  the same command. A sibling `skills show <name>` prints the full
   skill (manifest + manual + resource listing) on demand.
 - **Execution.** A skill's executable, when it has one, is a tool
   `route` runs — not a `skills` subcommand. `skills` stays read-only
@@ -150,33 +184,38 @@ discovery is a directory scan exposed as a command.
 The constraint: the provider reuses a stable *prefix* of the prompt
 via its prefix KV cache; the longer the byte-identical prefix across
 consecutive model calls, the more is reused. In this harness the
-request prefix is the system prompt, which `assemble` builds from the
-frozen call config (`bin/assemble` `main.rs`), and it must stay
-byte-stable between turns. So: keep the stable part at the front,
-the volatile part at the back, and never let a skill pull volatile
-content into the front.
+request prefix is the system prompt, which `assemble` builds from
+the frozen call config (`bin/assemble` `main.rs`), and it must stay
+byte-stable between turns.
 
-- **In the prompt (the cached prefix).** One fixed
-  `## Available skills` section of the system prompt: a
-  *deterministically sorted* index, one line per skill
-  (`name — one-line description`), plus a two-line "how to use
-  skills" note. It is byte-stable across loop turns (it changes only
-  when the skills tree changes — rare, and versioned with the repo),
-  so it *extends* the cached prefix instead of breaking it.
-- **Out of the prompt.** A skill's full manual and resources,
-  fetched on demand by the agent via `skills show <name>`. The
-  content lands as a **command / tool result in the transcript
-  (the tail)**, where it is recent context. Because disclosure is a
-  result appended to the back, the stable prefix is never mutated —
-  that is the whole point of progressive disclosure.
-- **Determinism for cache stability.** The index is sorted by name
-  (not hash / map order) and stable, so the prompt prefix is
-  byte-identical call to call. A new skill *appends* in sort order —
-  a one-time prefix change.
-- **Never expand the system prompt per relevant skill.** Injecting
-  "the full details of the currently relevant skill" into the prompt
-  would shift the prefix every time a different skill is relevant and
-  defeat the cache. The fixed index plus on-demand fetch avoids that.
+**So the system prompt carries no skill content.** No index, no
+manual, no "which skills are relevant now." Skill detail is never
+injected into the prefix, because *any* change to the skill set — a
+new skill, a reworded description, a different one being relevant
+this turn — would mutate the prefix and invalidate the cache for
+that session. Progressive disclosure preserves the prefix exactly
+because disclosure is not a prompt change:
+
+- **In the prompt (the stable prefix): at most one pointer line.**
+  A single, stable, skill-agnostic instruction — "You have a
+  `skills` tool; run `skills --list` to discover procedural
+  capabilities, and `skills show <name>` for detail." That line does
+  not change when skills are added or removed, so the prefix stays
+  byte-stable. The agent learns that skills *can* exist and how to
+  find them; it is not handed *which* exist.
+- **The index and the manual: on-demand tool results only.**
+  `skills --list` and `skills show <name>` are tool calls; their
+  output lands in the transcript **tail**, where it is recent
+  context. Disclosure is appended at the back, so the stable prefix
+  is never mutated. The agent spends tokens only on the skills it
+  actually fetches — nothing is up-front.
+- **Determinism.** `skills --list` sorts by name (not hash / map
+  order), so repeated calls return byte-identical output; the agent
+  and the TUI can rely on a stable order.
+- **Rule.** We do not inject skill detail into the system prompt,
+  and we do nothing that would move the skill set into the prefix.
+  The cost is one discovery call when a skill is needed; the gain is
+  that the cache prefix is never invalidated by the skill set.
 
 ## 7. TUI side (mainstream agent-tool UX)
 
@@ -189,9 +228,10 @@ gains:
   command is its first consumer.
 - **A slash command (`/`)**: typing `/` opens the window listing
   available **skills** (and built-in TUI commands); selecting one
-  inserts / triggers it. The data source is the same stable skill
-  index the prompt carries (i.e. `skills --list`), so the TUI and
-  the model share one source of truth.
+  inserts / triggers it. The data source is the `skills --list`
+  command itself — the same on-demand source the agent uses — so
+  the TUI and the model share one source of truth, and *neither is
+  the prompt* (section 6).
 - **Implementation.** A `render.rs` widget plus an `app.rs` /
   `vim_editor.rs` key path, fed by the shared index. It pairs with
   the skill system; it is not a separate transport.
@@ -205,9 +245,9 @@ gains:
   host applies to its load order).
 - A skill execution that fails supervision (timeout, cap exceeded) is
   reported to the agent as a not-run / failed outcome, not a hang.
-- The prompt index is the only skill material in the prompt; a skill
-  that tries to get its full manual into the prompt prefix is out of
-  scope.
+- The system prompt carries no skill content (at most the one
+  stable pointer line of section 6); a skill that tries to get its
+  index or manual into the prompt prefix is out of scope.
 
 ## 9. Open (not decided here)
 
@@ -227,8 +267,8 @@ gains:
   tree, found by scan, versioned with the repo.
 - Auto-invocation. The agent decides to call a skill; nothing calls
   one on its own.
-- Per-skill expansion of the system prompt (see section 6); that
-  would break the cached prefix.
+- Any skill content in the system prompt (see section 6); that would
+  break the cached prefix.
 
 ## 11. Acceptance (for when it is approved)
 
@@ -236,11 +276,11 @@ gains:
   needs one — a `route`-runnable tool; it replaces the ad-hoc PTY
   harness in the TUI feature checks.
 - `skills --list` prints the flat index; `skills show <name>` prints
-  the full skill. Both feed the prompt index and the TUI window from
-  one source.
-- The prompt carries only the stable index; a skill's manual reaches
-  the model as a transcript result, never as a prompt-prefix
-  mutation.
+  the full skill. Both feed the TUI window from one source; the
+  agent discovers on demand (no prompt index).
+- The prompt carries no skill detail (at most the one stable pointer
+  line); the index and a skill's manual reach the model only as
+  tool results, never as a prompt-prefix mutation.
 - A skill with no `caps` is fenced; a timed-out execution is a
   reported failure, not a hang.
 - The TUI input box shows the autocompletion window on `/` and lists
