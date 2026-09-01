@@ -148,7 +148,12 @@ pub struct App {
     /// O(viewport) instead of O(total lines). The extension reply
     /// version folds in, so a new reply rebuilds the lines
     /// (ui-extension-plan stage 1).
-    transcript_cache: Option<(u64, usize, u64, Vec<Line<'static>>)>,
+    transcript_cache: Option<(u64, usize, u64, crate::color::Level, Vec<Line<'static>>)>,
+    /// The terminal's color capability the built-in palette is lowered
+    /// to (truecolor default; 256/16 when the config or the env says
+    /// the terminal is less capable). Set by the host in `main`;
+    /// `new` defaults to truecolor so render tests are deterministic.
+    color_level: crate::color::Level,
     /// Latest `ext_status` values, id to value, for the active
     /// session. Maintained incrementally: `set_active` builds it
     /// and each appended watch event updates it. A tick reads this
@@ -192,9 +197,11 @@ fn valid_session_name(name: &str) -> bool {
 
 /// The `ext_status` values of one event list, id to value. Later
 /// events win, like the log order. An event without a string `id`
-/// adds no entry; a missing `value` counts as `null`. The pair is
-/// the value map plus the update order (most recent last), capped
-/// at [`EXT_STATUS_ID_CAP`] distinct ids: at the cap the
+/// adds no entry; a missing `value` counts as `null`. The triple
+/// is the value map, the event-timestamp side map (id to the raw
+/// `ts` of the event that last set the id), and the update order
+/// (most recent last). Both maps cap at
+/// [`EXT_STATUS_ID_CAP`] distinct ids: at the cap the
 /// least-recently-updated id drops, like the incremental path.
 fn ext_status_map(
     events: &[Event],
@@ -269,7 +276,22 @@ impl App {
             viewport: 0,
             events_version: 0,
             transcript_cache: None,
+            color_level: crate::color::Level::detect(),
         }
+    }
+
+    /// The terminal color capability every built-in style is lowered
+    /// to (docs/tui.md section 10). Set from the harness config
+    /// override ([tui] color) in [main]; defaults to environment
+    /// detection, so tests and the no-config path keep their own
+    /// detection result.
+    pub fn color_level(&self) -> crate::color::Level {
+        self.color_level
+    }
+
+    /// Override the capability the built-in render path lowers to.
+    pub fn set_color_level(&mut self, level: crate::color::Level) {
+        self.color_level = level;
     }
 
     // ── sessions ────────────────────────────────────────────────
@@ -387,14 +409,24 @@ impl App {
         ext: Option<&crate::ext::ExtHost>,
     ) -> &[Line<'static>] {
         let ext_ver = ext.map(|h| h.replies_version()).unwrap_or(0);
-        if let Some((v, w, ev, _)) = &self.transcript_cache {
-            if *v == self.events_version && *w == width && *ev == ext_ver {
-                return &self.transcript_cache.as_ref().unwrap().3;
+        if let Some((v, w, ev, cl, _)) = &self.transcript_cache {
+            if *v == self.events_version
+                && *w == width
+                && *ev == ext_ver
+                && *cl == self.color_level
+            {
+                return &self.transcript_cache.as_ref().unwrap().4;
             }
         }
         let lines = crate::render::build_transcript_lines(self, width, ext);
-        self.transcript_cache = Some((self.events_version, width, ext_ver, lines));
-        &self.transcript_cache.as_ref().unwrap().3
+        self.transcript_cache = Some((
+            self.events_version,
+            width,
+            ext_ver,
+            self.color_level,
+            lines,
+        ));
+        &self.transcript_cache.as_ref().unwrap().4
     }
 
     /// Events of the active session, oldest first.
@@ -429,8 +461,8 @@ impl App {
     /// Record one ext_status value in log order. A later event for
     /// the same id wins. The id set is capped:
     /// [`EXT_STATUS_ID_CAP`] distinct ids, oldest-updated first out.
-    /// An event without a `ts` field updates the value but leaves
-    /// the timestamp entry untouched.
+    /// The timestamp side map follows: it records the event `ts` and
+    /// drops an id with the value map.
     fn record_ext_status(&mut self, id: &str, value: Value, ts: Option<&str>) {
         if self
             .ext_status_values
@@ -455,11 +487,11 @@ impl App {
         }
     }
 
-    /// The raw `ts` of the event that last set the
-    /// [`LOOP_PHASE_STATUS_ID`] value of the active session.
-    /// `None` when the log holds no marker, or the marker event
-    /// carries no timestamp. The render parses the value with
-    /// chrono; a parse failure keeps the label and drops the span
+    /// The raw `ts` of the event that last set the [`LOOP_PHASE_STATUS_ID`]
+    /// value of the active session. `None` when the log holds no
+    /// marker, or the marker event carries no timestamp. The render
+    /// parses the value with chrono; a parse failure hides the
+    /// phase row, the title bit still shows the state
     /// (docs/tui-model-wait-indicator.md section 4).
     pub fn loop_phase_ts(&self) -> Option<&str> {
         self.ext_status_ts

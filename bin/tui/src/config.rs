@@ -69,6 +69,9 @@ pub struct TuiConfig {
     /// The active model name, for the extension `tick` payload
     /// (docs/ui-extension.md section 4). `None` when unconfigured.
     pub active_model: Option<String>,
+    /// The forced terminal color capability level, or `None` to detect
+    /// from the environment at startup (see color.rs module docs).
+    pub color: Option<crate::color::Level>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -78,6 +81,7 @@ struct RawConfig {
     loop_cmd: Option<RawLoop>,
     ext: Option<RawExt>,
     active: Option<RawActive>,
+    tui: Option<RawTui>,
 }
 
 /// The optional `[ext]` section: an override for the global extension
@@ -111,11 +115,21 @@ fn default_arg_style() -> String {
     "append_session".to_string()
 }
 
+/// The optional `[tui]` table: `color` forces the color capability
+/// level (`truecolor`, `256`, `8`, `16`; unknown names are a hard
+/// error like the other keys).
+#[derive(Debug, Default, Deserialize)]
+struct RawTui {
+    #[serde(default)]
+    color: Option<String>,
+}
+
 impl TuiConfig {
     /// Load the config. A missing file yields defaults (sessions root
     /// `sessions` next to the given path, no loop command) so the TUI
     /// stays useful for viewing logs; a corrupt file is a hard error.
     pub fn load(path: &str) -> Result<Self, String> {
+        use crate::color::Level;
         let path = PathBuf::from(path);
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
@@ -180,6 +194,21 @@ impl TuiConfig {
 
         let active_model = raw.active.as_ref().and_then(|a| a.model.clone());
 
+        // An explicit `[tui] color` forces the level; unknown names are a
+        // hard error, like the other keys. Absent means detect.
+        let color = match raw.tui.as_ref().and_then(|t| t.color.clone()) {
+            Some(c) => {
+                let lvl = Level::from_cfg(&c).ok_or_else(|| {
+                    format!(
+                        "config [tui] color: unknown value {c:?} \
+                         (expected one of truecolor, 256, 8, 16)"
+                    )
+                })?;
+                Some(lvl)
+            }
+            None => None,
+        };
+
         Ok(TuiConfig {
             sessions_root,
             schemas_dir,
@@ -188,6 +217,7 @@ impl TuiConfig {
             config_path: canonical,
             ext_dir,
             active_model,
+            color,
         })
     }
 
@@ -218,6 +248,7 @@ impl TuiConfig {
             config_path: path.to_path_buf(),
             ext_dir: None,
             active_model: None,
+            color: None,
         }
     }
 }

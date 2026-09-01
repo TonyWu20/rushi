@@ -597,6 +597,39 @@ fn lines_value(v: &Value) -> Option<Vec<ExtLine>> {
     Some(out)
 }
 
+/// Lower a wire line's styles (line style + every span) to the
+/// terminal capability. Named ANSI colors pass through unchanged
+/// (`color::lower` maps them to the swatch indices), so this only
+/// reshapes free-form RGB from hex wire colors.
+fn lower_ext_lines(lines: Vec<ExtLine>, level: crate::color::Level) -> Vec<ExtLine> {
+    use crate::color::lower_style;
+    lines
+        .into_iter()
+        .map(|mut l| {
+            l.style = lower_style(l.style, level);
+            l.spans = l
+                .spans
+                .into_iter()
+                .map(|mut s| {
+                    s.style = lower_style(s.style, level);
+                    s
+                })
+                .collect();
+            l
+        })
+        .collect()
+}
+
+/// Lower a `frame_spec` label's styles to the terminal capability.
+fn lower_frame_spec(mut spec: FrameSpec, level: crate::color::Level) -> FrameSpec {
+    use crate::color::lower_style;
+    if let Some((lines, style)) = &mut spec.label {
+        *lines = lower_ext_lines(lines.clone(), level);
+        *style = lower_style(*style, level);
+    }
+    spec
+}
+
 /// Items the host reports to the TUI main loop. The main loop owns
 /// the side effects: log appends go through the port, flashes hit
 /// the status row, notify ops hit the terminal the host owns.
@@ -842,6 +875,12 @@ struct HostInner {
     out_tx: mpsc::SyncSender<ExtItem>,
     /// Set by [`ExtHost::start`] from the host-level value.
     transform_timeout: Mutex<Duration>,
+    /// The terminal color capability the cached extension styles are
+    /// lowered to on storage (truecolor by default; 256/16 when the
+    /// terminal is less capable or `[tui] color` forces it). Named
+    /// ANSI colors pass through unchanged, so this only reshapes
+    /// free-form RGB from extension hex colors.
+    color_level: crate::color::Level,
 }
 
 /// The extension host: one supervised process per enabled extension
@@ -903,6 +942,9 @@ impl ExtHost {
                 replies_version: AtomicU64::new(0),
                 out_tx,
                 transform_timeout: Mutex::new(TRANSFORM_TIMEOUT),
+                color_level: cfg
+                    .color
+                    .unwrap_or_else(crate::color::Level::detect),
             }),
             disc: disc.clone(),
             config_path: cfg.config_path.clone(),
@@ -1099,6 +1141,7 @@ impl ExtHost {
                 "width": p.width,
                 "thinking": p.thinking,
                 "loop_running": p.loop_running,
+                "color": self.inner.color_level.name(),
                 "statuses": Value::Object(Map::from_iter(
                     p.statuses.iter().map(|(k, v)| (k.clone(), v.clone()))
                 )),
@@ -1581,7 +1624,9 @@ impl HostInner {
                 let Some(id) = v.get("event_id").and_then(|x| x.as_u64()) else {
                     return;
                 };
-                let Some(lines) = lines_value(&v["lines"]) else {
+                let Some(lines) = lines_value(&v["lines"]).map(|l| {
+                    lower_ext_lines(l, self.color_level)
+                }) else {
                     // G5: fall back to the built-in render.
                     return;
                 };
@@ -1602,7 +1647,9 @@ impl HostInner {
                 });
             }
             "status" => {
-                let Some(lines) = lines_value(&v["lines"]) else {
+                let Some(lines) = lines_value(&v["lines"]).map(|l| {
+                    lower_ext_lines(l, self.color_level)
+                }) else {
                     // G5: keep the last valid row.
                     return;
                 };
@@ -1636,6 +1683,7 @@ impl HostInner {
                     // G5: keep the last valid frame.
                     return;
                 };
+                let spec = lower_frame_spec(spec, self.color_level);
                 *slot.last_frame.lock().unwrap() = Some(spec);
                 self.replies_version.fetch_add(1, Ordering::SeqCst);
                 let _ = self.out_tx.try_send(ExtItem::FrameUpdated {
@@ -1646,7 +1694,9 @@ impl HostInner {
                 let Some(req) = v.get("req").and_then(|x| x.as_u64()) else {
                     return;
                 };
-                let Some(lines) = lines_value(&v["lines"]) else {
+                let Some(lines) = lines_value(&v["lines"])
+                    .map(|l| lower_ext_lines(l, self.color_level))
+                else {
                     return;
                 };
                 let ok = {
@@ -2021,6 +2071,7 @@ mod tests {
             config_path: root.join("config.toml"),
             ext_dir: None,
             active_model: None,
+            color: None,
         }
     }
 

@@ -142,6 +142,11 @@ fn main() {
     let backend = CrosstermBackend::new(std::io::stdout());
     let mut term = Terminal::new(backend).expect("cannot create the terminal");
     let mut app = App::new();
+    // The [tui] color override forces the capability level; absent,
+    // the App's environment detection stands (color.rs module docs).
+    if let Some(level) = cfg.color {
+        app.set_color_level(level);
+    }
     let host = ext::ExtHost::new(&disc, &cfg);
 
     for item in host.start() {

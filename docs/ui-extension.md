@@ -86,7 +86,7 @@ TUI to extension:
 | op | payload | meaning |
 |---|---|---|
 | `event` | one full log event | a new event matching `kinds` |
-| `tick` | `{seq, width, session, model, thinking, loop_running, statuses}` | cadence ping for status and frame extensions |
+| `tick` | `{seq, width, session, model, thinking, loop_running, color, statuses}` | cadence ping for status and frame extensions; `color` names the terminal capability level the TUI lowers hex wire colors to (color.rs `Level::name`) |
 | `frame` | `{seq, width, session, model, thinking, mode, loop_running}` | cadence ping for the frame extension; the `mode` label and `thinking` level drive its `frame_spec` |
 | `transform` | `{req, text, width, scope}` | rewrite one span |
 

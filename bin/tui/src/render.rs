@@ -113,10 +113,12 @@ fn body(text: &str, style: Style, cap: usize, wrap_w: usize, gutter: &str) -> Ve
         .add_modifier(Modifier::DIM);
     let mut out = Vec::with_capacity(cap + 1);
     for l in wrapped.iter().take(cap) {
-        out.push(Line::from(vec![
-            Span::raw(gutter.to_string()),
-            Span::raw(l.to_string()),
-        ]));
+        // Keep the wrapped line's styled spans (the tool-output tone) and
+        // only prefix the gutter: flattening to a raw span would drop the
+        // foreground and fall back to the terminal default.
+        let mut spans = vec![Span::raw(gutter.to_string())];
+        spans.extend(l.spans.iter().cloned());
+        out.push(Line::from(spans));
     }
     let dropped = wrapped.len().saturating_sub(cap);
     if dropped > 0 {
@@ -205,6 +207,7 @@ fn event_lines(
     width: usize,
     event_id: u64,
     ext: Option<&crate::ext::ExtHost>,
+    level: &crate::color::Level,
 ) -> Vec<Line<'static>> {
     let gutter = " ".repeat(GUTTER);
     let wrap_w = width.saturating_sub(GUTTER).max(4);
@@ -212,6 +215,16 @@ fn event_lines(
     let dim = Style::default()
         .fg(Color::DarkGray)
         .add_modifier(Modifier::DIM);
+    // Command/output bodies: a capability-aware muted tone, distinct
+    // from the transcript prose color (`color::Level::tool_output`).
+    let output = Style::default().fg(level.tool_output());
+    // The command text of a tool call: a capability-aware light tone
+    // (`color::Level::tool_command`), lighter than the result so the
+    // command and its output read as two different voices.
+    let command = Style::default().fg(level.tool_command());
+    // Unstyled transcript prose: the capability-aware plain-text
+    // color (`color::Level::plain_text`), not the terminal default.
+    let prose = Style::default().fg(level.plain_text());
 
     let mut out: Vec<Line<'static>> = Vec::new();
     match e.kind() {
@@ -220,7 +233,7 @@ fn event_lines(
                 .get_str("content")
                 .unwrap_or("[missing content]")
                 .to_string();
-            let wrapped = render_message_content(&content, event_id, ext, wrap_w);
+            let wrapped = render_message_content(&content, event_id, ext, wrap_w, prose);
             let mut spans = vec![Span::styled(
                 format!("{LABEL}user"),
                 label_style(Color::Cyan),
@@ -259,7 +272,7 @@ fn event_lines(
             let wrapped = if content.is_empty() {
                 Vec::new()
             } else {
-                render_message_content(&content, event_id, ext, wrap_w)
+                render_message_content(&content, event_id, ext, wrap_w, prose)
             };
             if let Some(first) = wrapped.first() {
                 header.push(Span::raw("  "));
@@ -295,7 +308,7 @@ fn event_lines(
                     .and_then(|a| a.get("command"))
                     .and_then(|c| c.as_str())
                 {
-                    out.extend(body(cmd, dim, TOOL_CALL_BODY_LINES, wrap_w, &gutter));
+                    out.extend(body(cmd, command, TOOL_CALL_BODY_LINES, wrap_w, &gutter));
                 }
             }
         }
@@ -321,13 +334,13 @@ fn event_lines(
             let text_style = if err {
                 Style::default().fg(Color::Red)
             } else {
-                Style::default().fg(Color::DarkGray)
+                output
             };
             // Tool result text: JSON syntax highlighting when the text
             // is a complete JSON document, plain otherwise. No cap:
             // the result is displayed in full.
             let wrapped = if highlight::looks_like_json(&text) {
-                wrap_json(&text, wrap_w)
+                wrap_json(&text, wrap_w, output)
             } else {
                 wrap_styled(vec![(text_style, text)], wrap_w)
             };
@@ -341,7 +354,7 @@ fn event_lines(
                 .add_modifier(Modifier::BOLD);
             let mut line = vec![
                 Span::styled(format!("[approval {id}] "), st),
-                Span::raw(trunc(&prompt, wrap_w.max(20))),
+                Span::styled(trunc(&prompt, wrap_w.max(20)), output),
             ];
             if pending {
                 line.push(Span::styled(
@@ -391,7 +404,7 @@ fn event_lines(
             let wrapped = if msg.is_empty() {
                 Vec::new()
             } else {
-                wrap_styled(vec![(Style::default(), msg)], wrap_w)
+                wrap_styled(vec![(prose, msg)], wrap_w)
             };
             if let Some(first) = wrapped.first() {
                 spans.push(Span::raw("  "));
@@ -417,7 +430,7 @@ fn event_lines(
                 .get_str("message")
                 .unwrap_or("[missing message]")
                 .to_string();
-            let wrapped = wrap_styled(vec![(Style::default(), msg)], wrap_w);
+            let wrapped = wrap_styled(vec![(prose, msg)], wrap_w);
             let mut spans = vec![Span::styled(
                 format!("{LABEL}[error]"),
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
@@ -540,8 +553,10 @@ fn wrap_styled(segs: Vec<(Style, String)>, width: usize) -> Vec<Line<'static>> {
 /// module's styles per segment. Fence state spans the hard lines; a
 /// trailing newline is dropped like every other body render. Segments
 /// of one hard line wrap continuously (one visual line per wrap,
-/// not one per token).
-fn wrap_markdown(text: &str, wrap_w: usize) -> Vec<Line<'static>> {
+/// not one per token). `base` is the foreground of the unstyled
+/// plain-text runs (the capability-aware prose color); styled runs
+/// (headings, quotes, lists, ...) keep their own styles.
+fn wrap_markdown(text: &str, wrap_w: usize, base: Style) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
     let mut fence = false;
     for hard in text.trim_end_matches('\n').split('\n') {
@@ -549,23 +564,40 @@ fn wrap_markdown(text: &str, wrap_w: usize) -> Vec<Line<'static>> {
             out.push(Line::default());
             continue;
         }
-        let segs = highlight::markdown_line(hard, &mut fence);
+        let segs = with_plain_base(
+            highlight::markdown_line(hard, &mut fence),
+            base,
+        );
         out.extend(wrap_flow(segs, wrap_w));
     }
     out
 }
 
 /// Wrap JSON tool-result text with the highlight module's JSON styles.
-fn wrap_json(text: &str, wrap_w: usize) -> Vec<Line<'static>> {
+fn wrap_json(text: &str, wrap_w: usize, base: Style) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
     for hard in text.trim_end_matches('\n').split('\n') {
         if hard.is_empty() {
             out.push(Line::default());
             continue;
         }
-        out.extend(wrap_flow(highlight::json_line(hard), wrap_w));
+        let segs = with_plain_base(highlight::json_line(hard), base);
+        out.extend(wrap_flow(segs, wrap_w));
     }
     out
+}
+
+/// Give the style-free segments of a highlight flow a `base`
+/// foreground so plain text never falls back to the terminal's
+/// default foreground (the "all gray" defect: the default color
+/// depends on the emulator, and on the iPad Blink app it reads as
+/// purple). A segment that carries any fg or modifier — a heading,
+/// a quote marker, a JSON token — is not the plain text and keeps
+/// its own style.
+fn with_plain_base(segs: Vec<(Style, String)>, base: Style) -> Vec<(Style, String)> {
+    segs.into_iter()
+        .map(|(s, t)| (if s == Style::default() { base } else { s }, t))
+        .collect()
 }
 
 /// Word-wrap styled segments that form one continuous flow: all
@@ -871,16 +903,19 @@ fn message_blocks(content: &str) -> Vec<MBlock<'_>> {
 ///   reply lines join into one line). No owner: the raw span text
 ///   renders, exactly like the built-in path.
 ///
-/// The `ext == None` path renders the content with [`wrap_markdown`],
-/// byte-identical to the pre-stage-3 renderer.
+/// `base` is the foreground of the unstyled plain-text runs (the
+/// capability-aware prose color); styled runs keep their own
+/// styles. The `ext == None` path renders the content with
+/// [`wrap_markdown`] over the same base.
 fn render_message_content(
     content: &str,
     event_id: u64,
     ext: Option<&crate::ext::ExtHost>,
     wrap_w: usize,
+    base: Style,
 ) -> Vec<Line<'static>> {
     if ext.is_none() {
-        return wrap_markdown(content, wrap_w);
+        return wrap_markdown(content, wrap_w, base);
     }
     let host = ext.expect("checked above");
     let blocks = message_blocks(content);
@@ -894,7 +929,10 @@ fn render_message_content(
                     for part in line_parts {
                         match part {
                             Part::Text(s) => {
-                                segs.extend(highlight::markdown_line(s, &mut fence));
+                                segs.extend(with_plain_base(
+                                    highlight::markdown_line(s, &mut fence),
+                                    base,
+                                ));
                             }
                             Part::Latex { idx, raw, text } => {
                                 let req =
@@ -908,7 +946,7 @@ fn render_message_content(
                                             .join(" ")
                                     })
                                     .unwrap_or_else(|| raw.to_string());
-                                segs.push((Style::default(), replaced));
+                                segs.push((base, replaced));
                             }
                         }
                     }
@@ -944,7 +982,10 @@ fn render_message_content(
                         // balanced fence.
                         let mut private = fence;
                         for hard in raw.split('\n') {
-                            let segs = highlight::markdown_line(hard, &mut private);
+                            let segs = with_plain_base(
+                                highlight::markdown_line(hard, &mut private),
+                                base,
+                            );
                             if segs.is_empty() {
                                 out.push(Line::default());
                             } else {
@@ -1186,8 +1227,8 @@ fn status_rows(
                         .add_modifier(Modifier::BOLD),
                 ))];
             }
-            // The running loop names its phase in the working row
-            // above the input box, not here
+            // The running loop names its phase in the reserved
+            // working row above the input box, not here
             // (docs/tui-model-wait-indicator.md section 3): the
             // statusline extension owns this slot, and the built-in
             // fallback shows the handoff hint, the last loop line,
@@ -1241,10 +1282,26 @@ pub fn build_transcript_lines(
                 Some(lines) => ext_lines_guttered(&lines, width),
                 // No valid reply for this event: the built-in render
                 // is the fallback.
-                None => event_lines(e, pending, &names, width.max(GUTTER + 8), event_id, ext),
+                None => event_lines(
+                    e,
+                    pending,
+                    &names,
+                    width.max(GUTTER + 8),
+                    event_id,
+                    ext,
+                    &app.color_level(),
+                ),
             }
         } else {
-            event_lines(e, pending, &names, width.max(GUTTER + 8), event_id, ext)
+            event_lines(
+                e,
+                pending,
+                &names,
+                width.max(GUTTER + 8),
+                event_id,
+                ext,
+                &app.color_level(),
+            )
         };
         all.extend(segs);
     }
@@ -1310,6 +1367,7 @@ pub fn pending_steering_lines(app: &App, running: bool, row_width: usize) -> Vec
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
     ))];
+    let prose = Style::default().fg(app.color_level().plain_text());
     for (i, ev) in pending.iter().enumerate().take(PENDING_MESSAGE_CAP) {
         let content = ev
             .get_str("content")
@@ -1319,10 +1377,10 @@ pub fn pending_steering_lines(app: &App, running: bool, row_width: usize) -> Vec
             .unwrap_or("");
         let prefix = format!("  {}. ", i + 1);
         let max = row_width.saturating_sub(prefix.chars().count()).saturating_sub(1);
-        out.push(Line::from(Span::raw(format!(
-            "{prefix}{}",
-            trunc(content, max)
-        ))));
+        out.push(Line::from(Span::styled(
+            format!("{prefix}{}", trunc(content, max)),
+            prose,
+        )));
     }
     if n > PENDING_MESSAGE_CAP {
         out.push(Line::from(Span::styled(
@@ -1336,8 +1394,8 @@ pub fn pending_steering_lines(app: &App, running: bool, row_width: usize) -> Vec
 }
 
 /// The whole frame: bordered panel with session title, transcript,
-/// optional approval banner, the working row (drawn while the loop
-/// runs), the input line, and the status/help row.
+/// optional approval banner, the reserved working row, the input
+/// line, and the status/help row.
 /// When a status extension exists, its row owns that last line
 /// (ui-extension-plan stage 1 layout); otherwise the built-in
 /// help/status content shows there.
@@ -1447,8 +1505,8 @@ pub fn draw(
     // The working row above the input box: the loop-phase spinner
     // and text while the loop runs (docs/tui-model-wait-indicator.md
     // section 3). No row when idle: the transcript absorbs it. The
-    // input box does not move; this matches the `pi` working
-    // indicator.
+    // input box shifts one row at the loop start/stop transition,
+    // like the `pi` working indicator.
     if running {
         constraints.push(Constraint::Length(1));
     }
@@ -1555,6 +1613,10 @@ pub fn draw(
         .and_then(|f| f.label.as_ref())
         .and_then(|(_, s)| s.fg)
         .unwrap_or_else(|| thinking_border(app.thinking_level()));
+    // The draft text's own color: the capability-aware prose color,
+    // not the terminal default (color.rs: the "all gray by default"
+    // complaint). The inverted caret cell is unchanged.
+    let prose = Style::default().fg(app.color_level().plain_text());
     // The box border. A frame label replaces the built-in title.
     let title = if let Some((flabel, _)) = frame.as_ref().and_then(|f| f.label.as_ref()) {
         // Each label line is a list of styled spans; the title is
@@ -1645,7 +1707,7 @@ pub fn draw(
         let line = if naming && j == 0 {
             Line::from(vec![
                 Span::styled("> ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(l.clone()),
+                Span::styled(l.clone(), prose),
                 Span::styled("_", Style::default().add_modifier(Modifier::BOLD)),
             ])
         } else if j == cursor_row && !in_command_line {
@@ -1663,15 +1725,21 @@ pub fn draw(
             let style = Style::default().bg(Color::White).fg(Color::Black);
             let mut spans = Vec::new();
             if !before.is_empty() {
-                spans.push(Span::raw(before.iter().collect::<String>()));
+                spans.push(Span::styled(
+                    before.iter().collect::<String>(),
+                    prose,
+                ));
             }
             spans.push(Span::styled(caret.to_string(), style));
             if !after.is_empty() {
-                spans.push(Span::raw(after.iter().collect::<String>()));
+                spans.push(Span::styled(
+                    after.iter().collect::<String>(),
+                    prose,
+                ));
             }
             Line::from(spans)
         } else {
-            Line::from(Span::raw(l.clone()))
+            Line::from(Span::styled(l.clone(), prose))
         };
         f.render_widget(Paragraph::new(line), sub);
     }
@@ -2316,6 +2384,7 @@ mod tests {
             config_path: root.join("config.toml"),
             ext_dir: Some(root.join("ui_extensions")),
             active_model: None,
+            color: None,
         };
         let disc = discover(&cfg).unwrap();
         let host = ExtHost::new(&disc, &cfg);
@@ -2536,8 +2605,9 @@ mod tests {
     #[test]
     fn render_message_content_without_ext_matches_wrap_markdown() {
         let content = "head $a+b$\n\n```mermaid\ngraph TD\n  A-->B\n```\n\n```bash\necho hi\n```";
-        let plain = render_message_content(content, 7, None, 60);
-        let builtin = wrap_markdown(content, 60);
+        let base = Style::default();
+        let plain = render_message_content(content, 7, None, 60, base);
+        let builtin = wrap_markdown(content, 60, base);
         let show = |v: &Vec<Line>| v.iter().map(|l| l.to_string()).collect::<Vec<_>>();
         assert_eq!(
             show(&plain),
@@ -2607,6 +2677,7 @@ mod tests {
             assert!(w <= 40, "row is {w} columns, the row owns 40");
         }
     }
+
     // ── loop-phase indicator (docs/tui-model-wait-indicator.md) ──
 
     struct PhaseDummyHandle;
@@ -2652,6 +2723,7 @@ mod tests {
             config_path: tmp.path().join("config.toml"),
             ext_dir: Some(tmp.path().join("ui_extensions")),
             active_model: None,
+            color: None,
         };
         let disc = crate::ext::discover(&cfg).unwrap();
         let host = crate::ext::ExtHost::new(&disc, &cfg);

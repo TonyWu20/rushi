@@ -420,6 +420,16 @@ arg_style = "append_session"   # append_session | env | none
 file's directory as working directory and an absolute `CONFIG`
 environment variable.
 
+```toml
+[tui]
+color = "truecolor"   # truecolor | 256 | 16 | 8 (aliases: rgb, 24bit, 256color, 8color)
+```
+
+`[tui] color` forces the terminal color capability level. Extension
+hex wire colors and the built-in tones lower to it. Unknown names
+are a hard error at load. Absent, the TUI detects from the
+environment (COLORTERM, TERM; color.rs module docs).
+
 ### 13.3 Loop process supervision
 
 The loop runs in its own process group (`setsid` in `pre_exec`).

@@ -66,7 +66,7 @@ impl Level {
         if PLAIN16.contains(&term.as_str()) {
             return Level::C16;
         }
-        Level::Rgb
+        Self::DEFAULT
     }
 
     /// The harness config override (`[tui] color = "truecolor"`).
@@ -86,6 +86,47 @@ impl Level {
             Level::Rgb => "truecolor",
             Level::C256 => "256",
             Level::C16 => "16",
+        }
+    }
+
+    /// The color for unstyled transcript prose (model messages, user
+    /// message bodies, the input draft). Truecolor gets a soft light
+    /// gray that reads as "default text" on a dark theme without
+    /// colliding with any named role color; 256-color quantizes that
+    /// same target through the 256-palette; 16-color falls back to the
+    /// `Gray` swatch (xterm 7, `#c0c0c0`).
+    pub fn plain_text(self) -> Color {
+        match self {
+            Level::Rgb => Color::Rgb(212, 212, 212),
+            Level::C256 => lower(Color::Rgb(212, 212, 212), Level::C256),
+            Level::C16 => Color::Gray,
+        }
+    }
+
+    /// The color for tool/command output (bash and tool-result bodies).
+    /// Chosen distinct from [`Level::plain_text`] at every level: a
+    /// muted mauve in truecolor so results no longer read as the same
+    /// gray as prose.
+    pub fn tool_output(self) -> Color {
+        match self {
+            Level::Rgb => Color::Rgb(191, 181, 205),
+            Level::C256 => lower(Color::Rgb(191, 181, 205), Level::C256),
+            Level::C16 => Color::DarkGray,
+        }
+    }
+
+    /// The color for the *command* text of a tool call — what was
+    /// invoked (a bash line, a tool name + args), as opposed to the
+    /// result it produced ([`Level::tool_output`]). Chosen lighter
+    /// than the result at every level so a command and its output read
+    /// as two different voices, not one repeated gray. Distinct from
+    /// both [`Level::plain_text`] and [`Level::tool_output`]: a light
+    /// blue in truecolor, the brightest blue swatch in 16-color.
+    pub fn tool_command(self) -> Color {
+        match self {
+            Level::Rgb => Color::Rgb(170, 200, 240),
+            Level::C256 => lower(Color::Rgb(170, 200, 240), Level::C256),
+            Level::C16 => Color::LightBlue,
         }
     }
 }
@@ -335,5 +376,46 @@ mod tests {
         assert_eq!(palette256(231), (255, 255, 255));
         assert_eq!(palette256(196), (255, 0, 0));
         assert_eq!(palette256(59), (95, 95, 95)); // cube (1,1,1)
+    }
+
+    #[test]
+    fn plain_text_palette() {
+        // Transcript prose / the input draft. Truecolor target is a soft
+        // light gray that reads as "default text", not a saturated swatch.
+        assert_eq!(Level::Rgb.plain_text(), Color::Rgb(212, 212, 212));
+        // 16-color lands on the light-gray swatch (xterm 7), never the dim one.
+        assert_eq!(Level::C16.plain_text(), Color::Gray);
+        // 256-color quantizes the same gray target to a 256-palette index.
+        assert!(matches!(Level::C256.plain_text(), Color::Indexed(..)));
+    }
+
+    #[test]
+    fn tool_output_palette() {
+        // Tool/command output: a muted mauve, distinct from prose at every
+        // level so bash results are visually separable from plain text.
+        assert_eq!(Level::Rgb.tool_output(), Color::Rgb(191, 181, 205));
+        assert_eq!(Level::C16.tool_output(), Color::DarkGray);
+        assert!(matches!(Level::C256.tool_output(), Color::Indexed(..)));
+        for lvl in [Level::Rgb, Level::C256, Level::C16] {
+            assert_ne!(lvl.plain_text(), lvl.tool_output());
+        }
+    }
+
+    #[test]
+    fn tool_command_palette() {
+        // The command text of a tool call: a light blue, lighter than the
+        // result (tool_output) so the two read as different voices.
+        assert_eq!(
+            Level::Rgb.tool_command(),
+            Color::Rgb(170, 200, 240)
+        );
+        assert_eq!(Level::C16.tool_command(), Color::LightBlue);
+        assert!(matches!(Level::C256.tool_command(), Color::Indexed(..)));
+        for lvl in [Level::Rgb, Level::C256, Level::C16] {
+            // Command is its own voice: distinct from prose and from
+            // the result body at every level.
+            assert_ne!(lvl.plain_text(), lvl.tool_command());
+            assert_ne!(lvl.tool_output(), lvl.tool_command());
+        }
     }
 }
