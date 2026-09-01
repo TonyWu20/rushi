@@ -81,6 +81,33 @@
       a toggle that shows or hides thinking blocks. The toggle
       follows `pi`'s thinking display.
 
+## New requests (2026-09-01)
+
+- [x] Show the loop phase while the loop runs. The TUI must state
+      that the loop waits for the model response. Today nothing
+      shows the phase. The model call is silent until the response
+      lands. The wait runs long.
+  - Data: the 2026-08-31 DSPARK analysis
+      (notes/harness-vs-pi-model-latency.md) puts the model
+      round-trip at a median of 9 s, a p90 of 50 s, and a max of
+      242 s.
+  - Spec: docs/tui-model-wait-indicator.md. The loop publishes
+      the phase as an `ext_status` event (id `loop_phase`). The
+      TUI renders the last value gated on the loop-running bit.
+  - Shipped: `scripts/step.sh` publishes the `loop_phase` marker
+    (`wait` before the model call, `tools` before the routing)
+    as an `ext_status` event through `bin/log` with schema
+    validation. `bin/tui` derives four display states (idle,
+    running, wait, tools) from the last marker value and the
+    loop-running bit. The session title shows the phase bit.
+    A working row above the input box shows the wait
+    since the marker (`waiting for model · Ns`,
+    `tools running · Ns`, `Working...`). The row is its own
+    layout cell and shows under any statusline. A statusline
+    extension picks the marker up through the existing `statuses`
+    map as a `loop_phase=wait` pill. `scripts/cache-e2e.sh`
+    checks the marker in the session log (the mutation gate).
+
 ## Design decision: pending user messages (2026-08-31)
 
 Decision: ship the pending-message work in two stages.

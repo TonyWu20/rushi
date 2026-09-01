@@ -31,6 +31,20 @@ route_cmd() {
   fi
 }
 
+# Publish the loop phase as an ext_status marker
+# (docs/tui-model-wait-indicator.md). The TUI renders the last
+# `loop_phase` value, gated on the loop-running bit. One event per
+# line, validated through bin/log with the schema dir. A failed
+# append aborts the step, like every other append in this script.
+append_loop_phase() {
+  local phase="$1"
+  local ts event
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  event=$(jq -cn --arg ts "$ts" --arg p "$phase" \
+    '{v:1, type:"ext_status", ts:$ts, id:"loop_phase", value:$p}')
+  echo "$event" | "$BIN_DIR/log" --session "$SESSION_DIR" --schemas "$SCHEMA_DIR" || exit 1
+}
+
 # The automatic handoff (correction 57). One cheap summarization call
 # on the compacted log. It seeds a new session with the summary and
 # records the `context_exhausted` marker on this session. The TUI
@@ -113,6 +127,7 @@ fi
 # 3. awaiting_tool_result: crash recovery (G2).
 #    Route the pending calls without calling the model.
 if [ "$STATE" = "awaiting_tool_result" ]; then
+  append_loop_phase tools
   TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   jq -c '.pending_tool_calls[] | . + {type: "tool_call", ts: $ts}' --arg ts "$TS" "$WORKDIR/claim.json" \
     | route_cmd > "$WORKDIR/routed.jsonl" || exit 1
@@ -121,6 +136,9 @@ if [ "$STATE" = "awaiting_tool_result" ]; then
 fi
 
 # 4. awaiting_model: assemble, then check for a budget error before model.
+# The marker covers assemble, the model call, the parse, and the
+# retry loop (docs/tui-model-wait-indicator.md).
+append_loop_phase wait
 "$BIN_DIR/assemble" --session "$SESSION_DIR" --config "$CONFIG" > "$WORKDIR/model-request.json" || exit 1
 if jq -e '.type == "error"' "$WORKDIR/model-request.json" > /dev/null; then
   "$BIN_DIR/log" --session "$SESSION_DIR" --schemas "$SCHEMA_DIR" < "$WORKDIR/model-request.json" || exit 1
@@ -220,6 +238,7 @@ done
 
 # 7. route only when parse says tool calls need routing (exit 1).
 if [ "$PARSE_EXIT" -eq 1 ]; then
+  append_loop_phase tools
   jq -c 'select(.type == "tool_call")' "$WORKDIR/parsed.jsonl" \
     | route_cmd > "$WORKDIR/routed.jsonl" || exit 1
   cat "$WORKDIR/parsed.jsonl" "$WORKDIR/routed.jsonl" | "$BIN_DIR/log" --session "$SESSION_DIR" --schemas "$SCHEMA_DIR" || exit 1

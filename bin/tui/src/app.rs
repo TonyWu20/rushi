@@ -158,6 +158,12 @@ pub struct App {
     /// Drops the oldest id when the map holds the cap
     /// (ui-extension-plan stage 4: the log-growth bound).
     ext_status_order: VecDeque<String>,
+    /// The timestamp of the event that last set each ext_status id
+    /// value (docs/tui-model-wait-indicator.md). Each id maps to
+    /// the raw `ts` string of that event. The map drops an id with
+    /// the value map at the cap. An event without a `ts` field
+    /// updates the value but leaves the entry untouched.
+    ext_status_ts: HashMap<String, String>,
 }
 
 /// The cap on the distinct ext_status ids the in-memory map holds.
@@ -166,6 +172,13 @@ pub struct App {
 /// event: the log is the audit record, and the bound bounds the
 /// TUI's memory only (ui-extension-plan stage 4, open items).
 const EXT_STATUS_ID_CAP: usize = 128;
+
+/// The `ext_status` id that carries the active loop's phase
+/// (docs/tui-model-wait-indicator.md). The loop publishes `wait`
+/// before the model call and `tools` before routing. The TUI reads
+/// the last value, gated on the loop-running bit. No TUI decision
+/// logic: the value is published log state.
+pub const LOOP_PHASE_STATUS_ID: &str = "loop_phase";
 
 /// A session name must stay a plain directory name inside the sessions
 /// root. Mirrors `port_file::session_dir`: no absolute paths, no
@@ -182,8 +195,11 @@ fn valid_session_name(name: &str) -> bool {
 /// the value map plus the update order (most recent last), capped
 /// at [`EXT_STATUS_ID_CAP`] distinct ids: at the cap the
 /// least-recently-updated id drops, like the incremental path.
-fn ext_status_map(events: &[Event]) -> (HashMap<String, Value>, VecDeque<String>) {
+fn ext_status_map(
+    events: &[Event],
+) -> (HashMap<String, Value>, HashMap<String, String>, VecDeque<String>) {
     let mut m = HashMap::new();
+    let mut ts = HashMap::new();
     let mut order: VecDeque<String> = VecDeque::new();
     for e in events {
         if e.kind() != EventKind::ExtStatus {
@@ -193,11 +209,13 @@ fn ext_status_map(events: &[Event]) -> (HashMap<String, Value>, VecDeque<String>
             continue;
         };
         let value = e.get("value").cloned().unwrap_or(Value::Null);
+        let event_ts = e.get_str("ts").map(str::to_string);
         if m.insert(id.to_string(), value).is_none() {
             order.push_back(id.to_string());
             while order.len() > EXT_STATUS_ID_CAP {
                 let old = order.pop_front().expect("cap keeps the order non-empty");
                 m.remove(&old);
+                ts.remove(&old);
             }
         } else {
             if let Some(pos) = order.iter().position(|x| x == id) {
@@ -205,8 +223,11 @@ fn ext_status_map(events: &[Event]) -> (HashMap<String, Value>, VecDeque<String>
             }
             order.push_back(id.to_string());
         }
+        if let Some(t) = event_ts {
+            ts.insert(id.to_string(), t);
+        }
     }
-    (m, order)
+    (m, ts, order)
 }
 
 const STATUS_TTL: std::time::Duration = std::time::Duration::from_secs(4);
@@ -243,6 +264,7 @@ impl App {
             pending_name: None,
             ext_status_values: HashMap::new(),
             ext_status_order: VecDeque::new(),
+            ext_status_ts: HashMap::new(),
             viewport: 0,
             events_version: 0,
             transcript_cache: None,
@@ -279,12 +301,13 @@ impl App {
     /// Switch the visible session. Reloads its log and resets scroll.
     /// The caller restarts the port watch afterwards.
     pub fn set_active(&mut self, id: SessionId, events: Vec<Event>) {
-        let (statuses, order) = ext_status_map(&events);
+        let (statuses, status_ts, order) = ext_status_map(&events);
         self.active = Some(id);
         self.events = events;
         self.scroll = 0;
         self.events_version += 1;
         self.ext_status_values = statuses;
+        self.ext_status_ts = status_ts;
         self.ext_status_order = order;
     }
 
@@ -322,7 +345,7 @@ impl App {
                 if event.kind() == EventKind::ExtStatus {
                     let value = event.get("value").cloned().unwrap_or(Value::Null);
                     if let Some(id) = event.get_str("id") {
-                        self.record_ext_status(id, value);
+                        self.record_ext_status(id, value, event.get_str("ts"));
                     }
                 }
                 self.events.push(event);
@@ -405,7 +428,9 @@ impl App {
     /// Record one ext_status value in log order. A later event for
     /// the same id wins. The id set is capped:
     /// [`EXT_STATUS_ID_CAP`] distinct ids, oldest-updated first out.
-    fn record_ext_status(&mut self, id: &str, value: Value) {
+    /// An event without a `ts` field updates the value but leaves
+    /// the timestamp entry untouched.
+    fn record_ext_status(&mut self, id: &str, value: Value, ts: Option<&str>) {
         if self
             .ext_status_values
             .insert(id.to_string(), value)
@@ -418,11 +443,27 @@ impl App {
                     .pop_front()
                     .expect("the cap keeps the order non-empty");
                 self.ext_status_values.remove(&old);
+                self.ext_status_ts.remove(&old);
             }
         } else if let Some(pos) = self.ext_status_order.iter().position(|x| x == id) {
             self.ext_status_order.remove(pos);
             self.ext_status_order.push_back(id.to_string());
         }
+        if let Some(t) = ts {
+            self.ext_status_ts.insert(id.to_string(), t.to_string());
+        }
+    }
+
+    /// The raw `ts` of the event that last set the
+    /// [`LOOP_PHASE_STATUS_ID`] value of the active session.
+    /// `None` when the log holds no marker, or the marker event
+    /// carries no timestamp. The render parses the value with
+    /// chrono; a parse failure keeps the label and drops the span
+    /// (docs/tui-model-wait-indicator.md section 4).
+    pub fn loop_phase_ts(&self) -> Option<&str> {
+        self.ext_status_ts
+            .get(LOOP_PHASE_STATUS_ID)
+            .map(|s| s.as_str())
     }
 
     // ── thinking level ─────────────────────────────────────────
@@ -1793,5 +1834,145 @@ mod tests {
             app.scroll() > before,
             "normal mode keeps the half-page log scroll"
         );
+    }
+
+    // ── loop_phase marker (docs/tui-model-wait-indicator.md) ──
+
+    fn loop_phase_marker(ts: &str, value: &str) -> Event {
+        ev(&format!(
+            r#"{{"v":1,"type":"ext_status","ts":"{ts}","id":"loop_phase","value":"{value}"}}"#,
+            ts = ts,
+            value = value
+        ))
+    }
+
+    #[test]
+    fn loop_phase_value_and_ts_track_the_last_event() {
+        // The value map and the timestamp side map both point at the
+        // last event for the id, in log order.
+        let evs = vec![
+            loop_phase_marker("2026-01-01T00:00:00Z", "wait"),
+            loop_phase_marker("2026-01-01T00:00:05Z", "tools"),
+            loop_phase_marker("2026-01-01T00:00:09Z", "wait"),
+        ];
+        let app = app_with(evs, "s1");
+        assert_eq!(
+            app.ext_statuses().get(LOOP_PHASE_STATUS_ID),
+            Some(&json!("wait")),
+            "the last value wins"
+        );
+        assert_eq!(
+            app.loop_phase_ts(),
+            Some("2026-01-01T00:00:09Z"),
+            "the last event ts wins"
+        );
+    }
+
+    #[test]
+    fn loop_phase_ts_updates_on_watch_events() {
+        let mut app = app_with(vec![loop_phase_marker("t1", "wait")], "s1");
+        assert_eq!(app.loop_phase_ts(), Some("t1"));
+        app.on_watch_item(WatchItem::Event {
+            event: loop_phase_marker("t2", "tools"),
+            cursor: crate::port::TailCursor::end(),
+        });
+        assert_eq!(
+            app.ext_statuses().get(LOOP_PHASE_STATUS_ID),
+            Some(&json!("tools")),
+            "the watch event updates the value"
+        );
+        assert_eq!(
+            app.loop_phase_ts(),
+            Some("t2"),
+            "the watch event updates the ts"
+        );
+        // An event without a ts field updates the value, leaves the
+        // ts entry untouched.
+        app.on_watch_item(WatchItem::Event {
+            event: ev(r#"{"v":1,"type":"ext_status","id":"loop_phase","value":"wait"}"#),
+            cursor: crate::port::TailCursor::end(),
+        });
+        assert_eq!(
+            app.ext_statuses().get(LOOP_PHASE_STATUS_ID),
+            Some(&json!("wait"))
+        );
+        assert_eq!(app.loop_phase_ts(), Some("t2"), "the ts entry keeps");
+    }
+
+    #[test]
+    fn loop_phase_marker_survives_the_id_cap() {
+        // 129 distinct ids precede a fresh loop_phase marker: the cap
+        // (128 ids) drops the two oldest ids, the marker survives
+        // (docs/tui-model-wait-indicator.md section 4).
+        let mut evs: Vec<Event> = (0..129)
+            .map(|i| {
+                ev(&format!(
+                    r#"{{"v":1,"type":"ext_status","ts":"t","id":"id-{i}","value":{i}}}"#,
+                    i = i
+                ))
+            })
+            .collect();
+        evs.push(loop_phase_marker("2026-01-01T00:00:00Z", "wait"));
+        let app = app_with(evs, "s1");
+        let m = app.ext_statuses();
+        assert_eq!(m.len(), EXT_STATUS_ID_CAP, "the cap holds");
+        assert!(m.get("id-0").is_none(), "the oldest id drops");
+        assert!(m.get("id-1").is_none(), "the next oldest drops");
+        assert_eq!(
+            m.get(LOOP_PHASE_STATUS_ID),
+            Some(&json!("wait")),
+            "the fresh marker survives"
+        );
+        assert_eq!(
+            app.loop_phase_ts(),
+            Some("2026-01-01T00:00:00Z"),
+            "the marker ts survives the drop"
+        );
+    }
+
+    #[test]
+    fn loop_phase_restart_rebuilds_from_the_log() {
+        // A TUI restart reads the whole log into set_active. The
+        // state is a pure function of the log and the running bit,
+        // so the rebuild restores the marker and its ts.
+        let events = vec![
+            ev(r#"{"v":1,"type":"user_message","ts":"t","content":"hi"}"#),
+            loop_phase_marker("2026-01-01T00:00:00Z", "wait"),
+            loop_phase_marker("2026-01-01T00:00:10Z", "tools"),
+        ];
+        let app = app_with(events, "s1");
+        assert_eq!(
+            app.ext_statuses().get(LOOP_PHASE_STATUS_ID),
+            Some(&json!("tools"))
+        );
+        assert_eq!(app.loop_phase_ts(), Some("2026-01-01T00:00:10Z"));
+    }
+
+    #[test]
+    fn loop_phase_session_switch_keeps_own_marker() {
+        // Two sessions hold different markers. Each switch rebuilds
+        // both maps from that session's log, so each session shows
+        // its own last value and ts.
+        let mut app = App::new();
+        app.set_sessions(vec![SessionId::new("a"), SessionId::new("b")]);
+        app.set_active(
+            SessionId::new("a"),
+            vec![loop_phase_marker("ta", "wait")],
+        );
+        assert_eq!(
+            app.ext_statuses().get(LOOP_PHASE_STATUS_ID),
+            Some(&json!("wait"))
+        );
+        assert_eq!(app.loop_phase_ts(), Some("ta"));
+        app.set_active(
+            SessionId::new("b"),
+            vec![loop_phase_marker("tb", "tools")],
+        );
+        assert_eq!(
+            app.ext_statuses().get(LOOP_PHASE_STATUS_ID),
+            Some(&json!("tools")),
+            "the other session's marker wins"
+        );
+        assert_eq!(app.loop_phase_ts(), Some("tb"), "the other session's ts wins");
     }
 }

@@ -33,6 +33,17 @@ echo "{\"v\":1,\"type\":\"user_message\",\"ts\":\"$TS1\",\"content\":\"Read conf
 # Run turn 1 (will call model API, parse, route, log)
 "$SCRIPT_DIR/step.sh" "$SESSION"
 
+# The step publishes the loop phase as an ext_status marker
+# (docs/tui-model-wait-indicator.md). The session log must hold at
+# least one loop_phase event. This check is the mutation gate:
+# removing the emit helper from step.sh fails it.
+if ! jq -e 'select(.type == "ext_status" and .id == "loop_phase")' "$SESSION_DIR/events.jsonl" > /dev/null; then
+  echo "FAIL: no loop_phase marker in the session log." >&2
+  exit 1
+fi
+PHASES=$(jq -r 'select(.type == "ext_status" and .id == "loop_phase") | .value' "$SESSION_DIR/events.jsonl" | sort -u | tr '\n' ' ')
+echo "Turn 1 loop_phase markers: $PHASES"
+
 # Extract cached_tokens from turn 1 assistant_message events
 TURN1_CACHED=$(jq -r 'select(.type == "assistant_message") | .usage.cached_tokens // 0' "$SESSION_DIR/events.jsonl" | tail -1)
 echo "Turn 1 cached_tokens: $TURN1_CACHED"

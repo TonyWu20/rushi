@@ -145,6 +145,31 @@ requests_from_human.md, 2026-08-31, stage 1):
 - loop stopped: `N message(s) waiting — no loop running · Ctrl+R
   run`
 
+The session title holds the loop-phase bit. The loop publishes the
+phase as an `ext_status` event with id `loop_phase` (values `wait`
+and `tools`; docs/tui-model-wait-indicator.md). The bit is a pure
+function of the last marker value and the loop-running bit, so it
+survives a TUI restart:
+
+- loop stopped: `[idle]`
+- loop running, no marker or an unknown value: `[running]`
+- loop running, last value `wait`: `[wait]`
+- loop running, last value `tools`: `[tools]`
+
+A working row sits above the input box, below the transcript. It
+shows while the loop runs, spinner plus text. When the loop stops,
+no row draws and the transcript absorbs the place. The input box
+does not move. A statusline extension does not own the row, so
+it shows under any statusline:
+
+- `wait` state: `waiting for model · Ns`
+- `tools` state: `tools running · Ns`
+- `running` state, no marker or unknown value: `Working...`
+- `idle`: no row
+
+`N` is whole seconds since the marker, `Mm SSs` at 60 s and up.
+The spinner shows one braille frame per redraw, about 100 ms.
+
 ## 7. Key bindings
 
 | Key | Action |

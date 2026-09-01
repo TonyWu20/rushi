@@ -35,6 +35,10 @@ fn main() {
     }
 
     // Load all schemas
+    // The list mirrors the session log's event vocabulary. ext_status
+    // is shared UI state: the loop publishes the loop_phase marker
+    // through this binary (docs/tui-model-wait-indicator.md), so the
+    // schema must validate here, not only in the TUI.
     let schema_files = [
         "user_message.json",
         "assistant_message.json",
@@ -42,6 +46,7 @@ fn main() {
         "tool_result.json",
         "error.json",
         "context_exhausted.json",
+        "ext_status.json",
     ];
 
     let mut schemas: Vec<(String, serde_json::Value)> = Vec::new();

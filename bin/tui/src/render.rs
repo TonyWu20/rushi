@@ -968,6 +968,149 @@ pub fn help_line(running: bool) -> String {
     )
 }
 
+/// The loop-phase display state of the active session
+/// (docs/tui-model-wait-indicator.md section 2). One of four values,
+/// derived from two inputs: the last `loop_phase` value in the log
+/// and the loop-running bit. The state is a pure function of the
+/// log and the bit, so it survives a TUI restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhaseState {
+    /// The loop is not running. Bit `[idle]`, the working row
+    /// stays blank.
+    Idle,
+    /// The loop runs with no marker, or a value outside
+    /// `wait` / `tools`. Bit `[running]`, the row shows
+    /// `Working...`.
+    RunningUnknown,
+    /// The loop runs, the last marker value is `wait`. Bit
+    /// `[wait]`, the row shows the wait for the model response.
+    Wait,
+    /// The loop runs, the last marker value is `tools`. Bit
+    /// `[tools]`, the row shows the tool run.
+    Tools,
+}
+
+/// The title bit text per phase state (docs/tui-model-wait-indicator.md
+/// section 2). A running loop names its phase; an idle loop or an
+/// unknown marker keeps the plain bit.
+pub fn phase_bit(state: PhaseState) -> &'static str {
+    match state {
+        PhaseState::Idle => " [idle] ",
+        PhaseState::RunningUnknown => " [running] ",
+        PhaseState::Wait => " [wait] ",
+        PhaseState::Tools => " [tools] ",
+    }
+}
+
+/// Derive the phase state from the last marker value and the running
+/// bit (docs/tui-model-wait-indicator.md section 2). The value comes
+/// from the O(1) per-id map; a missing marker or a value outside
+/// the two known strings maps to `RunningUnknown`.
+pub fn phase_state(app: &App, running: bool) -> PhaseState {
+    if !running {
+        return PhaseState::Idle;
+    }
+    match app
+        .ext_statuses()
+        .get(crate::app::LOOP_PHASE_STATUS_ID)
+        .and_then(|v| v.as_str())
+    {
+        Some("wait") => PhaseState::Wait,
+        Some("tools") => PhaseState::Tools,
+        _ => PhaseState::RunningUnknown,
+    }
+}
+
+/// The wait span between the marker timestamp and `now`, in whole
+/// seconds: `Ns` under 60 s, `Mm SSs` at 60 s and up. A negative
+/// span (the loop host clock runs behind the TUI) clamps to `0s`.
+/// An unparseable timestamp yields `None`: the working row keeps
+/// the label and drops the span (docs/tui-model-wait-indicator.md
+/// section 4).
+pub fn wait_span_text(ts: &str, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+    let marked = chrono::DateTime::parse_from_rfc3339(ts)
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    let secs = now.signed_duration_since(marked).num_seconds().max(0);
+    if secs < 60 {
+        Some(format!("{secs}s"))
+    } else {
+        Some(format!("{m}m {s}s", m = secs / 60, s = secs % 60))
+    }
+}
+
+/// The braille spinner frames of the working row, in cycle order.
+/// The row shows one frame per redraw; the main loop redraws about
+/// every 100 ms, so the cycle runs at 100 ms per frame.
+const WORKING_SPINNER_FRAMES: [&str; 10] = [
+    "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
+];
+
+/// The spinner frame index for `now`: the wall-clock milliseconds
+/// over the frame interval. The index is a pure function of time, so
+/// no animation state lives in the App.
+fn spinner_frame(now: &chrono::DateTime<chrono::Utc>) -> &'static str {
+    let idx = (now.timestamp_millis() / 100) % WORKING_SPINNER_FRAMES.len() as i64;
+    WORKING_SPINNER_FRAMES[idx as usize]
+}
+
+/// The working row text above the input box
+/// (docs/tui-model-wait-indicator.md section 3): the phase with the
+/// wait span from the marker timestamp. The `wait` and `tools`
+/// states carry the span; an unparseable timestamp drops the span
+/// and keeps the label. The idle state owns no text: the row stays
+/// blank.
+fn working_row_text(
+    state: PhaseState,
+    ts: Option<&str>,
+    now: &chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
+    match state {
+        PhaseState::Idle => None,
+        PhaseState::RunningUnknown => Some("Working...".to_string()),
+        PhaseState::Wait => {
+            let label = "waiting for model";
+            match ts.and_then(|t| wait_span_text(t, *now)) {
+                Some(span) => Some(format!("{label} · {span}")),
+                None => Some(label.to_string()),
+            }
+        }
+        PhaseState::Tools => {
+            let label = "tools running";
+            match ts.and_then(|t| wait_span_text(t, *now)) {
+                Some(span) => Some(format!("{label} · {span}")),
+                None => Some(label.to_string()),
+            }
+        }
+    }
+}
+
+/// The working row above the input box
+/// (docs/tui-model-wait-indicator.md section 3, after the `pi`
+/// working indicator): the spinner frame in the thinking-level
+/// border color, then the phase text in dim. The caller draws the
+/// row only while the loop runs. The idle state yields no text:
+/// no row, and the transcript absorbs its place.
+fn working_row(
+    app: &App,
+    running: bool,
+    now: &chrono::DateTime<chrono::Utc>,
+) -> Line<'static> {
+    let state = phase_state(app, running);
+    let Some(text) = working_row_text(state, app.loop_phase_ts(), now) else {
+        return Line::default();
+    };
+    let frame = Span::styled(
+        format!("{} ", spinner_frame(now)),
+        Style::default().fg(thinking_border(app.thinking_level())),
+    );
+    let body = Span::styled(
+        format!(" {text}"),
+        Style::default().fg(Color::DarkGray),
+    );
+    Line::from(vec![frame, body])
+}
+
 /// The status/help row content as terminal lines (one per row).
 ///
 /// The TUI flash wins; then the status extension row (its lines or
@@ -1043,6 +1186,12 @@ fn status_rows(
                         .add_modifier(Modifier::BOLD),
                 ))];
             }
+            // The running loop names its phase in the working row
+            // above the input box, not here
+            // (docs/tui-model-wait-indicator.md section 3): the
+            // statusline extension owns this slot, and the built-in
+            // fallback shows the handoff hint, the last loop line,
+            // or the help row.
             match last_line {
                 Some(l) => vec![Line::from(Span::styled(
                     format!(" » {}", trunc(&l, row_width.saturating_sub(4))),
@@ -1187,7 +1336,8 @@ pub fn pending_steering_lines(app: &App, running: bool, row_width: usize) -> Vec
 }
 
 /// The whole frame: bordered panel with session title, transcript,
-/// optional approval banner, input line, and the status/help row.
+/// optional approval banner, the working row (drawn while the loop
+/// runs), the input line, and the status/help row.
 /// When a status extension exists, its row owns that last line
 /// (ui-extension-plan stage 1 layout); otherwise the built-in
 /// help/status content shows there.
@@ -1217,8 +1367,12 @@ pub fn draw(
         .as_ref()
         .map(|s| app.loop_running(s))
         .unwrap_or(false);
+    // The loop-phase bit (docs/tui-model-wait-indicator.md): a
+    // running loop names its phase (`[wait]`, `[tools]`); an
+    // idle loop or an unknown marker keeps the plain bit.
+    let phase = phase_state(app, running);
     let mut status_bits: Vec<Span<'static>> = vec![Span::styled(
-        if running { " [running] " } else { " [idle] " },
+        phase_bit(phase),
         Style::default()
             .fg(if running {
                 Color::Green
@@ -1248,6 +1402,7 @@ pub fn draw(
     //   transcript (fill)
     //   waiting messages (0..=4, only when messages wait)
     //   approval banner (1, only when pending)
+    //   working row (1, while the loop runs: spinner + phase)
     //   input line (1)
     //   help/status row (1)
     let banner = app.oldest_pending_approval().is_some();
@@ -1287,6 +1442,14 @@ pub fn draw(
         constraints.push(Constraint::Length(pending_rows.len() as u16));
     }
     if banner {
+        constraints.push(Constraint::Length(1));
+    }
+    // The working row above the input box: the loop-phase spinner
+    // and text while the loop runs (docs/tui-model-wait-indicator.md
+    // section 3). No row when idle: the transcript absorbs it. The
+    // input box does not move; this matches the `pi` working
+    // indicator.
+    if running {
         constraints.push(Constraint::Length(1));
     }
     constraints.push(Constraint::Length(input_area_h));
@@ -1361,6 +1524,18 @@ pub fn draw(
                 .add_modifier(Modifier::BOLD),
         )]);
         f.render_widget(Paragraph::new(l), rows[row]);
+        row += 1;
+    }
+
+    // working row: shown while the loop runs. The spinner and the
+    // phase text. No row when idle (docs/tui-model-wait-indicator.md
+    // section 3).
+    if running {
+        let now = chrono::Utc::now();
+        f.render_widget(
+            Paragraph::new(working_row(app, running, &now)),
+            rows[row],
+        );
         row += 1;
     }
 
@@ -2431,6 +2606,220 @@ mod tests {
                 .sum();
             assert!(w <= 40, "row is {w} columns, the row owns 40");
         }
+    }
+    // ── loop-phase indicator (docs/tui-model-wait-indicator.md) ──
+
+    struct PhaseDummyHandle;
+    impl crate::port::LoopHandle for PhaseDummyHandle {
+        fn stop(&self) {}
+        fn wait_exit(&self) -> i32 {
+            0
+        }
+        fn take_lines(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<crate::port::LoopLine>> {
+            None
+        }
+    }
+
+    /// One `loop_phase` marker event with the given raw `ts` and value.
+    fn phase_marker(ts: &str, value: &str) -> Event {
+        Event::parse_line(&format!(
+            r#"{{"v":1,"type":"ext_status","ts":"{ts}","id":"loop_phase","value":"{value}"}}"#,
+            ts = ts,
+            value = value
+        ))
+        .unwrap()
+    }
+
+    /// Attach a running loop with one output line, so the status row
+    /// has a last line and the running bit is set.
+    fn attach_running_loop(app: &mut App, sid: &str) {
+        let (tx, rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::port::LoopLine>();
+        app.attach_loop(crate::port::SessionId::new(sid), Box::new(PhaseDummyHandle), rx);
+        tx.send(crate::port::LoopLine::Stdout("loop out".into())).unwrap();
+        app.drain_loop_lines();
+    }
+
+    /// An extension host with no extensions: the built-in row owns
+    /// the slot.
+    fn empty_host() -> (crate::ext::ExtHost, tempfile::TempDir) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = crate::config::TuiConfig {
+            sessions_root: tmp.path().join("sessions"),
+            schemas_dir: None,
+            loop_cmd: None,
+            config_dir: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            ext_dir: Some(tmp.path().join("ui_extensions")),
+            active_model: None,
+        };
+        let disc = crate::ext::discover(&cfg).unwrap();
+        let host = crate::ext::ExtHost::new(&disc, &cfg);
+        (host, tmp)
+    }
+
+    fn fmt_ts(t: chrono::DateTime<chrono::Utc>) -> String {
+        t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
+    #[test]
+    fn phase_state_table() {
+        // The four display states (docs/tui-model-wait-indicator.md
+        // section 2): idle, running-unknown, wait, tools.
+        let app = app_with_session(vec![]);
+        assert_eq!(phase_state(&app, false), PhaseState::Idle);
+        assert_eq!(phase_state(&app, true), PhaseState::RunningUnknown, "no marker: unknown");
+
+        let app = app_with_session(vec![phase_marker("t", "weird")]);
+        assert_eq!(
+            phase_state(&app, true),
+            PhaseState::RunningUnknown,
+            "a value outside the two: unknown"
+        );
+
+        let app = app_with_session(vec![phase_marker("t", "wait")]);
+        assert_eq!(phase_state(&app, true), PhaseState::Wait);
+        assert_eq!(
+            phase_state(&app, false),
+            PhaseState::Idle,
+            "a stopped loop is idle, marker or not"
+        );
+
+        let app = app_with_session(vec![phase_marker("t", "tools")]);
+        assert_eq!(phase_state(&app, true), PhaseState::Tools);
+
+        // A non-string value is outside the two: unknown.
+        let obj = Event::parse_line(
+            r#"{"v":1,"type":"ext_status","ts":"t","id":"loop_phase","value":{"a":1}}"#,
+        )
+        .unwrap();
+        let app = app_with_session(vec![obj]);
+        assert_eq!(phase_state(&app, true), PhaseState::RunningUnknown);
+    }
+
+    #[test]
+    fn phase_bit_text_per_state() {
+        assert_eq!(phase_bit(PhaseState::Idle), " [idle] ");
+        assert_eq!(phase_bit(PhaseState::RunningUnknown), " [running] ");
+        assert_eq!(phase_bit(PhaseState::Wait), " [wait] ");
+        assert_eq!(phase_bit(PhaseState::Tools), " [tools] ");
+    }
+
+    #[test]
+    fn wait_span_text_formats_and_clamps() {
+        // N is whole seconds between the marker timestamp and now:
+        // Ns under 60 s, Mm SSs at 60 s and up; a negative span
+        // clamps to 0s; an unparseable timestamp yields None.
+        let now = chrono::Utc::now();
+        let span = |s: i64| wait_span_text(&fmt_ts(now - chrono::Duration::seconds(s)), now);
+        assert_eq!(span(0), Some("0s".to_string()));
+        assert_eq!(span(59), Some("59s".to_string()));
+        assert_eq!(span(60), Some("1m 0s".to_string()));
+        // The conformance row: a 90 s marker reads 1m 30s.
+        assert_eq!(span(90), Some("1m 30s".to_string()));
+        // A future marker (the loop host clock runs behind the TUI)
+        // clamps to 0s.
+        let future = now + chrono::Duration::seconds(30);
+        assert_eq!(
+            wait_span_text(&fmt_ts(future), now),
+            Some("0s".to_string())
+        );
+        assert_eq!(wait_span_text("not-a-timestamp", now), None);
+        assert_eq!(wait_span_text("", now), None);
+    }
+
+    #[test]
+    fn working_row_shows_the_wait() {
+        // The reserved row above the input box: the spinner frame, the
+        // label, and the wait span since the marker.
+        let ts = fmt_ts(chrono::Utc::now() - chrono::Duration::seconds(5));
+        let mut app = app_with_session(vec![phase_marker(&ts, "wait")]);
+        attach_running_loop(&mut app, "s1");
+        let now = chrono::Utc::now();
+        let joined = join(&[working_row(&app, true, &now)]);
+        assert!(
+            joined.contains("waiting for model · 5s"),
+            "the wait row shows: {joined}"
+        );
+        // The timer left the statusline slot: the built-in row shows
+        // the last loop line, not the wait.
+        let (host, _keep) = empty_host();
+        let slot = join(&status_rows(&app, &host, true, 80));
+        assert!(!slot.contains("waiting for model"), "the slot is free: {slot}");
+        assert!(slot.contains("loop out"), "the last line shows: {slot}");
+    }
+
+    #[test]
+    fn working_row_shows_the_tools_run() {
+        let ts = fmt_ts(chrono::Utc::now() - chrono::Duration::seconds(75));
+        let mut app = app_with_session(vec![phase_marker(&ts, "tools")]);
+        attach_running_loop(&mut app, "s1");
+        let now = chrono::Utc::now();
+        let joined = join(&[working_row(&app, true, &now)]);
+        assert!(
+            joined.contains("tools running · 1m 15s"),
+            "the tools row shows: {joined}"
+        );
+    }
+
+    #[test]
+    fn working_row_is_blank_when_idle() {
+        // The loop is stopped: the bit shows [idle], the row stays
+        // blank, even with a marker in the log. The row stays
+        // reserved: the input box never shifts.
+        let ts = fmt_ts(chrono::Utc::now() - chrono::Duration::seconds(5));
+        let app = app_with_session(vec![phase_marker(&ts, "wait")]);
+        let now = chrono::Utc::now();
+        assert_eq!(
+            join(&[working_row(&app, false, &now)]),
+            "",
+            "the idle row is blank"
+        );
+    }
+
+    #[test]
+    fn working_row_shows_working_for_an_unknown_value() {
+        // A marker value outside wait/tools: the bit shows
+        // [running], the row shows the generic Working... text.
+        let mut app = app_with_session(vec![phase_marker("t", "weird")]);
+        attach_running_loop(&mut app, "s1");
+        let now = chrono::Utc::now();
+        let joined = join(&[working_row(&app, true, &now)]);
+        assert!(
+            joined.contains("Working..."),
+            "the generic text shows: {joined}"
+        );
+        assert!(!joined.contains("waiting for model"), "no wait: {joined}");
+    }
+
+    #[test]
+    fn working_row_drops_the_span_on_an_unparseable_ts() {
+        // The marker value is wait but its ts fails to parse: the
+        // row keeps the label and drops the span.
+        let mut app = app_with_session(vec![phase_marker("t", "wait")]);
+        attach_running_loop(&mut app, "s1");
+        let now = chrono::Utc::now();
+        let joined = join(&[working_row(&app, true, &now)]);
+        assert!(
+            joined.contains("waiting for model"),
+            "the label keeps: {joined}"
+        );
+        assert!(!joined.contains(" · "), "the span drops: {joined}");
+    }
+
+    #[test]
+    fn spinner_frame_cycles_over_time() {
+        // The frame is a pure function of the wall clock: two times
+        // 100 ms apart show adjacent frames in the cycle.
+        let now = chrono::Utc::now();
+        let a = spinner_frame(&now);
+        let b = spinner_frame(&(now + chrono::Duration::milliseconds(100)));
+        let idx = |f: &str| WORKING_SPINNER_FRAMES.iter().position(|x| x == &f).unwrap();
+        assert_eq!(
+            idx(b),
+            (idx(a) + 1) % WORKING_SPINNER_FRAMES.len(),
+            "the frame advances by one per interval"
+        );
     }
 }
 

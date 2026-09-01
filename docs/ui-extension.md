@@ -139,6 +139,20 @@ Cumulative stats survive a restart from the log alone.
   Suppressed from the transcript by default. The log keeps it.
   Publishers send only on change, not per tick
 
+Id registry — the known `ext_status` ids:
+
+- `model_thinking` — the active model's thinking level (0–4).
+  Published by the loop or a policy hook. The TUI colors the
+  input-area border from the last value.
+- `loop_phase` — the active loop's phase: `wait` (the step awaits
+  the model response) and `tools` (the step routes tool calls).
+  The loop publishes it in `scripts/step.sh` before the phase it
+  names (docs/tui-model-wait-indicator.md). The TUI renders the
+  last value as the title bit and the working row above
+  the input box, gated on the loop-running bit. Old logs hold no
+  marker. They fall back to the plain `[running]` bit and the
+  `Working...` row.
+
 Policy hooks (the `no-find-grep` class): an extension with
 `append_types = ["approval", "ext_status"]` watches `tool_call` and
 answers its own `approval_request` with a deny.
