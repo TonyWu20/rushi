@@ -32,9 +32,9 @@ Each design choice follows from the principle:
   and flat: read a manifest, not a daemon's catalog.
 - **Leverage, via metadata.** Each skill carries a tiny manifest:
   what it is, how to run it. The manifest is read at discovery; the
-  deep material (instructions, reference resources) is read only when
-  the skill is actually invoked. Progressive disclosure: the one-line
-  `usage` is always in memory, the man page is on disk.
+  deep material (the user manual, reference resources) is read only
+  when the skill is actually invoked. Progressive disclosure: the
+  one-line description is always in memory, the manual is on disk.
 - **Prefer the map over the filter, at the host.** The host maps a
   stable interface (the manifest schema) and pushes the variation
   (what the skill does) out to the skill itself. It never
@@ -59,11 +59,23 @@ Three existing surfaces must not be confused:
   directory.
 
 A skill is *how-to knowledge, packaged*: a manifest that names it and
-describes it, an entry point that runs it, and optional instructions
-and reference resources the agent reads on the way through. It is not
-a new transport (it runs as a command), not a daemon (it exits), and
-not a schema-validated data op (its contract is prose plus a
-command; it *may* expose a JSON schema, but does not have to).
+describes it, a user manual (prose) the agent reads on demand, and —
+optionally — executable entry points. It is not a new transport (an
+executable, when present, is a tool `route` runs) and not a daemon
+(it exits).
+
+**Capability scope (the axis the design turns on).** Two tiers:
+
+- **Prompt-only skill**: a reusable user manual / prompt, no
+  executable. The agent follows the instructions with existing
+  tools. No new transport, no `route` involvement.
+- **Prompt + executable skill**: a manual *and* one or more
+  executables. The executables are **tools run through `route`**
+  (the existing supervised path: schema validation, timeout, output
+  cap, caps). The manifest names them; the manual tells the agent
+  which tool to call with which arguments. The host keeps one
+  supervised-execution path; a skill is a naming / packaging layer
+  over tools plus prose.
 
 ## 3. The first skill: `tui-capture`
 
@@ -76,9 +88,9 @@ That file, plus a manifest, *is* the first skill:
 
 ```
 skills/tui-capture/
-  skill.toml     # name, one-line description, entry command
-  run.sh         # wraps: python3 <repo>/scripts/tui-capture.py "$@"
-  NOTES.md       # how to read the SGR families, what to assert
+  skill.toml     # name, one-line description, tools = [] or ["…"]
+  SKILL.md       # the user manual: how to run it, how to read the SGR
+  NOTES.md       # reference: SGR families, what to assert
 ```
 
 The agent invokes it the way it invokes `bash`: named, discoverable,
@@ -102,8 +114,8 @@ The shape is the one agent harnesses converged on:
 What this repo adds, in the Unix direction: a skill is *a command on
 a search path with a manifest* — not a protocol server (no JSON-RPC,
 no daemon) and not just a prompt to follow. The executable entry
-point is first-class; discovery is a directory scan the host does
-once.
+point, when present, is a tool on the existing supervised path;
+discovery is a directory scan exposed as a command.
 
 ## 5. Proposed shape
 
@@ -116,56 +128,120 @@ once.
   ```toml
   [skill]
   name        = "tui-capture"
-  description = "Capture the TUI on a PTY for a session; assert screen text and SGR."
-  entry       = "run.sh"          # or a Rust binary, or "python3 tui-capture.py"
-  # optional
-  args        = "SESSION [FLAGS]"  # usage string
-  resources   = ["NOTES.md"]      # files the agent may read
-  caps        = []                 # network / fs-write, mirroring the ext host
+  description = "Capture the TUI on a PTY; assert screen text and SGR."
+  # prompt-only skill: leave `tools` empty
+  # prompt + executable skill: name the tools `route` will run
+  tools       = []             # e.g. ["tui-capture-bin"]
+  resources   = ["NOTES.md"]   # files the agent may read
+  caps        = []             # network / fs-write, mirroring the ext host
   ```
-- **Discovery.** The host (or a small `route` sibling) scans the
-  root, reads the manifest, and presents the agent a flat list:
-  `name — one-line description`. The agent reads the manifest and
-  resources only on the call.
-- **Invocation.** The host runs `entry` under the *same supervision
-  a tool gets*: a timeout, an output cap, a working directory, and
-  the declared `caps`. It is a command, not a session.
-- **Composition.** Because I/O is text, skills pipe through `bash`
-  with no new mechanism. `skill-a | skill-b` is just a shell
-  pipeline of two supervised commands.
+  The user manual is `skills/<name>/SKILL.md`.
+- **Discovery = `skills --list`** (the endorsed form). A command that
+  prints the flat index — `name — one-line description`,
+  deterministically ordered. The agent and the TUI both read from
+  this one source. A sibling `skills show <name>` prints the full
+  skill (manifest + manual + resource listing) on demand.
+- **Execution.** A skill's executable, when it has one, is a tool
+  `route` runs — not a `skills` subcommand. `skills` stays read-only
+  (`list` / `show`); execution is supervised by `route`.
 
-## 6. Guardrails (consistent with the tool contract)
+## 6. Exposure and cache-friendliness (progressive disclosure)
+
+The constraint: the provider reuses a stable *prefix* of the prompt
+via its prefix KV cache; the longer the byte-identical prefix across
+consecutive model calls, the more is reused. In this harness the
+request prefix is the system prompt, which `assemble` builds from the
+frozen call config (`bin/assemble` `main.rs`), and it must stay
+byte-stable between turns. So: keep the stable part at the front,
+the volatile part at the back, and never let a skill pull volatile
+content into the front.
+
+- **In the prompt (the cached prefix).** One fixed
+  `## Available skills` section of the system prompt: a
+  *deterministically sorted* index, one line per skill
+  (`name — one-line description`), plus a two-line "how to use
+  skills" note. It is byte-stable across loop turns (it changes only
+  when the skills tree changes — rare, and versioned with the repo),
+  so it *extends* the cached prefix instead of breaking it.
+- **Out of the prompt.** A skill's full manual and resources,
+  fetched on demand by the agent via `skills show <name>`. The
+  content lands as a **command / tool result in the transcript
+  (the tail)**, where it is recent context. Because disclosure is a
+  result appended to the back, the stable prefix is never mutated —
+  that is the whole point of progressive disclosure.
+- **Determinism for cache stability.** The index is sorted by name
+  (not hash / map order) and stable, so the prompt prefix is
+  byte-identical call to call. A new skill *appends* in sort order —
+  a one-time prefix change.
+- **Never expand the system prompt per relevant skill.** Injecting
+  "the full details of the currently relevant skill" into the prompt
+  would shift the prefix every time a different skill is relevant and
+  defeat the cache. The fixed index plus on-demand fetch avoids that.
+
+## 7. TUI side (mainstream agent-tool UX)
+
+To match the input-box UX of the mainstream agent tools, `bin/tui`
+gains:
+
+- **An autocompletion window widget** in the input area: a popup menu
+  listing candidates, filtering by the typed prefix, navigable
+  (arrows) and selectable (Enter / Tab). A general widget; the slash
+  command is its first consumer.
+- **A slash command (`/`)**: typing `/` opens the window listing
+  available **skills** (and built-in TUI commands); selecting one
+  inserts / triggers it. The data source is the same stable skill
+  index the prompt carries (i.e. `skills --list`), so the TUI and
+  the model share one source of truth.
+- **Implementation.** A `render.rs` widget plus an `app.rs` /
+  `vim_editor.rs` key path, fed by the shared index. It pairs with
+  the skill system; it is not a separate transport.
+
+## 8. Guardrails (consistent with the tool contract)
 
 - A skill that declares no `caps` gets no network and writes only
   under the repo, exactly as a tool is fenced.
-- `entry` resolves relative to the skill directory; no absolute
-  paths, no `../` escapes (the same rule the extension host applies
-  to its load order).
-- A skill that fails supervision (timeout, cap exceeded) is
+- A skill's `tools` entries resolve to real, `route`-runnable tools;
+  no absolute paths, no `../` escapes (the same rule the extension
+  host applies to its load order).
+- A skill execution that fails supervision (timeout, cap exceeded) is
   reported to the agent as a not-run / failed outcome, not a hang.
+- The prompt index is the only skill material in the prompt; a skill
+  that tries to get its full manual into the prompt prefix is out of
+  scope.
 
-## 7. Open (not decided here)
+## 9. Open (not decided here)
 
-- **Where discovery runs.** A `route` sibling, a host-side lister,
-  or a `skills --list` the agent runs. The Unix answer is the last:
-  a command whose output the agent can pipe.
-- **Argument contract.** Default: prose `args` plus a free-form
-  body. A JSON schema is optional, per skill.
-- **Versioning.** Default: no `v` field until a skill changes.
+- Whether a skill may bind **multiple** tools (a small set) or is
+  limited to one. Default: allow a list; the manual names which to
+  call.
+- Where the `skills` command lives: a new `bin/skills`, or a
+  subcommand of an existing binary. The Unix answer is a small
+  dedicated command on the tool path.
+- TUI widget specifics: key bindings, the menu's vertical budget, and
+  how `/` interacts with the existing vim modal input.
 
-## 8. Not doing
+## 10. Not doing
 
 - A capability daemon or a JSON-RPC server. A skill is a command.
 - A global registry or an install step. Skills are files in the
   tree, found by scan, versioned with the repo.
 - Auto-invocation. The agent decides to call a skill; nothing calls
   one on its own.
+- Per-skill expansion of the system prompt (see section 6); that
+  would break the cached prefix.
 
-## 9. Acceptance (for when it is approved)
+## 11. Acceptance (for when it is approved)
 
-- `skills/tui-capture` exists with a manifest and runs, replacing
-  the ad-hoc PTY harness in the TUI feature checks.
-- Discovery lists it by name and one-line description; the agent
-  invokes it as a supervised command.
-- A capability-less skill is fenced (no network, repo-only writes).
-- A skill that times out is a reported failure, not a hang.
+- `skills/tui-capture` exists with a manifest, a manual, and — if it
+  needs one — a `route`-runnable tool; it replaces the ad-hoc PTY
+  harness in the TUI feature checks.
+- `skills --list` prints the flat index; `skills show <name>` prints
+  the full skill. Both feed the prompt index and the TUI window from
+  one source.
+- The prompt carries only the stable index; a skill's manual reaches
+  the model as a transcript result, never as a prompt-prefix
+  mutation.
+- A skill with no `caps` is fenced; a timed-out execution is a
+  reported failure, not a hang.
+- The TUI input box shows the autocompletion window on `/` and lists
+  skills.
