@@ -91,11 +91,7 @@ fn main() {
     };
 
     // Detect line ending style
-    let line_ending = if text.contains("\r\n") {
-        "\r\n"
-    } else {
-        "\n"
-    };
+    let line_ending = if text.contains("\r\n") { "\r\n" } else { "\n" };
 
     // Check old_string is not empty
     if old_string.is_empty() {
@@ -117,9 +113,7 @@ fn main() {
     let count = normalized_text.matches(&normalized_old).count();
 
     if count == 0 {
-        eprintln!(
-            "Error: old_string not found in file. It may have changed since your last read."
-        );
+        eprintln!("Error: old_string not found in file. It may have changed since your last read.");
         std::process::exit(1);
     }
 

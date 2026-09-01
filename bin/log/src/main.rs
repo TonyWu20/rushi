@@ -107,10 +107,7 @@ fn main() {
             }
         };
 
-        let event_type = parsed
-            .get("type")
-            .and_then(|t| t.as_str())
-            .unwrap_or("");
+        let event_type = parsed.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
         let mut valid = false;
         for (etype, schema) in &schemas {
@@ -129,7 +126,11 @@ fn main() {
             }
         }
         if !valid {
-            eprintln!("Error: line {} has unknown event type '{}'", idx + 1, event_type);
+            eprintln!(
+                "Error: line {} has unknown event type '{}'",
+                idx + 1,
+                event_type
+            );
             std::process::exit(1);
         }
     }
@@ -176,10 +177,18 @@ fn validate_against_schema(value: &serde_json::Value, schema: &serde_json::Value
                 return true;
             }
         }
-        Some("string") => { return value.is_string(); }
-        Some("integer") => { return value.is_i64(); }
-        Some("number") => { return value.is_f64(); }
-        Some("boolean") => { return value.is_boolean(); }
+        Some("string") => {
+            return value.is_string();
+        }
+        Some("integer") => {
+            return value.is_i64();
+        }
+        Some("number") => {
+            return value.is_f64();
+        }
+        Some("boolean") => {
+            return value.is_boolean();
+        }
         Some("array") => {
             if let Some(arr) = value.as_array() {
                 if let Some(items_schema) = schema.get("items") {
@@ -192,7 +201,9 @@ fn validate_against_schema(value: &serde_json::Value, schema: &serde_json::Value
                 return true;
             }
         }
-        _ => { return true; }
+        _ => {
+            return true;
+        }
     }
     false
 }

@@ -137,7 +137,10 @@ fn run_turn(session: &str, config: &str) {
         .expect("Failed to execute turn.sh");
 
     if !status.success() {
-        eprintln!("Error: turn.sh exited with status {}", status.code().unwrap_or(-1));
+        eprintln!(
+            "Error: turn.sh exited with status {}",
+            status.code().unwrap_or(-1)
+        );
         std::process::exit(status.code().unwrap_or(1));
     }
 }
@@ -153,9 +156,9 @@ fn resolve_session_dir(session: &str, config_path: &str) -> PathBuf {
 
 fn read_sessions_root(config_path: &str) -> PathBuf {
     let content = fs::read_to_string(config_path).unwrap_or_default();
-    let val: toml::Value = content.parse().unwrap_or_else(|_| {
-        toml::Value::Table(toml::map::Map::new())
-    });
+    let val: toml::Value = content
+        .parse()
+        .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
     val.get("paths")
         .and_then(|p| p.get("sessions_root"))
         .and_then(|s| s.as_str())

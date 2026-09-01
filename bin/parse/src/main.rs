@@ -7,7 +7,10 @@ use std::path::PathBuf;
 
 /// Validate model output and emit execution events
 #[derive(Parser)]
-#[command(name = "parse", about = "Validate model output and emit execution events")]
+#[command(
+    name = "parse",
+    about = "Validate model output and emit execution events"
+)]
 struct Args {
     /// Path to config file
     #[arg(long, default_value = "config.toml")]
@@ -95,10 +98,7 @@ fn main() {
     }
 
     // Usage is optional. Omit it when the model returns null.
-    let usage = model_output
-        .get("usage")
-        .filter(|u| !u.is_null())
-        .cloned();
+    let usage = model_output.get("usage").filter(|u| !u.is_null()).cloned();
 
     // Reasoning items from the model response. Each item is the
     // server's own item. Forward it verbatim to the event log so the
@@ -203,7 +203,7 @@ fn main() {
         "error" | "aborted" => {
             let message = match &detail {
                 Some(d) => format!("Model stop reason: {stop_reason}. {d}"),
-                None => format!("Model stop reason: {stop_reason}.")
+                None => format!("Model stop reason: {stop_reason}."),
             };
             let error_event = serde_json::json!({
                 "v": 1,
@@ -218,7 +218,8 @@ fn main() {
             // Emit assistant_message with truncated tool results
             let mut assistant_tool_calls: Vec<serde_json::Value> = Vec::new();
             for tc in &tool_calls {
-                let args = normalize_arguments(tc.get("arguments")).unwrap_or(serde_json::json!({}));
+                let args =
+                    normalize_arguments(tc.get("arguments")).unwrap_or(serde_json::json!({}));
                 assistant_tool_calls.push(serde_json::json!({
                     "id": tc.get("id").and_then(|id| id.as_str()).unwrap_or(""),
                     "name": tc.get("name").and_then(|n| n.as_str()).unwrap_or(""),
@@ -262,7 +263,7 @@ fn main() {
             // Unknown stop reason: treat as an error so the loop stops.
             let message = match &detail {
                 Some(d) => format!("Model stop reason: {other}. {d}"),
-                None => format!("Model stop reason: {other}.")
+                None => format!("Model stop reason: {other}."),
             };
             let error_event = serde_json::json!({
                 "v": 1,
@@ -345,7 +346,10 @@ enum TextCalls {
     /// No marker in the text. Treat it as plain prose.
     Absent,
     /// Recovered calls. `clean` is the text with the blocks removed.
-    Found { calls: Vec<serde_json::Value>, clean: String },
+    Found {
+        calls: Vec<serde_json::Value>,
+        clean: String,
+    },
     /// A marker is present but the block does not parse.
     Bad(String),
 }
@@ -358,9 +362,7 @@ const A_OPEN: &[u8] = &[0x0a, 0x3c, 0x69, 0x6e, 0x76, 0x6f, 0x6b, 0x65, 0x3e];
 const A_CLOSE: &[u8] = &[0x0a, 0x3c, 0x69, 0x6e, 0x76, 0x6f, 0x6b, 0x65, 0x3e];
 const P_OPEN: &[u8] = &[0x0a, 0x3c, 0x69, 0x6e, 0x76, 0x6f, 0x6b, 0x65];
 const P_CLOSE: &[u8] = &[0x0a, 0x3c, 0x2f, 0x69, 0x6e, 0x76, 0x6f, 0x6b, 0x65];
-const PAR_OPEN: &[u8] = &[
-    0x3c, 0x70, 0x61, 0x72, 0x61, 0x6d, 0x65, 0x74, 0x65, 0x72,
-];
+const PAR_OPEN: &[u8] = &[0x3c, 0x70, 0x61, 0x72, 0x61, 0x6d, 0x65, 0x74, 0x65, 0x72];
 const PAR_CLOSE: &[u8] = &[
     0x3c, 0x2f, 0x70, 0x61, 0x72, 0x61, 0x6d, 0x65, 0x74, 0x65, 0x72,
 ];
@@ -472,11 +474,7 @@ fn parse_block(kind: usize, inner: &str) -> Block {
     if kind == 0 {
         let v: serde_json::Value = match serde_json::from_str(inner) {
             Ok(v) => v,
-            Err(e) => {
-                return Block::Bad(format!(
-                    "the A-family block holds no JSON. Error: {e}"
-                ))
-            }
+            Err(e) => return Block::Bad(format!("the A-family block holds no JSON. Error: {e}")),
         };
         let v = match v {
             serde_json::Value::Array(a) => a,
@@ -505,7 +503,10 @@ fn call_from_json(v: &serde_json::Value) -> Result<BlockCall, String> {
         .and_then(|n| n.as_str())
         .ok_or_else(|| "the block item has no tool name".to_string())?
         .to_string();
-    let args_raw = obj.get("arguments").cloned().unwrap_or(serde_json::json!({}));
+    let args_raw = obj
+        .get("arguments")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
     let args = match args_raw {
         serde_json::Value::String(s) => serde_json::from_str(&s)
             .map_err(|e| format!("the arguments string is not JSON. Error: {e}"))?,
@@ -528,9 +529,7 @@ fn parse_pi_block(inner: &str) -> Block {
     let base = inner.len() - s.len();
     let first_nl = match find_bytes(sb, &[0x0a], 0) {
         Some(n) => n,
-        None => {
-            return Block::Bad("no tool name in the P-family block".to_string())
-        }
+        None => return Block::Bad("no tool name in the P-family block".to_string()),
     };
     let name = s[..first_nl].trim().to_string();
     if name.is_empty() {
@@ -597,8 +596,7 @@ fn parse_param_value(v: &str) -> serde_json::Value {
 }
 
 fn chrono_utc_now() -> String {
-    chrono::Utc::now()
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 #[cfg(test)]
@@ -608,10 +606,7 @@ mod tests {
     #[test]
     fn absent_when_plain_text() {
         let text = "done, nothing to do";
-        assert!(matches!(
-            extract_text_tool_calls(text),
-            TextCalls::Absent
-        ));
+        assert!(matches!(extract_text_tool_calls(text), TextCalls::Absent));
     }
 
     #[test]
@@ -671,18 +666,12 @@ mod tests {
     #[test]
     fn unterminated_marker_is_prose() {
         let text = "the model mentioned \n<invoke> in prose";
-        assert!(matches!(
-            extract_text_tool_calls(text),
-            TextCalls::Absent
-        ));
+        assert!(matches!(extract_text_tool_calls(text), TextCalls::Absent));
     }
 
     #[test]
     fn bad_antml_inner_reports_error() {
         let text = "\n<invoke>\nnot json\n\n<invoke>";
-        assert!(matches!(
-            extract_text_tool_calls(text),
-            TextCalls::Bad(_)
-        ));
+        assert!(matches!(extract_text_tool_calls(text), TextCalls::Bad(_)));
     }
 }

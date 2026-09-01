@@ -192,7 +192,11 @@ fn palette256(idx: u8) -> (u8, u8, u8) {
         }
         16..=231 => {
             let i = idx as u32 - 16;
-            (cube((i / 36) as u8), cube(((i / 6) % 6) as u8), cube((i % 6) as u8))
+            (
+                cube((i / 36) as u8),
+                cube(((i / 6) % 6) as u8),
+                cube((i % 6) as u8),
+            )
         }
         _ => {
             let n = idx as u32 - 232;
@@ -277,7 +281,10 @@ mod tests {
         // COLORTERM without truecolor/24bit says nothing usable: the
         // TERM fallback decides.
         assert_eq!(Level::detect_with(Some("dumb"), Some("xterm")), Level::C16);
-        assert_eq!(Level::detect_with(None, Some("xterm-256color")), Level::C256);
+        assert_eq!(
+            Level::detect_with(None, Some("xterm-256color")),
+            Level::C256
+        );
         assert_eq!(Level::detect_with(None, Some("st-256color")), Level::C256);
         assert_eq!(Level::detect_with(None, Some("xterm")), Level::C16);
         assert_eq!(Level::detect_with(None, Some("screen")), Level::C16);
@@ -291,7 +298,10 @@ mod tests {
         assert_eq!(Level::detect_with(None, Some("kitty")), Level::Rgb);
         assert_eq!(Level::detect_with(None, None), Level::Rgb);
         // Case-insensitive.
-        assert_eq!(Level::detect_with(None, Some("XTERM-256COLOR")), Level::C256);
+        assert_eq!(
+            Level::detect_with(None, Some("XTERM-256COLOR")),
+            Level::C256
+        );
         assert_eq!(Level::detect_with(Some("TrueColor"), None), Level::Rgb);
     }
 
@@ -327,17 +337,32 @@ mod tests {
 
     #[test]
     fn lowering_keeps_rgb_at_truecolor() {
-        assert_eq!(lower(Color::Rgb(0x24, 0x27, 0x3a), Level::Rgb), Color::Rgb(0x24, 0x27, 0x3a));
+        assert_eq!(
+            lower(Color::Rgb(0x24, 0x27, 0x3a), Level::Rgb),
+            Color::Rgb(0x24, 0x27, 0x3a)
+        );
     }
 
     #[test]
     fn lowering_quantizes_rgb_at_256() {
-        assert_eq!(lower(Color::Rgb(255, 0, 0), Level::C256), Color::Indexed(196));
-        assert_eq!(lower(Color::Rgb(0, 255, 255), Level::C256), Color::Indexed(51));
-        assert_eq!(lower(Color::Rgb(255, 255, 255), Level::C256), Color::Indexed(231));
+        assert_eq!(
+            lower(Color::Rgb(255, 0, 0), Level::C256),
+            Color::Indexed(196)
+        );
+        assert_eq!(
+            lower(Color::Rgb(0, 255, 255), Level::C256),
+            Color::Indexed(51)
+        );
+        assert_eq!(
+            lower(Color::Rgb(255, 255, 255), Level::C256),
+            Color::Indexed(231)
+        );
         assert_eq!(lower(Color::Rgb(0, 0, 0), Level::C256), Color::Indexed(16));
         // Near-gray hits the ramp, not the cube.
-        assert_eq!(lower(Color::Rgb(10, 10, 10), Level::C256), Color::Indexed(232));
+        assert_eq!(
+            lower(Color::Rgb(10, 10, 10), Level::C256),
+            Color::Indexed(232)
+        );
         // Mid gray: ramp 118 (idx 243, dist^2=48) beats cube 135 (idx 145,
         // dist^2=507).
         assert_eq!(
@@ -351,9 +376,15 @@ mod tests {
         assert_eq!(lower(Color::Rgb(0, 0, 0), Level::C16), Color::Black);
         assert_eq!(lower(Color::Rgb(255, 0, 0), Level::C16), Color::LightRed);
         assert_eq!(lower(Color::Rgb(255, 255, 255), Level::C16), Color::White);
-        assert_eq!(lower(Color::Rgb(255, 255, 0), Level::C16), Color::LightYellow);
+        assert_eq!(
+            lower(Color::Rgb(255, 255, 0), Level::C16),
+            Color::LightYellow
+        );
         // Mid-gray lands on the dark swatch (128,128,128).
-        assert_eq!(lower(Color::Rgb(128, 128, 128), Level::C16), Color::DarkGray);
+        assert_eq!(
+            lower(Color::Rgb(128, 128, 128), Level::C16),
+            Color::DarkGray
+        );
     }
 
     #[test]
@@ -405,10 +436,7 @@ mod tests {
     fn tool_command_palette() {
         // The command text of a tool call: a light blue, lighter than the
         // result (tool_output) so the two read as different voices.
-        assert_eq!(
-            Level::Rgb.tool_command(),
-            Color::Rgb(170, 200, 240)
-        );
+        assert_eq!(Level::Rgb.tool_command(), Color::Rgb(170, 200, 240));
         assert_eq!(Level::C16.tool_command(), Color::LightBlue);
         assert!(matches!(Level::C256.tool_command(), Color::Indexed(..)));
         for lvl in [Level::Rgb, Level::C256, Level::C16] {

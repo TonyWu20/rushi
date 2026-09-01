@@ -7,7 +7,10 @@ use std::path::{Path, PathBuf};
 
 /// Project session log to ModelRequest
 #[derive(Parser)]
-#[command(name = "assemble", about = "Project the session log into a ModelRequest")]
+#[command(
+    name = "assemble",
+    about = "Project the session log into a ModelRequest"
+)]
 struct Args {
     /// Session directory path
     #[arg(long)]
@@ -26,7 +29,9 @@ struct ModelSettings {
 
 /// One log event, projected to model input items.
 enum Ev {
-    User { text: String },
+    User {
+        text: String,
+    },
     /// `reasoning` holds the server's own items from this turn, kept
     /// verbatim. They sit in the request after the turn's user
     /// message and before the turn's function_call items.
@@ -39,7 +44,10 @@ enum Ev {
         reasoning: Vec<serde_json::Value>,
         usage_input: Option<usize>,
     },
-    ToolResult { id: String, text: String },
+    ToolResult {
+        id: String,
+        text: String,
+    },
 }
 
 struct Call {
@@ -93,7 +101,7 @@ struct CompactState {
 }
 
 impl CompactState {
-    fn to_json(&self) -> serde_json::Value {
+    fn to_json(self) -> serde_json::Value {
         serde_json::json!({
             "v": 2,
             "caps": { "result": self.caps.result, "text": self.caps.text },
@@ -156,8 +164,11 @@ fn read_compact_state(session_dir: &Path) -> StateLoad {
 fn write_compact_state(session_dir: &Path, state: &CompactState) {
     let path = session_dir.join("compact.json");
     let tmp = session_dir.join("compact.json.tmp");
-    if let Err(e) = fs::write(&tmp, serde_json::to_string(&state.to_json()).unwrap_or_else(|_| panic!("state json")))
-        .and_then(|_| fs::rename(&tmp, path))
+    if let Err(e) = fs::write(
+        &tmp,
+        serde_json::to_string(&state.to_json()).unwrap_or_else(|_| panic!("state json")),
+    )
+    .and_then(|_| fs::rename(&tmp, path))
     {
         eprintln!("Warning: compact state write failed: {e}");
     }
@@ -175,10 +186,18 @@ enum RequestForm {
     /// The sticky compact form: the frozen caps, the current keep
     /// window, the current drop count. The compact region re-renders
     /// only when one of those moves.
-    Compact { caps: Caps, keep: usize, drops: usize },
+    Compact {
+        caps: Caps,
+        keep: usize,
+        drops: usize,
+    },
     /// The drop count reached its max and the estimate still
     /// outgrows the budget: the handoff.
-    Exhausted { caps: Caps, keep: usize, drops: usize },
+    Exhausted {
+        caps: Caps,
+        keep: usize,
+        drops: usize,
+    },
 }
 
 /// Decide the request form of one run, in token space.
@@ -221,7 +240,11 @@ fn decide_form(
                     per_group: 0,
                 };
                 (
-                    RequestForm::Compact { caps: base_caps, keep: s.keep, drops: 0 },
+                    RequestForm::Compact {
+                        caps: base_caps,
+                        keep: s.keep,
+                        drops: 0,
+                    },
                     Some(s),
                 )
             }
@@ -240,8 +263,7 @@ fn decide_form(
                 if idx > s.last_at {
                     if s.last_tokens > 0 && s.drops > s.drops_at_last {
                         let saved = s.last_tokens.saturating_sub(tokens);
-                        s.per_group =
-                            saved / s.drops.saturating_sub(s.drops_at_last).max(1);
+                        s.per_group = saved / s.drops.saturating_sub(s.drops_at_last).max(1);
                     }
                     s.last_tokens = tokens;
                     s.last_at = idx;
@@ -267,12 +289,10 @@ fn decide_form(
                     s.keep = next;
                     moved = true;
                 } else if s.drops < max_drops {
-                    let k = if s.per_group > 0 {
-                        let deficit = predicted - budget_tokens;
-                        let n = deficit.saturating_sub(1) / s.per_group + 1;
-                        n.min(max_drops - s.drops)
-                    } else {
-                        1
+                    let deficit = predicted - budget_tokens;
+                    let k = match deficit.saturating_sub(1).checked_div(s.per_group) {
+                        Some(n) => (n + 1).min(max_drops - s.drops),
+                        None => 1,
                     };
                     s.drops = s.drops.saturating_add(k).min(max_drops);
                     moved = true;
@@ -280,12 +300,20 @@ fn decide_form(
             }
             if s.drops >= max_drops && over {
                 (
-                    RequestForm::Exhausted { caps: s.caps, keep: s.keep, drops: s.drops },
+                    RequestForm::Exhausted {
+                        caps: s.caps,
+                        keep: s.keep,
+                        drops: s.drops,
+                    },
                     moved.then_some(s),
                 )
             } else {
                 (
-                    RequestForm::Compact { caps: s.caps, keep: s.keep, drops: s.drops },
+                    RequestForm::Compact {
+                        caps: s.caps,
+                        keep: s.keep,
+                        drops: s.drops,
+                    },
                     moved.then_some(s),
                 )
             }
@@ -313,7 +341,7 @@ fn measured_growth_rate(measurements: &[(usize, usize)], engaged_at: usize) -> u
     if ib <= ia || tb <= ta {
         return 0;
     }
-    (tb - ta + (ib - ia) - 1) / (ib - ia)
+    (tb - ta).div_ceil(ib - ia)
 }
 
 /// Predict the token count of the next request.
@@ -635,7 +663,12 @@ fn full_items(
             "role": "user",
             "content": text
         })],
-        Ev::Assistant { text, calls, reasoning, .. } => {
+        Ev::Assistant {
+            text,
+            calls,
+            reasoning,
+            ..
+        } => {
             let mut items: Vec<serde_json::Value> = Vec::new();
             // The reasoning items are the model's own thinking. Send
             // them verbatim, pi-style: no cap, no trim, no slice.
@@ -888,17 +921,22 @@ fn main() {
         ));
     }
 
-    let limits = config.get("limits").cloned().unwrap_or(toml::Value::String(String::new()));
+    let limits = config
+        .get("limits")
+        .cloned()
+        .unwrap_or(toml::Value::String(String::new()));
     let limits = if limits.is_table() {
         limits
     } else {
         toml::Value::Table(toml::map::Map::new())
     };
-    let tool_result_max_chars: usize = val_int(&limits, "tool_result_max_chars").unwrap_or(20000) as usize;
+    let tool_result_max_chars: usize =
+        val_int(&limits, "tool_result_max_chars").unwrap_or(20000) as usize;
     let compact_keep_events: usize = val_int(&limits, "compact_keep_events").unwrap_or(24) as usize;
     // The frozen base caps of the compact form (correction 62).
     // They freeze at engagement. They never halve.
-    let compact_result_chars: usize = val_int(&limits, "compact_result_chars").unwrap_or(500) as usize;
+    let compact_result_chars: usize =
+        val_int(&limits, "compact_result_chars").unwrap_or(500) as usize;
     let compact_text_chars: usize = val_int(&limits, "compact_text_chars").unwrap_or(200) as usize;
     // The output cap of the one handoff summary call (correction 57).
     let handoff_summary_max_tokens: u64 =
@@ -987,12 +1025,24 @@ fn main() {
                 let mut calls: Vec<Call> = Vec::new();
                 if let Some(tc_arr) = event.get("tool_calls").and_then(|t| t.as_array()) {
                     for tc in tc_arr {
-                        let id = tc.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
-                        let name = tc.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                        let id = tc
+                            .get("id")
+                            .and_then(|i| i.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let name = tc
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         // The log stores arguments as a JSON object.
                         // The Responses API needs them as a JSON string.
-                        let args_val = tc.get("arguments").cloned().unwrap_or(serde_json::json!({}));
-                        let args_str = serde_json::to_string(&args_val).unwrap_or_else(|_| "{}".into());
+                        let args_val = tc
+                            .get("arguments")
+                            .cloned()
+                            .unwrap_or(serde_json::json!({}));
+                        let args_str =
+                            serde_json::to_string(&args_val).unwrap_or_else(|_| "{}".into());
                         calls.push(Call { id, name, args_str });
                     }
                 }
@@ -1001,13 +1051,7 @@ fn main() {
                 let reasoning = event
                     .get("reasoning")
                     .and_then(|r| r.as_array())
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter(|i| i.is_object())
-                            .cloned()
-                            .collect()
-                    })
+                    .map(|items| items.iter().filter(|i| i.is_object()).cloned().collect())
                     .unwrap_or_default();
                 // The measured input tokens of the request that
                 // produced this turn (work item B). They drive the
@@ -1017,10 +1061,19 @@ fn main() {
                     .and_then(|u| u.get("input_tokens"))
                     .and_then(|t| t.as_u64())
                     .map(|n| n as usize);
-                events.push(Ev::Assistant { text, calls, reasoning, usage_input });
+                events.push(Ev::Assistant {
+                    text,
+                    calls,
+                    reasoning,
+                    usage_input,
+                });
             }
             "tool_result" => {
-                let id = event.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                let id = event
+                    .get("id")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let index_text = event
                     .get("value")
                     .and_then(|v| v.get("text"))
@@ -1030,10 +1083,7 @@ fn main() {
                 // The full body comes from the tool log when the
                 // session has one; the index text is the legacy
                 // inline body or the short preview.
-                let text = tool_texts
-                    .get(&id)
-                    .cloned()
-                    .unwrap_or(index_text);
+                let text = tool_texts.get(&id).cloned().unwrap_or(index_text);
                 events.push(Ev::ToolResult { id, text });
             }
             // error events are terminal. Skip them, as before.
@@ -1127,7 +1177,10 @@ fn main() {
         .iter()
         .enumerate()
         .filter_map(|(i, e)| match e {
-            Ev::Assistant { usage_input: Some(t), .. } => Some((i, *t)),
+            Ev::Assistant {
+                usage_input: Some(t),
+                ..
+            } => Some((i, *t)),
             _ => None,
         })
         .collect();
@@ -1193,7 +1246,14 @@ fn main() {
             &ptrs,
         ),
         RequestForm::Exhausted { caps, keep, drops } => {
-            let items = compact_candidate(&events_refs, *keep, *drops, caps, tool_result_max_chars, &ptrs);
+            let items = compact_candidate(
+                &events_refs,
+                *keep,
+                *drops,
+                caps,
+                tool_result_max_chars,
+                &ptrs,
+            );
             let exhausted = context_exhausted_event(
                 &items,
                 &model_settings.model_id,
@@ -1207,8 +1267,7 @@ fn main() {
 }
 
 fn chrono_utc_now() -> String {
-    chrono::Utc::now()
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 /// The instructions of the handoff summary call. One cheap
@@ -1267,7 +1326,9 @@ fn toml_to_json(val: &toml::Value) -> serde_json::Value {
         toml::Value::Integer(i) => serde_json::json!(*i),
         toml::Value::Float(f) => serde_json::json!(*f),
         toml::Value::Boolean(b) => serde_json::json!(*b),
-        toml::Value::Array(arr) => serde_json::json!(arr.iter().map(toml_to_json).collect::<Vec<_>>()),
+        toml::Value::Array(arr) => {
+            serde_json::json!(arr.iter().map(toml_to_json).collect::<Vec<_>>())
+        }
         toml::Value::Table(tbl) => {
             let mut map = serde_json::Map::new();
             for (k, v) in tbl {
@@ -1360,14 +1421,15 @@ not json at all
         let clean: serde_json::Value =
             serde_json::json!({"exit": 0, "stdout": "out", "stderr": ""});
         assert_eq!(record_text(&clean).as_deref(), Some("out"));
-        let err: serde_json::Value =
-            serde_json::json!({"exit": 3, "stdout": "", "stderr": "boom"});
+        let err: serde_json::Value = serde_json::json!({"exit": 3, "stdout": "", "stderr": "boom"});
         assert_eq!(record_text(&err).as_deref(), Some("boom"));
         let code_only: serde_json::Value =
             serde_json::json!({"exit": 3, "stdout": "", "stderr": ""});
-        assert_eq!(record_text(&code_only).as_deref(), Some("Tool exited with code 3."));
-        let not_run: serde_json::Value =
-            serde_json::json!({"error": "Unknown tool nope."});
+        assert_eq!(
+            record_text(&code_only).as_deref(),
+            Some("Tool exited with code 3.")
+        );
+        let not_run: serde_json::Value = serde_json::json!({"error": "Unknown tool nope."});
         assert_eq!(record_text(&not_run).as_deref(), Some("Unknown tool nope."));
         assert!(record_text(&serde_json::json!({})).is_none());
     }
@@ -1431,9 +1493,20 @@ not json at all
             usage_input: None,
         };
         // An empty drop set keeps the pair, even in the compact form.
-        let items = compact_items(&ev, &Caps { result: 50, text: 20 }, &HashSet::new(), &test_ptrs());
+        let items = compact_items(
+            &ev,
+            &Caps {
+                result: 50,
+                text: 20,
+            },
+            &HashSet::new(),
+            &test_ptrs(),
+        );
         let s = items.iter().map(|i| i.to_string()).collect::<String>();
-        assert!(s.contains("\"bad\""), "the pair stays in the keep window: {s}");
+        assert!(
+            s.contains("\"bad\""),
+            "the pair stays in the keep window: {s}"
+        );
     }
 
     /// The id set is the schema-error results before the split point
@@ -1449,7 +1522,10 @@ not json at all
         // Split after two events: r1 is old, r3 sits in the keep window.
         let ids = schema_error_pair_ids(&refs, 2);
         assert!(ids.contains("r1"), "the old failure is in the set");
-        assert!(!ids.contains("r3"), "the recent failure stays out of the set");
+        assert!(
+            !ids.contains("r3"),
+            "the recent failure stays out of the set"
+        );
         // A clean result is never in the set.
         assert!(!ids.contains("r2"));
         // No split: nothing is compacted, nothing drops.
@@ -1489,7 +1565,10 @@ not json at all
             &refs,
             4,
             0,
-            &Caps { result: 8000, text: 2000 },
+            &Caps {
+                result: 8000,
+                text: 2000,
+            },
             20000,
             &test_ptrs(),
         );
@@ -1499,7 +1578,10 @@ not json at all
         // The oldest pair r0 and the keep-tail pair r28 are both
         // out: the history of empty-argument failures self-priming
         // the next call (FT-008).
-        assert!(!s.contains("\"call_id\":\"r0\""), "the old failed pair must be out");
+        assert!(
+            !s.contains("\"call_id\":\"r0\""),
+            "the old failed pair must be out"
+        );
         let last_even = 28;
         assert!(
             !s.contains(&format!("\"call_id\":\"r{last_even}\"")),
@@ -1533,7 +1615,14 @@ not json at all
         // The full form of the whole log, every schema-error pair
         // dropped.
         let drops = schema_error_pair_ids(&refs, refs.len());
-        let out = build_items(&refs, refs.len(), &Caps { result: 0, text: 0 }, 20000, &drops, &test_ptrs());
+        let out = build_items(
+            &refs,
+            refs.len(),
+            &Caps { result: 0, text: 0 },
+            20000,
+            &drops,
+            &test_ptrs(),
+        );
         let s = serde_json::to_string(&out).unwrap();
         assert!(s.contains("the task"), "the task statement survives");
         assert!(
@@ -1558,14 +1647,25 @@ not json at all
             out.contains("[compacted: 10 chars total, 7 elided from the middle. FULL]"),
             "{out}"
         );
-        assert_eq!(trim_chars("abc", 5, "FULL"), "abc", "a fitting string stays whole");
+        assert_eq!(
+            trim_chars("abc", 5, "FULL"),
+            "abc",
+            "a fitting string stays whole"
+        );
     }
 
     #[test]
     fn clip_full_keeps_head_and_tail_and_points_at_the_full_record() {
         let out = clip_full(&"x".repeat(30), 10, "FULL");
-        assert_eq!(out.chars().take(5).collect::<String>(), "xxxxx", "the head must survive");
-        assert!(out.ends_with(&"x".repeat(5)), "the tail must survive: {out}");
+        assert_eq!(
+            out.chars().take(5).collect::<String>(),
+            "xxxxx",
+            "the head must survive"
+        );
+        assert!(
+            out.ends_with(&"x".repeat(5)),
+            "the tail must survive: {out}"
+        );
         assert!(
             out.contains("[tool result clipped: 30 chars total, 20 elided from the middle. FULL]"),
             "{out}"
@@ -1578,17 +1678,25 @@ not json at all
         // The cut works in char units, so no partial char anywhere.
         let s = "\u{2500}".repeat(4000);
         let out = clip_full(&s, 100, "FULL");
-        assert_eq!(out.chars().take(50).collect::<String>(), "\u{2500}".repeat(50));
-        assert!(out.ends_with(&"\u{2500}".repeat(50)), "the tail must survive");
+        assert_eq!(
+            out.chars().take(50).collect::<String>(),
+            "\u{2500}".repeat(50)
+        );
         assert!(
-            out.contains("[tool result clipped: 4000 chars total, 3900 elided from the middle. FULL]"),
+            out.ends_with(&"\u{2500}".repeat(50)),
+            "the tail must survive"
+        );
+        assert!(
+            out.contains(
+                "[tool result clipped: 4000 chars total, 3900 elided from the middle. FULL]"
+            ),
             "the marker must name the gap: {out}"
         );
     }
 
     #[test]
     fn keep_all_when_window_covers_log() {
-        let events = vec![ev_res("a", "one"), ev_res("b", "two")];
+        let events = [ev_res("a", "one"), ev_res("b", "two")];
         let refs: Vec<&Ev> = events.iter().collect();
         let items = build_items(&refs, 10, &caps(), 20000, &HashSet::new(), &test_ptrs());
         // No compact marker, no clip marker, plain outputs.
@@ -1603,7 +1711,17 @@ not json at all
             events.push(ev_res(&format!("id{i}"), &"R".repeat(400)));
         }
         let refs: Vec<&Ev> = events.iter().collect();
-        let items = build_items(&refs, 4, &Caps { result: 50, text: 20 }, 20000, &HashSet::new(), &test_ptrs());
+        let items = build_items(
+            &refs,
+            4,
+            &Caps {
+                result: 50,
+                text: 20,
+            },
+            20000,
+            &HashSet::new(),
+            &test_ptrs(),
+        );
         let first = &items[0];
         let last = items.last().unwrap();
         let s = first.to_string();
@@ -1626,7 +1744,7 @@ not json at all
 
     #[test]
     fn compact_keeps_user_text_full() {
-        let events = vec![
+        let events = [
             Ev::User {
                 text: "do the task".to_string(),
             },
@@ -1644,7 +1762,15 @@ not json at all
     #[test]
     fn compact_tool_result_points_at_the_tool_log_record() {
         let ev = ev_res("c1", &"R".repeat(400));
-        let items = compact_items(&ev, &Caps { result: 50, text: 20 }, &HashSet::new(), &test_ptrs());
+        let items = compact_items(
+            &ev,
+            &Caps {
+                result: 50,
+                text: 20,
+            },
+            &HashSet::new(),
+            &test_ptrs(),
+        );
         let out = items[0]["output"].as_str().unwrap();
         let r25 = "R".repeat(25);
         assert!(out.starts_with(&r25), "the head must survive: {out}");
@@ -1660,7 +1786,15 @@ not json at all
     #[test]
     fn compact_tool_result_falls_back_to_the_event_log_pointer() {
         let ev = ev_res("z9", &"R".repeat(400));
-        let items = compact_items(&ev, &Caps { result: 50, text: 20 }, &HashSet::new(), &test_ptrs());
+        let items = compact_items(
+            &ev,
+            &Caps {
+                result: 50,
+                text: 20,
+            },
+            &HashSet::new(),
+            &test_ptrs(),
+        );
         let s = items[0].to_string();
         assert!(
             s.contains("Full result: sessions/s/events.jsonl (tool_result event, call id z9)"),
@@ -1682,7 +1816,10 @@ not json at all
             out.contains("[tool result clipped: 400 chars total, 350 elided from the middle."),
             "{out}"
         );
-        assert!(out.contains("Full result: sessions/s/tools.jsonl (call id c1"), "{out}");
+        assert!(
+            out.contains("Full result: sessions/s/tools.jsonl (call id c1"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -1704,7 +1841,15 @@ not json at all
             reasoning: vec![],
             usage_input: None,
         };
-        let items = compact_items(&ev, &Caps { result: 50, text: 20 }, &HashSet::new(), &test_ptrs());
+        let items = compact_items(
+            &ev,
+            &Caps {
+                result: 50,
+                text: 20,
+            },
+            &HashSet::new(),
+            &test_ptrs(),
+        );
         let s = items.iter().map(|i| i.to_string()).collect::<String>();
         assert!(
             s.contains("[compacted: 300 chars total, 280 elided from the middle. Full text: sessions/s/events.jsonl (assistant_message event)]"),
@@ -1787,12 +1932,17 @@ not json at all
                 })],
                 usage_input: None,
             },
-            &Caps { result: 50, text: 20 },
+            &Caps {
+                result: 50,
+                text: 20,
+            },
             &HashSet::new(),
             &test_ptrs(),
         );
         assert_eq!(items.len(), 2, "compact form keeps message and call only");
-        assert!(!items.iter().any(|i| i.get("type").and_then(|t| t.as_str()) == Some("reasoning")));
+        assert!(!items
+            .iter()
+            .any(|i| i.get("type").and_then(|t| t.as_str()) == Some("reasoning")));
     }
 
     /// A session whose reasoning items outgrow the budget still fits
@@ -1824,14 +1974,31 @@ not json at all
             });
         }
         let refs: Vec<&Ev> = events.iter().collect();
-        let full = build_items(&refs, refs.len(), &Caps { result: 0, text: 0 }, 20000, &HashSet::new(), &test_ptrs());
+        let full = build_items(
+            &refs,
+            refs.len(),
+            &Caps { result: 0, text: 0 },
+            20000,
+            &HashSet::new(),
+            &test_ptrs(),
+        );
         assert!(
             serde_json::to_string(&full).unwrap().len() > 12000,
             "the full form must outgrow the budget"
         );
         // A small keep window: the compact region drops the
         // reasoning items, the full tail keeps them.
-        let out = compact_candidate(&refs, 3, 0, &Caps { result: 8000, text: 2000 }, 20000, &test_ptrs());
+        let out = compact_candidate(
+            &refs,
+            3,
+            0,
+            &Caps {
+                result: 8000,
+                text: 2000,
+            },
+            20000,
+            &test_ptrs(),
+        );
         let s = serde_json::to_string(&out).unwrap();
         assert!(s.contains("the task"), "the task statement must survive");
         // The compacted events drop their items. The full tail keeps
@@ -1860,13 +2027,18 @@ not json at all
                 50_000,
                 &meas,
                 state,
-                Caps { result: 500, text: 100 },
+                Caps {
+                    result: 500,
+                    text: 100,
+                },
                 24,
                 100,
             );
             state = persist;
             match form {
-                RequestForm::Compact { keep, drops: dr, .. } => {
+                RequestForm::Compact {
+                    keep, drops: dr, ..
+                } => {
                     keeps.push(keep);
                     drops = dr;
                 }
@@ -1878,7 +2050,10 @@ not json at all
             vec![24, 12, 6, 3, 2, 2],
             "halving to two, then stable at two"
         );
-        assert_eq!(drops, 1, "the last over-budget reading drops one trial group");
+        assert_eq!(
+            drops, 1,
+            "the last over-budget reading drops one trial group"
+        );
     }
 
     /// The drop jump is measured. Without a drop measurement, the
@@ -1887,7 +2062,10 @@ not json at all
     #[test]
     fn decide_form_jump_is_measured() {
         let s0 = CompactState {
-            caps: Caps { result: 500, text: 100 },
+            caps: Caps {
+                result: 500,
+                text: 100,
+            },
             keep: 2,
             drops: 0,
             engaged_at: 0,
@@ -1898,11 +2076,25 @@ not json at all
         };
         // No compact measurement yet: the blind crawl drops one
         // group per run.
-        let (form, _persist) =
-            decide_form(10, 50_000, &[], Some(s0), Caps { result: 500, text: 100 }, 24, 100);
+        let (form, _persist) = decide_form(
+            10,
+            50_000,
+            &[],
+            Some(s0),
+            Caps {
+                result: 500,
+                text: 100,
+            },
+            24,
+            100,
+        );
         assert_eq!(
             form,
-            RequestForm::Compact { caps: s0.caps, keep: 2, drops: 1 },
+            RequestForm::Compact {
+                caps: s0.caps,
+                keep: 2,
+                drops: 1
+            },
             "the blind crawl drops one group"
         );
         // The measured jump. The trial drop saved 500 tokens for
@@ -1919,8 +2111,18 @@ not json at all
             per_group: 0,
         };
         let meas: Vec<(usize, usize)> = vec![(5, 60_000), (9, 59_500)];
-        let (form, _persist) =
-            decide_form(10, 50_000, &meas, Some(s1), Caps { result: 500, text: 100 }, 24, 100);
+        let (form, _persist) = decide_form(
+            10,
+            50_000,
+            &meas,
+            Some(s1),
+            Caps {
+                result: 500,
+                text: 100,
+            },
+            24,
+            100,
+        );
         match form {
             RequestForm::Compact { drops, .. } => {
                 assert_eq!(drops, 20, "the measured jump: one trial plus nineteen");
@@ -1933,7 +2135,9 @@ not json at all
     #[test]
     fn compact_candidate_drops_oldest_steps() {
         let ev = vec![
-            Ev::User { text: "task".into() },
+            Ev::User {
+                text: "task".into(),
+            },
             ev_asst("step one"),
             ev_res("1", "ok"),
             ev_res("2", "ok"),
@@ -1951,7 +2155,10 @@ not json at all
             ev_res("8", "ok"),
         ];
         let refs: Vec<&Ev> = ev.iter().collect();
-        let caps = Caps { result: 500, text: 100 };
+        let caps = Caps {
+            result: 500,
+            text: 100,
+        };
         // The keep window is two events. The seven assistant
         // groups are droppable. Two drops remove the two oldest.
         let items = compact_candidate(&refs, 2, 2, &caps, 20_000, &test_ptrs());
@@ -1961,7 +2168,8 @@ not json at all
         assert!(flat.contains("step three"));
         assert!(flat.contains("step seven"));
         assert_eq!(
-            flat.matches("step ").count() + flat.matches("step seven").count() - flat.matches("step seven").count(),
+            flat.matches("step ").count() + flat.matches("step seven").count()
+                - flat.matches("step seven").count(),
             5,
             "the five newest step markers survive"
         );
@@ -1970,15 +2178,27 @@ not json at all
     /// Zero drops keep every step.
     #[test]
     fn compact_candidate_keeps_all_steps_with_zero_drops() {
-        let ev = vec![
-            Ev::User { text: "task".into() },
+        let ev = [
+            Ev::User {
+                text: "task".into(),
+            },
             ev_asst("step one"),
             ev_res("1", "ok"),
             ev_asst("step two"),
             ev_res("2", "ok"),
         ];
         let refs: Vec<&Ev> = ev.iter().collect();
-        let items = compact_candidate(&refs, 2, 0, &Caps { result: 500, text: 100 }, 20_000, &test_ptrs());
+        let items = compact_candidate(
+            &refs,
+            2,
+            0,
+            &Caps {
+                result: 500,
+                text: 100,
+            },
+            20_000,
+            &test_ptrs(),
+        );
         let flat = serde_json::to_string(&items).unwrap();
         assert!(flat.contains("step one"));
         assert!(flat.contains("step two"));
@@ -1989,7 +2209,10 @@ not json at all
     #[test]
     fn decide_form_exhausts_at_the_max_drops() {
         let s = CompactState {
-            caps: Caps { result: 500, text: 100 },
+            caps: Caps {
+                result: 500,
+                text: 100,
+            },
             keep: 2,
             drops: 5,
             engaged_at: 0,
@@ -1999,8 +2222,18 @@ not json at all
             per_group: 500,
         };
         let meas: Vec<(usize, usize)> = vec![(4, 90_000)];
-        let (form, _persist) =
-            decide_form(5, 50_000, &meas, Some(s), Caps { result: 500, text: 100 }, 24, 5);
+        let (form, _persist) = decide_form(
+            5,
+            50_000,
+            &meas,
+            Some(s),
+            Caps {
+                result: 500,
+                text: 100,
+            },
+            24,
+            5,
+        );
         assert!(
             matches!(&form, RequestForm::Exhausted { .. }),
             "the max drop count with an over-budget estimate is the handoff"
@@ -2014,9 +2247,17 @@ not json at all
     fn measured_growth_rate_reads_the_last_two_measurements() {
         let m: Vec<(usize, usize)> =
             vec![(0, 1_000), (1, 2_000), (2, 1_900), (3, 2_800), (4, 4_000)];
-        assert_eq!(measured_growth_rate(&m, 0), 1_200, "the last two measurements: 4000 - 2800 over one event");
+        assert_eq!(
+            measured_growth_rate(&m, 0),
+            1_200,
+            "the last two measurements: 4000 - 2800 over one event"
+        );
         let shrunk: Vec<(usize, usize)> = vec![(0, 9_000), (1, 7_000)];
-        assert_eq!(measured_growth_rate(&shrunk, 0), 0, "a shrunken request reads as zero growth");
+        assert_eq!(
+            measured_growth_rate(&shrunk, 0),
+            0,
+            "a shrunken request reads as zero growth"
+        );
     }
 
     /// The prediction is the last measured input tokens plus the
@@ -2042,12 +2283,45 @@ not json at all
     fn decide_form_engages_on_over_budget_estimate() {
         let m: Vec<(usize, usize)> = vec![(0, 10_000), (2, 12_000)];
         assert!(
-            matches!(decide_form(2, 30_000, &m, None, Caps { result: 500, text: 100 }, 24, 100).0, RequestForm::Full),
+            matches!(
+                decide_form(
+                    2,
+                    30_000,
+                    &m,
+                    None,
+                    Caps {
+                        result: 500,
+                        text: 100
+                    },
+                    24,
+                    100
+                )
+                .0,
+                RequestForm::Full
+            ),
             "the estimate fits: the full log"
         );
-        let (form, persist) = decide_form(3, 10_000, &m, None, Caps { result: 500, text: 100 }, 24, 100);
+        let (form, persist) = decide_form(
+            3,
+            10_000,
+            &m,
+            None,
+            Caps {
+                result: 500,
+                text: 100,
+            },
+            24,
+            100,
+        );
         assert!(
-            matches!(&form, RequestForm::Compact { keep: 24, drops: 0, .. }),
+            matches!(
+                &form,
+                RequestForm::Compact {
+                    keep: 24,
+                    drops: 0,
+                    ..
+                }
+            ),
             "the over-budget estimate engages at the full keep window"
         );
         assert!(persist.is_some(), "the engagement persists");
@@ -2057,16 +2331,23 @@ not json at all
     /// same log: the cache property.
     #[test]
     fn compact_candidate_is_byte_stable_between_runs() {
-        let ev = vec![
-            Ev::User { text: "task".into() },
+        let ev = [
+            Ev::User {
+                text: "task".into(),
+            },
             ev_asst("step one"),
             ev_res("1", "ok"),
-            Ev::User { text: "more".into() },
+            Ev::User {
+                text: "more".into(),
+            },
             ev_asst("step two"),
             ev_res("2", "fine"),
         ];
         let refs: Vec<&Ev> = ev.iter().collect();
-        let caps = Caps { result: 500, text: 100 };
+        let caps = Caps {
+            result: 500,
+            text: 100,
+        };
         let a = compact_candidate(&refs, 24, 0, &caps, 20_000, &test_ptrs());
         let b = compact_candidate(&refs, 24, 0, &caps, 20_000, &test_ptrs());
         assert_eq!(
@@ -2085,7 +2366,10 @@ not json at all
         // Absent: no state.
         assert!(matches!(read_compact_state(path), StateLoad::Absent));
         let s = CompactState {
-            caps: Caps { result: 500, text: 100 },
+            caps: Caps {
+                result: 500,
+                text: 100,
+            },
             keep: 12,
             drops: 3,
             engaged_at: 42,
@@ -2108,7 +2392,7 @@ not json at all
     /// after `i`; the final entry is the list end.
     #[test]
     fn build_items_off_carries_event_boundaries() {
-        let events = vec![
+        let events = [
             Ev::User { text: "t".into() },
             Ev::Assistant {
                 text: "a".into(),
@@ -2126,13 +2410,27 @@ not json at all
             ev_res("1", "r"),
         ];
         let refs: Vec<&Ev> = events.iter().collect();
-        let (items, offsets) = build_items_off(&refs, 10, &Caps { result: 50, text: 20 }, 20000, &HashSet::new(), &test_ptrs());
+        let (items, offsets) = build_items_off(
+            &refs,
+            10,
+            &Caps {
+                result: 50,
+                text: 20,
+            },
+            20000,
+            &HashSet::new(),
+            &test_ptrs(),
+        );
         assert_eq!(offsets.len(), 4, "one offset per event plus the end");
         assert_eq!(items.len(), offsets[3]);
         // The assistant event projects to three items: reasoning,
         // message, call. Its boundary spans them.
         assert_eq!(offsets[2] - offsets[1], 3);
-        assert_eq!(offsets[3] - offsets[2], 1, "the result projects to one item");
+        assert_eq!(
+            offsets[3] - offsets[2],
+            1,
+            "the result projects to one item"
+        );
     }
 
     /// The exhausted event carries the summary request: the compacted
@@ -2151,7 +2449,10 @@ not json at all
         assert_eq!(sr["model"], "m");
         assert_eq!(sr["max_output_tokens"], 4096);
         assert_eq!(sr["tools"], serde_json::json!([]));
-        assert!(sr["instructions"].as_str().unwrap().contains("handoff summary"));
+        assert!(sr["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("handoff summary"));
         let input = sr["input"].as_array().expect("the input holds the items");
         assert_eq!(input.len(), 3, "the two items plus the summary ask");
         assert_eq!(input[0], items[0]);

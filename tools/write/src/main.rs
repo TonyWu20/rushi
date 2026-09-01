@@ -36,10 +36,7 @@ fn main() {
         .and_then(|f| f.as_str())
         .unwrap_or("");
 
-    let content = input
-        .get("content")
-        .and_then(|c| c.as_str())
-        .unwrap_or("");
+    let content = input.get("content").and_then(|c| c.as_str()).unwrap_or("");
 
     // Check content size
     let content_bytes = content.len();

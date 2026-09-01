@@ -31,10 +31,7 @@ fn main() {
         }
     };
 
-    let dir_path = input
-        .get("path")
-        .and_then(|p| p.as_str())
-        .unwrap_or(".");
+    let dir_path = input.get("path").and_then(|p| p.as_str()).unwrap_or(".");
 
     let full_path = PathBuf::from(dir_path);
 

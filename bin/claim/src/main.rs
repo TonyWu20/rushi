@@ -7,7 +7,10 @@ use std::path::PathBuf;
 
 /// Derive step state from the session log
 #[derive(Parser)]
-#[command(name = "claim", about = "Determine what work is owed from the session log")]
+#[command(
+    name = "claim",
+    about = "Determine what work is owed from the session log"
+)]
 struct Args {
     /// Session directory path
     #[arg(long)]
@@ -200,7 +203,9 @@ mod tests {
         let log = format!(
             "{}\n{}",
             line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"go"})),
-            line(&serde_json::json!({"v":1,"type":"context_exhausted","ts":"t","message":"m","new_session":"s1_h1","summary_request":{}}))
+            line(
+                &serde_json::json!({"v":1,"type":"context_exhausted","ts":"t","message":"m","new_session":"s1_h1","summary_request":{}})
+            )
         );
         let (state, _, pending) = derive_state(&log);
         assert_eq!(state, "exhausted");
@@ -213,9 +218,13 @@ mod tests {
     fn user_message_after_exhaustion_reopens_the_loop() {
         let log = format!(
             "{}\n{}\n{}",
-            line(&serde_json::json!({"v":1,"type":"context_exhausted","ts":"t","message":"m","new_session":""})),
+            line(
+                &serde_json::json!({"v":1,"type":"context_exhausted","ts":"t","message":"m","new_session":""})
+            ),
             line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"continue"})),
-            line(&serde_json::json!({"v":1,"type":"context_exhausted","ts":"t","message":"m","new_session":"s1_h2"}))
+            line(
+                &serde_json::json!({"v":1,"type":"context_exhausted","ts":"t","message":"m","new_session":"s1_h2"})
+            )
         );
         let (state, seq, _) = derive_state(&log);
         assert_eq!(state, "exhausted");
@@ -228,8 +237,12 @@ mod tests {
         // marker event. The marker is the last word on the state.
         let log = format!(
             "{}\n{}",
-            line(&serde_json::json!({"v":1,"type":"error","ts":"t","message":"summary call failed"})),
-            line(&serde_json::json!({"v":1,"type":"context_exhausted","ts":"t","message":"m","new_session":""}))
+            line(
+                &serde_json::json!({"v":1,"type":"error","ts":"t","message":"summary call failed"})
+            ),
+            line(
+                &serde_json::json!({"v":1,"type":"context_exhausted","ts":"t","message":"m","new_session":""})
+            )
         );
         let (state, _, _) = derive_state(&log);
         assert_eq!(state, "exhausted");

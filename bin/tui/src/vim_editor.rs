@@ -392,6 +392,8 @@ impl Editor {
     }
 
     /// The number of lines the text currently holds (at least 1).
+    /// Test-only accessor: no production caller.
+    #[cfg(test)]
     pub fn n_lines(&self) -> usize {
         if self.lines.is_empty() {
             1
@@ -400,7 +402,9 @@ impl Editor {
         }
     }
 
-    /// The cursor position in the document: `(row, col)`.
+    /// The cursor position in the document: `(row, col)`. Test-only
+    /// accessor: no production caller.
+    #[cfg(test)]
     pub fn cursor(&self) -> (usize, usize) {
         (self.row, self.col)
     }
@@ -5044,8 +5048,7 @@ mod tests {
         }
         assert_eq!(wrap_row(&"x".repeat(9), 8), vec!["xxxxxxxx", "x"]);
         // Wrapping is lossless: joining the rows reproduces the line.
-        let joined: String =
-            wrap_row("the quick brown fox jumps over the lazy dog", 12).join("");
+        let joined: String = wrap_row("the quick brown fox jumps over the lazy dog", 12).join("");
         assert_eq!(joined, "the quick brown fox jumps over the lazy dog");
     }
 
@@ -5057,7 +5060,7 @@ mod tests {
     #[test]
     fn display_row_counts_wrapped_lines() {
         let mut e = Editor::new();
-        e.set_text(&"hello world\nfoo".to_string());
+        e.set_text("hello world\nfoo");
         // "hello world" is 11 chars: two rows at 10 columns, one at 80.
         assert_eq!(e.display_row_count(10), 3); // 2 + 1
         assert_eq!(e.display_row_count(80), 2); // 1 + 1
@@ -5066,7 +5069,7 @@ mod tests {
     #[test]
     fn display_rows_wrap_and_window_from_the_scroll_row() {
         let mut e = Editor::new();
-        e.set_text(&"one two three four five\nx".to_string());
+        e.set_text("one two three four five\nx");
         // At width 8 "one two three four five" (22 chars) slices into
         // three rows; "x" is one more.
         assert_eq!(e.display_row_count(8), 4);

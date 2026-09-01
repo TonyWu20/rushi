@@ -447,10 +447,7 @@ impl ExtLine {
     /// texts; the `style` field is the first span's style.
     pub fn multi(spans: Vec<ExtSpan>) -> Self {
         let text = spans.iter().map(|s| s.text.clone()).collect();
-        let style = spans
-            .first()
-            .map(|s| s.style)
-            .unwrap_or_else(Style::default);
+        let style = spans.first().map(|s| s.style).unwrap_or_default();
         ExtLine { text, style, spans }
     }
 }
@@ -942,9 +939,7 @@ impl ExtHost {
                 replies_version: AtomicU64::new(0),
                 out_tx,
                 transform_timeout: Mutex::new(TRANSFORM_TIMEOUT),
-                color_level: cfg
-                    .color
-                    .unwrap_or_else(crate::color::Level::detect),
+                color_level: cfg.color.unwrap_or_else(crate::color::Level::detect),
             }),
             disc: disc.clone(),
             config_path: cfg.config_path.clone(),
@@ -1624,9 +1619,9 @@ impl HostInner {
                 let Some(id) = v.get("event_id").and_then(|x| x.as_u64()) else {
                     return;
                 };
-                let Some(lines) = lines_value(&v["lines"]).map(|l| {
-                    lower_ext_lines(l, self.color_level)
-                }) else {
+                let Some(lines) =
+                    lines_value(&v["lines"]).map(|l| lower_ext_lines(l, self.color_level))
+                else {
                     // G5: fall back to the built-in render.
                     return;
                 };
@@ -1647,9 +1642,9 @@ impl HostInner {
                 });
             }
             "status" => {
-                let Some(lines) = lines_value(&v["lines"]).map(|l| {
-                    lower_ext_lines(l, self.color_level)
-                }) else {
+                let Some(lines) =
+                    lines_value(&v["lines"]).map(|l| lower_ext_lines(l, self.color_level))
+                else {
                     // G5: keep the last valid row.
                     return;
                 };
@@ -1694,8 +1689,8 @@ impl HostInner {
                 let Some(req) = v.get("req").and_then(|x| x.as_u64()) else {
                     return;
                 };
-                let Some(lines) = lines_value(&v["lines"])
-                    .map(|l| lower_ext_lines(l, self.color_level))
+                let Some(lines) =
+                    lines_value(&v["lines"]).map(|l| lower_ext_lines(l, self.color_level))
                 else {
                     return;
                 };

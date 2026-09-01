@@ -11,7 +11,10 @@ use std::time::{Duration, Instant};
 
 /// Run a shell command in the session working directory
 #[derive(Parser)]
-#[command(name = "bash", about = "Run a shell command in the session working directory")]
+#[command(
+    name = "bash",
+    about = "Run a shell command in the session working directory"
+)]
 struct Args {
     /// Maximum combined output bytes (shared by stdout and stderr)
     #[arg(long, default_value = "16000")]

@@ -48,7 +48,6 @@ impl LogLine {
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .write(true)
             .open(path)?;
         let fd = file.as_raw_fd();
         if unsafe { libc::flock(fd, libc::LOCK_EX) } != 0 {

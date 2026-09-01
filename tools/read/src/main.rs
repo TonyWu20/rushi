@@ -48,10 +48,7 @@ fn main() {
         .and_then(|f| f.as_str())
         .unwrap_or("");
 
-    let offset: usize = input
-        .get("offset")
-        .and_then(|o| o.as_u64())
-        .unwrap_or(1) as usize;
+    let offset: usize = input.get("offset").and_then(|o| o.as_u64()).unwrap_or(1) as usize;
 
     let mut limit: usize = input
         .get("limit")

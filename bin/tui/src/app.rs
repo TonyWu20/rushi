@@ -2119,10 +2119,7 @@ mod tests {
         // The TUI does not decide the level: it renders whatever
         // the loop or a policy hook published, last event wins.
         for level in 0..THINKING_LEVELS {
-            let app = app_with(
-                vec![thinking_marker("t", &level.to_string())],
-                "s1",
-            );
+            let app = app_with(vec![thinking_marker("t", &level.to_string())], "s1");
             assert_eq!(app.thinking_level(), level, "level {level}");
         }
     }

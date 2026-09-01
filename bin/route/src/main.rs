@@ -98,7 +98,7 @@ fn tool_log_record(o: &Outcome, ts: &str, id: &str) -> String {
         "v": 1,
         "ts": ts,
         "id": id,
-        "exit": o.exit.map(|c| serde_json::Value::from(c)),
+        "exit": o.exit.map(serde_json::Value::from),
         "stdout": o.stdout,
         "stderr": o.stderr,
         "text": text,
@@ -131,9 +131,7 @@ fn preview(text: &str) -> String {
         .rev()
         .collect();
     let elided = total - PREVIEW_HEAD_CHARS - PREVIEW_TAIL_CHARS;
-    format!(
-        "{head}\n[{elided} of {total} chars elided; full body in the tool log]\n{tail}"
-    )
+    format!("{head}\n[{elided} of {total} chars elided; full body in the tool log]\n{tail}")
 }
 
 /// The slim `tool_result` index event for the session log: status,
@@ -257,79 +255,83 @@ fn main() {
                     if let Some(name) = tool_path.file_name() {
                         let name_str = name.to_string_lossy().to_string();
                         if let Ok(content) = fs::read_to_string(&tool_toml) {
-                            match content.parse::<toml::Value>() {
-                                Ok(config) => {
-                                    let raw_command = config
-                                        .get("tool")
-                                        .and_then(|t| t.get("command"))
-                                        .and_then(|c| c.as_str())
-                                        .unwrap_or(&name_str)
-                                        .to_string();
-                                    // Resolve the tool binary. Prefer the cargo
-                                    // build output (this binary's own directory),
-                                    // then the tools/<name>/bin/ copy.
-                                    let command = if raw_command == name_str {
-                                        let exe_dir = std::env::current_exe()
-                                            .ok()
-                                            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-                                        let candidates = [
-                                            exe_dir
-                                                .as_ref()
-                                                .map(|d| d.join(&name_str)),
-                                            Some(tool_path.join("bin").join(&name_str)),
-                                        ];
-                                        candidates
-                                            .iter()
-                                            .flatten()
-                                            .find(|p| p.is_file())
-                                            .map(|p| p.to_string_lossy().to_string())
-                                            .unwrap_or_else(|| {
-                                                tool_path
-                                                    .join("bin")
-                                                    .join(&name_str)
-                                                    .to_string_lossy()
-                                                    .to_string()
-                                            })
-                                    } else {
-                                        raw_command
-                                    };
-                                    let args_val = config
-                                        .get("tool")
-                                        .and_then(|t| t.get("args"))
-                                        .cloned()
-                                        .unwrap_or(toml::Value::Array(toml::value::Array::new()));
-                                    let timeout_ms = config
-                                        .get("tool")
-                                        .and_then(|t| t.get("timeout_ms"))
-                                        .and_then(|t| t.as_integer())
-                                        .unwrap_or(30000) as u64;
-                                    let schema = config
-                                        .get("tool")
-                                        .and_then(|t| t.get("schema"))
-                                        .cloned()
+                            if let Ok(config) = content.parse::<toml::Value>() {
+                                let raw_command = config
+                                    .get("tool")
+                                    .and_then(|t| t.get("command"))
+                                    .and_then(|c| c.as_str())
+                                    .unwrap_or(&name_str)
+                                    .to_string();
+                                // Resolve the tool binary. Prefer the cargo
+                                // build output (this binary's own directory),
+                                // then the tools/<name>/bin/ copy.
+                                let command = if raw_command == name_str {
+                                    let exe_dir = std::env::current_exe()
+                                        .ok()
+                                        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+                                    let candidates = [
+                                        exe_dir.as_ref().map(|d| d.join(&name_str)),
+                                        Some(tool_path.join("bin").join(&name_str)),
+                                    ];
+                                    candidates
+                                        .iter()
+                                        .flatten()
+                                        .find(|p| p.is_file())
+                                        .map(|p| p.to_string_lossy().to_string())
                                         .unwrap_or_else(|| {
-                                            let mut tbl = toml::value::Table::new();
-                                            tbl.insert("type".to_string(), toml::Value::String("object".to_string()));
-                                            tbl.insert("properties".to_string(), toml::Value::Table(toml::value::Table::new()));
-                                            tbl.insert("required".to_string(), toml::Value::Array(toml::value::Array::new()));
-                                            toml::Value::Table(tbl)
-                                        });
-                                    let args_json: serde_json::Value = toml_to_json(&args_val);
-                                    let schema_json: serde_json::Value = toml_to_json(&schema);
-                                    tool_manifests.insert(
-                                        name_str.clone(),
-                                        (
-                                            command,
-                                            serde_json::json!({
-                                                "args": args_json,
-                                                "timeout_ms": timeout_ms,
-                                                "schema": schema_json
-                                            }),
-                                        ),
-                                    );
-                                }
-                                Err(_) => {
-                                }
+                                            tool_path
+                                                .join("bin")
+                                                .join(&name_str)
+                                                .to_string_lossy()
+                                                .to_string()
+                                        })
+                                } else {
+                                    raw_command
+                                };
+                                let args_val = config
+                                    .get("tool")
+                                    .and_then(|t| t.get("args"))
+                                    .cloned()
+                                    .unwrap_or(toml::Value::Array(toml::value::Array::new()));
+                                let timeout_ms = config
+                                    .get("tool")
+                                    .and_then(|t| t.get("timeout_ms"))
+                                    .and_then(|t| t.as_integer())
+                                    .unwrap_or(30000)
+                                    as u64;
+                                let schema = config
+                                    .get("tool")
+                                    .and_then(|t| t.get("schema"))
+                                    .cloned()
+                                    .unwrap_or_else(|| {
+                                        let mut tbl = toml::value::Table::new();
+                                        tbl.insert(
+                                            "type".to_string(),
+                                            toml::Value::String("object".to_string()),
+                                        );
+                                        tbl.insert(
+                                            "properties".to_string(),
+                                            toml::Value::Table(toml::value::Table::new()),
+                                        );
+                                        tbl.insert(
+                                            "required".to_string(),
+                                            toml::Value::Array(toml::value::Array::new()),
+                                        );
+                                        toml::Value::Table(tbl)
+                                    });
+                                let args_json: serde_json::Value = toml_to_json(&args_val);
+                                let schema_json: serde_json::Value = toml_to_json(&schema);
+                                tool_manifests.insert(
+                                    name_str.clone(),
+                                    (
+                                        command,
+                                        serde_json::json!({
+                                            "args": args_json,
+                                            "timeout_ms": timeout_ms,
+                                            "schema": schema_json
+                                        }),
+                                    ),
+                                );
                             }
                         }
                     }
@@ -345,19 +347,17 @@ fn main() {
         let tc_name = tc.get("name").and_then(|n| n.as_str()).unwrap_or("");
         // Arguments may be a JSON string or already a JSON object
         let tc_args: serde_json::Value = match tc.get("arguments") {
-            Some(serde_json::Value::String(s)) => {
-                match serde_json::from_str(s) {
-                    Ok(v) => v,
-                    Err(_) => {
-                        let o = Outcome::not_run(
+            Some(serde_json::Value::String(s)) => match serde_json::from_str(s) {
+                Ok(v) => v,
+                Err(_) => {
+                    let o = Outcome::not_run(
                             "Tool arguments failed schema validation: invalid JSON. The arguments string is not valid JSON. Resend the call with a JSON object."
                                 .to_string(),
                         );
-                        println!("{}", emit_result(&o, &ts, tc_id, &args));
-                        continue;
-                    }
+                    println!("{}", emit_result(&o, &ts, tc_id, &args));
+                    continue;
                 }
-            }
+            },
             Some(v) => v.clone(),
             None => serde_json::json!({}),
         };
@@ -395,7 +395,11 @@ fn main() {
         // Spawn subprocess
         let command = &manifest.0;
         let args_json = manifest.1.get("args").unwrap();
-        let timeout_ms = manifest.1.get("timeout_ms").and_then(|t| t.as_u64()).unwrap_or(30000);
+        let timeout_ms = manifest
+            .1
+            .get("timeout_ms")
+            .and_then(|t| t.as_u64())
+            .unwrap_or(30000);
 
         let mut cmd = Command::new(command);
         if let Some(ref cwd) = args.cwd {
@@ -516,8 +520,7 @@ fn validate_args(args: &serde_json::Value, schema: &serde_json::Value) -> Option
 }
 
 fn chrono_utc_now() -> String {
-    chrono::Utc::now()
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 fn toml_to_json(val: &toml::Value) -> serde_json::Value {
@@ -527,7 +530,7 @@ fn toml_to_json(val: &toml::Value) -> serde_json::Value {
         toml::Value::Float(f) => serde_json::json!(*f),
         toml::Value::Boolean(b) => serde_json::json!(*b),
         toml::Value::Array(arr) => {
-            serde_json::json!(arr.iter().map(|v| toml_to_json(v)).collect::<Vec<_>>())
+            serde_json::json!(arr.iter().map(toml_to_json).collect::<Vec<_>>())
         }
         toml::Value::Table(tbl) => {
             let mut map = serde_json::Map::new();
@@ -552,16 +555,24 @@ impl WaitWithOutput for Child {
         while start.elapsed() < duration {
             match self.try_wait() {
                 Ok(Some(status)) => {
-                    let stdout = self.stdout.take().map(|mut s| {
-                        let mut buf = Vec::new();
-                        io::Read::read_to_end(&mut s, &mut buf).unwrap_or(0);
-                        buf
-                    }).unwrap_or_default();
-                    let stderr = self.stderr.take().map(|mut s| {
-                        let mut buf = Vec::new();
-                        io::Read::read_to_end(&mut s, &mut buf).unwrap_or(0);
-                        buf
-                    }).unwrap_or_default();
+                    let stdout = self
+                        .stdout
+                        .take()
+                        .map(|mut s| {
+                            let mut buf = Vec::new();
+                            io::Read::read_to_end(&mut s, &mut buf).unwrap_or(0);
+                            buf
+                        })
+                        .unwrap_or_default();
+                    let stderr = self
+                        .stderr
+                        .take()
+                        .map(|mut s| {
+                            let mut buf = Vec::new();
+                            io::Read::read_to_end(&mut s, &mut buf).unwrap_or(0);
+                            buf
+                        })
+                        .unwrap_or_default();
                     return Ok(std::process::Output {
                         status,
                         stdout,
@@ -610,9 +621,19 @@ mod tests {
         let p = preview(&text);
         assert!(p.starts_with("x"), "the head must survive");
         assert!(p.ends_with('x'), "the tail must survive");
-        assert!(p.contains("chars elided"), "the elision marker must name the gap");
+        assert!(
+            p.contains("chars elided"),
+            "the elision marker must name the gap"
+        );
         let head: String = text.chars().take(PREVIEW_HEAD_CHARS).collect();
-        let tail: String = text.chars().rev().take(PREVIEW_TAIL_CHARS).collect::<Vec<_>>().into_iter().rev().collect();
+        let tail: String = text
+            .chars()
+            .rev()
+            .take(PREVIEW_TAIL_CHARS)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         assert!(p.starts_with(&head));
         assert!(p.ends_with(&tail));
     }
@@ -630,7 +651,10 @@ mod tests {
     fn not_run_outcome_carry_the_error_text() {
         let o = Outcome::not_run("Tool arguments failed schema validation: file_path.".to_string());
         assert!(o.is_error());
-        assert_eq!(o.display_text(usize::MAX), "Tool arguments failed schema validation: file_path.");
+        assert_eq!(
+            o.display_text(usize::MAX),
+            "Tool arguments failed schema validation: file_path."
+        );
     }
 
     #[test]
@@ -645,7 +669,10 @@ mod tests {
             Some("timeout_secs".to_string())
         );
         assert_eq!(
-            validate_args(&serde_json::json!({"command": "pwd", "timeout_secs": 5}), &schema),
+            validate_args(
+                &serde_json::json!({"command": "pwd", "timeout_secs": 5}),
+                &schema
+            ),
             None
         );
     }
@@ -714,8 +741,14 @@ mod tests {
         let ev: serde_json::Value =
             serde_json::from_str(&legacy_result_event(&o, "t", "c1", 100)).unwrap();
         assert_eq!(ev["value"]["text"].as_str().unwrap().len(), 100);
-        assert!(ev.get("tool_log").is_none(), "legacy events carry no pointer");
-        assert!(ev.get("bytes").is_none(), "legacy events carry no byte length");
+        assert!(
+            ev.get("tool_log").is_none(),
+            "legacy events carry no pointer"
+        );
+        assert!(
+            ev.get("bytes").is_none(),
+            "legacy events carry no byte length"
+        );
     }
 
     #[test]
@@ -726,8 +759,7 @@ mod tests {
             stderr: "stderr body".to_string(),
             error: None,
         };
-        let rec: serde_json::Value =
-            serde_json::from_str(&tool_log_record(&o, "t", "c1")).unwrap();
+        let rec: serde_json::Value = serde_json::from_str(&tool_log_record(&o, "t", "c1")).unwrap();
         assert_eq!(rec["id"], "c1");
         assert_eq!(rec["exit"], 1);
         assert_eq!(rec["stdout"], "stdout body");
@@ -739,8 +771,7 @@ mod tests {
     #[test]
     fn tool_log_record_for_not_run_carry_the_error() {
         let o = Outcome::not_run("Unknown tool nope.".to_string());
-        let rec: serde_json::Value =
-            serde_json::from_str(&tool_log_record(&o, "t", "c2")).unwrap();
+        let rec: serde_json::Value = serde_json::from_str(&tool_log_record(&o, "t", "c2")).unwrap();
         assert_eq!(rec["exit"], serde_json::Value::Null);
         assert_eq!(rec["error"], "Unknown tool nope.");
         assert_eq!(rec["stdout"], "");
@@ -760,8 +791,7 @@ mod tests {
         let ev = emit_result(&o, "t", "c9", &args);
         // The record landed in the tool log, keyed by the call id.
         let record = std::fs::read_to_string(&log_path).unwrap();
-        let rec: serde_json::Value =
-            serde_json::from_str(record.trim_end()).unwrap();
+        let rec: serde_json::Value = serde_json::from_str(record.trim_end()).unwrap();
         assert_eq!(rec["id"], "c9");
         assert_eq!(rec["stdout"], "line one\nline two");
         // The event on stdout is the slim index, not the full body.
