@@ -133,17 +133,24 @@ Cumulative stats survive a restart from the log alone.
   `assistant_message` (`schemas/events/v1/assistant_message.json`).
   The statusline sums those events
 - `ext_status` — `{id, value}`: shared UI state (vim mode, team status).
-  An extension publishes, the statusline consumes.
-  This is the log-based replacement for pi's `ctx.ui.setStatus`.
+  An extension publishes; the host consumes the ids it owns
+  (the input-area border, the working row). This is the log-based
+  replacement for pi's `ctx.ui.setStatus`.
   Add it to `EventKind` and to `schemas/events/v1`.
   Suppressed from the transcript by default. The log keeps it.
-  Publishers send only on change, not per tick
+  Publishers send only on change, not per tick.
+  The reference statusline does not list ext_status values:
+  shared UI state is host presentation, not footer content
+  (2026-09-02 revision). The `statuses` map stays on the tick
+  payload for consumers that want it
 
 Id registry — the known `ext_status` ids:
 
 - `model_thinking` — the active model's thinking level (0–4).
-  Published by the loop or a policy hook. The TUI colors the
-  input-area border from the last value.
+  Published by the loop or a policy hook. The loop publishes it
+  from the resolved `reasoning_effort` (`scripts/step.sh` via
+  `bin/model --describe`; docs/tui-thinking-level-input-box.md).
+  The TUI colors the input-area border from the last value.
 - `loop_phase` — the active loop's phase: `wait` (the step awaits
   the model response) and `tools` (the step routes tool calls).
   The loop publishes it in `scripts/step.sh` before the phase it

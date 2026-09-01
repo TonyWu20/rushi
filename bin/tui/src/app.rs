@@ -205,7 +205,11 @@ fn valid_session_name(name: &str) -> bool {
 /// least-recently-updated id drops, like the incremental path.
 fn ext_status_map(
     events: &[Event],
-) -> (HashMap<String, Value>, HashMap<String, String>, VecDeque<String>) {
+) -> (
+    HashMap<String, Value>,
+    HashMap<String, String>,
+    VecDeque<String>,
+) {
     let mut m = HashMap::new();
     let mut ts = HashMap::new();
     let mut order: VecDeque<String> = VecDeque::new();
@@ -410,22 +414,14 @@ impl App {
     ) -> &[Line<'static>] {
         let ext_ver = ext.map(|h| h.replies_version()).unwrap_or(0);
         if let Some((v, w, ev, cl, _)) = &self.transcript_cache {
-            if *v == self.events_version
-                && *w == width
-                && *ev == ext_ver
-                && *cl == self.color_level
+            if *v == self.events_version && *w == width && *ev == ext_ver && *cl == self.color_level
             {
                 return &self.transcript_cache.as_ref().unwrap().4;
             }
         }
         let lines = crate::render::build_transcript_lines(self, width, ext);
-        self.transcript_cache = Some((
-            self.events_version,
-            width,
-            ext_ver,
-            self.color_level,
-            lines,
-        ));
+        self.transcript_cache =
+            Some((self.events_version, width, ext_ver, self.color_level, lines));
         &self.transcript_cache.as_ref().unwrap().4
     }
 
@@ -2089,24 +2085,121 @@ mod tests {
         // its own last value and ts.
         let mut app = App::new();
         app.set_sessions(vec![SessionId::new("a"), SessionId::new("b")]);
-        app.set_active(
-            SessionId::new("a"),
-            vec![loop_phase_marker("ta", "wait")],
-        );
+        app.set_active(SessionId::new("a"), vec![loop_phase_marker("ta", "wait")]);
         assert_eq!(
             app.ext_statuses().get(LOOP_PHASE_STATUS_ID),
             Some(&json!("wait"))
         );
         assert_eq!(app.loop_phase_ts(), Some("ta"));
-        app.set_active(
-            SessionId::new("b"),
-            vec![loop_phase_marker("tb", "tools")],
-        );
+        app.set_active(SessionId::new("b"), vec![loop_phase_marker("tb", "tools")]);
         assert_eq!(
             app.ext_statuses().get(LOOP_PHASE_STATUS_ID),
             Some(&json!("tools")),
             "the other session's marker wins"
         );
-        assert_eq!(app.loop_phase_ts(), Some("tb"), "the other session's ts wins");
+        assert_eq!(
+            app.loop_phase_ts(),
+            Some("tb"),
+            "the other session's ts wins"
+        );
+    }
+
+    // ── thinking level (docs/tui.md section 7.2) ──
+
+    fn thinking_marker(ts: &str, value: &str) -> Event {
+        ev(&format!(
+            r#"{{"v":1,"type":"ext_status","ts":"{ts}","id":"model_thinking","value":{value}}}"#,
+            ts = ts,
+            value = value
+        ))
+    }
+
+    #[test]
+    fn thinking_level_tracks_the_last_published_value() {
+        // The TUI does not decide the level: it renders whatever
+        // the loop or a policy hook published, last event wins.
+        for level in 0..THINKING_LEVELS {
+            let app = app_with(
+                vec![thinking_marker("t", &level.to_string())],
+                "s1",
+            );
+            assert_eq!(app.thinking_level(), level, "level {level}");
+        }
+    }
+
+    #[test]
+    fn thinking_level_later_event_wins() {
+        let evs = vec![
+            thinking_marker("t1", "1"),
+            thinking_marker("t2", "3"),
+            thinking_marker("t3", "2"),
+        ];
+        let app = app_with(evs, "s1");
+        assert_eq!(app.thinking_level(), 2, "the last value wins");
+    }
+
+    #[test]
+    fn thinking_level_clamps_an_out_of_range_value() {
+        // 4+ is the highest known bucket: a published 7 renders
+        // like 4, never past the palette.
+        let app = app_with(vec![thinking_marker("t", "7")], "s1");
+        assert_eq!(app.thinking_level(), THINKING_LEVELS - 1);
+    }
+
+    #[test]
+    fn thinking_level_falls_back_to_the_default() {
+        // No event, or a value that is not a non-negative integer:
+        // the default level (0, no thinking) shows.
+        let none = app_with(Vec::new(), "s1");
+        assert_eq!(none.thinking_level(), DEFAULT_THINKING_LEVEL);
+        for raw in [r#""low"#, "null", "true", "1.5", "-1"] {
+            let app = app_with(
+                vec![ev(&format!(
+                    r#"{{"v":1,"type":"ext_status","ts":"t","id":"model_thinking","value":{raw}}}"#
+                ))],
+                "s1",
+            );
+            assert_eq!(
+                app.thinking_level(),
+                DEFAULT_THINKING_LEVEL,
+                "value {raw} falls back to the default"
+            );
+        }
+    }
+
+    #[test]
+    fn thinking_level_updates_on_watch_events() {
+        let mut app = app_with(vec![thinking_marker("t1", "1")], "s1");
+        app.on_watch_item(WatchItem::Event {
+            event: thinking_marker("t2", "4"),
+            cursor: crate::port::TailCursor::end(),
+        });
+        assert_eq!(app.thinking_level(), 4, "a new marker recolors");
+        app.on_watch_item(WatchItem::Event {
+            event: thinking_marker("t3", "0"),
+            cursor: crate::port::TailCursor::end(),
+        });
+        assert_eq!(
+            app.thinking_level(),
+            DEFAULT_THINKING_LEVEL,
+            "a zero marker returns to the default"
+        );
+    }
+
+    #[test]
+    fn thinking_level_session_switch_rebuilds() {
+        // Each session carries its own last value; a session with
+        // no marker in its log shows the default, not the other
+        // session's level.
+        let mut app = App::new();
+        app.set_sessions(vec![SessionId::new("a"), SessionId::new("b")]);
+        app.set_active(SessionId::new("a"), vec![thinking_marker("ta", "3")]);
+        assert_eq!(app.thinking_level(), 3);
+        app.set_active(SessionId::new("b"), Vec::new());
+        assert_eq!(
+            app.thinking_level(),
+            DEFAULT_THINKING_LEVEL,
+            "no marker in b's log: the default applies"
+        );
     }
 }

@@ -14,7 +14,10 @@
 #   measured request input tokens over the model window, in the
 #   starship-statusline style (`ctx <pct>% (<tokens>/<window>)`);
 #   the window is the active model's context_tokens in $CONFIG
-# - ext_status values published by other extensions
+# Shared-UI-state `ext_status` values are not shown: they are host
+# presentation (the input-area border, the working row), not
+# statusline content (2026-09-02 revision; the `statuses` map stays
+# on the tick payload for other consumers)
 # Narrow terminals (< 100 cols) get the two-line layout. A row
 # that overflows the terminal drops its lowest-priority pills.
 [ext]

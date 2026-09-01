@@ -22,8 +22,15 @@
 #   metric is the last usage event's input_tokens, not the
 #   cumulative totals. The section hides until both are known. Both
 #   numbers shorten with the same k/M/B rule.
-# - ext_status values that other extensions published into the log;
-#   the row consumes them through the tick payload's `statuses` map
+#
+# The footer does NOT dump the ext_status values the tick payload
+# carries: shared UI state (model_thinking, loop_phase, other
+# extensions' state) is host presentation (the input-area border,
+# the working row), not statusline content. A 2026-09-02 revision
+# dropped the generic k=v pill dump, which also carried a missing
+# separator between two pills and showed the thinking level as a
+# bare number. The `statuses` map stays on the wire for consumers
+# that want it.
 #
 # The row is a powerline footer: rounded pill segments with Nerd
 # Font glyphs, the starship-statusline reference look. The left hard
@@ -188,25 +195,6 @@ usage_pair() {
   fi
 }
 
-# The ext_status values of the tick, compact "k=v" text. The row
-# shows at most two; the rest stay in the log. An empty statuses map
-# skips the jq spawn.
-status_text() {
-  # $1 = the tick line
-  case "$1" in
-    *'"statuses":{}'*) return 0 ;;
-  esac
-  local out=""
-  if [ "$USE_JQ" = 1 ]; then
-    out=$(printf '%s' "$1" | jq -r '
-      ((.statuses // {}) | to_entries)
-      | .[0:2][]
-      | "\(.key)=\(.value | if type == "string" then . else tojson end)"
-    ' 2>/dev/null)
-  fi
-  printf '%s' "${out:-}"
-}
-
 # The context-fullness section, starship-statusline style:
 # `ctx <pct>% (<tokens>/<window>)`. Both numbers need to be known,
 # so the section hides until the last usage event and the config
@@ -341,10 +329,8 @@ row_fit() {
 }
 
 emit_status() {
-  # $1 width, $2 model, $3 tick line
-  local width=$1 model=$2 tickline=$3
-  local stt
-  stt=$(status_text "$tickline")
+  # $1 width, $2 model
+  local width=$1 model=$2
 
   # The context window is keyed on the model name from the tick.
   # The model rarely changes; the re-parse only fires on a switch.
@@ -368,7 +354,6 @@ emit_status() {
   local model_txt="${model:-no-model}"
   local stats
   stats="$(usage_text)"
-  [ -n "$stt" ] && stats="$stats st:${stt}"
 
   # One record per pill. The head (dir) never drops; the model and
   # git pills drop in that order on overflow; the stats pill keeps
@@ -419,8 +404,9 @@ on_tick() {
     [ -n "$width" ] || width=80
     ;;
   esac
-  # The tick also carries session and loop_running. The footer does
-  # not consume them: the host top bar shows both.
+  # The tick also carries session, loop_running, thinking, and the
+  # ext_status statuses map. The footer does not consume them: the
+  # host top bar and the input-area border show that state.
   local model=""
   local m_model='"model":"'
   case "$1" in *"$m_model"*)
@@ -428,7 +414,7 @@ on_tick() {
     model="${model%%\"*}"
     ;;
   esac
-  emit_status "$width" "$model" "$1"
+  emit_status "$width" "$model"
 }
 
 while IFS= read -r line; do

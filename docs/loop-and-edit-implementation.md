@@ -114,7 +114,7 @@ created or edited it in this session."""
 
 The `[model]` table holds defaults. Each `[model.<name>]` table defines one model. `[active] model` selects the active model. The `MODEL` environment variable overrides the selection.
 
-`max_output_tokens` bounds the generated output. The value includes reasoning tokens. A per-model value overrides the default. `reasoning_effort` sets the thinking level. Allowed values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. `none` disables thinking. The value maps to the `reasoning.effort` field in the request.
+`max_output_tokens` bounds the generated output. The value includes reasoning tokens. A per-model value overrides the default. `reasoning_effort` sets the thinking level. Allowed values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. `none` disables thinking. The value maps to the `reasoning.effort` field in the request. The loop publishes the resolved level as a `model_thinking` `ext_status` event so the TUI colors the input-area border from it (docs/tui-thinking-level-input-box.md).
 
 `context_tokens` is the model's context window. Set `context_tokens` to match the server for local models. llama.cpp sets the window with `--ctx-size`. The request budget is in input tokens: `context_budget_tokens` in `[limits]`. The decision is in token space only (correction 62): `assemble` compares the measured `usage.input_tokens` of the log against the budget. The growth of appended events projects at the measured per-event token growth. No char mechanism: no chars-per-token rate, no char budget. These values are frozen call config.
 

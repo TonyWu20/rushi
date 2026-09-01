@@ -271,7 +271,9 @@ value and maps it to a border color:
 The mapping is host presentation only: the TUI does not decide the
 level, it renders whatever the loop or a policy hook published. The
 `frame` extension may override the border color; without one, the
-host's built-in palette above applies.
+host's built-in palette above applies. The loop publishes the
+level as `model_thinking` from the resolved `reasoning_effort`
+(docs/tui-thinking-level-input-box.md).
 
 ## 8. Rust stack
 

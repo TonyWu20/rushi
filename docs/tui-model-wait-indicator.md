@@ -12,6 +12,14 @@ indicator. The first ship kept the timer in the statusline
 row. The reference statusline extension owns that slot and hid
 the timer. The working row shows under any statusline.
 
+Revision (2026-09-02): the reference statusline stopped listing
+`ext_status` values (the bash reference and the Rust port).
+The generic `key=value` pill dump is gone: it duplicated host
+presentation in the footer, ran two values together with no
+separator, and showed the thinking level as a bare number.
+The marker's presentation is the title bit and the working
+row. The `statuses` map stays on the tick payload.
+
 ## 1. Purpose and justification
 
 While the loop runs, the TUI shows two loop signals only. The
@@ -107,9 +115,12 @@ Working row rules (after the `pi` working indicator):
   last loop line, help line.
 
 Extension rule: no protocol change. The marker reaches the
-extension tick through the existing `statuses` map. A
-statusline that lists ext_status values shows the marker as a
-`key=value` pill without new code.
+extension tick through the existing `statuses` map. The
+reference statusline no longer lists ext_status values (a
+2026-09-02 revision dropped the generic `key=value` pill dump:
+it shared a slot with no separator between two values and
+duplicated host presentation in the footer). The marker's
+presentation is the title bit and the working row.
 
 ## 3. Behavior
 
@@ -188,9 +199,10 @@ backend. The manual pass covers a live session.
 - No cumulative timer. `N` counts the current wait only.
 - No sub-second resolution. The marker timestamp has one-second
   resolution.
-- No styled statusline pill. The shipped statusline shows the
-  marker as a generic `key=value` pill. A styled pill is a
-  separate, optional piece of work. It spans
+- No styled statusline pill. The reference statusline does not
+  list ext_status values at all (a 2026-09-02 revision dropped
+  the generic `key=value` pill dump). A styled pill that picks
+  its own ids is a separate, optional piece of work. It spans
   `ext-rs/statusline-rs`, `ui_extensions/statusline`, and the
   pi-config starship port.
 

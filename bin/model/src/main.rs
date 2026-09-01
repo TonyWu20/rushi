@@ -12,6 +12,15 @@ struct Args {
     /// Path to config file
     #[arg(long, default_value = "config.toml")]
     config: String,
+
+    /// Print the resolved call config as one JSON object and exit:
+    /// the active model, the reasoning effort as sent in the
+    /// request, and the 0-4 thinking level (docs/tui.md section
+    /// 7.2). No API call, no stdin. The loop publishes the level
+    /// as the `model_thinking` ext_status; the resolution is this
+    /// binary's, so the published level matches the request.
+    #[arg(long)]
+    describe: bool,
 }
 
 /// Resolve the active model name from the MODEL env var or config.
@@ -35,6 +44,23 @@ fn val_str(v: &toml::Value, key: &str) -> Option<String> {
 
 fn val_int(v: &toml::Value, key: &str) -> Option<i64> {
     v.get(key).and_then(|x| x.as_integer())
+}
+
+/// Map the resolved reasoning effort to the 0-4 thinking level of
+/// docs/tui.md section 7.2: 0 no thinking (the default), 1 low,
+/// 2 medium, 3 high, 4+ highest. The level is what the loop
+/// publishes as the `model_thinking` ext_status; the TUI colors
+/// the input-area border from it. Unknown efforts map to 0: the
+/// level must never claim a thinking the request does not carry.
+fn thinking_level_for(effort: &str) -> u32 {
+    match effort.to_ascii_lowercase().as_str() {
+        "none" => 0,
+        "minimal" | "low" => 1,
+        "medium" => 2,
+        "high" => 3,
+        "xhigh" | "max" => 4,
+        _ => 0,
+    }
 }
 
 fn main() {
@@ -63,8 +89,7 @@ fn main() {
     let model_root = config.get("model").unwrap_or(&empty);
     let mdl = model_root.get(&active_model).unwrap_or(&empty);
 
-    let base_url = val_str(mdl, "base_url")
-        .unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
+    let base_url = val_str(mdl, "base_url").unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
 
     let model_name = val_str(mdl, "model_id").unwrap_or_else(|| active_model.clone());
 
@@ -76,10 +101,31 @@ fn main() {
         .or_else(|| val_str(model_root, "reasoning_effort"))
         .unwrap_or_else(|| "medium".to_string());
 
-    let api_key_env = val_str(mdl, "api_key_env")
-        .unwrap_or_else(|| "MODEL_API_KEY".to_string());
+    // "off" is not an API effort value; it normalizes to "none".
+    // The normalized value is what the request carries, and it is
+    // the value `--describe` reports.
+    let effort = if reasoning_effort.eq_ignore_ascii_case("off") {
+        "none".to_string()
+    } else {
+        reasoning_effort.clone()
+    };
+
+    let api_key_env = val_str(mdl, "api_key_env").unwrap_or_else(|| "MODEL_API_KEY".to_string());
 
     let api_key = std::env::var(api_key_env).unwrap_or_default();
+
+    if args.describe {
+        // The resolved call config, one JSON object. The loop reads
+        // `thinking_level` and publishes it; nothing here touches
+        // the network or the session log.
+        let out = serde_json::json!({
+            "active": active_model,
+            "reasoning_effort": effort,
+            "thinking_level": thinking_level_for(&effort),
+        });
+        println!("{out}");
+        return;
+    }
 
     // Read model request from stdin
     let mut request_str = String::new();
@@ -102,12 +148,7 @@ fn main() {
     // surface. The server must not retain state: the session log is
     // the store. The encrypted reasoning content is requested back so
     // it can round-trip verbatim. Reasoning models get the configured
-    // effort with an automatic summary; "off" sends effort "none".
-    let effort = if reasoning_effort.eq_ignore_ascii_case("off") {
-        "none".to_string()
-    } else {
-        reasoning_effort.clone()
-    };
+    // effort with an automatic summary.
     let mut api_request = request.clone();
     api_request["stream"] = serde_json::json!(true);
     api_request["store"] = serde_json::json!(false);
@@ -235,7 +276,10 @@ fn call_chat_completions(
             let status = resp.status();
             if !status.is_success() {
                 let body = resp.text().unwrap_or_default();
-                return Err(format!("Chat completions API returned status {}: {}", status, body));
+                return Err(format!(
+                    "Chat completions API returned status {}: {}",
+                    status, body
+                ));
             }
             let body = match resp.text() {
                 Ok(b) => b,
@@ -273,10 +317,7 @@ fn convert_to_chat_format(request: &serde_json::Value) -> serde_json::Value {
             match item.get("type").and_then(|t| t.as_str()) {
                 Some("message") => {
                     let role = item.get("role").and_then(|r| r.as_str()).unwrap_or("user");
-                    let content = item
-                        .get("content")
-                        .and_then(|c| c.as_str())
-                        .unwrap_or("");
+                    let content = item.get("content").and_then(|c| c.as_str()).unwrap_or("");
                     let mut message = serde_json::json!({
                         "role": role,
                         "content": content
@@ -289,10 +330,7 @@ fn convert_to_chat_format(request: &serde_json::Value) -> serde_json::Value {
                     messages.push(message);
                 }
                 Some("function_call") => {
-                    let call_id = item
-                        .get("call_id")
-                        .and_then(|c| c.as_str())
-                        .unwrap_or("");
+                    let call_id = item.get("call_id").and_then(|c| c.as_str()).unwrap_or("");
                     let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
                     let arguments = item
                         .get("arguments")
@@ -333,14 +371,8 @@ fn convert_to_chat_format(request: &serde_json::Value) -> serde_json::Value {
                     }));
                 }
                 Some("function_call_output") => {
-                    let call_id = item
-                        .get("call_id")
-                        .and_then(|c| c.as_str())
-                        .unwrap_or("");
-                    let output = item
-                        .get("output")
-                        .and_then(|o| o.as_str())
-                        .unwrap_or("");
+                    let call_id = item.get("call_id").and_then(|c| c.as_str()).unwrap_or("");
+                    let output = item.get("output").and_then(|o| o.as_str()).unwrap_or("");
                     messages.push(serde_json::json!({
                         "role": "tool",
                         "tool_call_id": call_id,
@@ -461,10 +493,7 @@ fn parse_sse_response(body: &str) -> Result<String, String> {
                                 .unwrap_or("")
                                 .to_string();
                             fc_names.entry(item_id.clone()).or_insert(name);
-                            if let Some(args) = item
-                                .get("arguments")
-                                .and_then(|a| a.as_str())
-                            {
+                            if let Some(args) = item.get("arguments").and_then(|a| a.as_str()) {
                                 fc_args.insert(item_id.clone(), args.to_string());
                             }
                             if !fc_order.contains(&item_id) {
@@ -493,7 +522,10 @@ fn parse_sse_response(body: &str) -> Result<String, String> {
                     .unwrap_or("")
                     .to_string();
                 if let Some(delta) = event.get("delta").and_then(|d| d.as_str()) {
-                    reasoning_text.entry(item_id.clone()).or_default().push_str(delta);
+                    reasoning_text
+                        .entry(item_id.clone())
+                        .or_default()
+                        .push_str(delta);
                 }
                 if !reasoning_order.contains(&item_id) {
                     reasoning_order.push(item_id);
@@ -570,8 +602,7 @@ fn parse_sse_response(body: &str) -> Result<String, String> {
                     Some("message") => {
                         if let Some(content) = item.get("content").and_then(|c| c.as_array()) {
                             for part in content {
-                                if part.get("type").and_then(|t| t.as_str())
-                                    == Some("output_text")
+                                if part.get("type").and_then(|t| t.as_str()) == Some("output_text")
                                 {
                                     if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
                                         final_text.push_str(t);
@@ -809,8 +840,11 @@ fn parse_chat_response(body: &str) -> Result<String, String> {
             usage_map.insert("output_tokens".to_string(), serde_json::json!(v));
         }
     }
-    let usage_norm: Option<serde_json::Value> =
-        if usage_map.is_empty() { None } else { Some(serde_json::Value::Object(usage_map)) };
+    let usage_norm: Option<serde_json::Value> = if usage_map.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(usage_map))
+    };
 
     // The completions fallback speaks the deepseek thinking format:
     // the thinking text rides in message.reasoning_content. Capture
@@ -857,12 +891,8 @@ mod tests {
         let mut s = String::new();
         s.push_str("event: response.created\n");
         s.push_str("data: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\"}}\n\n");
-        s.push_str(
-            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello \"}\n\n",
-        );
-        s.push_str(
-            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"world\"}\n\n",
-        );
+        s.push_str("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello \"}\n\n");
+        s.push_str("data: {\"type\":\"response.output_text.delta\",\"delta\":\"world\"}\n\n");
         s.push_str(
             "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}}\n\n",
         );
@@ -919,8 +949,7 @@ mod tests {
     #[test]
     fn failed_stream_reports_error() {
         let s = "data: {\"type\":\"response.failed\",\"response\":{\"id\":\"r1\",\"status\":\"failed\"}}\n\n";
-        let out: serde_json::Value =
-            serde_json::from_str(&parse_sse_response(s).unwrap()).unwrap();
+        let out: serde_json::Value = serde_json::from_str(&parse_sse_response(s).unwrap()).unwrap();
         assert_eq!(out["stop_reason"], "error");
         assert!(out.get("detail").is_none());
     }
@@ -992,7 +1021,10 @@ mod tests {
             serde_json::from_str(&parse_sse_response(&s).unwrap()).unwrap();
         let item = &out["reasoning"][0];
         assert_eq!(
-            item["content"].as_array().expect("content is an array").len(),
+            item["content"]
+                .as_array()
+                .expect("content is an array")
+                .len(),
             1
         );
         assert_eq!(item["content"][0]["text"], "");
@@ -1074,5 +1106,38 @@ mod tests {
         assert_eq!(msgs[1]["role"], "assistant");
         assert_eq!(msgs[1]["reasoning_content"], "plan A");
     }
-}
 
+    // The 0-4 scale of docs/tui.md section 7.2: the TUI colors the
+    // input-area border from this level, so the mapping is the
+    // host palette's.
+    #[test]
+    fn thinking_level_maps_the_documented_efforts() {
+        let cases = [
+            ("none", 0),
+            ("minimal", 1),
+            ("low", 1),
+            ("medium", 2),
+            ("high", 3),
+            ("xhigh", 4),
+            ("max", 4),
+        ];
+        for (effort, level) in cases {
+            assert_eq!(thinking_level_for(effort), level, "{effort}");
+        }
+    }
+
+    #[test]
+    fn thinking_level_is_case_insensitive_and_unknown_is_zero() {
+        assert_eq!(
+            thinking_level_for("XHIGH"),
+            4,
+            "effort is compared case-insensitively"
+        );
+        assert_eq!(
+            thinking_level_for("turbo"),
+            0,
+            "an unknown effort claims no thinking"
+        );
+        assert_eq!(thinking_level_for(""), 0);
+    }
+}

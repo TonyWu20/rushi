@@ -45,6 +45,34 @@ append_loop_phase() {
   echo "$event" | "$BIN_DIR/log" --session "$SESSION_DIR" --schemas "$SCHEMA_DIR" || exit 1
 }
 
+# Publish the active model's thinking level (docs/tui.md section 7.2,
+# docs/ui-extension.md section 5). The TUI colors the input-area
+# border from the last `model_thinking` value. The level resolves
+# through `bin/model --describe` — the same config resolution as the
+# API call — so the published level matches what the model receives.
+#
+# The publisher sends only on change (docs/ui-extension.md section
+# 5): the effort is frozen call config, so the log carries one event
+# per value. A describe failure (no binary, broken config) skips the
+# publish; the TUI falls back to its default level. A failed append
+# aborts the step, like every other append in this script.
+publish_model_thinking() {
+  local level last ts event
+  level=$("$BIN_DIR/model" --describe --config "$CONFIG" 2>/dev/null \
+    | jq -r '.thinking_level // empty')
+  [[ "$level" =~ ^[0-9]+$ ]] || return 0
+  # The on-change gate: the last published value in the log. The tail
+  # window is whole lines; a value older than the window republishes
+  # the same number once and the log quiets again.
+  last=$(tail -n 4096 "$SESSION_DIR/events.jsonl" 2>/dev/null \
+    | jq -rs '[.[] | select(.type == "ext_status" and .id == "model_thinking") | .value] | last // empty')
+  [[ "$last" == "$level" ]] && return 0
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  event=$(jq -cn --arg ts "$ts" --argjson v "$level" \
+    '{v:1, type:"ext_status", ts:$ts, id:"model_thinking", value:$v}')
+  echo "$event" | "$BIN_DIR/log" --session "$SESSION_DIR" --schemas "$SCHEMA_DIR" || exit 1
+}
+
 # The automatic handoff (correction 57). One cheap summarization call
 # on the compacted log. It seeds a new session with the summary and
 # records the `context_exhausted` marker on this session. The TUI
@@ -108,6 +136,12 @@ Handoff: the session \"$1\" ran out of context. The summary above is your only c
     "$WORKDIR/model-request.json" \
     | "$BIN_DIR/log" --session "$session_dir" --schemas "$SCHEMA_DIR" || exit 1
 }
+
+# The thinking level publishes on every step entry, before the claim:
+# the border color reflects the active model even while the step
+# routes tools or the session idles. The on-change gate keeps the
+# log quiet after the first publish.
+publish_model_thinking
 
 "$BIN_DIR/claim" --session "$SESSION_DIR" > "$WORKDIR/claim.json" || exit 1
 STATE=$(jq -r .state "$WORKDIR/claim.json")

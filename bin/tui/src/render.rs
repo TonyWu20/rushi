@@ -564,10 +564,7 @@ fn wrap_markdown(text: &str, wrap_w: usize, base: Style) -> Vec<Line<'static>> {
             out.push(Line::default());
             continue;
         }
-        let segs = with_plain_base(
-            highlight::markdown_line(hard, &mut fence),
-            base,
-        );
+        let segs = with_plain_base(highlight::markdown_line(hard, &mut fence), base);
         out.extend(wrap_flow(segs, wrap_w));
     }
     out
@@ -982,10 +979,8 @@ fn render_message_content(
                         // balanced fence.
                         let mut private = fence;
                         for hard in raw.split('\n') {
-                            let segs = with_plain_base(
-                                highlight::markdown_line(hard, &mut private),
-                                base,
-                            );
+                            let segs =
+                                with_plain_base(highlight::markdown_line(hard, &mut private), base);
                             if segs.is_empty() {
                                 out.push(Line::default());
                             } else {
@@ -1083,9 +1078,7 @@ pub fn wait_span_text(ts: &str, now: chrono::DateTime<chrono::Utc>) -> Option<St
 /// The braille spinner frames of the working row, in cycle order.
 /// The row shows one frame per redraw; the main loop redraws about
 /// every 100 ms, so the cycle runs at 100 ms per frame.
-const WORKING_SPINNER_FRAMES: [&str; 10] = [
-    "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
-];
+const WORKING_SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// The spinner frame index for `now`: the wall-clock milliseconds
 /// over the frame interval. The index is a pure function of time, so
@@ -1132,11 +1125,7 @@ fn working_row_text(
 /// border color, then the phase text in dim. The caller draws the
 /// row only while the loop runs. The idle state yields no text:
 /// no row, and the transcript absorbs its place.
-fn working_row(
-    app: &App,
-    running: bool,
-    now: &chrono::DateTime<chrono::Utc>,
-) -> Line<'static> {
+fn working_row(app: &App, running: bool, now: &chrono::DateTime<chrono::Utc>) -> Line<'static> {
     let state = phase_state(app, running);
     let Some(text) = working_row_text(state, app.loop_phase_ts(), now) else {
         return Line::default();
@@ -1145,10 +1134,7 @@ fn working_row(
         format!("{} ", spinner_frame(now)),
         Style::default().fg(thinking_border(app.thinking_level())),
     );
-    let body = Span::styled(
-        format!(" {text}"),
-        Style::default().fg(Color::DarkGray),
-    );
+    let body = Span::styled(format!(" {text}"), Style::default().fg(Color::DarkGray));
     Line::from(vec![frame, body])
 }
 
@@ -1376,7 +1362,9 @@ pub fn pending_steering_lines(app: &App, running: bool, row_width: usize) -> Vec
             .next()
             .unwrap_or("");
         let prefix = format!("  {}. ", i + 1);
-        let max = row_width.saturating_sub(prefix.chars().count()).saturating_sub(1);
+        let max = row_width
+            .saturating_sub(prefix.chars().count())
+            .saturating_sub(1);
         out.push(Line::from(Span::styled(
             format!("{prefix}{}", trunc(content, max)),
             prose,
@@ -1590,10 +1578,7 @@ pub fn draw(
     // section 3).
     if running {
         let now = chrono::Utc::now();
-        f.render_widget(
-            Paragraph::new(working_row(app, running, &now)),
-            rows[row],
-        );
+        f.render_widget(Paragraph::new(working_row(app, running, &now)), rows[row]);
         row += 1;
     }
 
@@ -1725,17 +1710,11 @@ pub fn draw(
             let style = Style::default().bg(Color::White).fg(Color::Black);
             let mut spans = Vec::new();
             if !before.is_empty() {
-                spans.push(Span::styled(
-                    before.iter().collect::<String>(),
-                    prose,
-                ));
+                spans.push(Span::styled(before.iter().collect::<String>(), prose));
             }
             spans.push(Span::styled(caret.to_string(), style));
             if !after.is_empty() {
-                spans.push(Span::styled(
-                    after.iter().collect::<String>(),
-                    prose,
-                ));
+                spans.push(Span::styled(after.iter().collect::<String>(), prose));
             }
             Line::from(spans)
         } else {
@@ -2620,10 +2599,8 @@ mod tests {
     fn steering_block_is_empty_when_nothing_waits() {
         let app = app_with_session(vec![
             produce::user_message("hi"),
-            Event::parse_line(
-                r#"{"v":1,"type":"assistant_message","ts":"t","content":"yo"}"#,
-            )
-            .unwrap(),
+            Event::parse_line(r#"{"v":1,"type":"assistant_message","ts":"t","content":"yo"}"#)
+                .unwrap(),
         ]);
         assert!(pending_steering_lines(&app, true, 80).is_empty());
     }
@@ -2669,11 +2646,7 @@ mod tests {
         let lines = pending_steering_lines(&app, true, 40);
         assert!(!lines.is_empty());
         for l in &lines {
-            let w: usize = l
-                .spans
-                .iter()
-                .map(|s| s.content.chars().count())
-                .sum();
+            let w: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
             assert!(w <= 40, "row is {w} columns, the row owns 40");
         }
     }
@@ -2686,7 +2659,9 @@ mod tests {
         fn wait_exit(&self) -> i32 {
             0
         }
-        fn take_lines(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<crate::port::LoopLine>> {
+        fn take_lines(
+            &self,
+        ) -> Option<tokio::sync::mpsc::UnboundedReceiver<crate::port::LoopLine>> {
             None
         }
     }
@@ -2704,10 +2679,14 @@ mod tests {
     /// Attach a running loop with one output line, so the status row
     /// has a last line and the running bit is set.
     fn attach_running_loop(app: &mut App, sid: &str) {
-        let (tx, rx) =
-            tokio::sync::mpsc::unbounded_channel::<crate::port::LoopLine>();
-        app.attach_loop(crate::port::SessionId::new(sid), Box::new(PhaseDummyHandle), rx);
-        tx.send(crate::port::LoopLine::Stdout("loop out".into())).unwrap();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<crate::port::LoopLine>();
+        app.attach_loop(
+            crate::port::SessionId::new(sid),
+            Box::new(PhaseDummyHandle),
+            rx,
+        );
+        tx.send(crate::port::LoopLine::Stdout("loop out".into()))
+            .unwrap();
         app.drain_loop_lines();
     }
 
@@ -2740,7 +2719,11 @@ mod tests {
         // section 2): idle, running-unknown, wait, tools.
         let app = app_with_session(vec![]);
         assert_eq!(phase_state(&app, false), PhaseState::Idle);
-        assert_eq!(phase_state(&app, true), PhaseState::RunningUnknown, "no marker: unknown");
+        assert_eq!(
+            phase_state(&app, true),
+            PhaseState::RunningUnknown,
+            "no marker: unknown"
+        );
 
         let app = app_with_session(vec![phase_marker("t", "weird")]);
         assert_eq!(
@@ -2792,10 +2775,7 @@ mod tests {
         // A future marker (the loop host clock runs behind the TUI)
         // clamps to 0s.
         let future = now + chrono::Duration::seconds(30);
-        assert_eq!(
-            wait_span_text(&fmt_ts(future), now),
-            Some("0s".to_string())
-        );
+        assert_eq!(wait_span_text(&fmt_ts(future), now), Some("0s".to_string()));
         assert_eq!(wait_span_text("not-a-timestamp", now), None);
         assert_eq!(wait_span_text("", now), None);
     }
@@ -2817,7 +2797,10 @@ mod tests {
         // the last loop line, not the wait.
         let (host, _keep) = empty_host();
         let slot = join(&status_rows(&app, &host, true, 80));
-        assert!(!slot.contains("waiting for model"), "the slot is free: {slot}");
+        assert!(
+            !slot.contains("waiting for model"),
+            "the slot is free: {slot}"
+        );
         assert!(slot.contains("loop out"), "the last line shows: {slot}");
     }
 
@@ -2898,6 +2881,8 @@ mod tests {
 #[cfg(test)]
 mod cursor_span_tests {
     use super::cursor_line_spans;
+    use super::thinking_border;
+    use ratatui::style::Color;
 
     fn text(before: &[char], caret: char, after: &[char]) -> String {
         let mut s: String = before.iter().collect();
@@ -2941,5 +2926,23 @@ mod cursor_span_tests {
         // On-char on an empty line degrades to the blank cell.
         let (_b, c, _a) = cursor_line_spans("", 0, true);
         assert_eq!(c, ' ');
+    }
+
+    #[test]
+    fn thinking_border_maps_the_level_palette() {
+        // The docs/tui.md section 7.2 table: 0 gray (the idle
+        // default, no thinking published), 1 blue, 2 cyan, 3 green,
+        // 4+ yellow. The input-area border and the working-row
+        // spinner both render in this color.
+        assert_eq!(thinking_border(0), Color::DarkGray);
+        assert_eq!(thinking_border(1), Color::Blue);
+        assert_eq!(thinking_border(2), Color::Cyan);
+        assert_eq!(thinking_border(3), Color::Green);
+        assert_eq!(thinking_border(4), Color::Yellow);
+        assert_eq!(
+            thinking_border(9),
+            Color::Yellow,
+            "4 and up collapse into the highest bucket"
+        );
     }
 }

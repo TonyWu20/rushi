@@ -31,8 +31,15 @@
 //!   metric is the last usage event's input_tokens, not the
 //!   cumulative totals. The section hides until both are known. Both
 //!   numbers shorten with the same k/M/B rule.
-//! - ext_status values that other extensions published into the log;
-//!   the row consumes them through the tick payload's `statuses` map
+//!
+//! The footer does NOT dump the ext_status values the tick payload
+//! carries: shared UI state (model_thinking, loop_phase, other
+//! extensions' state) is host presentation (the input-area border,
+//! the working row), not statusline content. A 2026-09-02 revision
+//! dropped the generic k=v pill dump, which also carried a missing
+//! separator between two pills and showed the thinking level as a
+//! bare number. The `statuses` map stays on the wire for consumers
+//! that want it.
 //!
 //! Layout: one line on wide terminals, two lines when the terminal
 //! is narrow (width under 100). The host reserves one terminal row
@@ -130,22 +137,6 @@ fn git_refresh(dir: &str, cache: &Arc<Mutex<GitCache>>) {
             }
         }
     });
-}
-
-/// The ext_status values of the tick, compact `k=v` text. The row
-/// shows at most two; the rest stay in the log.
-fn status_text(statuses: &Value) -> String {
-    let Some(map) = statuses.as_object() else {
-        return String::new();
-    };
-    map.iter()
-        .take(2)
-        .map(|(k, v)| match v {
-            Value::String(s) => format!("{k}={s}"),
-            other => format!("{k}={other}"),
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// Truncate the dir to the last 16 chars with a leading ellipsis.
@@ -363,10 +354,10 @@ fn main() {
                     .and_then(|m| m.as_str())
                     .filter(|m| !m.is_empty())
                     .unwrap_or("no-model");
-                // The tick also carries session and loop_running.
-                // The footer does not consume them: the host top
-                // bar shows both.
-                let stt = status_text(v.get("statuses").unwrap_or(&Value::Null));
+                // The tick also carries session, loop_running,
+                // thinking, and the ext_status statuses map. The
+                // footer does not consume them: the host top bar
+                // and the input-area border show that state.
 
                 // The context window is keyed on the model name from
                 // the tick. The model rarely changes; the re-parse
@@ -375,9 +366,6 @@ fn main() {
                     ctx_window = ctx_window_of(model);
                     ctx_model = model.to_string();
                 }
-                // The tick also carries session and loop_running.
-                // The footer does not consume them: the host top
-                // bar shows both.
                 let git_txt = if branch.is_empty() {
                     "git:none".to_string()
                 } else {
@@ -390,7 +378,7 @@ fn main() {
                 // The stats pill: the cumulative totals (k/M/B
                 // shortened), the cached total when the session saw
                 // any, the ctx section when both its inputs are
-                // known, and the ext_status values at the tail.
+                // known.
                 let mut stats = format!(
                     "in:{} out:{} sum:{}",
                     fmt_num(in_total),
@@ -402,9 +390,6 @@ fn main() {
                 }
                 if let Some(c) = ctx_text(last_in, ctx_window) {
                     stats.push_str(&format!(" {c}"));
-                }
-                if !stt.is_empty() {
-                    stats.push_str(&format!(" st:{stt}"));
                 }
 
                 // One segment per pill. The head (dir) never drops;
