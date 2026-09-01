@@ -37,14 +37,16 @@ sessions_root = "sessions"
 tools_root = "tools"
 
 [limits]
-# Cap the model request so auto-compact engages before the context
-# reaches the zone where this model emits empty tool-call arguments
-# (FT-008). The first schema-validation failure in sessions/better-ui
-# appeared at 56.8k input tokens; none below 50k. The budget is in
-# input tokens (correction 62): the token-only decision compares the
-# measured usage.input_tokens growth against it. No char mechanism.
-# No chars-per-token rate. No char budget knob.
-context_budget_tokens = 55000
+# The cap of the model request in input tokens. It matches the
+# context window of the active model (the [model] context_tokens,
+# 262144). `assemble` clamps it to the input budget: the window
+# minus max_output_tokens (229376). The sticky compact form
+# (correction 62) engages when the predicted input outgrows the
+# cap. The token-only decision compares the measured
+# usage.input_tokens growth against it. No char mechanism. No
+# chars-per-token rate. No char budget knob. The proactive compact
+# trigger is the design of docs/auto-compact-plan.md.
+context_budget_tokens = 262144
 read_limit = 2000
 read_max_line_length = 2000
 read_max_bytes = 51200
@@ -78,7 +80,7 @@ compact_result_chars = 500
 compact_text_chars = 200
 # The output cap of the one handoff summary call. Cheap by default:
 # the summary is a seed, not a report.
-handoff_summary_max_tokens = 4096
+handoff_summary_max_tokens = 25600
 
 [system_prompt]
 # Borrowed from the pi coding agent default prompt.
