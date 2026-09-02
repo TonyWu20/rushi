@@ -71,7 +71,7 @@ Goal: prove the point with no new compiled code.
   - session, model, and loop state from `tick`
   - cumulative stats from `assistant_message.usage`
   - two-line layout when the terminal is narrow
-- `ui_extensions/tool_result/`: `ext.toml` plus a script.
+- `ui_extensions-demos/tool_result/`: `ext.toml` plus a script.
   The `render` kind owner for `tool_result`
 - `ui_extensions/notify/`: `ext.toml` plus a script. Bell and
   OSC through the `notify` op, tmux tty resolution

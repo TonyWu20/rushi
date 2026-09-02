@@ -6,12 +6,13 @@
 //! - unsupported `v` -> raw JSON with a "newer log version" hint
 //! - malformed line -> raw text with a hint
 //!
-//! Text content (user/assistant messages, tool output) wraps across as
-//! many lines as it needs: the `content` field is displayed in full,
-//! never truncated or folded (docs/tui_feature_requests_from_human.md
-//! item 1). Message content gets markdown syntax highlighting; tool
-//! result text that is a complete JSON document gets JSON syntax
-//! highlighting (item 4). The log file stays the record.
+//! Message content (the `content` field of user and assistant
+//! events) wraps across as many lines as it needs: it is displayed
+//! in full, never truncated or folded (docs/
+//! tui_feature_requests_from_human.md item 1). Message content gets
+//! markdown syntax highlighting; tool result bodies get the folded,
+//! box-wrapped, syntax-aware render of docs/tui-tool-display-port.md.
+//! The log file stays the record.
 //!
 //! The input area is a multi-line textarea in a rounded-corner border
 //! whose color tracks the active model's thinking level, and is
@@ -59,8 +60,10 @@ const LABEL: &str = " ";
 /// Continuation lines align under the content of the first line.
 const GUTTER: usize = 12;
 /// Body lines a single tool call's `command` argument may occupy.
-/// The `content` field and tool result text have no cap: they are
-/// displayed in full (docs/tui_feature_requests_from_human.md item 1).
+/// The `content` field of user and assistant messages has no cap:
+/// it displays in full (docs/tui_feature_requests_from_human.md item
+/// 1). Tool result bodies fold at render time (docs/
+/// tui-tool-display-port.md).
 const TOOL_CALL_BODY_LINES: usize = 4;
 /// Events rendered into the transcript at once. The oldest are dropped
 /// to bound memory on huge logs. The log file is the record.
@@ -72,6 +75,9 @@ const RAW_FALLBACK_MAX_LINES: usize = 6;
 fn trunc(s: &str, max: usize) -> String {
     let mut out: String = s.chars().take(max).collect();
     if s.chars().count() > max {
+        // The ellipsis owns one column of the budget: the result
+        // never exceeds `max` columns.
+        out = s.chars().take(max.saturating_sub(1)).collect();
         out.push('…');
     }
     out
@@ -156,10 +162,11 @@ fn result_status(value: Option<&serde_json::Value>, err: bool) -> String {
     }
 }
 
-/// Extract display text from a tool_result value, most readable first:
-/// `text`, then `stdout` + `stderr`, then a plain string value, then
-/// full compact JSON as the last resort. Nothing is hidden: the last
-/// resort carries the whole value (item 1: no truncation). JSON
+/// Extract display text from a tool_result value, most readable
+/// first: `text`, then `stdout` + `stderr`, then a plain string
+/// value, then full compact JSON as the last resort. The extraction
+/// takes the whole value: the cap applies at render time, where the
+/// body folds to the preview (docs/tui-tool-display-port.md). JSON
 /// highlighting is applied at render time when the text parses as a
 /// complete JSON document.
 fn result_text(value: Option<&serde_json::Value>, err: bool) -> String {
@@ -210,33 +217,57 @@ fn fmt_k(n: i64) -> String {
 /// `event_id` is the log index of the event; `ext` enables the stage
 /// 3 span extraction (transform owners may rewrite the message
 /// spans in place). `None` ext renders exactly the built-in path.
+/// The render state of one transcript build (docs/tui-tool-display-
+/// port.md section 2, docs/tui-color-scheme.md section 3, docs/tui-
+/// thinking-block.md section 4, docs/tui-pending-user-messages.md
+/// stage 2): the palette, the tool display config, the global fold
+/// toggle, and the thinking-block state. The render path is a pure
+/// function of the events and this state.
+pub struct RenderState<'a> {
+    pub palette: &'a crate::color::Palette,
+    pub tool_display: &'a crate::tool_display::ToolDisplay,
+    /// The global tool fold/expand toggle (Ctrl+O): `true` expands
+    /// every collapsed block to the full body.
+    pub tool_expanded: bool,
+    /// The thinking-block visibility (Ctrl+T): `false` hides every
+    /// thinking block.
+    pub thinking_shown: bool,
+    /// The thinking-block expand state (Ctrl+X): `false` shows the
+    /// collapsed header row only.
+    pub thinking_expanded: bool,
+}
+
 fn event_lines(
     e: &Event,
     pending: bool,
-    call_names: &HashMap<String, String>,
+    call_details: &HashMap<String, (String, serde_json::Value)>,
+    result_ids: &std::collections::HashSet<String>,
     width: usize,
     event_id: u64,
     ext: Option<&crate::ext::ExtHost>,
-    level: &crate::color::Level,
+    state: &RenderState,
     loop_running: bool,
     compaction_last_open: bool,
 ) -> Vec<Line<'static>> {
     let gutter = " ".repeat(GUTTER);
     let wrap_w = width.saturating_sub(GUTTER).max(4);
     let label_style = |fg: Color| Style::default().fg(fg).add_modifier(Modifier::BOLD);
-    let dim = Style::default()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::DIM);
-    // Command/output bodies: a capability-aware muted tone, distinct
-    // from the transcript prose color (`color::Level::tool_output`).
-    let output = Style::default().fg(level.tool_output());
+    let palette = state.palette;
+    // The muted tone of the hint rows and the error accents: the
+    // palette roles, lowered to the capability level
+    // (docs/tui-color-tones.md).
+    let dim = palette.style(crate::color::Role::Hint, Modifier::DIM);
+    // Command/output bodies: the capability-aware muted tones, distinct
+    // from the transcript prose color (docs/tui-color-tones.md: the
+    // reference-tone fix). The colors are palette roles.
+    let output = palette.style(crate::color::Role::ToolOutput, Modifier::empty());
     // The command text of a tool call: a capability-aware light tone
-    // (`color::Level::tool_command`), lighter than the result so the
-    // command and its output read as two different voices.
-    let command = Style::default().fg(level.tool_command());
+    // (`tool_command`), lighter than the result so the command and its
+    // output read as two different voices.
+    let command = palette.style(crate::color::Role::ToolCommand, Modifier::empty());
     // Unstyled transcript prose: the capability-aware plain-text
-    // color (`color::Level::plain_text`), not the terminal default.
-    let prose = Style::default().fg(level.plain_text());
+    // color (`plain_text`), not the terminal default.
+    let prose = palette.style(crate::color::Role::PlainText, Modifier::empty());
 
     let mut out: Vec<Line<'static>> = Vec::new();
     match e.kind() {
@@ -245,7 +276,7 @@ fn event_lines(
                 .get_str("content")
                 .unwrap_or("[missing content]")
                 .to_string();
-            let wrapped = render_message_content(&content, event_id, ext, wrap_w, prose);
+            let wrapped = render_message_content(&content, event_id, ext, wrap_w, prose, palette);
             let mut spans = vec![Span::styled(
                 format!("{LABEL}user"),
                 label_style(Color::Cyan),
@@ -263,6 +294,41 @@ fn event_lines(
             }
         }
         EventKind::AssistantMessage => {
+            // The thinking block first: the model's own reasoning items,
+            // captured into the log by the loop, render above the
+            // message body and the tool calls that follow, so the
+            // transcript reads thinking, then the actions (docs/tui-
+            // thinking-block.md section 4: the reasoning content shows
+            // above the message body).
+            // pi-aligned keymap: `Ctrl+T` collapses or expands
+            // the block (the pi `app.thinking.toggle`). Collapsed it is a
+            // one-line label row; expanded it is the full reasoning text.
+            // `Ctrl+X` hides or shows the block entirely. The color is
+            // the lighter thinking tone (docs/tui-color-tones.md), not a
+            // dimmed gray.
+            if state.thinking_shown {
+                let reasoning = e.get("reasoning").and_then(|v| v.as_array());
+                if let Some(text) = thinking_text(reasoning) {
+                    let thinking_style =
+                        palette.style(crate::color::Role::Thinking, Modifier::empty());
+                    if state.thinking_expanded {
+                        let header = vec![Span::styled(
+                            format!("{LABEL}thinking"),
+                            thinking_style.clone(),
+                        )];
+                        out.push(Line::from(header));
+                        let wrapped = wrap_thinking(&text, wrap_w, palette, thinking_style);
+                        out.extend(guttered(&wrapped, &gutter));
+                    } else {
+                        // The collapsed row: a one-line pi-style label with
+                        // the expand hint, not the full reasoning text.
+                        out.push(Line::from(Span::styled(
+                            format!("{LABEL}thinking \u{2026} (Ctrl+T to expand)"),
+                            thinking_style,
+                        )));
+                    }
+                }
+            }
             let content = e.get_str("content").unwrap_or("").to_string();
             let tool_calls = e.get("tool_calls").and_then(|v| v.as_array());
             let mut header = vec![Span::styled(
@@ -284,7 +350,7 @@ fn event_lines(
             let wrapped = if content.is_empty() {
                 Vec::new()
             } else {
-                render_message_content(&content, event_id, ext, wrap_w, prose)
+                render_message_content(&content, event_id, ext, wrap_w, prose, palette)
             };
             if let Some(first) = wrapped.first() {
                 header.push(Span::raw("  "));
@@ -301,35 +367,48 @@ fn event_lines(
         }
         EventKind::ToolCall => {
             let name = e.get_str("name").unwrap_or("?");
-            let args = e
-                .get("arguments")
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "[missing arguments]".to_string());
-            out.push(Line::from(vec![
-                Span::styled(format!("{LABEL}tool:{name}"), label_style(Color::Magenta)),
-                Span::styled(
-                    format!(" {}", trunc(&args, wrap_w.max(20))),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]));
-            // The command of a bash call is the interesting part; show
-            // it as its own dim line instead of raw JSON noise.
-            if name == "bash" {
-                if let Some(cmd) = e
+            let id = e.get_str("id").unwrap_or("");
+            // A bash call whose result follows merges into the
+            // result box: the box body opens with the `$ <command>`
+            // line, so the separate call line would repeat the
+            // command. A call without a result yet keeps its line:
+            // the command is the only view of a running tool.
+            let merged = name == "bash" && result_ids.contains(id);
+            if !merged {
+                let args = e
                     .get("arguments")
-                    .and_then(|a| a.get("command"))
-                    .and_then(|c| c.as_str())
-                {
-                    out.extend(body(cmd, command, TOOL_CALL_BODY_LINES, wrap_w, &gutter));
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "[missing arguments]".to_string());
+                out.push(Line::from(vec![
+                    Span::styled(format!("{LABEL}tool:{name}"), label_style(Color::Magenta)),
+                    Span::styled(
+                        format!(" {}", trunc(&args, wrap_w.max(20))),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+                // The command of a bash call is the interesting part;
+                // show it as its own dim line instead of raw JSON
+                // noise.
+                if name == "bash" {
+                    if let Some(cmd) = e
+                        .get("arguments")
+                        .and_then(|a| a.get("command"))
+                        .and_then(|c| c.as_str())
+                    {
+                        out.extend(body(cmd, command, TOOL_CALL_BODY_LINES, wrap_w, &gutter));
+                    }
                 }
             }
         }
         EventKind::ToolResult => {
             let id = e.get_str("id").unwrap_or("?");
-            let name = call_names
+            // The call details hold the tool name and the call
+            // arguments (the write diff needs the write `content`
+            // argument; docs/tui-tool-result-truncation.md).
+            let (name, args) = call_details
                 .get(id)
                 .cloned()
-                .unwrap_or_else(|| id.to_string());
+                .unwrap_or_else(|| (id.to_string(), serde_json::Value::Null));
             let value = e.get("value");
             let err = e.get_bool("is_error").unwrap_or(false);
             let status = result_status(value, err);
@@ -338,25 +417,59 @@ fn event_lines(
             } else {
                 dim
             };
-            out.push(Line::from(vec![
-                Span::styled(format!("{LABEL}tool:{name}"), label_style(Color::Magenta)),
-                Span::styled(format!("  {status}"), status_style),
-            ]));
-            let text = result_text(value, err);
-            let text_style = if err {
-                Style::default().fg(Color::Red)
-            } else {
-                output
-            };
-            // Tool result text: JSON syntax highlighting when the text
-            // is a complete JSON document, plain otherwise. No cap:
-            // the result is displayed in full.
-            let wrapped = if highlight::looks_like_json(&text) {
-                wrap_json(&text, wrap_w, output)
-            } else {
-                wrap_styled(vec![(text_style, text)], wrap_w)
-            };
-            out.extend(guttered(&wrapped, &gutter));
+            // The result body in its lighter box (docs/tui-tool-
+            // display-port.md section 2, the box): the body is the
+            // tool-specific compact output (docs/tui-tool-result-
+            // truncation.md section 1, the content layer), folded to
+            // the output mode's lines, with the global Ctrl+O
+            // expansion to the full body. The box top border carries
+            // the `tool:<name>  <status>` title, so no separate
+            // header line above the box. An error title keeps the
+            // red accent through the title style.
+            let value_ref = value.unwrap_or(&serde_json::Value::Null);
+            // The body content budget: the box inner width minus the
+            // left padding cell. The box truncates overflow with a
+            // trailing ellipsis, so the content fills the panel
+            // instead of leaving dead columns (the 2026-09-03 user
+            // directive: truncate, never wrap).
+            let body_w = width.saturating_sub(3);
+            let mut body = crate::tool_display::body_rows(
+                &name,
+                value_ref,
+                Some(&args),
+                err,
+                state.tool_display,
+                palette,
+                state.tool_expanded,
+                body_w,
+            );
+            // The JSON-document body (docs/tui-color-tones.md): a
+            // read result whose content is a complete JSON document,
+            // or an unknown tool whose result is JSON, keeps the
+            // JSON token colors instead of the plain code tone.
+            let body_text = value_ref.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            let known = matches!(name.as_str(), "read" | "write" | "edit" | "bash" | "list");
+            if name == "read" || !known {
+                if highlight::looks_like_json(&body_text) {
+                    body = crate::tool_display::json_body_rows(
+                        &name,
+                        value_ref,
+                        state.tool_display,
+                        palette,
+                        state.tool_expanded,
+                        body_w,
+                    );
+                }
+            }
+            let title = format!("tool:{name}  {status}");
+            let title_style = if err { Some(status_style) } else { None };
+            let rows =
+                crate::tool_display::box_rows(&title, &body, width, palette, title_style.as_ref());
+            for row in rows {
+                let spans: Vec<Span<'static>> =
+                    row.into_iter().map(|(s, t)| Span::styled(t, s)).collect();
+                out.push(Line::from(spans));
+            }
         }
         EventKind::ApprovalRequest => {
             let id = e.get_str("id").unwrap_or("?");
@@ -471,17 +584,16 @@ fn event_lines(
             let reason = e.get_str("reason").unwrap_or("threshold").to_string();
             let tokens = e.get_i64("tokens_before").unwrap_or(0);
             let style = if compaction_last_open && loop_running {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 dim.clone()
             };
             let text = if compaction_last_open && !loop_running {
                 format!("{LABEL}compacting (interrupted)")
             } else {
-                format!(
-                    "{LABEL}compacting ({reason}): {} tokens",
-                    fmt_k(tokens)
-                )
+                format!("{LABEL}compacting ({reason}): {} tokens", fmt_k(tokens))
             };
             out.push(Line::from(Span::styled(text, style)));
         }
@@ -515,9 +627,7 @@ fn event_lines(
         EventKind::CompactionFailed => {
             let reason = e.get_str("reason").unwrap_or("overflow").to_string();
             let detail = e.get_str("detail").unwrap_or("").to_string();
-            let st = Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::BOLD);
+            let st = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
             let mut spans = vec![Span::styled(
                 format!("{LABEL}compaction failed ({reason})"),
                 st,
@@ -590,6 +700,55 @@ fn push_line(cur: &mut Vec<Span<'static>>, out: &mut Vec<Line<'static>>) {
 /// a hard break: each hard line word-wraps independently. Width is
 /// measured in characters; CJK and combining characters will drift a
 /// few columns on non-ASCII lines (phase-1 log content is ASCII).
+/// The expanded thinking block text (docs/tui-thinking-block.md
+/// section 4): the raw reasoning text in the thinking tone. One
+/// exception: a run of consecutive `|` table lines draws as the
+/// box-drawing grid, the same rule as `wrap_markdown_p` (the
+/// 2026-09-03 user report: tables inside a thinking block lost
+/// their fixed column widths).
+fn wrap_thinking(
+    text: &str,
+    wrap_w: usize,
+    palette: &crate::color::Palette,
+    style: Style,
+) -> Vec<Line<'static>> {
+    let hard_lines: Vec<&str> = text.split('\n').collect();
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let border_style = palette.style(crate::color::Role::Hint, Modifier::DIM);
+    let mut i = 0usize;
+    while i < hard_lines.len() {
+        if highlight::is_table_row(hard_lines[i]) {
+            let mut block: Vec<String> = Vec::new();
+            while i < hard_lines.len() && highlight::is_table_row(hard_lines[i]) {
+                block.push(hard_lines[i].to_string());
+                i += 1;
+            }
+            let grid = highlight::table_grid(&block, wrap_w, palette);
+            for row in grid {
+                let spans: Vec<Span<'static>> = row
+                    .into_iter()
+                    .map(|(s, t)| {
+                        // The cell text takes the thinking tone; the
+                        // border runs keep the hint style.
+                        let s = if s == border_style { s } else { style.clone() };
+                        Span::styled(t, s)
+                    })
+                    .collect();
+                out.push(Line::from(spans));
+            }
+            continue;
+        }
+        let line = hard_lines[i];
+        i += 1;
+        if line.is_empty() {
+            out.push(Line::default());
+            continue;
+        }
+        out.extend(wrap_styled(vec![(style.clone(), line.to_string())], wrap_w));
+    }
+    out
+}
+
 fn wrap_styled(segs: Vec<(Style, String)>, width: usize) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
     for (style, text) in segs {
@@ -657,6 +816,108 @@ fn wrap_markdown(text: &str, wrap_w: usize, base: Style) -> Vec<Line<'static>> {
         out.extend(wrap_flow(segs, wrap_w));
     }
     out
+}
+
+/// The marker-free markdown render (docs/tui-markdown-render.md):
+/// the styles in, the markers out. The fence state spans the hard
+/// lines; consecutive table rows draw as a box-drawing grid
+/// (the grid clamps to the pane width); a trailing newline drops
+/// like every other body render. Segments of one hard line wrap
+/// continuously. `base` is the foreground of the unstyled
+/// plain-text runs; `palette` the color roles.
+fn wrap_markdown_p(
+    text: &str,
+    wrap_w: usize,
+    palette: &crate::color::Palette,
+    base: Style,
+) -> Vec<Line<'static>> {
+    let hard_lines: Vec<&str> = text.trim_end_matches('\n').split('\n').collect();
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut fence = false;
+    let mut i = 0usize;
+    while i < hard_lines.len() {
+        let line = hard_lines[i];
+        // A table block: consecutive `|`-separated rows. The block
+        // draws as one grid table, clamped to the pane width
+        // (docs/tui-markdown-render.md section 3: the column width
+        // rule on a narrow pane).
+        if highlight::is_table_row(line) {
+            let mut block: Vec<String> = Vec::new();
+            while i < hard_lines.len() && highlight::is_table_row(hard_lines[i]) {
+                block.push(hard_lines[i].to_string());
+                i += 1;
+            }
+            let grid = highlight::table_grid(&block, wrap_w, palette);
+            for row in grid {
+                let spans: Vec<Span<'static>> =
+                    row.into_iter().map(|(s, t)| Span::styled(t, s)).collect();
+                out.push(Line::from(spans));
+            }
+            continue;
+        }
+        i += 1;
+        if line.is_empty() {
+            out.push(Line::default());
+            continue;
+        }
+        let segs = with_plain_base(highlight::md_line(line, &mut fence, palette), base);
+        out.extend(wrap_flow(segs, wrap_w));
+    }
+    out
+}
+
+/// The thinking text of one `assistant_message` reasoning array
+/// (docs/tui-thinking-block.md section 4): the item `summary` texts
+/// first (the provider's own summary), the `content` reasoning-text
+/// entries when the summary is empty. Malformed items drop; the
+/// rest ride on, like the capture in commit `61cde02`.
+fn thinking_text(reasoning: Option<&Vec<serde_json::Value>>) -> Option<String> {
+    let items = reasoning?;
+    let mut parts: Vec<String> = Vec::new();
+    for item in items.iter().filter(|i| i.is_object()) {
+        // The summary first: the provider's own summary of the
+        // reasoning, when it carries text.
+        let summary_text: String = item
+            .get("summary")
+            .and_then(|s| s.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|s| s.get("text").and_then(|t| t.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+        if !summary_text.is_empty() {
+            parts.push(summary_text);
+            continue;
+        }
+        // The raw reasoning-text entries of the content array.
+        // A `reasoning_text` entry and a plain text entry both carry
+        // the reasoning text (older session logs store the plain
+        // shape; docs/tui-thinking-block.md section 4).
+        let content_text: String = item
+            .get("content")
+            .and_then(|c| c.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter(|e| match e.get("type").and_then(|t| t.as_str()) {
+                        Some(t) => t == "reasoning_text",
+                        None => true,
+                    })
+                    .filter_map(|e| e.get("text").and_then(|t| t.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+        if !content_text.is_empty() {
+            parts.push(content_text);
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
 }
 
 /// Wrap JSON tool-result text with the highlight module's JSON styles.
@@ -976,6 +1237,22 @@ fn message_blocks(content: &str) -> Vec<MBlock<'_>> {
     blocks
 }
 
+/// The rendered text of one hard line of a text block: the text
+/// parts in order, the latex spans by their span text. Used for
+/// the grid-table detection: a run of consecutive table lines in
+/// one text block draws as a box-drawing grid, the same rule as
+/// [`wrap_markdown_p`] (docs/tui-markdown-render.md section 1).
+fn block_line_text(parts: &[crate::render::Part]) -> String {
+    parts
+        .iter()
+        .map(|p| match p {
+            crate::render::Part::Text(s) => *s,
+            crate::render::Part::Latex { text, .. } => *text,
+        })
+        .collect::<Vec<_>>()
+        .concat()
+}
+
 /// Render one user/assistant message with the stage 3 span
 /// extraction.
 ///
@@ -988,20 +1265,24 @@ fn message_blocks(content: &str) -> Vec<MBlock<'_>> {
 ///   span. A finished reply replaces the span text in place (the
 ///   reply lines join into one line). No owner: the raw span text
 ///   renders, exactly like the built-in path.
+/// - A table block: a run of consecutive `|`-separated lines draws
+///   as a box-drawing grid, like the `ext == None` path (the
+///   2026-09-03 report: the block path showed the raw pipes).
 ///
 /// `base` is the foreground of the unstyled plain-text runs (the
 /// capability-aware prose color); styled runs keep their own
 /// styles. The `ext == None` path renders the content with
-/// [`wrap_markdown`] over the same base.
+/// [`wrap_markdown_p`] over the same base.
 fn render_message_content(
     content: &str,
     event_id: u64,
     ext: Option<&crate::ext::ExtHost>,
     wrap_w: usize,
     base: Style,
+    palette: &crate::color::Palette,
 ) -> Vec<Line<'static>> {
     if ext.is_none() {
-        return wrap_markdown(content, wrap_w, base);
+        return wrap_markdown_p(content, wrap_w, palette, base);
     }
     let host = ext.expect("checked above");
     let blocks = message_blocks(content);
@@ -1010,21 +1291,49 @@ fn render_message_content(
     for block in blocks {
         match block {
             MBlock::Text { parts } => {
-                for line_parts in parts {
+                let mut li = 0usize;
+                while li < parts.len() {
+                    // The grid table: a run of consecutive
+                    // table lines, clamped to the pane width,
+                    // like wrap_markdown_p.
+                    let text = block_line_text(&parts[li]);
+                    if highlight::is_table_row(&text) {
+                        let mut block: Vec<String> = Vec::new();
+                        while li < parts.len() {
+                            let t = block_line_text(&parts[li]);
+                            if !highlight::is_table_row(&t) {
+                                break;
+                            }
+                            block.push(t);
+                            li += 1;
+                        }
+                        let grid = highlight::table_grid(&block, wrap_w, palette);
+                        for row in grid {
+                            let spans: Vec<Span<'static>> = row
+                                .into_iter()
+                                .map(|(s, t)| Span::styled(t, s))
+                                .collect();
+                            out.push(Line::from(spans));
+                        }
+                        continue;
+                    }
+                    let line_parts = &parts[li];
+                    li += 1;
                     let mut segs: Vec<(Style, String)> = Vec::new();
                     for part in line_parts {
                         match part {
                             Part::Text(s) => {
                                 segs.extend(with_plain_base(
-                                    highlight::markdown_line(s, &mut fence),
+                                    highlight::md_line(s, &mut fence, palette),
                                     base,
                                 ));
                             }
                             Part::Latex { idx, raw, text } => {
-                                let req =
-                                    host.request_span(event_id, idx, "inline:latex", text, wrap_w);
+                                let req = host.request_span(
+                                    event_id, *idx, "inline:latex", *text, wrap_w,
+                                );
                                 let replaced = req
-                                    .and_then(|_| host.span_lines(event_id, idx))
+                                    .and_then(|_| host.span_lines(event_id, *idx))
                                     .map(|ls| {
                                         ls.iter()
                                             .map(|l| l.text.clone())
@@ -1068,8 +1377,10 @@ fn render_message_content(
                         // balanced fence.
                         let mut private = fence;
                         for hard in raw.split('\n') {
-                            let segs =
-                                with_plain_base(highlight::markdown_line(hard, &mut private), base);
+                            let segs = with_plain_base(
+                                highlight::md_line(hard, &mut private, palette),
+                                base,
+                            );
                             if segs.is_empty() {
                                 out.push(Line::default());
                             } else {
@@ -1221,7 +1532,7 @@ fn working_row(app: &App, running: bool, now: &chrono::DateTime<chrono::Utc>) ->
     };
     let frame = Span::styled(
         format!("{} ", spinner_frame(now)),
-        Style::default().fg(thinking_border(app.thinking_level())),
+        Style::default().fg(app.palette().thinking_border(app.thinking_level())),
     );
     let body = Span::styled(format!(" {text}"), Style::default().fg(Color::DarkGray));
     Line::from(vec![frame, body])
@@ -1335,15 +1646,31 @@ pub fn build_transcript_lines(
     width: usize,
     ext: Option<&crate::ext::ExtHost>,
 ) -> Vec<Line<'static>> {
-    let names = app.call_names();
+    let details = app.call_details();
     let pending = app.oldest_pending_approval().is_some();
     let events = app.events();
     let start = events.len().saturating_sub(TRANSCRIPT_EVENT_CAP);
+    // The tool_result ids of the visible window: a tool_call whose
+    // result follows merges into the result box (the call line drops
+    // for the tools whose result carries the call info).
+    let result_ids: std::collections::HashSet<String> = events[start..]
+        .iter()
+        .filter(|e| e.kind() == EventKind::ToolResult)
+        .filter_map(|e| e.get_str("id").map(String::from))
+        .collect();
+    // The render state (docs/tui-tool-display-port.md section 2, the
+    // config part, plus the fold and thinking toggles): the palette,
+    // the tool display config, and the app's toggle states.
+    let state = RenderState {
+        palette: app.palette(),
+        tool_display: app.tool_display(),
+        tool_expanded: app.tool_expanded(),
+        thinking_shown: app.thinking_shown(),
+        thinking_expanded: app.thinking_expanded(),
+    };
     // The loop supervision (docs/auto-compact-plan.md section 4.6):
     // the transcript session's loop process running bit.
-    let running = app
-        .active()
-        .is_some_and(|s| app.loop_running(s));
+    let running = app.active().is_some_and(|s| app.loop_running(s));
     // The last open compaction marker: a `compaction_started` with
     // no later `compaction_summary` or `compaction_failed` in the
     // visible window. A restarted loop may add more open markers;
@@ -1385,11 +1712,12 @@ pub fn build_transcript_lines(
                 None => event_lines(
                     e,
                     pending,
-                    &names,
+                    &details,
+                    &result_ids,
                     width.max(GUTTER + 8),
                     event_id,
                     ext,
-                    &app.color_level(),
+                    &state,
                     running,
                     last_open.get(i).copied().unwrap_or(false),
                 ),
@@ -1398,11 +1726,12 @@ pub fn build_transcript_lines(
             event_lines(
                 e,
                 pending,
-                &names,
+                &details,
+                &result_ids,
                 width.max(GUTTER + 8),
                 event_id,
                 ext,
-                &app.color_level(),
+                &state,
                 running,
                 last_open.get(i).copied().unwrap_or(false),
             )
@@ -1427,51 +1756,103 @@ fn ext_lines_guttered(lines: &[crate::ext::ExtLine], width: usize) -> Vec<Line<'
     guttered(&wrapped, &gutter)
 }
 
-/// The waiting-message cap of the steering block: the header row plus
-/// the listed rows stay inside five terminal rows. The rest counts
-/// in the `+N more` row. The full content renders in the transcript
-/// when the loop answers the message.
+/// The waiting-message cap of one pending block: the header row
+/// plus the listed rows stay inside five terminal rows. The rest
+/// counts in the `+N more` row. The full content renders in the
+/// transcript when the loop answers the message.
 const PENDING_MESSAGE_CAP: usize = 3;
 
-/// The steering block of the active session (docs/tui_feature_
-/// requests_from_human.md 2026-08-31, stage 1): one header row with
-/// the count and the delivery hint, then one preview row per
-/// unconsumed `user_message` event, capped at [`PENDING_MESSAGE_CAP`]
-/// plus a `+N more` row.
-///
-/// The header names the delivery the loop actually performs:
-/// - loop running: steering, injected at the next step
-/// - loop stopped: the messages wait for a loop start
-///
-/// Each row owns one terminal row: previews truncate to the width.
-pub fn pending_steering_lines(app: &App, running: bool, row_width: usize) -> Vec<Line<'static>> {
-    let pending = app.pending_user_messages();
-    if pending.is_empty() {
+/// The pending-message blocks of the active session (docs/tui-
+/// pending-user-messages.md stage 2): the two delivery queues, each
+/// with its count and its previews. The stage-1 steering block is
+/// replaced by the pair: the steer queue lists the messages that
+/// inject at the next step (or wait for a loop start when stopped),
+/// and the follow queue lists the messages that run after the loop
+/// would stop, as new turns. Each preview row owns one terminal
+/// row: previews truncate to the width.
+pub fn pending_message_lines(app: &App, running: bool, row_width: usize) -> Vec<Line<'static>> {
+    let steer = app.pending_steering();
+    let follow = app.pending_follows();
+    if steer.is_empty() && follow.is_empty() {
         return Vec::new();
     }
+    let prose = app
+        .palette()
+        .style(crate::color::Role::PlainText, Modifier::empty());
+    let mut out: Vec<Line<'static>> = Vec::new();
+    // The steer block: the stage-1 label states the delivery the
+    // loop actually performs. Running: injected at the next step.
+    // Stopped: the messages wait for a loop start.
+    if !steer.is_empty() {
+        let (label, dim) = if running {
+            ("steering — injected at the next step", false)
+        } else {
+            ("no loop running — waiting for Ctrl+R run", true)
+        };
+        out.extend(pending_block_lines(
+            &steer,
+            label,
+            dim,
+            running,
+            row_width,
+            &prose,
+            app.palette(),
+        ));
+    }
+    // The follow block: the messages run after the loop would stop,
+    // as new turns.
+    if !follow.is_empty() {
+        out.extend(pending_block_lines(
+            &follow,
+            "follow-up — run after the loop stops",
+            false,
+            running,
+            row_width,
+            &prose,
+            app.palette(),
+        ));
+    }
+    out
+}
+
+/// One pending block: the header row (the count and the delivery
+/// hint), the preview rows capped at [`PENDING_MESSAGE_CAP`], and
+/// the `+N more` row for the rest. `waiting` dims the header of a
+/// stopped-loop steer block: the messages wait, nothing injects.
+fn pending_block_lines(
+    pending: &[&crate::event::Event],
+    label: &str,
+    waiting: bool,
+    running: bool,
+    row_width: usize,
+    prose: &Style,
+    palette: &crate::color::Palette,
+) -> Vec<Line<'static>> {
     let n = pending.len();
     let what = if n == 1 {
-        "1 message waiting".to_string()
+        "1 message".to_string()
     } else {
-        format!("{n} messages waiting")
+        format!("{n} messages")
     };
-    let header_text = if running {
-        format!("{what} — steering, injected at the next step")
+    // The header is ` {what} waiting — {label}`. The label owns its
+    // full width; the what part gets the rest. A zero budget drops
+    // the what part (the ellipsis would own a column the row does
+    // not have).
+    let label_w = label.chars().count();
+    let what_budget = row_width.saturating_sub(label_w + 4);
+    let what_cell = if what_budget == 0 {
+        String::new()
     } else {
-        format!("{what} — no loop running · Ctrl+R run")
+        trunc(&format!("{what} waiting"), what_budget)
     };
     let mut out: Vec<Line<'static>> = vec![Line::from(Span::styled(
-        format!(
-            " {}",
-            // The leading space and the truncation ellipsis each own
-            // one column: the budget leaves room for both.
-            trunc(&header_text, row_width.saturating_sub(2))
-        ),
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
+        format!(" {what_cell} — {label}"),
+        if waiting {
+            palette.style(crate::color::Role::Hint, Modifier::BOLD | Modifier::DIM)
+        } else {
+            palette.style(crate::color::Role::Status, Modifier::BOLD)
+        },
     ))];
-    let prose = Style::default().fg(app.color_level().plain_text());
     for (i, ev) in pending.iter().enumerate().take(PENDING_MESSAGE_CAP) {
         let content = ev
             .get_str("content")
@@ -1485,18 +1866,65 @@ pub fn pending_steering_lines(app: &App, running: bool, row_width: usize) -> Vec
             .saturating_sub(1);
         out.push(Line::from(Span::styled(
             format!("{prefix}{}", trunc(content, max)),
-            prose,
+            *prose,
         )));
     }
     if n > PENDING_MESSAGE_CAP {
         out.push(Line::from(Span::styled(
             format!("  +{} more", n - PENDING_MESSAGE_CAP),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
+            palette.style(crate::color::Role::Hint, Modifier::DIM),
         )));
     }
+    let _ = running;
     out
+}
+
+/// The input box title (the box top border text).
+///
+/// The search prompt wins: in command-line mode the host renders the
+/// prompt (`/pat█`) even when a frame extension labels the frame, so
+/// the typed pattern stays visible (the host keeps its modal-state
+/// render, docs/ui-extension.md section 10 and docs/vim-editor-design.md
+/// section 7). Otherwise a frame label replaces the built-in mode
+/// label. Without a frame label, the mode label shows
+/// (`[NORMAL]`, `[d-PENDING]`, ...).
+fn input_box_title(
+    editor: &crate::vim_editor::Editor,
+    mode_label: &str,
+    frame: &Option<crate::ext::FrameSpec>,
+    border_color: Color,
+) -> Line<'static> {
+    if let Some(prompt) = editor.command_line_label() {
+        Line::from(Span::styled(
+            prompt,
+            Style::default()
+                .fg(Color::Black)
+                .bg(border_color)
+                .add_modifier(Modifier::BOLD),
+        ))
+    } else if let Some((flabel, _)) = frame.as_ref().and_then(|f| f.label.as_ref()) {
+        // Each label line is a list of styled spans; the title is the
+        // first line's spans, in order.
+        Line::from(
+            flabel
+                .first()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| Span::styled(s.text.clone(), s.style))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+        )
+    } else {
+        Line::from(Span::styled(
+            mode_label.to_string(),
+            Style::default()
+                .fg(Color::Black)
+                .bg(border_color)
+                .add_modifier(Modifier::BOLD),
+        ))
+    }
 }
 
 /// The whole frame: bordered panel with session title, transcript,
@@ -1600,7 +2028,7 @@ pub fn draw(
     let status_n = status_lines.len() as u16;
     // The waiting-message block owns one layout cell for its rows
     // (docs/tui_feature_requests_from_human.md 2026-08-31, stage 1).
-    let pending_rows = pending_steering_lines(app, running, inner.width as usize);
+    let pending_rows = pending_message_lines(app, running, inner.width as usize);
     let mut constraints: Vec<Constraint> = vec![Constraint::Min(2)];
     if !pending_rows.is_empty() {
         constraints.push(Constraint::Length(pending_rows.len() as u16));
@@ -1715,37 +2143,21 @@ pub fn draw(
         .as_ref()
         .and_then(|f| f.label.as_ref())
         .and_then(|(_, s)| s.fg)
-        .unwrap_or_else(|| thinking_border(app.thinking_level()));
+        .unwrap_or_else(|| app.palette().thinking_border(app.thinking_level()));
     // The draft text's own color: the capability-aware prose color,
     // not the terminal default (color.rs: the "all gray by default"
     // complaint). The inverted caret cell is unchanged.
-    let prose = Style::default().fg(app.color_level().plain_text());
-    // The box border. A frame label replaces the built-in title.
-    let title = if let Some((flabel, _)) = frame.as_ref().and_then(|f| f.label.as_ref()) {
-        // Each label line is a list of styled spans; the title is
-        // the first line's spans, in order.
-        Line::from(
-            flabel
-                .first()
-                .map(|l| {
-                    l.spans
-                        .iter()
-                        .map(|s| Span::styled(s.text.clone(), s.style))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default(),
-        )
-    } else {
-        Line::from(Span::styled(
-            app.editor()
-                .command_line_label()
-                .unwrap_or_else(|| app.editor_mode_label()),
-            Style::default()
-                .fg(Color::Black)
-                .bg(border_color)
-                .add_modifier(Modifier::BOLD),
-        ))
-    };
+    let prose = app
+        .palette()
+        .style(crate::color::Role::PlainText, Modifier::empty());
+    // The box border: the search prompt wins over the frame label
+    // (the host keeps its modal-state render when a frame extension
+    // owns the chrome, docs/ui-extension.md section 10); a frame
+    // label otherwise replaces the built-in mode label.
+    // The mode label first: it is a value, so the call below keeps
+    // no second borrow of `app` (the editor borrow is the only one).
+    let mode_label = app.editor_mode_label();
+    let title = input_box_title(&*app.editor(), &mode_label, &frame, border_color);
     let input_block = Block::bordered()
         .border_type(border_type)
         .border_style(Style::default().fg(border_color))
@@ -1902,6 +2314,28 @@ mod tests {
     use super::*;
     use crate::event::produce;
     use serde_json::json;
+    #[test]
+    fn tool_result_box_rows_stay_inside_the_width() {
+        // The narrow-pane clamp: a long tool result must not push any
+        // box row past the requested width (no terminal wrap).
+        let long = "x".repeat(80);
+        let value = serde_json::json!({ "text": format!("{long}\nsecond line"), "exit_code": 0 });
+        let ev = Event::parse_line(&format!(
+            r#"{{"v":1,"type":"tool_result","ts":"t","id":"c9","value":{value},"is_error":false}}"#
+        ))
+        .unwrap();
+        let app = app_with_session(vec![ev]);
+        for width in [60, 69, 80, 120] {
+            let lines = build_transcript_lines(&app, width, None);
+            for l in &lines {
+                let w: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
+                assert!(
+                    w <= width,
+                    "a transcript row of {w} cols overflows a {width}-col pane: {l:?}"
+                );
+            }
+        }
+    }
 
     fn join(lines: &[ratatui::text::Line]) -> String {
         lines
@@ -1915,6 +2349,90 @@ mod tests {
         let mut app = App::new();
         app.set_active(crate::port::SessionId::new("s1"), events);
         app
+    }
+
+    /// An editor in the search command line, with `ab` typed.
+    fn command_line_editor() -> crate::vim_editor::Editor {
+        let mut e = crate::vim_editor::Editor::new();
+        e.set_text("alpha beta");
+        e.press(crate::app::Key::Esc);
+        e.press(crate::app::Key::Char('/'));
+        e.press(crate::app::Key::Char('a'));
+        e.press(crate::app::Key::Char('b'));
+        e
+    }
+
+    /// A frame spec whose label is the mode text `label`.
+    fn frame_with_label(label: &str) -> Option<crate::ext::FrameSpec> {
+        use crate::ext::{ExtLine, FrameSpec};
+        Some(FrameSpec {
+            border: None,
+            label: Some((
+                vec![ExtLine::styled(label, Style::default())],
+                Style::default(),
+            )),
+            height: None,
+        })
+    }
+
+    #[test]
+    fn thinking_block_renders_above_the_assistant_message() {
+        // The 2026-09-02 report: the thinking content showed after the
+        // assistant message and the tool results. The transcript reads
+        // thinking first, then the actions (docs/tui-thinking-block.md
+        // section 4: the reasoning content shows above the message body).
+        let reasoning = json!([{
+            "type": "reasoning",
+            "id": "rs_1",
+            "status": "completed",
+            "content": [{"type": "reasoning_text", "text": "consider the options first"}],
+            "summary": [],
+            "encrypted_content": null
+        }]);
+        let line = format!(
+            r#"{{"v":1,"type":"assistant_message","ts":"t","content":"hello","tool_calls":[],"stop_reason":"stop","usage":{{"input_tokens":10,"output_tokens":2}},"reasoning":{reasoning}}}"#
+        );
+        let ev = Event::parse_line(&line).unwrap();
+        let app = app_with_session(vec![ev]);
+        let lines = build_transcript_lines(&app, 80, None);
+        let joined = join(&lines);
+        let think = joined.find("thinking").unwrap_or(usize::MAX);
+        let asst = joined.find("assistant").unwrap_or(usize::MAX);
+        assert!(
+            think < asst,
+            "the thinking row must come before the assistant row:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn input_box_title_prompt_wins_over_the_frame_label() {
+        // The typed prompt must stay visible when a frame extension
+        // owns the chrome (docs/ui-extension.md section 10): the
+        // host keeps its modal-state render in the box title.
+        let e = command_line_editor();
+        let frame = frame_with_label("[COMMAND]");
+        let title = input_box_title(&e, "[COMMAND]", &frame, Color::DarkGray);
+        assert_eq!(title.to_string(), "/ab\u{2588}");
+        // No frame label: the prompt still shows (the built-in case).
+        let none: Option<crate::ext::FrameSpec> = None;
+        let title = input_box_title(&e, "[COMMAND]", &none, Color::DarkGray);
+        assert_eq!(title.to_string(), "/ab\u{2588}");
+    }
+
+    #[test]
+    fn input_box_title_frame_label_wins_outside_command_line() {
+        // Outside command-line mode the frame label replaces the
+        // built-in mode label, like before the prompt fix.
+        let mut e = crate::vim_editor::Editor::new();
+        e.set_text("abc");
+        e.press(crate::app::Key::Esc); // normal mode
+        let frame = frame_with_label("[COMMAND]");
+        let title = input_box_title(&e, "[NORMAL]", &frame, Color::DarkGray);
+        assert_eq!(title.to_string(), "[COMMAND]");
+        // No frame label: the built-in mode label shows.
+        let none: Option<crate::ext::FrameSpec> = None;
+        let title = input_box_title(&e, "[NORMAL]", &none, Color::DarkGray);
+        assert_eq!(title.to_string(), "[NORMAL]");
     }
 
     #[test]
@@ -1949,9 +2467,11 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(flat.contains("i.e. one column"), "spaces lost: {flat}");
+        // The marker-free render (docs/tui-markdown-render.md): the
+        // italic word shows without its stars.
         assert!(
-            flat.contains("*left* of the rendered"),
-            "italic token lost its neighbours: {flat}"
+            flat.contains("left of the rendered"),
+            "italic word lost its neighbours: {flat}"
         );
     }
 
@@ -2127,7 +2647,9 @@ mod tests {
             "the started line shows the trigger and the scale: {joined}"
         );
         assert!(
-            joined.contains("context compacted (threshold): 213k to 33k tokens, keeping events from seq 312"),
+            joined.contains(
+                "context compacted (threshold): 213k to 33k tokens, keeping events from seq 312"
+            ),
             "the summary line names the boundary: {joined}"
         );
         assert!(
@@ -2180,7 +2702,11 @@ mod tests {
     }
 
     #[test]
-    fn long_tool_result_is_displayed_in_full() {
+    fn long_tool_result_folds_to_the_preview_cap() {
+        // The rescoped rule (docs/tui-tool-result-truncation.md
+        // section 4): the result no longer displays in full. The
+        // unknown tool's body folds to the preview cap, with the
+        // fold hint naming the remainder and the expand key.
         let text = (0..100)
             .map(|i| format!("tool out {i:03}"))
             .collect::<Vec<_>>()
@@ -2190,18 +2716,30 @@ mod tests {
             r#"{{"v":1,"type":"tool_result","ts":"t","id":"c9","value":{value},"is_error":false}}"#
         ))
         .unwrap()];
-        let app = app_with_session(evs);
+        let app = app_with_session(evs.clone());
         let joined = join(&build_transcript_lines(&app, 80, None));
         assert!(
-            !joined.contains("more lines"),
-            "tool result must not fold: {joined}"
+            joined.contains("92 more lines"),
+            "the fold hint states the remainder: {joined}"
         );
-        for i in [0, 1, 50, 99] {
-            assert!(
-                joined.contains(&format!("tool out {i:03}")),
-                "tool line {i} missing"
-            );
-        }
+        assert!(joined.contains("tool out 000"), "the first line shows");
+        assert!(
+            !joined.contains("tool out 099"),
+            "the collapsed preview holds the first lines only: {joined}"
+        );
+        // The global expand toggle (Ctrl+O) opens the full body, up
+        // to the expanded cap.
+        let mut app = app_with_session(evs);
+        app.press(crate::app::Key::CtrlO);
+        let joined = join(&build_transcript_lines(&app, 80, None));
+        assert!(
+            joined.contains("tool out 099"),
+            "the expanded state shows the body: {joined}"
+        );
+        assert!(
+            !joined.contains("more lines"),
+            "the expanded state drops the fold hint: {joined}"
+        );
     }
 
     #[test]
@@ -2230,61 +2768,85 @@ mod tests {
     }
 
     #[test]
-    fn markdown_syntax_in_content_is_highlighted() {
+    fn markdown_content_renders_without_the_markers() {
+        // The marker-free render (docs/tui-markdown-render.md): the
+        // styles in, the markers out. The list bullet stays a
+        // visible bullet; the `#`, `>`, emphasis stars, and the
+        // backticks drop; the link text shows and the URL stays.
         let content = "# Title\n- item\n`code` **b** *i* [t](u)\n> quote";
         let evs = vec![produce::user_message(content)];
         let app = app_with_session(evs);
         let lines = build_transcript_lines(&app, 80, None);
+        let palette = app.palette();
         let find = |needle: &str| lines.iter().position(|l| l.to_string().contains(needle));
         // Word wrapping splits a line into spans, so assert over the
         // spans of the line that holds the syntax, not global spans.
-        let hl = find("# Title").expect("heading line missing");
+        let hl = find("Title").expect("heading line missing");
         assert!(
+            !lines[hl].to_string().contains('#'),
+            "the hash run drops: {:?}",
             lines[hl]
-                .spans
-                .iter()
-                .filter(|s| s.content.as_ref() == "# " || s.content.as_ref() == "Title")
-                .all(|s| s.style == highlight::heading_style()),
-            "heading spans not styled: {lines:?}"
         );
-        let ql = find("> quote").expect("quote line missing");
+        assert!(lines[hl].spans.iter().any(|s| s.content.as_ref() == "Title"
+            && s.style.fg
+                == palette
+                    .style(crate::color::Role::Heading, Modifier::BOLD)
+                    .fg));
+        let ql = find("quote").expect("quote line missing");
         assert!(
+            !lines[ql].to_string().trim_start().starts_with('>'),
+            "the > marker drops: {:?}",
             lines[ql]
+        );
+        let ul = find("item").expect("list line missing");
+        assert!(
+            lines[ul]
                 .spans
                 .iter()
-                .filter(|s| s.content.as_ref() == "> " || s.content.as_ref() == "quote")
-                .all(|s| s.style == highlight::quote_style()),
-            "quote spans not styled: {lines:?}"
+                .any(|s| s.content.as_ref() == "-" && s.style.add_modifier.contains(Modifier::BOLD)),
+            "the list bullet stays a visible bullet: {:?}",
+            lines[ul]
         );
-        let ml = find("item").expect("list line missing");
-        assert!(lines[ml]
-            .spans
-            .iter()
-            .any(|s| s.content.as_ref() == "-" && s.style == highlight::list_style()));
-        let cl = find("`code`").expect("inline code line missing");
+        let cl = find("code").expect("code line missing");
+        assert!(
+            !lines[cl].to_string().contains('`'),
+            "the backticks drop: {:?}",
+            lines[cl]
+        );
+        assert!(lines[cl].spans.iter().any(|s| s.content.as_ref() == "code"));
         assert!(lines[cl]
             .spans
             .iter()
-            .any(|s| s.content.as_ref() == "`code`" && s.style == highlight::inline_code_style()));
-        let bl = find("**b**").expect("bold line missing");
-        assert!(lines[bl]
-            .spans
+            .any(|s| s.content.as_ref() == "b"
+                && s.style.add_modifier.contains(Modifier::BOLD)),
+        "the bold word shows without the stars: {:?}",
+            lines[cl]);
+        assert!(
+            lines[cl].spans.iter().any(|s| s.content.as_ref() == "i"
+                && s.style.add_modifier.contains(Modifier::UNDERLINED)),
+            "the italic word shows without the stars: {:?}",
+            lines[cl]
+        );
+        // The link line shows the link text and the URL, without
+        // the [ ] ( ) markers.
+        let link_style = palette.style(crate::color::Role::Link, Modifier::UNDERLINED);
+        let url_style = palette.style(crate::color::Role::LinkUrl, Modifier::DIM);
+        let ll = lines
             .iter()
-            .any(|s| s.content.as_ref() == "**b**" && s.style == highlight::bold_style()));
-        let il = find("*i*").expect("italic line missing");
-        assert!(lines[il]
-            .spans
-            .iter()
-            .any(|s| s.content.as_ref() == "*i*" && s.style == highlight::italic_style()));
-        let ll = find("[t]").expect("link line missing");
-        assert!(lines[ll]
-            .spans
-            .iter()
-            .any(|s| s.content.as_ref() == "[t]" && s.style == highlight::link_style()));
-        assert!(lines[ll]
-            .spans
-            .iter()
-            .any(|s| s.content.as_ref() == "(u)" && s.style == highlight::link_url_style()));
+            .position(|l| {
+                l.spans
+                    .iter()
+                    .any(|s| s.content.as_ref() == "t" && s.style == link_style)
+            })
+            .expect("link line missing");
+        assert!(
+            lines[ll]
+                .spans
+                .iter()
+                .any(|s| s.content.as_ref() == "u" && s.style == url_style),
+            "the URL shows on the link line: {:?}",
+            lines[ll]
+        );
     }
 
     #[test]
@@ -2296,22 +2858,25 @@ mod tests {
         .unwrap()];
         let app = app_with_session(evs);
         let lines = build_transcript_lines(&app, 80, None);
+        // The box cells carry the light box background; the token
+        // colors are the foregrounds. Compare fg + modifiers, not
+        // the full style (the bg is the box role). Each cell is
+        // padded to the pane width: trim before comparing.
+        let key = highlight::json_key_style();
+        let num = highlight::json_number_style();
+        let nul = highlight::json_null_style();
         let spans: Vec<(Style, &str)> = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| (s.style, s.content.as_ref())))
             .collect();
-        assert!(
-            spans
-                .iter()
-                .any(|(st, t)| *t == "\"a\"" && *st == highlight::json_key_style()),
-            "json key not styled: {spans:?}"
-        );
-        assert!(spans
-            .iter()
-            .any(|(st, t)| *t == "1" && *st == highlight::json_number_style()));
-        assert!(spans
-            .iter()
-            .any(|(st, t)| *t == "null" && *st == highlight::json_null_style()));
+        let hit = |needle: &str, want: Style| {
+            spans.iter().any(|(st, t)| {
+                t.trim() == needle && st.fg == want.fg && st.add_modifier == want.add_modifier
+            })
+        };
+        assert!(hit("\"a\"", key), "json key not styled: {spans:?}");
+        assert!(hit("1", num), "json number not styled: {spans:?}");
+        assert!(hit("null", nul), "json null not styled: {spans:?}");
     }
 
     #[test]
@@ -2348,6 +2913,71 @@ mod tests {
         assert!(
             !joined.contains("\"stdout\""),
             "raw value JSON leaked: {joined}"
+        );
+    }
+
+    #[test]
+    fn bash_call_merges_into_the_result_box() {
+        // The bash tool_call line drops when its result follows:
+        // the result box body opens with the `$ <command>` line, so
+        // the separate call line would repeat the command.
+        let result = Event::parse_line(
+            r#"{"v":1,"type":"tool_result","ts":"t","id":"c9","value":{"text":"$ make\ndone","exit_code":0},"is_error":false}"#,
+        )
+        .unwrap();
+        let call = Event::parse_line(
+            r#"{"v":1,"type":"tool_call","ts":"t","id":"c9","name":"bash","arguments":{"command":"make"}}"#,
+        )
+        .unwrap();
+        let app = app_with_session(vec![call, result]);
+        let joined = join(&build_transcript_lines(&app, 80, None));
+        assert!(
+            joined.contains("$ make"),
+            "the box body keeps the command line: {joined}"
+        );
+        assert!(
+            !joined.contains("{\"command\":\"make\"}"),
+            "the merged call line must not repeat the raw args: {joined}"
+        );
+        // A call without a result yet keeps its own line: the
+        // command is the only view of a running tool.
+        let solo = app_with_session(vec![Event::parse_line(
+            r#"{"v":1,"type":"tool_call","ts":"t","id":"c9","name":"bash","arguments":{"command":"make"}}"#,
+        )
+        .unwrap()]);
+        let joined = join(&build_transcript_lines(&solo, 80, None));
+        assert!(
+            joined.contains("{\"command\":\"make\"}"),
+            "a pending call shows its arguments: {joined}"
+        );
+    }
+
+    #[test]
+    fn tool_result_box_carries_the_title_in_the_border() {
+        // No standalone header line above the box: the top border
+        // carries `tool:<name>  <status>` (the error accent keeps
+        // the red bold through the title style). The call event
+        // resolves the tool name.
+        let call = Event::parse_line(
+            r#"{"v":1,"type":"tool_call","ts":"t","id":"c9","name":"bash","arguments":{"command":"true"}}"#,
+        )
+        .unwrap();
+        let ev = Event::parse_line(
+            r#"{"v":1,"type":"tool_result","ts":"t","id":"c9","value":{"text":"x","exit_code":0},"is_error":false}"#,
+        )
+        .unwrap();
+        let lines: Vec<String> =
+            build_transcript_lines(&app_with_session(vec![call, ev]), 80, None)
+                .iter()
+                .map(|l| l.to_string())
+                .collect();
+        let i = lines
+            .iter()
+            .position(|l| l.contains("tool:bash"))
+            .expect("the tool row");
+        assert!(
+            lines[i].starts_with('\u{250c}'),
+            "the title lives in the box top border, not a header line: {lines:?}"
         );
     }
 
@@ -2561,6 +3191,11 @@ mod tests {
             ext_dir: Some(root.join("ui_extensions")),
             active_model: None,
             color: None,
+            color_scheme: None,
+            custom_schemes: std::collections::HashMap::new(),
+            tool_display: crate::tool_display::ToolDisplay::preset(
+                crate::tool_display::Preset::OpenCode,
+            ),
         };
         let disc = discover(&cfg).unwrap();
         let host = ExtHost::new(&disc, &cfg);
@@ -2782,8 +3417,9 @@ mod tests {
     fn render_message_content_without_ext_matches_wrap_markdown() {
         let content = "head $a+b$\n\n```mermaid\ngraph TD\n  A-->B\n```\n\n```bash\necho hi\n```";
         let base = Style::default();
-        let plain = render_message_content(content, 7, None, 60, base);
-        let builtin = wrap_markdown(content, 60, base);
+        let palette = crate::color::Palette::builtin(crate::color::Level::Rgb);
+        let plain = render_message_content(content, 7, None, 60, base, &palette);
+        let builtin = wrap_markdown_p(content, 60, &palette, base);
         let show = |v: &Vec<Line>| v.iter().map(|l| l.to_string()).collect::<Vec<_>>();
         assert_eq!(
             show(&plain),
@@ -2793,27 +3429,70 @@ mod tests {
     }
 
     #[test]
+    fn ext_path_draws_the_grid_table() {
+        // The 2026-09-03 report: the ext-active block path showed
+        // the raw `|` pipes. The consecutive table lines now draw
+        // as a grid, like the ext-none path (docs/tui-markdown-
+        // render.md section 1).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let cfg = crate::config::TuiConfig {
+            sessions_root: root.join("sessions"),
+            schemas_dir: None,
+            loop_cmd: None,
+            config_dir: root.clone(),
+            config_path: root.join("config.toml"),
+            ext_dir: None,
+            active_model: None,
+            color: None,
+            color_scheme: None,
+            custom_schemes: std::collections::HashMap::new(),
+            tool_display: crate::tool_display::ToolDisplay::preset(
+                crate::tool_display::Preset::OpenCode,
+            ),
+        };
+        let disc = crate::ext::discover(&cfg).unwrap();
+        let host = crate::ext::ExtHost::new(&disc, &cfg);
+        let palette = crate::color::Palette::builtin(crate::color::Level::Rgb);
+        let content = "before\n| a | b |\n| - | - |\n| 1 | 2 |\nafter";
+        let lines =
+            render_message_content(content, 1, Some(&host), 60, Style::default(), &palette);
+        let text: String = lines
+            .iter()
+            .map(|l| l.iter().map(|s| s.content.to_string()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains('┌'), "the grid border shows: {text}");
+        assert!(
+            text.lines().all(|l| !l.trim_start().starts_with('|')),
+            "no raw pipe line survives: {text}"
+        );
+        assert!(text.contains("before"), "the text before the table: {text}");
+        assert!(text.contains("after"), "the text after the table: {text}");
+    }
+
+    #[test]
     fn steering_block_is_empty_when_nothing_waits() {
         let app = app_with_session(vec![
             produce::user_message("hi"),
             Event::parse_line(r#"{"v":1,"type":"assistant_message","ts":"t","content":"yo"}"#)
                 .unwrap(),
         ]);
-        assert!(pending_steering_lines(&app, true, 80).is_empty());
+        assert!(pending_message_lines(&app, true, 80).is_empty());
     }
 
     #[test]
     fn steering_header_names_the_delivery() {
         let app = app_with_session(vec![produce::user_message("fix the test")]);
-        let running = join(&pending_steering_lines(&app, true, 80));
+        let running = join(&pending_message_lines(&app, true, 80));
         assert!(running.contains("1 message waiting"), "{running}");
         assert!(
-            running.contains("steering, injected at the next step"),
+            running.contains("steering — injected at the next step"),
             "{running}"
         );
         assert!(running.contains("fix the test"), "{running}");
 
-        let stopped = join(&pending_steering_lines(&app, false, 80));
+        let stopped = join(&pending_message_lines(&app, false, 80));
         assert!(stopped.contains("Ctrl+R run"), "{stopped}");
         assert!(
             !stopped.contains("steering"),
@@ -2827,7 +3506,7 @@ mod tests {
             .map(|i| produce::user_message(&format!("msg {i}")))
             .collect();
         let app = app_with_session(evs);
-        let joined = join(&pending_steering_lines(&app, true, 80));
+        let joined = join(&pending_message_lines(&app, true, 80));
         assert!(joined.contains("6 messages waiting"), "{joined}");
         assert!(joined.contains("msg 0"), "{joined}");
         assert!(joined.contains("msg 2"), "{joined}");
@@ -2840,12 +3519,54 @@ mod tests {
         // Every row owns one terminal row: no row may wrap past the
         // reserved width.
         let app = app_with_session(vec![produce::user_message(&"x".repeat(200))]);
-        let lines = pending_steering_lines(&app, true, 40);
+        let lines = pending_message_lines(&app, true, 40);
         assert!(!lines.is_empty());
         for l in &lines {
             let w: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
             assert!(w <= 40, "row is {w} columns, the row owns 40");
         }
+    }
+
+    /// The follow queue renders its own block, separate from the
+    /// steer queue (docs/tui-pending-user-messages.md stage 2, the
+    /// TUI part): each list keeps its own count and previews.
+    #[test]
+    fn follow_messages_render_their_own_block() {
+        let app = app_with_session(vec![
+            produce::user_message("steer me"),
+            produce::user_message_follow("later"),
+        ]);
+        let joined = join(&pending_message_lines(&app, true, 80));
+        assert!(
+            joined.contains("steering — injected at the next step"),
+            "{joined}"
+        );
+        assert!(joined.contains("steer me"), "{joined}");
+        assert!(
+            joined.contains("follow-up — run after the loop stops"),
+            "{joined}"
+        );
+        assert!(joined.contains("later"), "{joined}");
+        // Each block carries its own count: one steer, one follow.
+        let counts: Vec<&str> = joined
+            .split('\n')
+            .filter(|l| l.contains("message waiting"))
+            .collect();
+        assert_eq!(counts.len(), 2, "one header per queue: {joined}");
+    }
+
+    /// A follow-only queue shows no steer block: the follow header
+    /// stands alone with its count.
+    #[test]
+    fn follow_only_queue_shows_one_block() {
+        let app = app_with_session(vec![produce::user_message_follow("later")]);
+        let joined = join(&pending_message_lines(&app, true, 80));
+        assert!(!joined.contains("steering"), "{joined}");
+        assert!(joined.contains("1 message waiting"), "{joined}");
+        assert!(
+            joined.contains("follow-up — run after the loop stops"),
+            "{joined}"
+        );
     }
 
     // ── loop-phase indicator (docs/tui-model-wait-indicator.md) ──
@@ -2900,6 +3621,11 @@ mod tests {
             ext_dir: Some(tmp.path().join("ui_extensions")),
             active_model: None,
             color: None,
+            color_scheme: None,
+            custom_schemes: std::collections::HashMap::new(),
+            tool_display: crate::tool_display::ToolDisplay::preset(
+                crate::tool_display::Preset::OpenCode,
+            ),
         };
         let disc = crate::ext::discover(&cfg).unwrap();
         let host = crate::ext::ExtHost::new(&disc, &cfg);
@@ -3079,7 +3805,11 @@ mod tests {
 mod cursor_span_tests {
     use super::cursor_line_spans;
     use super::thinking_border;
-    use ratatui::style::Color;
+    use super::thinking_text;
+    use super::wrap_thinking;
+    use ratatui::style::{Color, Modifier};
+    use ratatui::text::Span;
+    use serde_json::json;
 
     fn text(before: &[char], caret: char, after: &[char]) -> String {
         let mut s: String = before.iter().collect();
@@ -3141,5 +3871,67 @@ mod cursor_span_tests {
             Color::Yellow,
             "4 and up collapse into the highest bucket"
         );
+    }
+
+    #[test]
+    fn thinking_text_accepts_typed_and_typeless_entries() {
+        // The typed `reasoning_text` entries and the plain text
+        // entries of older logs both carry the reasoning text.
+        let typed: Vec<serde_json::Value> = vec![json!({
+            "content": [
+                {"type": "reasoning_text", "text": "typed"},
+                {"type": "image", "text": "nope"}
+            ]
+        })];
+        assert_eq!(thinking_text(Some(&typed)).as_deref(), Some("typed"));
+        let typeless: Vec<serde_json::Value> = vec![json!({"content": [{"text": "plain"}]})];
+        assert_eq!(thinking_text(Some(&typeless)).as_deref(), Some("plain"));
+        // The summary wins over the content entries.
+        let summary: Vec<serde_json::Value> = vec![json!({
+            "summary": [{"text": "summed"}],
+            "content": [{"text": "plain"}]
+        })];
+        assert_eq!(thinking_text(Some(&summary)).as_deref(), Some("summed"));
+        // A text-less item renders nothing.
+        let empty: Vec<serde_json::Value> = vec![json!({"content": [{"type": "image"}]})];
+        assert_eq!(thinking_text(Some(&empty)), None);
+    }
+
+    #[test]
+    fn thinking_block_tables_draw_as_a_fixed_width_grid() {
+        // The 2026-09-03 user report: a table inside an expanded
+        // thinking block kept its raw `|` pipes and lost the fixed
+        // column widths. The grid replaces the run of table lines.
+        let palette = crate::color::Palette::builtin(crate::color::Level::Rgb);
+        let style = palette.style(crate::color::Role::Thinking, Modifier::empty());
+        let text = "preamble\n| Level | Border |\n|---|---|\n| 0 | gray |\n| 1 | blue |\nafter";
+        let lines = wrap_thinking(text, 60, &palette, style.clone());
+        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        let joined = text.join("\n");
+        assert!(joined.contains('┌'), "the grid border: {joined:?}");
+        assert!(joined.contains("Level"), "{joined:?}");
+        assert!(joined.contains("gray"), "{joined:?}");
+        // Every grid row has the same width: no clipped column.
+        let widths: Vec<usize> = text
+            .iter()
+            .filter(|l| l.contains('│') || l.contains('─'))
+            .map(|l| l.chars().count())
+            .collect();
+        let first = widths.first().copied().unwrap_or(0);
+        assert!(
+            !widths.is_empty() && widths.iter().all(|w| *w == first),
+            "grid rows keep one width: {widths:?}"
+        );
+        // The prose lines survive around the grid.
+        assert!(text.iter().any(|l| l.contains("preamble")), "{joined:?}");
+        assert!(text.iter().any(|l| l.contains("after")), "{joined:?}");
+        // The cell text uses the thinking tone, not plain text.
+        let cell_line = lines
+            .iter()
+            .find(|l| l.to_string().contains("gray"))
+            .unwrap();
+        let spans: Vec<&Span<'static>> = cell_line.iter().collect();
+        let cell = spans.iter().find(|s| s.content.contains("gray")).unwrap();
+        assert_eq!(cell.style, style, "the cell keeps the thinking tone");
     }
 }

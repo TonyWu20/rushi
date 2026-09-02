@@ -297,6 +297,127 @@ fn seg(cs: &[char], from: usize, to: usize) -> String {
     cs[from..to].iter().collect()
 }
 
+// ── presentation pass (docs/tui-markdown-render.md) ──────────
+//
+// The marker-free render: the raw-token functions above keep the
+// markers for the extension transform path. This pass drops the
+// marker text and keeps the style. The list bullet stays a visible
+// bullet; the `#`, `>` runs and the emphasis stars drop; the
+// backticks drop; the link text shows and its URL stays dimmed;
+// the table rows draw as a box-drawing grid; the fence marker
+// lines dim and the fence content stays literal.
+
+use crate::color::{Palette, Role};
+
+/// One hard line of message content as presentation segments:
+/// the markers out, the styles in. `fence` carries the fenced-code
+/// state across hard lines, like [`markdown_line`]. Palette colors
+/// replace the 16-color styles; the plain runs stay at the default
+/// style so the caller's `with_plain_base` pass paints them.
+pub fn md_line(line: &str, fence: &mut bool, palette: &Palette) -> Vec<Seg> {
+    let t = line.trim_start();
+    if *fence {
+        if is_fence_delim(t) {
+            *fence = false;
+            return fence_line_p(t, palette);
+        }
+        return vec![(
+            palette.style(Role::Code, Modifier::empty()),
+            line.to_string(),
+        )];
+    }
+    if is_fence_delim(t) {
+        *fence = true;
+        return fence_line_p(t, palette);
+    }
+    if is_heading(t) {
+        // The `#` run drops; the heading style stays.
+        let text = t.trim_start_matches('#').trim_start().to_string();
+        let style = palette.style(Role::Heading, Modifier::BOLD);
+        return vec![(style, text)];
+    }
+    if t.starts_with('>') {
+        // The `>` marker drops; the quote style stays.
+        let text = t.trim_start_matches('>').trim_start().to_string();
+        let style = palette.style(Role::Quote, Modifier::DIM);
+        return vec![(style, text)];
+    }
+    if let Some((marker, rest)) = list_split(t) {
+        // The bullet stays a visible bullet (docs/tui-markdown-
+        // render.md section 3).
+        let style = palette.style(Role::List, Modifier::BOLD);
+        let mut segs: Vec<Seg> = vec![(style, marker)];
+        segs.extend(inline_segments_p(rest, palette));
+        return segs;
+    }
+    inline_segments_p(line, palette)
+}
+
+/// The fence marker line of the presentation pass: the delimiter
+/// and the language tag dimmed (the code content keeps the Code
+/// role, literal).
+fn fence_line_p(t: &str, palette: &Palette) -> Vec<Seg> {
+    let delim = if t.starts_with("```") { "```" } else { "~~~" };
+    let style = palette.style(Role::Fence, Modifier::DIM);
+    let mut out = vec![(style.clone(), delim.to_string())];
+    let rest = t[delim.len()..].trim_start();
+    if !rest.is_empty() {
+        out.push((style, rest.to_string()));
+    }
+    out
+}
+
+/// The inline tokens of the presentation pass: the markers out,
+/// the styles in. `` `code` `` shows the word in the inline-code
+/// style without the backticks; `**b**` shows bold without the
+/// stars; `*i*` shows underlined without the stars; `[text](url)`
+/// shows the link text and the dimmed URL.
+pub fn inline_segments_p(line: &str, palette: &Palette) -> Vec<Seg> {
+    let cs: Vec<char> = line.chars().collect();
+    let n = cs.len();
+    let mut out: Vec<Seg> = Vec::new();
+    let mut plain = String::new();
+    let mut i = 0usize;
+    while i < n {
+        let c = cs[i];
+        if let Some((tok, end)) = next_token(&cs, i) {
+            if !plain.is_empty() {
+                out.push((Style::default(), std::mem::take(&mut plain)));
+            }
+            match tok {
+                Tok::Code => {
+                    let inner: String = cs[i + 1..end - 1].iter().collect();
+                    out.push((palette.style(Role::InlineCode, Modifier::empty()), inner));
+                }
+                Tok::Bold => {
+                    let inner: String = cs[i + 2..end - 2].iter().collect();
+                    out.push((Style::default().add_modifier(Modifier::BOLD), inner));
+                }
+                Tok::Italic => {
+                    let inner: String = cs[i + 1..end - 1].iter().collect();
+                    out.push((Style::default().add_modifier(Modifier::UNDERLINED), inner));
+                }
+                Tok::Link { j } => {
+                    let text: String = cs[i + 1..j].iter().collect();
+                    // The parens of the marker-free URL stay off:
+                    // j + 2 is the first URL char, end - 1 the `)`.
+                    let url: String = cs[j + 2..end - 1].iter().collect();
+                    out.push((palette.style(Role::Link, Modifier::UNDERLINED), text));
+                    out.push((palette.style(Role::LinkUrl, Modifier::DIM), url));
+                }
+            }
+            i = end;
+            continue;
+        }
+        plain.push(c);
+        i += 1;
+    }
+    if !plain.is_empty() {
+        out.push((Style::default(), plain));
+    }
+    out
+}
+
 // ── json ───────────────────────────────────────────────────────
 
 /// True when `text` is a complete JSON document. Gate for JSON
@@ -407,6 +528,263 @@ pub fn json_line(line: &str) -> Vec<Seg> {
     if !plain.is_empty() {
         out.push((Style::default(), plain));
     }
+    out
+}
+
+/// The palette variant of [`json_line`]: the same token split, the
+/// colors lowered through the palette roles. Used when the result
+/// body of a read or unknown tool is a JSON document (docs/tui-
+/// color-tones.md: the JSON tokens keep their colors).
+pub fn json_line_p(line: &str, palette: &Palette) -> Vec<Seg> {
+    let cs: Vec<char> = line.chars().collect();
+    let n = cs.len();
+    let style = |role: Role, mods: Modifier| palette.style(role, mods);
+    let mut out: Vec<Seg> = Vec::new();
+    let mut plain = String::new();
+    let mut i = 0usize;
+    while i < n {
+        let c = cs[i];
+        if c == '"' {
+            let mut j = i + 1;
+            let mut closed = false;
+            while j < n {
+                if cs[j] == '\\' {
+                    j += 2;
+                    continue;
+                }
+                if cs[j] == '"' {
+                    closed = true;
+                    break;
+                }
+                j += 1;
+            }
+            if !plain.is_empty() {
+                out.push((Style::default(), std::mem::take(&mut plain)));
+            }
+            let end = if closed { j + 1 } else { n };
+            let st = if closed {
+                let mut k = j + 1;
+                while k < n && (cs[k] == ' ' || cs[k] == '\t') {
+                    k += 1;
+                }
+                if k < n && cs[k] == ':' {
+                    style(Role::JsonKey, Modifier::BOLD)
+                } else {
+                    style(Role::JsonString, Modifier::empty())
+                }
+            } else {
+                style(Role::JsonString, Modifier::empty())
+            };
+            out.push((st, seg(&cs, i, end)));
+            i = end;
+            continue;
+        }
+        if c.is_ascii_digit() || (c == '-' && i + 1 < n && cs[i + 1].is_ascii_digit()) {
+            let mut j = i;
+            while j < n && (cs[j].is_ascii_digit() || matches!(cs[j], '.' | '+' | '-' | 'e' | 'E'))
+            {
+                j += 1;
+            }
+            if !plain.is_empty() {
+                out.push((Style::default(), std::mem::take(&mut plain)));
+            }
+            out.push((style(Role::JsonNumber, Modifier::empty()), seg(&cs, i, j)));
+            i = j;
+            continue;
+        }
+        if c == 't' && line[i..].starts_with("true") {
+            if !plain.is_empty() {
+                out.push((Style::default(), std::mem::take(&mut plain)));
+            }
+            out.push((style(Role::JsonLiteral, Modifier::BOLD), "true".to_string()));
+            i += 4;
+            continue;
+        }
+        if c == 'f' && line[i..].starts_with("false") {
+            if !plain.is_empty() {
+                out.push((Style::default(), std::mem::take(&mut plain)));
+            }
+            out.push((
+                style(Role::JsonLiteral, Modifier::BOLD),
+                "false".to_string(),
+            ));
+            i += 5;
+            continue;
+        }
+        if c == 'n' && line[i..].starts_with("null") {
+            if !plain.is_empty() {
+                out.push((Style::default(), std::mem::take(&mut plain)));
+            }
+            out.push((style(Role::JsonNull, Modifier::DIM), "null".to_string()));
+            i += 4;
+            continue;
+        }
+        if matches!(c, '{' | '}' | '[' | ']' | ',' | ':') {
+            if !plain.is_empty() {
+                out.push((Style::default(), std::mem::take(&mut plain)));
+            }
+            out.push((style(Role::JsonPunct, Modifier::DIM), c.to_string()));
+        } else {
+            plain.push(c);
+        }
+        i += 1;
+    }
+    if !plain.is_empty() {
+        out.push((Style::default(), plain));
+    }
+    out
+}
+
+// ── the grid table (docs/tui-markdown-render.md section 1) ────
+
+/// True when the hard line is a table row: a `|`-separated run with
+/// at least two cells. The separator row (`|---|---|`) counts: it
+/// marks the header row as the table's first row.
+pub fn is_table_row(line: &str) -> bool {
+    let t = line.trim();
+    if !t.starts_with('|') || t.matches('|').count() < 2 {
+        return false;
+    }
+    let inner = t.trim_start_matches('|').trim_end_matches('|');
+    inner.split('|').count() >= 2
+}
+
+/// The cells of one table row: the `|`-separated run split at the
+/// pipes. The outer pipes drop; the cells keep their padding
+/// trimmed.
+pub fn table_cells(line: &str) -> Vec<String> {
+    let t = line.trim();
+    let inner = t.trim_start_matches('|').trim_end_matches('|');
+    inner.split('|').map(|c| c.trim().to_string()).collect()
+}
+
+/// True when the row is the `|---|---|` separator: every cell is a
+/// run of dashes (or empty).
+pub fn is_table_separator(line: &str) -> bool {
+    if !is_table_row(line) {
+        return false;
+    }
+    table_cells(line)
+        .iter()
+        .all(|c| c.is_empty() || c.chars().all(|c| c == '-'))
+}
+
+/// The grid table of one table block: the rows are the `|`-separated
+/// lines in order; a separator row after the header row drops from
+/// the grid, and the header row styles bold. The box-drawing grid
+/// fits `width` columns: the column width takes the content width
+/// capped at the even share, the overflow elides with a trailing
+/// ellipsis (the narrow-pane rule of docs/tui-markdown-render.md
+/// section 3). Each returned inner `Vec` is one grid row of styled
+/// segments, in cell order.
+pub fn table_grid(rows: &[String], width: usize, palette: &Palette) -> Vec<Vec<(Style, String)>> {
+    let has_sep = rows.get(1).map(|r| is_table_separator(r)).unwrap_or(false);
+    let mut cells_rows: Vec<Vec<String>> = Vec::new();
+    let mut header_index: Option<usize> = None;
+    for (i, r) in rows.iter().enumerate() {
+        if i == 1 && has_sep {
+            continue;
+        }
+        if i == 0 && has_sep {
+            header_index = Some(0);
+        }
+        cells_rows.push(table_cells(r));
+    }
+    if cells_rows.is_empty() {
+        return Vec::new();
+    }
+    let ncols = cells_rows.iter().map(|c| c.len()).max().unwrap_or(0);
+    if ncols == 0 {
+        return Vec::new();
+    }
+    // The column widths: the content cap, then the narrow share.
+    // The grid owns `ncols` verticals, the two outer borders, and
+    // `ncols` padding cells: the content columns split the rest.
+    let avail = width
+        .saturating_sub(2)
+        .saturating_sub(ncols)
+        .saturating_sub(2 * ncols);
+    let share = (avail / ncols).max(1);
+    let widths: Vec<usize> = (0..ncols)
+        .map(|c| {
+            let content = cells_rows
+                .iter()
+                .map(|row| row.get(c).map(|s| s.chars().count()).unwrap_or(0))
+                .max()
+                .unwrap_or(0);
+            content.min(share)
+        })
+        .collect();
+
+    let border = palette.style(Role::Hint, Modifier::DIM);
+    let plain = palette.style(Role::PlainText, Modifier::empty());
+    let header_style = palette.style(Role::PlainText, Modifier::BOLD);
+
+    let clamp = |s: &str, w: usize| -> String {
+        let chars: Vec<char> = s.chars().collect();
+        if chars.len() <= w {
+            return s.to_string();
+        }
+        if w == 0 {
+            return String::new();
+        }
+        let mut out: String = chars[..w - 1].iter().collect();
+        out.push('…');
+        out
+    };
+
+    let mut out: Vec<Vec<(Style, String)>> = Vec::new();
+    out.push(grid_border('┌', '┐', '┬', '─', &widths, &border));
+    for (ri, row) in cells_rows.iter().enumerate() {
+        let is_header = header_index == Some(ri);
+        let mut cells_out: Vec<(Style, String)> = Vec::new();
+        cells_out.push((border.clone(), "│".to_string()));
+        for c in 0..ncols {
+            let cell = row.get(c).cloned().unwrap_or_default();
+            // Pad to the column width: every row's verticals must land
+            // on the same columns as the border rows (a shorter cell
+            // renders at the column's full width, left-aligned).
+            let w = widths[c];
+            let text = format!(" {:<w$} ", clamp(&cell, w));
+            let st = if is_header { &header_style } else { &plain };
+            cells_out.push((st.clone(), text));
+            if c + 1 < ncols {
+                cells_out.push((border.clone(), "│".to_string()));
+            }
+        }
+        cells_out.push((border.clone(), "│".to_string()));
+        out.push(cells_out);
+        if ri + 1 < cells_rows.len() {
+            out.push(grid_border('├', '┤', '┼', '─', &widths, &border));
+        }
+    }
+    out.push(grid_border('└', '┘', '┴', '─', &widths, &border));
+    out
+}
+
+/// One grid border row: the left corner, one `─` run per column
+/// (the column width plus the two padding cells), the join per
+/// gap, the right corner. The cells carry the border style.
+fn grid_border(
+    left: char,
+    right: char,
+    join: char,
+    run: char,
+    widths: &[usize],
+    style: &Style,
+) -> Vec<(Style, String)> {
+    let mut out: Vec<(Style, String)> = Vec::new();
+    out.push((style.clone(), left.to_string()));
+    for (i, w) in widths.iter().enumerate() {
+        out.push((
+            style.clone(),
+            std::iter::repeat(run).take(w + 2).collect::<String>(),
+        ));
+        if i + 1 < widths.len() {
+            out.push((style.clone(), join.to_string()));
+        }
+    }
+    out.push((style.clone(), right.to_string()));
     out
 }
 
@@ -600,5 +978,61 @@ mod tests {
             ],
             "{s:?}"
         );
+    }
+
+    #[test]
+    fn table_grid_rows_keep_fixed_column_widths() {
+        // Every row (cell rows and border rows) must land its verticals
+        // on the same columns: a shorter cell pads to the column width,
+        // so no row is narrower than the borders.
+        let palette = Palette::builtin(crate::color::Level::Rgb);
+        let rows = vec![
+            "| Name  | Description       |".to_string(),
+            "|-------|-----------------|".to_string(),
+            "| a     | b               |".to_string(),
+            "| longer| a much longer text here |".to_string(),
+        ];
+        let grid = table_grid(&rows, 80, &palette);
+        assert!(grid.len() >= 5, "borders plus rows: {grid:?}");
+        let widths: Vec<usize> = grid
+            .iter()
+            .map(|r| r.iter().map(|(_, s)| s.chars().count()).sum::<usize>())
+            .collect();
+        let first = widths[0];
+        assert!(
+            widths.iter().all(|w| *w == first),
+            "every grid row has the same width: {widths:?}"
+        );
+        // The middle separator line and the cell rows align: the
+        // verticals of one cell row sit at the border's column joins.
+        let row_text: String = grid[1].iter().map(|(_, s)| s.as_str()).collect();
+        assert!(row_text.starts_with('│'), "cell row: {row_text:?}");
+        assert!(row_text.ends_with('│'), "cell row: {row_text:?}");
+        // The clamped column: the long cell elides when the pane is
+        // narrow, the short cell pads to the column width.
+        let row3: String = grid[3].iter().map(|(_, s)| s.as_str()).collect();
+        assert!(row3.contains("a"), "short cell row: {row3:?}");
+        let row5: String = grid[5].iter().map(|(_, s)| s.as_str()).collect();
+        assert!(row5.contains("longer"), "wide cell row: {row5:?}");
+    }
+
+    #[test]
+    fn table_grid_clamps_and_elides_on_a_narrow_pane() {
+        let palette = Palette::builtin(crate::color::Level::Rgb);
+        let rows = vec![
+            "| Name | Description |".to_string(),
+            "|------|-------------|".to_string(),
+            "| abc  | a very long description that must elide |".to_string(),
+        ];
+        let grid = table_grid(&rows, 30, &palette);
+        let widths: Vec<usize> = grid
+            .iter()
+            .map(|r| r.iter().map(|(_, s)| s.chars().count()).sum::<usize>())
+            .collect();
+        assert!(widths.iter().all(|w| *w == widths[0]), "{widths:?}");
+        let last: String = grid.last().unwrap().iter().map(|(_, s)| s.as_str()).collect();
+        let cell: String = grid[3].iter().map(|(_, s)| s.as_str()).collect();
+        assert!(cell.contains('…'), "the elided cell: {cell:?}");
+        assert!(last.contains('└'), "{last:?}");
     }
 }

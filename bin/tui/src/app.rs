@@ -28,6 +28,24 @@ pub enum Key {
     CtrlE,
     CtrlU,
     CtrlD,
+    /// The global tool fold/expand toggle (docs/tui-tool-display-port.md
+    /// section 2, the expand part): every collapsed block expands to
+    /// the full output, and back. The key follows `pi`'s expand key.
+    CtrlO,
+    /// The thinking-block show/hide toggle (docs/tui-thinking-block.md
+    /// section 4). `Ctrl+H` is unsafe: most terminals send the
+    /// backspace byte for it, so the toggle takes `Ctrl+T` instead.
+    CtrlT,
+    /// The thinking-block collapse/expand toggle (docs/tui-thinking-
+    /// block.md section 4).
+    CtrlX,
+    /// The input queue toggle: the next draft sends to the follow
+    /// queue (docs/tui-pending-user-messages.md stage 2).
+    CtrlF,
+    /// The reasoning-effort cycle: the next effort value in the
+    /// effort order, written to the active model's config entry
+    /// (docs/tui-thinking-block.md section 4, the effort control).
+    CtrlL,
     /// The multi-line editor's newline key: in insert mode it
     /// inserts a hard newline; in normal mode it is the `j` motion.
     /// `Enter` sends the draft (docs/tui.md section 7).
@@ -88,6 +106,23 @@ pub enum Action {
     /// and survives as an orphan. Only Ctrl+C stops a loop. The log
     /// stays intact, so a restart re-renders the live session.
     Quit,
+    /// The global tool fold/expand toggle (Ctrl+O). Main redraws; the
+    /// state lives on the app (docs/tui-tool-display-port.md section 2,
+    /// the expand part).
+    ToggleToolExpand,
+    /// The thinking-block show/hide toggle (Ctrl+T, docs/tui-thinking-
+    /// block.md section 4).
+    ToggleThinking,
+    /// The thinking-block collapse/expand toggle (Ctrl+X).
+    ToggleThinkingExpand,
+    /// The input queue toggle (Ctrl+F, docs/tui-pending-user-messages.md
+    /// stage 2): the next draft sends to the follow queue.
+    ToggleFollowQueue,
+    /// The reasoning-effort cycle (Ctrl+L, docs/tui-thinking-block.md
+    /// section 4, the effort control). Main writes the next effort
+    /// value to the active model's config entry and flashes the
+    /// change.
+    CycleEffort,
 }
 
 /// The oldest pending `approval_request` in the active session log.
@@ -144,16 +179,45 @@ pub struct App {
     /// valid only while this number is unchanged.
     events_version: u64,
     /// Cached wrapped transcript lines, keyed by (events_version,
-    /// width, ext reply version). A scroll redraw reuses the cache:
-    /// O(viewport) instead of O(total lines). The extension reply
-    /// version folds in, so a new reply rebuilds the lines
-    /// (ui-extension-plan stage 1).
-    transcript_cache: Option<(u64, usize, u64, crate::color::Level, Vec<Line<'static>>)>,
+    /// width, ext reply version, palette). A scroll redraw reuses the
+    /// cache: O(viewport) instead of O(total lines). The extension
+    /// reply version folds in, so a new reply rebuilds the lines
+    /// (ui-extension-plan stage 1). The palette folds in, so a
+    /// scheme change rebuilds the lines (docs/tui-color-scheme.md).
+    transcript_cache: Option<(
+        u64,
+        usize,
+        u64,
+        crate::color::Level,
+        crate::color::Palette,
+        Vec<Line<'static>>,
+    )>,
     /// The terminal's color capability the built-in palette is lowered
-    /// to (truecolor default; 256/16 when the config or the env says
-    /// the terminal is less capable). Set by the host in `main`;
-    /// `new` defaults to truecolor so render tests are deterministic.
-    color_level: crate::color::Level,
+    /// to, and the selected color scheme (docs/tui-color-scheme.md
+    /// section 3). Set by the host in `main`; `new` defaults to the
+    /// built-in palette at detected capability, so render tests are
+    /// deterministic.
+    palette: crate::color::Palette,
+    /// The tool-result display config ([`tui] tool_display` table,
+    /// docs/tui-tool-display-port.md section 2). Set from the harness
+    /// config in `main`; `new` defaults to the `opencode` preset.
+    tool_display: crate::tool_display::ToolDisplay,
+    /// The global tool fold/expand toggle (Ctrl+O, docs/tui-tool-
+    /// display-port.md section 2, the expand part). `false` shows each
+    /// block at its output mode's lines; `true` expands every
+    /// collapsed block to the full body, capped at
+    /// `expanded_preview_max_lines`.
+    tool_expanded: bool,
+    /// The thinking-block visibility (Ctrl+T, docs/tui-thinking-block.md
+    /// section 4). `true` renders the block; `false` hides it
+    /// entirely.
+    thinking_shown: bool,
+    /// The thinking-block expand state (Ctrl+X). `false` shows the
+    /// collapsed header row; `true` shows the full thinking text.
+    thinking_expanded: bool,
+    /// The input queue toggle (Ctrl+F, docs/tui-pending-user-messages.md
+    /// stage 2). `true`: the next draft sends to the follow queue.
+    follow_queue: bool,
     /// Latest `ext_status` values, id to value, for the active
     /// session. Maintained incrementally: `set_active` builds it
     /// and each appended watch event updates it. A tick reads this
@@ -280,22 +344,63 @@ impl App {
             viewport: 0,
             events_version: 0,
             transcript_cache: None,
-            color_level: crate::color::Level::detect(),
+            palette: crate::color::Palette::builtin(crate::color::Level::detect()),
+            tool_display: crate::tool_display::ToolDisplay::preset(
+                crate::tool_display::Preset::OpenCode,
+            ),
+            tool_expanded: false,
+            thinking_shown: true,
+            thinking_expanded: true,
+            follow_queue: false,
         }
     }
 
-    /// The terminal color capability every built-in style is lowered
-    /// to (docs/tui.md section 10). Set from the harness config
-    /// override ([tui] color) in [main]; defaults to environment
-    /// detection, so tests and the no-config path keep their own
-    /// detection result.
-    pub fn color_level(&self) -> crate::color::Level {
-        self.color_level
+    /// The color palette every built-in style lowers to: the
+    /// capability level plus the selected color scheme
+    /// (docs/tui-color-scheme.md section 3). Set from the harness
+    /// config override in [main]; defaults to the built-in palette
+    /// at environment detection, so tests and the no-config path
+    /// keep their own detection result.
+    pub fn palette(&self) -> &crate::color::Palette {
+        &self.palette
     }
 
-    /// Override the capability the built-in render path lowers to.
-    pub fn set_color_level(&mut self, level: crate::color::Level) {
-        self.color_level = level;
+    /// Override the palette the built-in render path lowers to.
+    pub fn set_palette(&mut self, palette: crate::color::Palette) {
+        self.palette = palette;
+    }
+
+    /// The tool-result display config ([`tui] tool_display` table,
+    /// docs/tui-tool-display-port.md section 2). Set from the harness
+    /// config in `main`; defaults to the `opencode` preset.
+    pub fn set_tool_display(&mut self, td: crate::tool_display::ToolDisplay) {
+        self.tool_display = td;
+    }
+
+    /// The tool-result display config, for the render path.
+    pub fn tool_display(&self) -> &crate::tool_display::ToolDisplay {
+        &self.tool_display
+    }
+
+    /// The global fold/expand toggle state (Ctrl+O).
+    pub fn tool_expanded(&self) -> bool {
+        self.tool_expanded
+    }
+
+    /// The thinking-block visibility state (Ctrl+T).
+    pub fn thinking_shown(&self) -> bool {
+        self.thinking_shown
+    }
+
+    /// The thinking-block expand state (Ctrl+X).
+    pub fn thinking_expanded(&self) -> bool {
+        self.thinking_expanded
+    }
+
+    /// The input queue toggle state (Ctrl+F): the next draft sends
+    /// to the follow queue when `true`.
+    pub fn follow_queue(&self) -> bool {
+        self.follow_queue
     }
 
     // ── sessions ────────────────────────────────────────────────
@@ -413,16 +518,26 @@ impl App {
         ext: Option<&crate::ext::ExtHost>,
     ) -> &[Line<'static>] {
         let ext_ver = ext.map(|h| h.replies_version()).unwrap_or(0);
-        if let Some((v, w, ev, cl, _)) = &self.transcript_cache {
-            if *v == self.events_version && *w == width && *ev == ext_ver && *cl == self.color_level
+        if let Some((v, w, ev, cl, p, _)) = &self.transcript_cache {
+            if *v == self.events_version
+                && *w == width
+                && *ev == ext_ver
+                && *cl == self.palette.level()
+                && *p == self.palette
             {
-                return &self.transcript_cache.as_ref().unwrap().4;
+                return &self.transcript_cache.as_ref().unwrap().5;
             }
         }
         let lines = crate::render::build_transcript_lines(self, width, ext);
-        self.transcript_cache =
-            Some((self.events_version, width, ext_ver, self.color_level, lines));
-        &self.transcript_cache.as_ref().unwrap().4
+        self.transcript_cache = Some((
+            self.events_version,
+            width,
+            ext_ver,
+            self.palette.level(),
+            self.palette.clone(),
+            lines,
+        ));
+        &self.transcript_cache.as_ref().unwrap().5
     }
 
     /// Events of the active session, oldest first.
@@ -438,6 +553,26 @@ impl App {
             if e.kind() == EventKind::ToolCall {
                 if let (Some(id), Some(name)) = (e.get_str("id"), e.get_str("name")) {
                     m.insert(id.to_string(), name.to_string());
+                }
+            }
+        }
+        m
+    }
+
+    /// Map tool_call id -> (name, arguments), for result rendering.
+    /// The arguments are the call arguments verbatim: the write
+    /// diff of docs/tui-tool-result-truncation.md needs the
+    /// `content` argument of the write call, and the render holds
+    /// it next to the result line (pure presentation lookup, not
+    /// decision logic).
+    pub fn call_details(&self) -> HashMap<String, (String, Value)> {
+        let mut m: HashMap<String, (String, Value)> = HashMap::new();
+        for e in &self.events {
+            if e.kind() == EventKind::ToolCall {
+                if let Some(id) = e.get_str("id") {
+                    let name = e.get_str("name").unwrap_or("").to_string();
+                    let args = e.get("arguments").cloned().unwrap_or(Value::Null);
+                    m.insert(id.to_string(), (name, args));
                 }
             }
         }
@@ -654,6 +789,27 @@ impl App {
         self.events[from..]
             .iter()
             .filter(|e| e.kind() == EventKind::UserMessage)
+            .collect()
+    }
+
+    /// The pending `steer` queue: the unconsumed messages without the
+    /// `follow` marker (a missing field means steer; stage 2 of
+    /// docs/tui-pending-user-messages.md). They inject at the next
+    /// step of the running loop.
+    pub fn pending_steering(&self) -> Vec<&Event> {
+        self.pending_user_messages()
+            .into_iter()
+            .filter(|e| e.get_str("queue") != Some("follow"))
+            .collect()
+    }
+
+    /// The pending `follow` queue: the unconsumed messages marked
+    /// `queue: "follow"` (stage 2 of docs/tui-pending-user-messages.
+    /// md). They run only after the loop would stop, as new turns.
+    pub fn pending_follows(&self) -> Vec<&Event> {
+        self.pending_user_messages()
+            .into_iter()
+            .filter(|e| e.get_str("queue") == Some("follow"))
             .collect()
     }
 
@@ -1042,6 +1198,56 @@ impl App {
                 // Half-page down, like vim: back toward the tail.
                 self.scroll_down(self.half_page());
                 Vec::new()
+            }
+            Key::CtrlO => {
+                // The global tool fold/expand toggle (docs/tui-tool-
+                // display-port.md section 2, the expand part): every
+                // collapsed block expands to the full output, and
+                // back. The state is app-local; the version bump
+                // rebuilds the transcript on the next draw.
+                self.tool_expanded = !self.tool_expanded;
+                self.events_version += 1;
+                vec![Action::ToggleToolExpand]
+            }
+            Key::CtrlT => {
+                // The thinking-block collapse/expand toggle (docs/tui-
+                // thinking-block.md section 4, the pi
+                // `app.thinking.toggle` keymap): `false` collapses every
+                // block to its one-line label; `true` expands the full
+                // reasoning text. `Ctrl+X` is the separate show/hide.
+                self.thinking_expanded = !self.thinking_expanded;
+                self.events_version += 1;
+                vec![Action::ToggleThinkingExpand]
+            }
+            Key::CtrlX => {
+                // The thinking-block show/hide toggle (docs/tui-
+                // thinking-block.md section 4): `false` hides every
+                // thinking block; `true` restores them. `Ctrl+T` is
+                // the pi collapse/expand key, so hide takes `Ctrl+X`.
+                self.thinking_shown = !self.thinking_shown;
+                self.events_version += 1;
+                vec![Action::ToggleThinking]
+            }
+            Key::CtrlF => {
+                // The input queue toggle (docs/tui-pending-user-
+                // messages.md stage 2): the next draft sends to the
+                // follow queue, and back to steer. The state is the
+                // input area's own: no transcript rebuild.
+                self.follow_queue = !self.follow_queue;
+                self.flash(if self.follow_queue {
+                    "queue: follow — the next message waits for the loop to stop"
+                } else {
+                    "queue: steer — the next message injects at the next step"
+                });
+                vec![Action::ToggleFollowQueue]
+            }
+            Key::CtrlL => {
+                // The reasoning-effort cycle (docs/tui-thinking-level-
+                // input-box.md section 3). Main owns the config
+                // write-back: it reads the active model's effort,
+                // steps to the next value in the effort order, and
+                // writes the active model's config entry.
+                vec![Action::CycleEffort]
             }
             Key::Wheel(delta) => {
                 // Wheel up scrolls back in history; wheel down chases

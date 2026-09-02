@@ -72,6 +72,21 @@ pub struct TuiConfig {
     /// The forced terminal color capability level, or `None` to detect
     /// from the environment at startup (see color.rs module docs).
     pub color: Option<crate::color::Level>,
+    /// The named color scheme, or `None` for the built-in palette
+    /// (docs/tui-color-scheme.md section 3). A built-in name or a
+    /// user scheme defined under `custom_schemes`.
+    pub color_scheme: Option<String>,
+    /// User-defined schemes: name to role-key to hex value. A
+    /// missing role keeps the built-in palette value of the level:
+    /// a partial table overlays the built-ins (docs/tui-color-
+    /// scheme.md section 3).
+    pub custom_schemes:
+        std::collections::HashMap<String, std::collections::HashMap<crate::color::Role, String>>,
+    /// The tool-result display state (docs/tui-tool-display-port.md
+    /// section 2, the config part): a preset plus the per-field
+    /// overrides. The `opencode` preset is the default: read and
+    /// search results stay collapsed.
+    pub tool_display: crate::tool_display::ToolDisplay,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -117,11 +132,50 @@ fn default_arg_style() -> String {
 
 /// The optional `[tui]` table: `color` forces the color capability
 /// level (`truecolor`, `256`, `8`, `16`; unknown names are a hard
-/// error like the other keys).
+/// error like the other keys). `color_scheme` selects a named color
+/// scheme (docs/tui-color-scheme.md section 3: the default keeps the
+/// current built-in palette). `color_schemes` holds user-defined
+/// role-to-hex tables; a table name the `color_scheme` value does
+/// not name is inert.
 #[derive(Debug, Default, Deserialize)]
 struct RawTui {
     #[serde(default)]
     color: Option<String>,
+    #[serde(default)]
+    color_scheme: Option<String>,
+    #[serde(default)]
+    color_schemes: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    /// The tool-result display table (docs/tui-tool-display-port.md
+    /// section 2). Every field is optional; a missing field keeps
+    /// the preset value. The preset defaults to `opencode`.
+    #[serde(default)]
+    tool_display: Option<RawToolDisplay>,
+}
+
+/// The `[tui.tool_display]` table: a preset name plus the per-field
+/// overrides (docs/tui-tool-display-port.md section 2, the config
+/// part). The presets are `opencode` (the default: read and search
+/// hidden, bash collapsed to 10 lines), `balanced` (summaries), and
+/// `verbose` (larger previews).
+#[derive(Debug, Default, Deserialize)]
+struct RawToolDisplay {
+    preset: Option<String>,
+    /// The read output mode: `hidden`, `summary`, `preview`.
+    read: Option<String>,
+    /// The search output mode: `hidden`, `count`, `preview`.
+    search: Option<String>,
+    /// The bash output mode: `hidden`, `summary`, `preview`.
+    bash: Option<String>,
+    /// The preview line count of the read preview.
+    preview_lines: Option<usize>,
+    /// The collapsed line count of the bash output.
+    bash_collapsed_lines: Option<usize>,
+    /// The collapsed line count of the edit/write diff.
+    diff_collapsed_lines: Option<usize>,
+    /// The expanded preview cap (the `Ctrl+O` expansion).
+    expanded_preview_max_lines: Option<usize>,
+    /// The diff layout: `auto`, `split`, `unified`.
+    diff_view: Option<String>,
 }
 
 impl TuiConfig {
@@ -209,6 +263,132 @@ impl TuiConfig {
             None => None,
         };
 
+        // The color scheme (docs/tui-color-scheme.md section 3): a
+        // named internal scheme (`catppuccin macchiato`) or a user
+        // scheme table. Unknown names are a hard error at load, like
+        // the other keys. A table value that is not a known role key
+        // or is not a parseable hex is a hard error: a scheme must
+        // not load half-validated.
+        let mut custom_schemes: std::collections::HashMap<
+            String,
+            std::collections::HashMap<crate::color::Role, String>,
+        > = std::collections::HashMap::new();
+        for (name, table) in raw
+            .tui
+            .as_ref()
+            .map(|t| t.color_schemes.clone())
+            .unwrap_or_default()
+        {
+            let key_to_role = |k: &str| -> Result<crate::color::Role, String> {
+                crate::color::Role::ALL
+                    .iter()
+                    .find(|r| r.key() == k)
+                    .copied()
+                    .ok_or_else(|| {
+                        format!(
+                            "config [tui] color_schemes.{}: unknown role {k:?} \
+                             (expected one of {})",
+                            name,
+                            crate::color::Role::ALL
+                                .iter()
+                                .map(|r| r.key())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    })
+            };
+            let mut roles: std::collections::HashMap<crate::color::Role, String> =
+                std::collections::HashMap::new();
+            for (key, hex) in table {
+                let role = key_to_role(&key)?;
+                if crate::color::parse_scheme_color(&hex).is_none() {
+                    return Err(format!(
+                        "config [tui] color_schemes.{}: role {key} value {hex:?} \
+                         is not a hex color (expected #rgb or #rrggbb)",
+                        name
+                    ));
+                }
+                roles.insert(role, hex);
+            }
+            custom_schemes.insert(name, roles);
+        }
+        if let Some(name) = raw.tui.as_ref().and_then(|t| t.color_scheme.clone()) {
+            let known = name == crate::color::SCHEME_CATPPUCCIN_MACCHIATO
+                || custom_schemes.contains_key(&name);
+            if !known {
+                return Err(format!(
+                    "config [tui] color_scheme: unknown scheme {name:?} \
+                     (expected the built-in {} or a [tui] color_schemes table name",
+                    crate::color::SCHEME_CATPPUCCIN_MACCHIATO
+                ));
+            }
+        }
+        let color_scheme = raw.tui.as_ref().and_then(|t| t.color_scheme.clone());
+
+        // The tool-result display table (docs/tui-tool-display-port.md
+        // section 2, the config part). The preset table is the base;
+        // the per-field overrides win. A bad preset name or a bad
+        // mode value is a hard error at load, like the other keys.
+        let td = raw.tui.as_ref().and_then(|t| t.tool_display.as_ref());
+        let preset = td.and_then(|t| t.preset.as_deref()).unwrap_or("opencode");
+        let preset = crate::tool_display::parse_preset(preset).ok_or_else(|| {
+            format!(
+                "config [tui.tool_display] preset: unknown preset {preset:?} \
+                 (expected opencode, balanced, or verbose)"
+            )
+        })?;
+        let mut tool_display = crate::tool_display::ToolDisplay::preset(preset);
+        if let Some(t) = td {
+            if let Some(m) = t.read.as_deref() {
+                tool_display.read_mode =
+                    crate::tool_display::parse_output_mode(m).ok_or_else(|| {
+                        format!(
+                            "config [tui.tool_display] read: unknown mode {m:?} \
+                             (expected hidden, summary, or preview)"
+                        )
+                    })?;
+            }
+            if let Some(m) = t.search.as_deref() {
+                tool_display.search_mode =
+                    crate::tool_display::parse_search_mode(m).ok_or_else(|| {
+                        format!(
+                            "config [tui.tool_display] search: unknown mode {m:?} \
+                             (expected hidden, count, or preview)"
+                        )
+                    })?;
+            }
+            if let Some(m) = t.bash.as_deref() {
+                tool_display.bash_mode =
+                    crate::tool_display::parse_output_mode(m).ok_or_else(|| {
+                        format!(
+                            "config [tui.tool_display] bash: unknown mode {m:?} \
+                             (expected hidden, summary, or preview)"
+                        )
+                    })?;
+            }
+            if let Some(m) = t.diff_view.as_deref() {
+                tool_display.diff_view =
+                    crate::tool_display::parse_diff_view(m).ok_or_else(|| {
+                        format!(
+                            "config [tui.tool_display] diff_view: unknown value {m:?} \
+                             (expected auto, split, or unified)"
+                        )
+                    })?;
+            }
+            if let Some(n) = t.preview_lines {
+                tool_display.preview_lines = n;
+            }
+            if let Some(n) = t.bash_collapsed_lines {
+                tool_display.bash_collapsed_lines = n;
+            }
+            if let Some(n) = t.diff_collapsed_lines {
+                tool_display.diff_collapsed_lines = n;
+            }
+            if let Some(n) = t.expanded_preview_max_lines {
+                tool_display.expanded_preview_max_lines = n;
+            }
+        }
+
         Ok(TuiConfig {
             sessions_root,
             schemas_dir,
@@ -218,6 +398,9 @@ impl TuiConfig {
             ext_dir,
             active_model,
             color,
+            color_scheme,
+            custom_schemes,
+            tool_display,
         })
     }
 
@@ -249,6 +432,11 @@ impl TuiConfig {
             ext_dir: None,
             active_model: None,
             color: None,
+            color_scheme: None,
+            custom_schemes: std::collections::HashMap::new(),
+            tool_display: crate::tool_display::ToolDisplay::preset(
+                crate::tool_display::Preset::OpenCode,
+            ),
         }
     }
 }
@@ -362,5 +550,214 @@ arg_style = "append_session"
         let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
         assert!(cfg.ext_dir.is_none());
         assert!(cfg.active_model.is_none());
+    }
+
+    #[test]
+    fn color_scheme_selects_the_builtin_name() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "config.toml",
+            "[tui]\ncolor_scheme = \"catppuccin macchiato\"\n",
+        );
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        assert_eq!(
+            cfg.color_scheme.as_deref(),
+            Some("catppuccin macchiato"),
+            "the built-in scheme name loads"
+        );
+        assert!(cfg.custom_schemes.is_empty());
+    }
+
+    #[test]
+    fn user_scheme_table_parses_roles_and_hexes() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "config.toml",
+            r##"
+[tui]
+color_scheme = "mocha"
+
+[tui.color_schemes.mocha]
+plain_text = "#cdd6f4"
+tool_output = "#8f92ac"
+border1 = "#74c7ec"
+"##,
+        );
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        let table = cfg.custom_schemes.get("mocha").expect("the table loads");
+        assert_eq!(
+            table.get(&crate::color::Role::PlainText),
+            Some(&"#cdd6f4".to_string())
+        );
+        assert_eq!(
+            table.get(&crate::color::Role::Border1),
+            Some(&"#74c7ec".to_string()),
+        );
+        assert_eq!(table.len(), 3, "every key of the table parses");
+    }
+
+    #[test]
+    fn unknown_scheme_name_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "config.toml",
+            "[tui]\ncolor_scheme = \"solarized\"\n",
+        );
+        let err = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap_err();
+        assert!(err.contains("unknown scheme"), "{err}");
+    }
+
+    #[test]
+    fn user_scheme_name_resolves_against_the_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "config.toml",
+            r##"
+[tui]
+color_scheme = "mocha"
+
+[tui.color_schemes.mocha]
+plain_text = "#cdd6f4"
+"##,
+        );
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        assert!(
+            cfg.custom_schemes.contains_key("mocha"),
+            "the named table resolves"
+        );
+    }
+
+    #[test]
+    fn bad_scheme_hex_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "config.toml",
+            "[tui.color_schemes.mocha]\nplain_text = \"red\"\n",
+        );
+        let err = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap_err();
+        assert!(err.contains("hex"), "{err}");
+    }
+
+    #[test]
+    fn unknown_scheme_role_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "config.toml",
+            "[tui.color_schemes.mocha]\nnope = \"#cdd6f4\"\n",
+        );
+        let err = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap_err();
+        assert!(err.contains("unknown role"), "{err}");
+    }
+
+    #[test]
+    fn scheme_config_is_optional_and_defaults_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "config.toml", "[loop]\ncommand = \"bash\"\n");
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        assert!(
+            cfg.color_scheme.is_none(),
+            "no scheme: the built-in palette stands"
+        );
+        assert!(cfg.custom_schemes.is_empty());
+    }
+
+    // ── tool display (docs/tui-tool-display-port.md section 2) ──
+
+    /// The default table is the `opencode` preset: read and search
+    /// hidden, bash collapsed to the first 10 lines.
+    #[test]
+    fn tool_display_defaults_to_the_opencode_preset() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "config.toml", "[loop]\ncommand = \"bash\"\n");
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        use crate::tool_display::*;
+        assert_eq!(cfg.tool_display, ToolDisplay::preset(Preset::OpenCode));
+        assert_eq!(cfg.tool_display.effective_preset(), Preset::OpenCode);
+    }
+
+    /// A preset table with no overrides keeps the preset value table
+    /// and reports the preset name.
+    #[test]
+    fn tool_display_preset_name_selects_the_table() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "config.toml",
+            r##"[loop]
+command = "bash"
+
+[tui.tool_display]
+preset = "verbose"
+"##,
+        );
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        use crate::tool_display::*;
+        assert_eq!(cfg.tool_display, ToolDisplay::preset(Preset::Verbose));
+        assert_eq!(cfg.tool_display.preview_lines, 12);
+        assert_eq!(cfg.tool_display.bash_collapsed_lines, 20);
+        assert_eq!(cfg.tool_display.effective_preset(), Preset::Verbose);
+    }
+
+    /// A field override drops the preset to `Custom`: the override
+    /// wins over the preset table value.
+    #[test]
+    fn tool_display_override_drops_to_custom() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "config.toml",
+            r##"[loop]
+command = "bash"
+
+[tui.tool_display]
+preset = "opencode"
+read = "preview"
+preview_lines = 12
+"##,
+        );
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        use crate::tool_display::*;
+        assert_eq!(cfg.tool_display.read_mode, OutputMode::Preview);
+        assert_eq!(cfg.tool_display.preview_lines, 12);
+        // The untouched fields keep the preset values.
+        assert_eq!(cfg.tool_display.search_mode, SearchMode::Hidden);
+        assert_eq!(cfg.tool_display.bash_mode, OutputMode::Preview);
+        assert_eq!(cfg.tool_display.effective_preset(), Preset::Custom);
+    }
+
+    /// An unknown preset name is a hard error at load.
+    #[test]
+    fn tool_display_unknown_preset_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "config.toml",
+            r##"[tui.tool_display]
+preset = "nope"
+"##,
+        );
+        let err = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap_err();
+        assert!(err.contains("preset"), "{err}");
+    }
+
+    /// An unknown mode value is a hard error at load.
+    #[test]
+    fn tool_display_unknown_mode_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "config.toml",
+            r##"[tui.tool_display]
+read = "all"
+"##,
+        );
+        let err = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap_err();
+        assert!(err.contains("read"), "{err}");
     }
 }

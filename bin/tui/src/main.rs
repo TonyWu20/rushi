@@ -17,6 +17,7 @@ mod highlight;
 mod port;
 mod port_file;
 mod render;
+mod tool_display;
 mod vim_editor;
 
 use std::io::Write;
@@ -82,6 +83,11 @@ fn key_input(k: &cevent::KeyEvent) -> Option<Key> {
             cevent::KeyCode::Char('c') => Some(Key::CtrlC),
             cevent::KeyCode::Char('e') => Some(Key::CtrlE),
             cevent::KeyCode::Char('j') => Some(Key::CtrlJ),
+            cevent::KeyCode::Char('o') => Some(Key::CtrlO),
+            cevent::KeyCode::Char('t') => Some(Key::CtrlT),
+            cevent::KeyCode::Char('x') => Some(Key::CtrlX),
+            cevent::KeyCode::Char('f') => Some(Key::CtrlF),
+            cevent::KeyCode::Char('l') => Some(Key::CtrlL),
             cevent::KeyCode::Char('q') => Some(Key::Quit),
             cevent::KeyCode::Char('r') => Some(Key::CtrlR),
             cevent::KeyCode::Char('u') => Some(Key::CtrlU),
@@ -108,6 +114,140 @@ fn key_input(k: &cevent::KeyEvent) -> Option<Key> {
         cevent::KeyCode::Delete => Some(Key::Delete),
         _ => None,
     }
+}
+
+/// The effort values the reasoning-effort key cycles through
+/// (docs/tui-thinking-block.md section 4, the effort control).
+/// `none` turns thinking off. `minimal`/`low` share the low level
+/// bucket, and `max`/`xhigh` share the highest (docs/tui.md 7.2).
+const EFFORT_ORDER: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// The 0-4 level of one effort value, mirroring the bin/model
+/// mapping (docs/tui.md 7.2). The flash states the level so the
+/// input-area border color matches what the next step publishes.
+fn effort_level(effort: &str) -> u32 {
+    match effort.to_ascii_lowercase().as_str() {
+        "none" => 0,
+        "minimal" | "low" => 1,
+        "medium" => 2,
+        "high" => 3,
+        "xhigh" | "max" => 4,
+        _ => 0,
+    }
+}
+
+/// The active model name for the effort write-back, matching the
+/// bin/model resolution: the `MODEL` env var wins, then the config's
+/// `[active] model`, then the default.
+fn resolve_active_model_name(cfg: &TuiConfig) -> String {
+    std::env::var("MODEL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| cfg.active_model.clone())
+        .unwrap_or_else(|| "deepseek".to_string())
+}
+
+/// The resolved reasoning effort of one model name, matching the
+/// bin/model precedence: the per-model table wins over the global
+/// `[model]` table; a missing key defaults to `medium`; `off`
+/// normalizes to `none`.
+fn resolve_reasoning_effort(text: &str, active: &str) -> String {
+    let v: toml::Value = text
+        .parse()
+        .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
+    let model_root = v
+        .get("model")
+        .cloned()
+        .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
+    let mdl = model_root
+        .get(active)
+        .cloned()
+        .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
+    let s = |t: &toml::Value, k: &str| -> Option<String> {
+        t.get(k).and_then(|x| x.as_str()).map(str::to_string)
+    };
+    let effort = s(&mdl, "reasoning_effort")
+        .or_else(|| s(&model_root, "reasoning_effort"))
+        .unwrap_or_else(|| "medium".to_string());
+    if effort.eq_ignore_ascii_case("off") {
+        "none".to_string()
+    } else {
+        effort
+    }
+}
+
+/// Cycle the active model's reasoning effort to the next value and
+/// write it back to the config (docs/tui-thinking-block.md section
+/// 4, the effort control). The write-back is a targeted, comment-
+/// preserving text edit of the `[model.<active>]` table: the toml
+/// crate cannot round-trip comments, so the rest of the config
+/// survives verbatim. The per-model table is created when missing.
+/// Returns the new effort value.
+fn cycle_reasoning_effort(config_path: &std::path::Path, active: &str) -> Result<String, String> {
+    let text = std::fs::read_to_string(config_path)
+        .map_err(|e| format!("cannot read config {}: {e}", config_path.display()))?;
+    let current = resolve_reasoning_effort(&text, active);
+    let pos = EFFORT_ORDER
+        .iter()
+        .position(|e| e.to_ascii_lowercase() == current.to_ascii_lowercase())
+        .unwrap_or(3); // the default `medium` index
+    let next = EFFORT_ORDER[(pos + 1) % EFFORT_ORDER.len()];
+
+    // The section header, bare or quoted. The model name comes from
+    // the config the user wrote, so both forms must match.
+    let headers = [format!("[model.{active}]"), format!("[model.\"{active}\"]")];
+    let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
+
+    // The line index of the active table's header, or `None` when the
+    // table is absent (created below). While the loop runs, `in` is
+    // the open section's header index and `key_at` the index of a
+    // `reasoning_effort` line inside it.
+    let is_header = |l: &str| headers.iter().any(|h| l.trim() == h);
+    let mut section_open: Option<usize> = None;
+    let mut key_at: Option<usize> = None;
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim();
+        if is_header(t) {
+            section_open = Some(i);
+            key_at = None;
+            continue;
+        }
+        if section_open.is_some() && t.starts_with('[') {
+            section_open = None;
+            continue;
+        }
+        if section_open.is_some() && t.starts_with("reasoning_effort") {
+            key_at = Some(i);
+        }
+    }
+
+    let mut out: Vec<String> = lines.clone();
+    match (section_open, key_at) {
+        (_, Some(k)) => {
+            // The key exists in the table: move the value in place.
+            out[k] = format!("reasoning_effort = \"{next}\"");
+        }
+        (Some(s), None) => {
+            // The table exists without the key: add the key right
+            // after the header line.
+            out.insert(s + 1, format!("reasoning_effort = \"{next}\""));
+        }
+        (None, _) => {
+            // The table is absent: create it at the end of the file.
+            if !out.is_empty() && !out.last().unwrap().trim().is_empty() {
+                out.push(String::new());
+            }
+            out.push(format!("[model.{active}]"));
+            out.push(format!("reasoning_effort = \"{next}\""));
+        }
+    }
+    let mut new_text = out.join("\n");
+    if !new_text.ends_with('\n') {
+        new_text.push('\n');
+    }
+    std::fs::write(config_path, new_text)
+        .map_err(|e| format!("cannot write config {}: {e}", config_path.display()))?;
+    Ok(next.to_string())
 }
 
 fn main() {
@@ -143,10 +283,25 @@ fn main() {
     let mut term = Terminal::new(backend).expect("cannot create the terminal");
     let mut app = App::new();
     // The [tui] color override forces the capability level; absent,
-    // the App's environment detection stands (color.rs module docs).
-    if let Some(level) = cfg.color {
-        app.set_color_level(level);
-    }
+    // the environment detection stands (color.rs module docs). The
+    // [tui] color scheme (docs/tui-color-scheme.md section 3) maps
+    // every color role to a hex value; the values lower to the level.
+    let level = cfg.color.unwrap_or_else(crate::color::Level::detect);
+    let palette = match crate::color::palette_from_config(
+        level,
+        cfg.color_scheme.as_deref(),
+        &cfg.custom_schemes,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("tui: {e}");
+            std::process::exit(1);
+        }
+    };
+    app.set_palette(palette);
+    // The tool-result display config (docs/tui-tool-display-port.md
+    // section 2, the config part): the `[tui] tool_display` table.
+    app.set_tool_display(cfg.tool_display.clone());
     let host = ext::ExtHost::new(&disc, &cfg);
 
     for item in host.start() {
@@ -353,7 +508,15 @@ fn main() {
                         continue;
                     };
                     let content = app.take_draft();
-                    let ev = event::produce::user_message(&content);
+                    // The input queue toggle (docs/tui-pending-user-
+                    // messages.md stage 2): the follow queue keeps the
+                    // message for a turn restart; the steer queue is
+                    // the default (the missing field).
+                    let ev = if app.follow_queue() {
+                        event::produce::user_message_follow(&content)
+                    } else {
+                        event::produce::user_message(&content)
+                    };
                     match rt.block_on(port.append_event(&sid, &ev)) {
                         Ok(()) => app.flash("message sent"),
                         Err(e) => {
@@ -719,6 +882,31 @@ fn main() {
                                 app.flash(format!("handoff to {name} failed: {e}"));
                             }
                         },
+                    }
+                }
+                Action::ToggleToolExpand
+                | Action::ToggleThinking
+                | Action::ToggleThinkingExpand
+                | Action::ToggleFollowQueue => {
+                    // The state lives on the app; the next draw
+                    // repaints. No port work.
+                }
+                Action::CycleEffort => {
+                    // The reasoning-effort cycle (docs/tui-thinking-
+                    // block.md section 4): the next effort value in
+                    // the order, written to the active model's
+                    // config entry. The loop publishes the new level
+                    // on its next step; the input-area border moves
+                    // then (docs/tui.md 7.2).
+                    let active = resolve_active_model_name(&cfg);
+                    match cycle_reasoning_effort(&cfg.config_path, &active) {
+                        Ok(next) => {
+                            let lvl = effort_level(&next);
+                            app.flash(format!(
+                                "reasoning effort → {next} (level {lvl}) — the border follows on the next step"
+                            ));
+                        }
+                        Err(e) => app.flash(e),
                     }
                 }
                 Action::Quit => {

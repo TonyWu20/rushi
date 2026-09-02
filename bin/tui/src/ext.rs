@@ -989,6 +989,10 @@ impl ExtHost {
             }
             match spawn_gen(&slot, &m, &self.config_path) {
                 Ok(gen) => {
+                    ext_log(&format!(
+                        "spawn {} gen=0 pid={}",
+                        m.name, gen.0.pid
+                    ));
                     *slot.state.lock().unwrap() = SlotState::Running;
                     // A fresh generation: the staleness clock and
                     // flag reset with it.
@@ -1009,6 +1013,7 @@ impl ExtHost {
                         .ok();
                 }
                 Err(e) => {
+                    ext_log(&format!("spawn {} gen=0 failed: {}", m.name, e));
                     *slot.state.lock().unwrap() = SlotState::Skipped;
                     items.push(ExtItem::Skipped {
                         ext: m.name.clone(),
@@ -1566,17 +1571,33 @@ impl ExtHost {
         }
         // A generation that started during the wait is a new group
         // not in the list above. The monitor cannot start another
-        // one: its loop checks the stop flag before each spawn.
-        // Let the in-flight spawn store its pid, collect again, and
-        // kill the new pids.
-        std::thread::sleep(Duration::from_millis(200));
-        let original: std::collections::HashSet<i32> = pids.iter().copied().collect();
-        for s in &self.inner.slots {
-            let pid = s.pid.load(Ordering::SeqCst);
-            if pid > 0 && !original.contains(&pid) {
-                unsafe {
-                    libc::kill(-pid, libc::SIGKILL);
+        // one: its loop checks the stop flag before each spawn. Let
+        // an in-flight spawn store its pid, collect again, and kill
+        // the new pids. The collection loops for a bounded window:
+        // a spawn can land just after one pass, and the monitor's
+        // post-spawn check kills its own racy generation as a backstop.
+        let mut empty_rounds: u32 = 0;
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(300));
+            let known: std::collections::HashSet<i32> = pids.iter().copied().collect();
+            let mut fresh: Vec<i32> = Vec::new();
+            for s in &self.inner.slots {
+                let pid = s.pid.load(Ordering::SeqCst);
+                if pid > 0 && !known.contains(&pid) {
+                    unsafe {
+                        libc::kill(-pid, libc::SIGKILL);
+                    }
+                    fresh.push(pid);
                 }
+            }
+            pids.extend(fresh.clone());
+            if fresh.is_empty() {
+                empty_rounds += 1;
+                if empty_rounds >= 2 {
+                    break;
+                }
+            } else {
+                empty_rounds = 0;
             }
         }
     }
@@ -1867,6 +1888,24 @@ fn build_argv(m: &Manifest) -> Result<Vec<CString>, String> {
     Ok(v)
 }
 
+/// The extension-host debug log. When the `TUI_EXT_LOG` env var is
+/// set, one line appends to that file per extension process event
+/// (spawn, death, respawn, stop). It is off by default.
+fn ext_log(msg: &str) {
+    let Ok(path) = std::env::var("TUI_EXT_LOG") else {
+        return;
+    };
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let line = format!("{} {} {}\n", std::process::id(), ms, msg);
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
 /// Spawn one extension generation. The child joins its own process
 /// group via `setsid`, so [`ExtHost::stop`] kills the whole group,
 /// not just the top process (docs/tui.md section 13.3). The working
@@ -1972,13 +2011,19 @@ fn monitor_thread(
                     .spawn(move || reader_thread(rinner, idx, so))
                     .ok();
             }
-            let _ = child.wait();
+            let code = child.wait();
+            ext_log(&format!(
+                "death {} gen={} exit={}",
+                slot.name, attempt, code
+            ));
         }
         // The generation ended: it exited, or the last spawn failed.
         if stop.load(Ordering::SeqCst) {
+            ext_log(&format!("stop {} gen={}", slot.name, attempt));
             break;
         }
         if attempt >= delays.len() {
+            ext_log(&format!("dead {} (budget spent)", slot.name));
             mark_dead(&slot, &inner, idx);
             break;
         }
@@ -1993,6 +2038,10 @@ fn monitor_thread(
         // again on the next pass and dies when the budget is spent.
         gen = match spawn_gen(&slot, &manifest, &config_path) {
             Ok(g) => {
+                ext_log(&format!(
+                    "respawn {} gen={} pid={}",
+                    manifest.name, attempt, g.0.pid
+                ));
                 // A fresh generation: the staleness clock and flag
                 // reset with it.
                 *slot.gen_started.lock().unwrap() = Instant::now();
@@ -2000,8 +2049,27 @@ fn monitor_thread(
                 slot.status_stale.store(false, Ordering::SeqCst);
                 Some(g)
             }
-            Err(_) => None,
+            Err(e) => {
+                ext_log(&format!(
+                    "respawn {} gen={} failed: {}",
+                    manifest.name, attempt, e
+                ));
+                None
+            }
         };
+        // A spawn that raced the host stop: the stop pass may have
+        // finished its pid collection just before this generation
+        // stored its pid. Kill the new group and break, so no orphan
+        // generation outlives the stop (docs/ui-extension.md section 7).
+        if stop.load(Ordering::SeqCst) {
+            if let Some((child, _)) = &gen {
+                let p = child.pid;
+                unsafe {
+                    libc::kill(-p, libc::SIGKILL);
+                }
+            }
+            break;
+        }
         if gen.is_none() && attempt >= delays.len() {
             mark_dead(&slot, &inner, idx);
             break;
@@ -2077,6 +2145,11 @@ mod tests {
             ext_dir: None,
             active_model: None,
             color: None,
+            color_scheme: None,
+            custom_schemes: std::collections::HashMap::new(),
+            tool_display: crate::tool_display::ToolDisplay::preset(
+                crate::tool_display::Preset::OpenCode,
+            ),
         }
     }
 

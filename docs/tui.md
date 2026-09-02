@@ -131,19 +131,30 @@ No `turn.sh`, no `pending/approval.json`, no `state.json` appears in this flow. 
 └─────────────────────────────────────────────────────┘
 ```
 
-When unconsumed `user_message` events sit in the log, a waiting-
-messages block (the steering block) renders between the transcript
-and the input box. It holds one header row with the count and the
-delivery hint, then up to three message preview rows, then a
-`+N more` row for the rest. The block is computed at draw time
-from the active session's events. A message is consumed when an
-`assistant_message` event follows it in the log (docs/tui_feature_
-requests_from_human.md, 2026-08-31, stage 1):
+When unconsumed `user_message` events sit in the log, two waiting-
+message blocks render between the transcript and the input box
+(docs/tui-pending-user-messages.md). The `steer` queue delivers at
+the next step of the running loop; the `follow` queue runs as new
+turns after the loop would stop. Each block holds one header row
+with the count and the delivery hint, then up to three message
+preview rows, then a `+N more` row for the rest. A message is
+consumed when an `assistant_message` event follows it in the log,
+and the `follow` queue clears at every turn boundary:
 
-- loop running: `N message(s) waiting — steering, injected at the
-  next step`
-- loop stopped: `N message(s) waiting — no loop running · Ctrl+R
-  run`
+- steer, loop running: `N message(s) waiting — steering —
+  injected at the next step`
+- steer, loop stopped: `N message(s) waiting — no loop running —
+  waiting for Ctrl+R run`
+- follow: `N message(s) waiting — follow-up — run after the loop
+  stops`
+
+`Ctrl+F` toggles the composer between the steer and the follow
+queue. A sent message lands in the toggled queue: steer messages
+wait for the next step, follow messages run as new turns after the
+loop stops (the loop side, `scripts/turn.sh` and `scripts/step.sh`,
+injects the follow turn at the idle boundary, commit of the
+2026-09-03 follow-up stage). The block is computed at draw time
+from the active session's events.
 
 The session title holds the loop-phase bit. The loop publishes the
 phase as an `ext_status` event with id `loop_phase` (values `wait`
@@ -180,6 +191,11 @@ The spinner shows one braille frame per redraw, about 100 ms.
 | `Ctrl+R` | In normal mode with pending redo state: redo. Otherwise: `SessionPort::spawn_loop(active_session)`. The persistent `loop.pid` probe blocks the start when a live loop holds the session (FT-003) |
 | `Ctrl+C` | With an active session: stop the loop and append a `cancel` event. A local handle stops its group. Without one, the `loop.pid` probe stops the external group (FT-003). Without an active session: the editor's insert-exit key (insert/replace to normal) |
 | `Ctrl+U` | In the search command line: clear the input. In the idle composer's insert mode: kill the current line. Otherwise: half-page up in the log |
+| `Ctrl+O` | Fold/expand tool result bodies. Collapsed: the preview cap per tool (docs/tui-tool-display-port.md). Expanded: the full body up to the expanded cap. The toggle is global for the whole transcript (the pi `app.tools.expand` keymap) |
+| `Ctrl+T` | Collapse/expand the model's thinking block (the pi `app.thinking.toggle` keymap). Collapsed: one label row; expanded: the full reasoning text. Expanded is the default |
+| `Ctrl+X` | Show/hide the thinking blocks entirely (the secondary toggle; the pi keymap keeps `Ctrl+X` for message copy, which the harness TUI does not have) |
+| `Ctrl+F` | Toggle the composer between the steer queue and the follow queue (the pending message blocks above) |
+| `Ctrl+L` | Cycle the active model's `reasoning_effort` through `none, minimal, low, medium, high, xhigh, max`. Writes `[model.<active>]` in `config.toml` in place, comments kept; the input-border color follows the new level |
 | `y` / `n` / `e` | Answer the oldest pending `approval_request`: allow / deny / edit-then-allow |
 | `h` | One-key handoff resume (correction 57). Only when the log holds a `context_exhausted` marker that seeded a session and no loop runs. Switches to the seeded session and starts its loop. The old session's local loop stops. Without those conditions, `h` stays the editor key |
 | `Tab` | Switch session |
@@ -229,7 +245,10 @@ and the mode handlers. The design record is `docs/vim-editor-design.md`.
   types into the box title (`/pat█`); `Enter` runs the search and
   returns to the opening mode, `Esc` or a backspace on the empty
   buffer cancels, `Ctrl-U` clears the input. `n` / `N` repeat the
-  last search; `*` / `#` search the word under the cursor
+  last search; `*` / `#` search the word under the cursor. The
+  prompt wins over a `frame` extension label in that title (the
+  host keeps its modal-state render; docs/ui-extension.md section
+  10), and the frame label returns when the search ends
 
 Counts prefix operators and motions: `3dd`, `2w`, `3c`. Operator and
 motion counts multiply (`2d3w` is six words). The register set holds
@@ -274,6 +293,14 @@ level, it renders whatever the loop or a policy hook published. The
 host's built-in palette above applies. The loop publishes the
 level as `model_thinking` from the resolved `reasoning_effort`
 (docs/tui-thinking-level-input-box.md).
+The assistant's `reasoning` content renders as a thinking block
+above the message body (docs/tui-thinking-block.md): collapsed, a
+one-line preview with the expand hint; expanded, the full reasoning
+text in the lighter thinking tone. `Ctrl+T` collapses or expands
+the block (the pi `app.thinking.toggle` keymap), `Ctrl+X`
+shows or hides it. `Ctrl+L` cycles the active model's
+`reasoning_effort` in `config.toml`; the border color and the
+thinking capture follow the new level.
 
 ## 8. Rust stack
 
@@ -399,9 +426,13 @@ and verification record.
   normal mode with an empty draft; in every other state it types a
   plain `q` into the active input. This deviates from the single `q`
   of section 7 for mistouch safety.
-- Text content wraps across lines: user/assistant messages and tool
-  output wrap at the pane width, capped per event with a `… +N more
-  lines` hint. Newlines in the text are hard breaks.
+- Message content wraps across lines: the `content` field of user
+  and assistant messages wraps at the pane width and displays in
+  full (docs/tui_feature_requests_from_human.md item 1, rescoped
+  2026-09-03). Tool result bodies fold at render time: the
+  preview cap per tool, the fold hint, and the expanded cap
+  (docs/tui-tool-display-port.md). Newlines in the text are hard
+  breaks.
 - Tool results render the tool's `text` payload (or `stdout`/`stderr`
   when no `text`), not the raw JSON value envelope. The status line
   shows `exit <code>` and an `(error)` flag.
@@ -425,12 +456,42 @@ environment variable.
 ```toml
 [tui]
 color = "truecolor"   # truecolor | 256 | 16 | 8 (aliases: rgb, 24bit, 256color, 8color)
+color_scheme = "catppuccin-macchiato"   # absent: the built-in tones
+# custom schemes overlay the built-in palette role by role:
+# [tui.custom_schemes.name]
+# plain_text = "#cdd6f4"   # a partial table keeps the rest
 ```
 
 `[tui] color` forces the terminal color capability level. Extension
 hex wire colors and the built-in tones lower to it. Unknown names
 are a hard error at load. Absent, the TUI detects from the
 environment (COLORTERM, TERM; color.rs module docs).
+
+`[tui] color_scheme` selects a built-in scheme. The first internal
+scheme is `catppuccin-macchiato` (docs/tui-color-scheme.md):
+every role resolves to a scheme hex, lowered to the capability
+level. A `[tui.custom_schemes.<name>]` table overlays the
+selected palette role by role; an unset role keeps its current
+value. An unknown role name is a hard error at load.
+
+```toml
+[tui.tool_display]   # docs/tui-tool-display-port.md
+preset = "opencode"  # opencode | balanced | verbose
+# per-tool overrides, any of:
+# read = "preview"              # hidden | summary | preview
+# search = "preview"            # hidden | count | preview
+# bash = "preview"              # hidden | summary | preview
+# preview_lines = 8
+# bash_collapsed_lines = 10
+# diff_collapsed_lines = 24
+# expanded_preview_max_lines = 4000
+# diff_view = "auto"            # auto | unified | split
+```
+
+An override switches the effective preset to `custom`. The presets
+are the `pi-tool-display` values: `opencode` keeps short output
+full and folds the rest; `balanced` folds more; `verbose` folds
+least.
 
 ### 13.3 Loop process supervision
 
@@ -465,4 +526,58 @@ on the next poll. It never re-emits an event.
 - A session that grows past 50 MB reads only its tail.
 - The tailer is per active session. One std thread per switched
   session; a dropped receiver stops it on the next send.
+
+### 13.6 Tool display, thinking block, queues, schemes (2026-09-03)
+
+The 2026-08-29/09-02 request batch (docs/ tui_feature_requests_
+from_human.md) ships in this pass:
+
+- **Tool result display** (docs/tui-tool-display-port.md): the
+  built-in tool result render ports the `pi-tool-display` style.
+  A rounded box with the tool box background, the command header,
+  the per-tool output modes, the preview caps (read and search
+  `preview_lines`, bash `bash_collapsed_lines`, diff
+  `diff_collapsed_lines`), the fold hint with the `Ctrl+O`
+  expand, the `expanded_max_lines` cap, the unified/split diff
+  layout at `DIFF_SPLIT_MIN_WIDTH`, and the three presets with
+  per-tool overrides under `[tui.tool_display]`. `Edit` results
+  render as a diff (before and after, split on wide panes). `Read`
+  and unknown-tool results that are complete JSON documents get
+  JSON syntax highlighting inside the box.
+- **Marker-free markdown** (docs/tui-markdown-render.md): the
+  transcript drops the `#`, `>`, `**`, `*`, and backtick markers;
+  the styles stay. The list bullet keeps its marker. `|` tables
+  draw as box-drawing grid tables (the header bold, the separator
+  row dropped, columns elide on narrow panes). Fence markers stay
+  dim; their content renders literal.
+- **Thinking block** (docs/tui-thinking-block.md): the
+  `reasoning` content of assistant messages renders as a block
+  above the body. Collapsed, a one-line preview; expanded, the
+  full text in the lighter thinking tone. `Ctrl+T` collapse/expand
+  (the pi keymap), `Ctrl+X` show/hide.
+  `Ctrl+L` cycles the active model's `reasoning_effort` in
+  `config.toml` (a comment-preserving in-place edit; the table is
+  created when absent).
+- **Pending message queues** (docs/tui-pending-user-messages.md,
+  stage 2): the `user_message` event takes an optional `queue`
+  field, `steer` or `follow`. `bin/user` gains `--queue`. The
+  loop side (bin/claim, bin/assemble, scripts/turn.sh, step.sh)
+splits the queues: steer messages wake the loop at the next
+  step; follow messages run as new turns at the idle boundary
+  (`--inject-follow`). The TUI renders the two blocks and
+  `Ctrl+F` toggles the composer between the queues.
+- **Color schemes** (docs/tui-color-scheme.md): the 28-role
+  palette with the built-in tones as the default. The first
+  internal scheme is `catppuccin-macchiato` (the built-in value
+  of the 2026-08-29 palette work), selected by `[tui]
+  color_scheme`. Custom schemes overlay role by role under
+  `[tui.custom_schemes.<name>]`, a partial table allowed.
+- **The reference renderers stop the gray abuse** (docs/
+  tui-color-tones.md section 4): `ui_extensions-demos/tool_result/
+  tool_result.sh` and `ext-rs/tool_result-rs` paint the body in
+  one muted tone instead of a single gray, and a body that is a
+  complete JSON document gets JSON syntax highlighting (the awk
+  tokenizer in the bash reference, the native walk in the Rust
+  port). The six rescoped "never truncate" comments ship with
+  the same pass (docs/tui-tool-result-truncation.md section 4).
 

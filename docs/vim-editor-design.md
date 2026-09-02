@@ -166,7 +166,10 @@ and the vim state. The state fields mirror `state.ts`:
 
 - `/` and `?` from normal or visual open the command line (the
   prompt renders in the input box title; `Esc` or a backspace on an
-  empty buffer cancels).
+  empty buffer cancels). The prompt wins over a `frame` extension
+  label: the host keeps its modal-state render while a search is
+  open, and the frame label returns when the search ends
+  (docs/ui-extension.md section 10).
 - `Enter` runs the search (literal, case-insensitive, per line,
   wrap-around) and returns to the mode that opened it.
 - `Ctrl+U`: in command-line mode it clears the buffer; in the idle
@@ -230,7 +233,10 @@ Replay suppresses new recording.
   - insert: the block is a blank cell at the caret; the line keeps
     the char under it.
   - command-line: no block in the text area; the prompt renders in
-    the box title (`/pat█`) and the hardware cursor sits on it.
+    the box title (`/pat█`) and the hardware cursor sits on it. The
+    prompt beats a `frame` extension label in that title: the
+    extension keeps its border, color, and height, and its label
+    returns when the search ends.
 - The mode label in the border title mirrors `vim-modal.ts`
   (`[NORMAL]`, `[d-PENDING]`, `[COMMAND]`).
 - the visual selection keeps its highlight behavior.

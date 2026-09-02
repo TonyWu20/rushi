@@ -1,8 +1,9 @@
 # TUI pending user messages
 
-Status: stage 1 shipped (commit `fc51f71`), stage 2 open. The
-request lives in `docs/tui_feature_requests_from_human.md`
-(2026-08-31 item).
+Status: shipped (stage 2, 2026-09-03 pass). Stage 1 shipped in
+commit `fc51f71`. The request lives in
+`docs/tui_feature_requests_from_human.md` (2026-08-31 item).
+Stage 2, the loop-side split, shipped in the same pass.
 
 ## 1. Request
 
@@ -59,21 +60,38 @@ How `pi` splits the two queues (reference,
       `App::pending_user_messages` (bin/tui/src/app.rs) and
       `pending_steering_lines` (bin/tui/src/render.rs).
 
-## 4. Stage 2 (loop-side split, open)
+## 4. Stage 2 (loop-side split, shipped)
 
-- [ ] Schema: add `queue: "steer" | "follow"` to `user_message`.
-      A missing field means `steer`. Old logs stay valid.
-- [ ] `bin/claim`: pending `steer` gives `awaiting_model`. Only
-      pending `follow` gives `idle` plus a `pending_follow_ups`
-      count.
-- [ ] `scripts/turn.sh`: do not break on `idle` when follow-ups
-      are pending. Continue the loop. They run as a new turn.
-- [ ] `bin/assemble`: inject `steer` messages into the in-flight
-      step. Inject `follow` messages only on a turn restart.
-- [ ] `bin/user` and the TUI input: pick the queue while the
-      loop is busy.
-- [ ] TUI: render both pending lists, each with a count.
-      Replace the stage-1 label.
+- [x] Schema: the `queue` field, `steer` or `follow`, on
+      `user_message` (`schemas/events/v1/user_message.json`). A
+      missing field means `steer`. Old logs stay valid. `bin/user`
+      takes `--queue follow` (the steer path leaves the field
+      absent, so its logs stay unchanged). The TUI's
+      `Ctrl+F`-toggled composer sends the follow queue when
+      toggled.
+- [x] `bin/claim`: `derive_state` reports `pending_follow_ups`
+      alongside the pending tool calls. Only pending `follow`
+      messages hold `idle` (with the count); a pending `steer`
+      message gives `awaiting_model`. A turn boundary (an
+      `assistant_message` without tool calls, an `error`, or an
+      exhausted context) clears the follow count.
+- [x] `scripts/turn.sh` and `scripts/step.sh`: the step exits
+      `idle` only when no follow-ups wait. On `idle` with
+      follow-ups the loop runs the follow turn: the model path
+      with `bin/assemble --inject-follow`, one new turn per drain.
+      In-progress steps of that turn do not re-inject.
+- [x] `bin/assemble`: `user_event_rides` waits for the follow
+      queue to reach the turn boundary; `--inject-follow`
+      releases the queued follow messages into the request. The
+      seq counting survives the skip.
+- [x] `bin/user` and the TUI input: `bin/user --queue follow`
+      writes the field; the TUI composer toggles the queue with
+      `Ctrl+F` and flashes the active queue on the status row.
+- [x] TUI: the two pending blocks, each with its own count and
+      previews. `pending_steering_lines` becomes
+      `pending_message_lines`; the steer block keeps its
+      stage-1 labels and the follow block renders its own header
+      (`follow-up — run after the loop stops`).
 
 ## 5. Notes
 

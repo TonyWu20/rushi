@@ -967,6 +967,11 @@ mod tests {
             active_model: None,
             ext_dir: None,
             color: None,
+            color_scheme: None,
+            custom_schemes: std::collections::HashMap::new(),
+            tool_display: crate::tool_display::ToolDisplay::preset(
+                crate::tool_display::Preset::OpenCode,
+            ),
         };
         Cfg {
             dir,

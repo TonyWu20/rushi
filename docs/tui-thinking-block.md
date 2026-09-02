@@ -1,9 +1,10 @@
 # TUI thinking block
 
-Status: partial. The request lives in
+Status: shipped. The request lives in
 `docs/tui_feature_requests_from_human.md` (2026-08-29 item,
-extended by the 2026-08-31 item). The capture is shipped. The
-render and the controls stay open.
+extended by the 2026-08-31 item). The capture shipped in commit
+`61cde02`. The render, the toggles, and the effort control
+shipped in the 2026-09-03 pass.
 
 ## 1. Request (2026-08-29)
 
@@ -38,9 +39,19 @@ Commit `61cde02`:
 - The schema accepts the field
   (`schemas/events/v1/assistant_message.json`).
 
-## 4. Still open
+## 4. Shipped (2026-09-03 pass)
 
-- Render the thinking block in the TUI as a collapsible dimmed
-  block.
-- Add the show/hide toggle (the 2026-08-31 extension).
-- Add the reasoning-effort control.
+- The TUI renders the thinking block: the `reasoning` content of
+  an `assistant_message` shows above the message body. The block
+  renders for the typed `reasoning_text` content entries and for
+  the plain text entries of older logs. Collapsed, one label row;
+  expanded, the full reasoning text in the lighter thinking tone
+  (the pi `subtext1` color, not a dim gray).
+- `Ctrl+T` collapses or expands the thinking blocks (the pi
+  `app.thinking.toggle` keymap; the 2026-08-31 toggle extension).
+  `Ctrl+X` shows or hides them entirely.
+- `Ctrl+L` cycles the active model's `reasoning_effort` through
+  `none, minimal, low, medium, high, xhigh, max`. The TUI edits
+  `[model.<active>]` in `config.toml` in place, comments kept,
+  and creates the table when absent. The input-border color
+  follows the new level.

@@ -153,6 +153,12 @@ pub mod produce {
     }
 
     /// `user_message` event composed by the human in the input line.
+    ///
+    /// The delivery queue is `steer` (docs/tui-pending-user-messages.md
+    /// stage 2): the message injects at the next step of the running
+    /// loop. The queue field is absent: a missing field means
+    /// `steer`, and old logs stay valid. The `follow` queue uses
+    /// [`user_message_follow`].
     pub fn user_message(content: &str) -> Event {
         Event::Json {
             obj: json!({
@@ -160,6 +166,23 @@ pub mod produce {
                 "type": EventKind::UserMessage.as_wire().expect("semantic kind has a wire name"),
                 "ts": now_ts(),
                 "content": content,
+            }),
+        }
+    }
+
+    /// `user_message` event in the `follow` queue (docs/tui-pending-
+    /// user-messages.md stage 2): the message runs only after the
+    /// loop would stop, as a new turn. The `queue` field is written
+    /// for the follow queue only; the steer line keeps the stage-1
+    /// shape.
+    pub fn user_message_follow(content: &str) -> Event {
+        Event::Json {
+            obj: json!({
+                "v": 1,
+                "type": EventKind::UserMessage.as_wire().expect("semantic kind has a wire name"),
+                "ts": now_ts(),
+                "content": content,
+                "queue": "follow",
             }),
         }
     }

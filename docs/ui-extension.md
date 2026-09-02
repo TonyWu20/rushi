@@ -217,6 +217,10 @@ where the core decides the sequence and an entry never claims a slot
 - A slow `transform` times out at 2 s. Fallback is the raw block
 - Tick cost note: a bash statusline that spawns `git` on every tick is
   expensive. The reference TTL-caches git calls at 3 s
+- Debug log: set `TUI_EXT_LOG=/path/log` and the host appends one
+  line per extension process event (spawn, death with exit code,
+  respawn, stop). The log is off unless the var is set (2026-09-04
+  pass, `ext_log` in `bin/tui/src/ext.rs`)
 
 ## 8. Reference extensions, in order
 
@@ -226,7 +230,9 @@ where the core decides the sequence and an entry never claims a slot
 4. `statusline-rs` — Rust port of item 1
 5. `frame` — bash. Owns the input-area frame: colors the rounded
    border by the model thinking level and labels it with the editor
-   mode. Proves the `frame` capability and its trust boundary (chrome
+   mode. In command-line mode the host search prompt takes the
+   title over that label (docs/ui-extension.md section 10).
+   Proves the `frame` capability and its trust boundary (chrome
    only, no input state)
 
 ## 9. Distribution and lifecycle policy
@@ -252,9 +258,12 @@ where the core decides the sequence and an entry never claims a slot
   interior height, but it cannot type into the draft, move the
   cursor, or capture a key. The host renders the draft content, the
   cursor, and the modal state; a frame spec is a declarative
-  description of the border. The `frame` capability is therefore
-  presentation-level trust, below `append` (a log writer). Two frame
-  owners refuse the start, like the `status` row
+  description of the border. In command-line mode the host search
+  prompt takes the title over a frame label, and the label returns
+  when the search ends (docs/vim-editor-design.md section 7). The
+  `frame` capability is therefore presentation-level trust, below
+  `append` (a log writer). Two frame owners refuse the start, like
+  the `status` row
 - The `docs/tui.md` section 10 forbidden-string scan stays
 - Trust: an extension with `append` is a long-lived log writer.
   It holds loop-level trust, not tool-level trust. The tool contract is

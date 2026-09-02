@@ -1,7 +1,10 @@
 # TUI tool result truncation
 
-Status: open. The request lives in
+Status: shipped (2026-09-03 pass). The request lives in
 `docs/tui_feature_requests_from_human.md` (2026-08-29 item).
+The content-layer work shipped with the `pi-tool-display` port
+(docs/tui-tool-display-port.md): the preview caps, the diff
+layout, the fold/expand control, the presets, the config.
 
 ## 1. Request
 
@@ -22,7 +25,7 @@ Behavior to port:
 
 ## 2. Today
 
-`ui_extensions/tool_result/tool_result.sh` renders the full
+`ui_extensions-demos/tool_result/tool_result.sh` renders the full
 body. Its header says "Nothing is truncated". A `Read` spams
 the whole screen. The Rust port (`ext-rs/tool_result-rs`)
 repeats the same rule.
@@ -39,19 +42,52 @@ the diff layout. The two may ship together or apart.
 The "never truncate" rule in original request item 1 applies to
 the `content` field of `user_message` and `assistant_message`
 events. Tool result bodies may be truncated. The code encodes
-the wider rule. These rescopes are recorded here and left for
-later:
+the wider rule. These rescopes shipped in the 2026-09-03 pass:
 
-- [ ] `bin/tui/src/render.rs` module header: "Text content (user/
+- [x] `bin/tui/src/render.rs` module header: "Text content (user/
       assistant messages, tool output) ... never truncated or
-      folded". Rescope to user and assistant messages.
-- [ ] `bin/tui/src/render.rs` `TOOL_CALL_BODY_LINES` comment: "The
-      `content` field and tool result text have no cap". Rescope.
-- [ ] `bin/tui/src/render.rs` `result_text` doc comment: "Nothing is
-      hidden ... (item 1: no truncation)". Rescope.
-- [ ] `ui_extensions/tool_result/tool_result.sh` header: "Nothing is
-      truncated: the body is shown in full". Rescope.
-- [ ] `ext-rs/tool_result-rs/src/main.rs` header: same text.
-      Rescope.
-- [ ] `ui_extensions/README.md` tool_result row: "styled header
-      plus the full body". Annotate the truncation request above.
+      folded". Rescoped to user and assistant messages; tool
+      result bodies fold at render time.
+- [x] `bin/tui/src/render.rs` `TOOL_CALL_BODY_LINES` comment: "The
+      `content` field and tool result text have no cap". Rescoped
+      to the `content` field of user and assistant messages; tool
+      result bodies fold at render time.
+- [x] `bin/tui/src/render.rs` `result_text` doc comment: "Nothing is
+      hidden ... (item 1: no truncation)". Rescoped: the
+      extraction takes the whole value; the cap applies at render
+      time.
+- [x] `ui_extensions-demos/tool_result/tool_result.sh` header: "Nothing is
+      truncated: the body is shown in full". Rescoped: the body is
+      still shown in full (this reply protocol has no fold
+      control); the no-truncation promise now covers the `content`
+      field of user and assistant messages only.
+- [x] `ext-rs/tool_result-rs/src/main.rs` header: same text.
+      Rescoped as the bash reference.
+- [x] `ui_extensions/README.md` tool_result row: "styled header
+      plus the full body". Annotated with the truncation request
+      above and the gray-abuse fix.
+
+## 5. Box overflow and the bash command wrap (2026-09-04 pass)
+
+Two user directives closed the box width model:
+
+- [x] Overflow truncates, it never wraps. A body row that still
+      overflows the box inner width cuts at the border. The cut
+      marks the overflow with a trailing ellipsis (`box_rows`,
+      one reserved column). The body content budget is the box
+      inner width minus the left padding cell (`width - 3` in
+      `render.rs`), so the panel fills instead of leaving dead
+      columns.
+- [x] The bash command line wraps on a narrow pane. The merged
+      bash box opens with the `$ <command>` line. On a narrow
+      terminal that line word-wraps to the pane width instead of
+      truncating (`wrap_hard_line` in `tool_display.rs`, applied
+      to the first body line of `bash_body`). The output lines
+      keep the hard-line truncation above.
+
+Verification: `wrap_hard_line_fits_and_wraps_and_splits`,
+`bash_body_wraps_the_command_line_on_a_narrow_pane`, and
+`box_rows_mark_the_truncated_overflow_with_an_ellipsis` in
+`bin/tui/src/tool_display.rs`. A 60-col PTY run shows the
+command on two box rows and the long output row with the
+ellipsis at the border.
