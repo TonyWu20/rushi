@@ -177,3 +177,43 @@ frozen call config and must stay byte-stable. So:
   in the WM sense.
 - A fenced tool that fails supervision is a reported failure, not a
   hang; the cached prompt prefix is never mutated by the tool set.
+
+## 11. Worked example: triaging `scratch/` under the model
+
+`scratch/` is the anti-pattern this model removes: a black hole of
+one-off scripts, fixtures, generated output, and external references
+with no names, no self-documentation, and no place in the hierarchy.
+The model's test — *where does this belong?* — answers for every item,
+so the directory itself can be deleted.
+
+The capture pattern that seeded this proposal is the clearest case. It
+was inlined three times and coalesced into `scripts/tui-capture.py`.
+That generalization collapses the ad-hoc capture scripts into *one*
+self-documenting application: a thinking-border check is now
+`tui-capture.py --expect "38;5;3"` on the marker session, not a
+bespoke script. One application instead of a pile.
+
+The full triage of `scratch/`:
+
+| Item | Role | Where the model puts it |
+|---|---|---|
+| `capture_tui.py`, `capture-thinking-border.py`, `thinking-cfg.toml` | ad-hoc PTY / border capture | superseded by the `tui-capture` application → delete |
+| `band_match.py`, `timestamp_compare.py`, `timestamp_analysis.py` | one-off model-timing analyses | done their job; findings live in `docs/` → delete (or keep one note) |
+| `ctest/` | compact-tool conformance fixtures | a tool's fixtures live with the tool → deleted here (the tool is uncommitted) |
+| `replay/`, `replay2/` | generated replay-session data | generated output → delete |
+| `color-capture-raw.bin` | raw capture output | an output, not source → delete |
+| `verify-reattach.py` | FT-003 reattach feature test | belongs with the reattach feature, not scratch → move |
+| `vim_editor_parts_stale/` | literally *stale* | junk → delete |
+| `refs/pi-vim` | external reference repo | not committed; **`.gitignore`d** so a `git add -A` cannot sweep it in |
+
+Read through the model: the "capture" entry — the original friction —
+stops being a pile and becomes a named application; tool fixtures and
+generated data are dropped rather than hoarded; one-off analyses that
+have finished are let go; and the one genuinely external reference is
+fenced by `.gitignore` instead of committed. The black hole empties;
+`scratch/` goes.
+
+_Status as of this writing: `ctest/`, `replay/`, `replay2/` removed;
+`refs/pi-vim` gitignored. The redundant capture scripts, the one-off
+analyses, and the stale/junk entries above are still pending the
+human's call._
