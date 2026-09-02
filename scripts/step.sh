@@ -13,6 +13,12 @@ BIN_DIR="$(cd "$(dirname "$0")/../target/debug" && pwd)"
 TOOL_DIR="$(cd "$(dirname "$0")/../tools" && pwd)"
 SCHEMA_DIR="$(cd "$(dirname "$0")/../schemas/events/v1" && pwd)"
 
+# The binary overrides: the e2e suite points the loop at stub
+# binaries. The defaults are the workspace build output.
+MODEL_BIN="${MODEL_BIN:-$BIN_DIR/model}"
+COMPACT_BIN="${COMPACT_BIN:-$BIN_DIR/compact}"
+ASSEMBLE_BIN="${ASSEMBLE_BIN:-$BIN_DIR/assemble}"
+
 # The session working directory, recorded at the entry point.
 TOOL_CWD=""
 if [ -f "$SESSION_DIR/cwd" ]; then
@@ -58,7 +64,7 @@ append_loop_phase() {
 # aborts the step, like every other append in this script.
 publish_model_thinking() {
   local level last ts event
-  level=$("$BIN_DIR/model" --describe --config "$CONFIG" 2>/dev/null \
+  level=$("$MODEL_BIN" --describe --config "$CONFIG" 2>/dev/null \
     | jq -r '.thinking_level // empty')
   [[ "$level" =~ ^[0-9]+$ ]] || return 0
   # The on-change gate: the last published value in the log. The tail
@@ -73,68 +79,74 @@ publish_model_thinking() {
   echo "$event" | "$BIN_DIR/log" --session "$SESSION_DIR" --schemas "$SCHEMA_DIR" || exit 1
 }
 
-# The automatic handoff (correction 57). One cheap summarization call
-# on the compacted log. It seeds a new session with the summary and
-# records the `context_exhausted` marker on this session. The TUI
-# offers a one-key resume in the seeded session. A failed summary
-# call still records the exhaustion; it just seeds no session.
-run_handoff() {
-  local session_dir="$2"
-  local ts new_session base next d name suffix
-  local summary_req="$WORKDIR/summary-request.json"
-  local summary_out="$WORKDIR/summary-output.json"
-  local summary="" seed="" new_session_final="" detail
-  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+# The auto-compact recovery knobs, resolved once per step. The
+# kill switch (docs/auto-compact-plan.md section 4.5) gates the
+# threshold hook and the overflow compaction. Off sends the overflow
+# path to the last-resort compaction without the overflow compaction.
+# The active model and its window feed the model guard and the
+# truncation test; the input budget is the assemble clamp: the model
+# window minus the output reservation, capped by the user knob.
+resolve_compact_config() {
+  local active="${1:-}"
+  ACTIVE_MODEL="${1:-}"
+  COMPACT_ENABLED=$(awk '
+    /^\[/ { s = $0; sub(/^\[/, "", s); sub(/\].*$/, "", s) }
+    s == "limits" && /^compact_enabled[[:space:]]*=/ {
+      val = $0; sub(/^[^=]*=[[:space:]]*/, "", val); print val; exit
+    }' "$CONFIG")
+  [[ -n "$COMPACT_ENABLED" ]] || COMPACT_ENABLED=true
+  MAX_OUT=$(awk -v m="$active" '
+    /^\[/ { s = $0; sub(/^\[/, "", s); sub(/\].*$/, "", s) }
+    /^max_output_tokens[[:space:]]*=/ {
+      val = $0; sub(/^[^=]*=[[:space:]]*/, "", val)
+      if (s == "model" || s == "model.\"" m "\"" || s == "model." m) { last = val }
+    }
+    END { print last }' "$CONFIG")
+  [[ "${MAX_OUT:-0}" =~ ^[0-9]+$ ]] || MAX_OUT=32768
+  CTX_TOK=$(awk -v m="$active" '
+    /^\[/ { s = $0; sub(/^\[/, "", s); sub(/\].*$/, "", s) }
+    /^context_tokens[[:space:]]*=/ {
+      val = $0; sub(/^[^=]*=[[:space:]]*/, "", val)
+      if (s == "model." m || s == "model.\"" m "\"" ) { last = val }
+    }
+    END { print last }' "$CONFIG")
+  [[ "${CTX_TOK:-0}" =~ ^[0-9]+$ ]] || CTX_TOK=131072
+  local budget_knob
+  budget_knob=$(awk '
+    /^\[/ { s = $0; sub(/^\[/, "", s); sub(/\].*$/, "", s) }
+    s == "limits" && /^context_budget_tokens[[:space:]]*=/ {
+      val = $0; sub(/^[^=]*=[[:space:]]*/, "", val); print val; exit
+    }' "$CONFIG")
+  INPUT_BUDGET=$(awk -v bknob="${budget_knob:-0}" -v ctx="$CTX_TOK" -v maxout="$MAX_OUT" 'BEGIN {
+    win = ctx - maxout; if (win < 1) win = 1
+    b = (bknob + 0 > 0) ? (bknob + 0) : win
+    if (b > win) b = win
+    if (b < 1) b = 1
+    print b
+  }')
+}
 
-  # The handoff chain stays under the original base name: x -> x_h1,
-  # x_h1 -> x_h2. A plain session name is its own base.
-  if [[ "$1" =~ ^(.*)_h([0-9]+)$ ]]; then
-    base="${BASH_REMATCH[1]}"
-  else
-    base="$1"
+# Append one event line through the log binary, like the other
+# appends in this script. A failed append aborts the step.
+log_event() {
+  local session_dir="$1"; shift
+  echo "$@" | "$BIN_DIR/log" --session "$session_dir" --schemas "$SCHEMA_DIR" || exit 1
+}
+
+# The last-resort in-session compaction (docs/auto-compact-plan.md
+# section 4.4). It runs the forced compact, re-projects through the
+# boundary when the compact succeeded, and prints 0 on success, 1
+# on failure.
+run_last_resort_compaction() {
+  local status
+  status=$("$COMPACT_BIN" "$SESSION_DIR" --config "$CONFIG" \
+    --reason "${1:-overflow}" --force 2>/dev/null | jq -r '.status // "failed"')
+  if [[ "$status" == "compacted" ]]; then
+    "$ASSEMBLE_BIN" --session "$SESSION_DIR" --config "$CONFIG" \
+      > "$WORKDIR/model-request.json" || exit 1
+    return 0
   fi
-  next=1
-  for d in "$SESSIONS_ROOT/${base}"_h*; do
-    [[ -d "$d" ]] || continue
-    name="$(basename "$d")"
-    suffix="${name#"${base}"_h}"
-    if [[ "$suffix" =~ ^[0-9]+$ ]] && (( suffix + 1 > next )); then
-      next=$((suffix + 1))
-    fi
-  done
-  new_session="${base}_h${next}"
-
-  jq -c '.summary_request' "$WORKDIR/model-request.json" > "$summary_req"
-  if "$BIN_DIR/model" --config "$CONFIG" < "$summary_req" > "$summary_out" 2>/dev/null \
-     && [[ "$(jq -r '.stop_reason // ""' "$summary_out" 2>/dev/null)" != "error" ]]; then
-    summary="$(jq -r '.text // ""' "$summary_out")"
-  fi
-
-  if [[ -n "$summary" ]]; then
-    seed="${summary}
-
----
-Handoff: the session \"$1\" ran out of context. The summary above is your only context about it. Continue the task from where it left off. Re-read any file the summary references before acting on it."
-    mkdir -p "$SESSIONS_ROOT/$new_session"
-    [[ -f "$session_dir/cwd" ]] && cp "$session_dir/cwd" "$SESSIONS_ROOT/$new_session/cwd"
-    jq -cn --arg ts "$ts" --arg c "$seed" \
-      '{v:1, type:"user_message", ts:$ts, content:$c}' \
-      | "$BIN_DIR/log" --session "$SESSIONS_ROOT/$new_session" --schemas "$SCHEMA_DIR" || exit 1
-    new_session_final="$new_session"
-  else
-    detail="$(jq -r '.detail // "the summary call did not run"' "$summary_out" 2>/dev/null)"
-    detail="${detail:-the summary call did not run}"
-    jq -cn --arg ts "$ts" --arg d "$detail" \
-      '{v:1, type:"error", ts:$ts, message:("handoff summary call failed: " + $d)}' \
-      | "$BIN_DIR/log" --session "$session_dir" --schemas "$SCHEMA_DIR" || exit 1
-  fi
-
-  # Record the handoff on this session. The marker names the seeded
-  # session (empty string when none was seeded). It is the last
-  # event of the log: claim reports the exhausted state from it.
-  jq -c --arg ns "$new_session_final" 'del(.summary_request) | . + {new_session: $ns}' \
-    "$WORKDIR/model-request.json" \
-    | "$BIN_DIR/log" --session "$session_dir" --schemas "$SCHEMA_DIR" || exit 1
+  return 1
 }
 
 # The thinking level publishes on every step entry, before the claim:
@@ -169,41 +181,96 @@ if [ "$STATE" = "awaiting_tool_result" ]; then
   exit 0
 fi
 
-# 4. awaiting_model: assemble, then check for a budget error before model.
-# The marker covers assemble, the model call, the parse, and the
-# retry loop (docs/tui-model-wait-indicator.md).
+# 4. awaiting_model: the threshold compact hook, assemble, the
+# Exhausted-form last resort, and the model call with overflow
+# recovery (docs/auto-compact-plan.md section 4.4). The marker
+# covers assemble, the compact calls, the model call, the parse,
+# and the retry loop (docs/tui-model-wait-indicator.md).
 append_loop_phase wait
-"$BIN_DIR/assemble" --session "$SESSION_DIR" --config "$CONFIG" > "$WORKDIR/model-request.json" || exit 1
+
+# The classifier table and the config knobs. The active model comes
+# from the same resolution as the API call (the model guard's source
+# of truth).
+source "$(cd "$(dirname "$0")" && pwd)/overflow-classify.sh"
+ACTIVE_MODEL=$("$MODEL_BIN" --describe --config "$CONFIG" 2>/dev/null | jq -r '.active // empty')
+# The guard source: the request model is the model_id of the active
+# model (assemble writes model_id into every request). The section
+# name and the model_id differ in the deepseek config.
+GUARD_MODEL=$("$MODEL_BIN" --describe --config "$CONFIG" 2>/dev/null | jq -r '.model_id // .active // empty')
+resolve_compact_config "${ACTIVE_MODEL:-}"
+
+# 4.0 The threshold auto-compact hook. It runs before the request,
+# not only after a step: that covers the first request after a new
+# user message in an idle session. No-op when the trigger is cold
+# or the cooldown from a failed summary call is active. The kill
+# switch gates it. A failed compact leaves its marker in the log;
+# the step proceeds in the current form.
+if [[ "$COMPACT_ENABLED" == "true" ]]; then
+  "$COMPACT_BIN" "$SESSION_DIR" --config "$CONFIG" --reason threshold || true
+fi
+
+"$ASSEMBLE_BIN" --session "$SESSION_DIR" --config "$CONFIG" > "$WORKDIR/model-request.json" || exit 1
 if jq -e '.type == "error"' "$WORKDIR/model-request.json" > /dev/null; then
   "$BIN_DIR/log" --session "$SESSION_DIR" --schemas "$SCHEMA_DIR" < "$WORKDIR/model-request.json" || exit 1
   exit 0
 fi
 
-# 4.5. context_exhausted: the automatic handoff (correction 57).
+# 4.5. The Exhausted form: the last-resort in-session compaction.
+# It replaces the automatic handoff (correction 57): no new session,
+# no context_exhausted marker. The force flag skips the kill switch
+# and the cooldown. On success the re-projection below projects
+# through the boundary. On failure the marker is in the log and the
+# step proceeds in the current form: the model call runs and its
+# failure path records the terminal event. The failed compact leaves
+# the envelope in the request file: unwrap the embedded compact-
+# candidate request so the model call sends a real request, not the
+# envelope.
 if jq -e '.type == "context_exhausted"' "$WORKDIR/model-request.json" > /dev/null; then
-  run_handoff "$SESSION" "$SESSION_DIR"
-  exit 0
+  if ! run_last_resort_compaction threshold; then
+    jq -c '.request // empty' "$WORKDIR/model-request.json" > "$WORKDIR/model-request.json.unwrapped"
+    if [[ -s "$WORKDIR/model-request.json.unwrapped" ]]; then
+      mv "$WORKDIR/model-request.json.unwrapped" "$WORKDIR/model-request.json"
+    else
+      rm -f "$WORKDIR/model-request.json.unwrapped"
+      exit 1
+    fi
+  fi
 fi
 
-# 5-6. model + parse, with a guard against empty assistant turns.
-# An empty turn (no text and no tool calls) is a model glitch.
-# Retry up to EMPTY_RETRIES times. If it persists, log an error and stop.
-# A failed model call (API or stream error) is a transport problem. Retry
-# up to MODEL_ERR_RETRIES times before logging the error and stopping.
+# 5-6. model + parse, with the overflow recovery and the guard
+# against empty assistant turns. An empty turn (no text and no
+# tool calls) is a model glitch. Retry up to EMPTY_RETRIES times.
+# A failed model call (API or stream error) is a transport problem
+# unless the overflow classifier claims it. The overflow recovery
+# runs once: one compact, one re-run. The second failure runs the
+# last-resort compaction, then one more call. A failure after the
+# last resort logs the terminal error event and stops the loop in
+# the original session. No new session. No context_exhausted
+# marker. The user reopens the same session.
 EMPTY_RETRIES=3
 MODEL_ERR_RETRIES=2
 ATTEMPT=0
 MODEL_ERR_ATTEMPT=0
+OVF_RECOVERED=0   # the one overflow compact + re-run ran
+LAST_RESORT=0     # the last-resort compaction ran
 while true; do
   ATTEMPT=$((ATTEMPT + 1))
 
   # model: one API call. Capture exit code.
   set +e
-  "$BIN_DIR/model" --config "$CONFIG" < "$WORKDIR/model-request.json" > "$WORKDIR/model-output.json"
+  "$MODEL_BIN" --config "$CONFIG" < "$WORKDIR/model-request.json" > "$WORKDIR/model-output.json"
   MODEL_EXIT=$?
   set -e
 
   if [ "$MODEL_EXIT" -ne 0 ]; then
+    # The last-resort failure: the terminal error event, no more
+    # retries. The loop stops in the original session.
+    if [ "$LAST_RESORT" = "1" ]; then
+      ERROR_EVENT=$(jq -cn --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{v:1, type:"error", ts:$ts, message:"model binary failed after the last-resort compaction"}')
+      echo "$ERROR_EVENT" | "$BIN_DIR/log" --session "$SESSION_DIR" --schemas "$SCHEMA_DIR" || exit 1
+      exit 0
+    fi
     # The model binary crashed. Treat it as a transient failure.
     if [ "$MODEL_ERR_ATTEMPT" -lt "$MODEL_ERR_RETRIES" ]; then
       MODEL_ERR_ATTEMPT=$((MODEL_ERR_ATTEMPT + 1))
@@ -216,21 +283,87 @@ while true; do
     exit 0
   fi
 
-  # Transport-level model failure (API error, truncated stream). The model
-  # binary reports it with stop_reason "error" and a detail. Retry while
-  # attempts remain. Then log the detail and stop.
+  # The stop reason and the classification, before the transport
+  # retry. The model guard: the classifier claims the failure only
+  # when the request model matches the active config model. The
+  # request JSON is the source: assemble writes model into every
+  # request, and parse does not run on a failed call.
   MR=$(jq -r '.stop_reason // "none"' "$WORKDIR/model-output.json")
+  REQ_MODEL=$(jq -r '.model // ""' "$WORKDIR/model-request.json")
+  DETAIL=$(jq -r '.detail // ""' "$WORKDIR/model-output.json")
   if [ "$MR" = "error" ]; then
+    OVERFLOW=0
+    if [[ -n "$REQ_MODEL" && "$REQ_MODEL" == "$GUARD_MODEL" ]]; then
+      if classify_overflow_error "$DETAIL"; then
+        OVERFLOW=1
+      fi
+    fi
+    if [ "$OVERFLOW" = "1" ]; then
+      # The overflow recovery (plan 4.4 step 5). The error overflow
+      # carries no strip: the failed response is not in the log,
+      # and the last group is a valid step. Stripping it would
+      # lose that step's context.
+      if [ "$LAST_RESORT" = "1" ]; then
+        # The second failure after the last-resort compaction.
+        ERROR_EVENT=$(jq -cn --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg d "$DETAIL" \
+          '{v:1, type:"error", ts:$ts, message:("context overflow: the last-resort compaction did not recover: " + $d)}')
+        echo "$ERROR_EVENT" | "$BIN_DIR/log" --session "$SESSION_DIR" --schemas "$SCHEMA_DIR" || exit 1
+        exit 0
+      fi
+      if [[ "$COMPACT_ENABLED" == "true" && "$OVF_RECOVERED" = "0" ]]; then
+        OVF_RECOVERED=1
+        if "$COMPACT_BIN" "$SESSION_DIR" --config "$CONFIG" --reason overflow; then
+          # The re-run: the re-projection projects through the new
+          # boundary. The auto-continue: the interrupted turn
+          # resumes in the same session.
+          "$ASSEMBLE_BIN" --session "$SESSION_DIR" --config "$CONFIG" > "$WORKDIR/model-request.json" || exit 1
+          continue
+        fi
+      fi
+      # The last-resort compaction: the overflow compact failed, the
+      # kill switch is off, or this is the second overflow. The
+      # forced flag skips the switch and the cooldown.
+      LAST_RESORT=1
+      run_last_resort_compaction overflow || true
+      continue
+    fi
+  fi
+
+  # Transport-level model failure (API error, truncated stream).
+  # The model binary reports it with stop_reason "error" and a
+  # detail. Retry while attempts remain. Then log the detail and
+  # stop. The last-resort failure stops without the retry.
+  if [ "$MR" = "error" ]; then
+    if [ "$LAST_RESORT" = "1" ]; then
+      ERROR_EVENT=$(jq -cn --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg d "$DETAIL" \
+        '{v:1, type:"error", ts:$ts, message:("model API call failed after the last-resort compaction: " + $d)}')
+      echo "$ERROR_EVENT" | "$BIN_DIR/log" --session "$SESSION_DIR" --schemas "$SCHEMA_DIR" || exit 1
+      exit 0
+    fi
     if [ "$MODEL_ERR_ATTEMPT" -lt "$MODEL_ERR_RETRIES" ]; then
       MODEL_ERR_ATTEMPT=$((MODEL_ERR_ATTEMPT + 1))
       sleep 3
       continue
     fi
-    DETAIL=$(jq -r '.detail // "no detail"' "$WORKDIR/model-output.json")
     ERROR_EVENT=$(jq -cn --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg d "$DETAIL" \
       '{v:1, type:"error", ts:$ts, message:("model API call failed after retries: " + $d)}')
     echo "$ERROR_EVENT" | "$BIN_DIR/log" --session "$SESSION_DIR" --schemas "$SCHEMA_DIR" || exit 1
     exit 0
+  fi
+
+  # The silent overflow: a successful call whose measured input
+  # tokens meet or exceed the input budget. Compact only, no
+  # re-run: the valid response is on the log, and the loop
+  # continues by its own state machine (plan 4.4 step 5, the pi
+  # split: retry only when the stop reason is not stop). The kill
+  # switch off sends the path to the last-resort compaction.
+  MEASURED_IN=$(jq -r '.usage.input_tokens // 0' "$WORKDIR/model-output.json")
+  if [[ -n "$REQ_MODEL" && "$REQ_MODEL" == "$GUARD_MODEL" && "$MEASURED_IN" =~ ^[0-9]+$ && "$MEASURED_IN" -ge "$INPUT_BUDGET" ]]; then
+    if [[ "$COMPACT_ENABLED" == "true" ]]; then
+      "$COMPACT_BIN" "$SESSION_DIR" --config "$CONFIG" --reason overflow || true
+    else
+      run_last_resort_compaction overflow || true
+    fi
   fi
 
   # parse: validate, emit events, choose exit code.
@@ -241,17 +374,39 @@ while true; do
 
   # Detect an empty assistant turn: no text and no tool calls.
   EMPTY=$(jq -c 'select(.type == "assistant_message") | select(((.content // "") | length) == 0) | select(((.tool_calls // []) | length) == 0) | "empty"' "$WORKDIR/parsed.jsonl" | head -1)
+  LAST_STOP=$(jq -r 'select(.type == "assistant_message") | .stop_reason // ""' "$WORKDIR/parsed.jsonl" | head -1)
+  OUT_TOK=$(jq -r '.usage.output_tokens // 0' "$WORKDIR/model-output.json")
 
-  # An output-budget exhaustion is not a glitch. The model hit
-  # max_output_tokens mid-generation. Do not burn retries on it.
-  if [ -n "$EMPTY" ]; then
-    LAST_STOP=$(jq -r 'select(.type == "assistant_message") | .stop_reason // ""' "$WORKDIR/parsed.jsonl" | head -1)
-    if [ "$LAST_STOP" = "length" ]; then
-      ERROR_EVENT=$(jq -cn --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        '{v:1, type:"error", ts:$ts, message:"model output budget exhausted: no content after max_output_tokens"}')
-      echo "$ERROR_EVENT" | "$BIN_DIR/log" --session "$SESSION_DIR" --schemas "$SCHEMA_DIR" || exit 1
-      exit 0
+  # The length-stop recovery (plan 4.4): a length stop with output
+  # below the configured max output is recoverable, once. The output
+  # is the provider stop, not the call count: a truncated tool-call
+  # group recovers too. That includes the truncation stop (the
+  # zero-output case with the input filling the window) and the
+  # empty-content case the old script logged as terminal. The group
+  # lands in the log before the retry: the assistant message, the
+  # {}-argument calls, and the truncation-notice results. The strip
+  # excludes it from the retry request. The route does not run on
+  # this path. The terminal empty-content-length error moves behind
+  # the recovery.
+  if [[ "$LAST_STOP" = "length" && "$OUT_TOK" =~ ^[0-9]+$ && "$OUT_TOK" -lt "$MAX_OUT" ]]; then
+    if [[ "$OVF_RECOVERED" = "0" ]]; then
+      OVF_RECOVERED=1
+      # Log the truncated group before the retry.
+      "$BIN_DIR/log" --session "$SESSION_DIR" --schemas "$SCHEMA_DIR" < "$WORKDIR/parsed.jsonl" || exit 1
+      if [[ "$COMPACT_ENABLED" == "true" ]]; then
+        "$COMPACT_BIN" "$SESSION_DIR" --config "$CONFIG" --reason overflow --strip-last-assistant || true
+      else
+        run_last_resort_compaction overflow || true
+      fi
+      "$ASSEMBLE_BIN" --session "$SESSION_DIR" --config "$CONFIG" > "$WORKDIR/model-request.json" || exit 1
+      continue
     fi
+    # The second length stop: the last-resort compaction, then one
+    # more call. A third failure stops the loop.
+    LAST_RESORT=1
+    run_last_resort_compaction overflow || true
+    "$ASSEMBLE_BIN" --session "$SESSION_DIR" --config "$CONFIG" > "$WORKDIR/model-request.json" || exit 1
+    continue
   fi
 
   # Empty turn is a glitch. Retry while attempts remain.

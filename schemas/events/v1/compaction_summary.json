@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["v", "type", "ts", "summary", "first_kept_seq", "reason", "tokens_before"],
+  "properties": {
+    "v": { "type": "integer", "const": 1 },
+    "type": { "type": "string", "const": "compaction_summary" },
+    "ts": { "type": "string", "format": "date-time" },
+    "summary": {
+      "type": "string",
+      "description": "the LLM summary of the old region. The next projection replaces every earlier event with this text."
+    },
+    "first_kept_seq": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "the 1-based log sequence of the first event the summary does not cover. Projection replaces every earlier event with the summary. The minimum keyword is outside the validator subset; the producer (bin/compact) enforces it, and bin/assemble rejects an unparseable boundary value at read time."
+    },
+    "reason": {
+      "type": "string",
+      "enum": ["threshold", "overflow"],
+      "description": "which trigger fired. The enum keyword is outside the validator subset; the producer (bin/compact) enforces it."
+    },
+    "tokens_before": {
+      "type": "integer",
+      "description": "the measured input tokens at trigger time."
+    },
+    "tokens_after": {
+      "type": "integer",
+      "description": "the chars/4 estimate of the post-compaction request. Sources the TUI second number."
+    },
+    "read_files": {
+      "type": "array",
+      "description": "file paths the old region's tool calls read. Accumulates across compactions; the next compaction carries the list forward."
+    },
+    "modified_files": {
+      "type": "array",
+      "description": "file paths the old region's tool calls modified. Accumulates across compactions; the next compaction carries the list forward."
+    },
+    "usage": {
+      "type": "object",
+      "description": "the token usage of the summary call itself. The statusline sums it into the cumulative totals."
+    }
+  }
+}

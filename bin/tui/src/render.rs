@@ -195,6 +195,16 @@ fn result_text(value: Option<&serde_json::Value>, err: bool) -> String {
     v.to_string()
 }
 
+/// The token count as a compact `k` figure: 212992 renders as
+/// `212k`, 33000 as `33k`, 999 as `999`.
+fn fmt_k(n: i64) -> String {
+    if n >= 1000 {
+        format!("{}k", (n + 500) / 1000)
+    } else {
+        n.to_string()
+    }
+}
+
 /// One visual event block: a header line plus wrapped, capped body
 /// lines, each continuation line aligned under the content gutter.
 /// `event_id` is the log index of the event; `ext` enables the stage
@@ -208,6 +218,8 @@ fn event_lines(
     event_id: u64,
     ext: Option<&crate::ext::ExtHost>,
     level: &crate::color::Level,
+    loop_running: bool,
+    compaction_last_open: bool,
 ) -> Vec<Line<'static>> {
     let gutter = " ".repeat(GUTTER);
     let wrap_w = width.saturating_sub(GUTTER).max(4);
@@ -445,6 +457,83 @@ fn event_lines(
             // alone (an empty-slice `wrapped[1..]` panics).
             if !wrapped.is_empty() {
                 out.extend(guttered(&wrapped[1..], &gutter));
+            }
+        }
+        // The in-session auto-compact markers (docs/auto-compact-plan.md
+        // section 4.6). The started line shows the trigger and the
+        // scale while the summary call runs. The slot says whether
+        // this marker is the last open one: a closed marker, or an
+        // open marker superseded by a later one, renders dimmed.
+        // The renderer closes the first open marker. The last open
+        // marker with the loop process not running renders the
+        // interrupted form.
+        EventKind::CompactionStarted => {
+            let reason = e.get_str("reason").unwrap_or("threshold").to_string();
+            let tokens = e.get_i64("tokens_before").unwrap_or(0);
+            let style = if compaction_last_open && loop_running {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else {
+                dim.clone()
+            };
+            let text = if compaction_last_open && !loop_running {
+                format!("{LABEL}compacting (interrupted)")
+            } else {
+                format!(
+                    "{LABEL}compacting ({reason}): {} tokens",
+                    fmt_k(tokens)
+                )
+            };
+            out.push(Line::from(Span::styled(text, style)));
+        }
+        EventKind::CompactionSummary => {
+            let reason = e.get_str("reason").unwrap_or("threshold").to_string();
+            let before = e.get_i64("tokens_before").unwrap_or(0);
+            let after = e.get_i64("tokens_after").unwrap_or(0);
+            let first_kept = e.get_i64("first_kept_seq").unwrap_or(0);
+            let summary = e.get_str("summary").unwrap_or("").to_string();
+            let st = Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD);
+            let spans = vec![Span::styled(
+                format!(
+                    "{LABEL}context compacted ({reason}): {} to {} tokens, keeping events from seq {first_kept}",
+                    fmt_k(before),
+                    fmt_k(after)
+                ),
+                st,
+            )];
+            out.push(Line::from(spans));
+            // The summary body rides under the gutter, available in
+            // the expand mechanism like the error body.
+            if !summary.is_empty() {
+                let wrapped = wrap_styled(vec![(prose, summary)], wrap_w);
+                if !wrapped.is_empty() {
+                    out.extend(guttered(&wrapped, &gutter));
+                }
+            }
+        }
+        EventKind::CompactionFailed => {
+            let reason = e.get_str("reason").unwrap_or("overflow").to_string();
+            let detail = e.get_str("detail").unwrap_or("").to_string();
+            let st = Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD);
+            let mut spans = vec![Span::styled(
+                format!("{LABEL}compaction failed ({reason})"),
+                st,
+            )];
+            if !detail.is_empty() {
+                let wrapped = wrap_styled(vec![(prose, detail)], wrap_w);
+                if let Some(first) = wrapped.first() {
+                    spans.push(Span::raw("  "));
+                    spans.extend(first.spans.iter().cloned());
+                }
+                out.push(Line::from(spans));
+                if !wrapped.is_empty() {
+                    out.extend(guttered(&wrapped[1..], &gutter));
+                }
+            } else {
+                out.push(Line::from(spans));
             }
         }
         EventKind::UnknownType => {
@@ -1250,6 +1339,31 @@ pub fn build_transcript_lines(
     let pending = app.oldest_pending_approval().is_some();
     let events = app.events();
     let start = events.len().saturating_sub(TRANSCRIPT_EVENT_CAP);
+    // The loop supervision (docs/auto-compact-plan.md section 4.6):
+    // the transcript session's loop process running bit.
+    let running = app
+        .active()
+        .is_some_and(|s| app.loop_running(s));
+    // The last open compaction marker: a `compaction_started` with
+    // no later `compaction_summary` or `compaction_failed` in the
+    // visible window. A restarted loop may add more open markers;
+    // the renderer closes the first one, and only the last open
+    // marker renders the live or interrupted form.
+    let mut last_open: Vec<bool> = vec![false; events.len() - start];
+    let open_started: Vec<usize> = (0..events.len() - start)
+        .filter(|&i| events[start + i].kind() == EventKind::CompactionStarted)
+        .filter(|&i| {
+            !(start + i + 1..events.len()).any(|j| {
+                matches!(
+                    events[j].kind(),
+                    EventKind::CompactionSummary | EventKind::CompactionFailed
+                )
+            })
+        })
+        .collect();
+    if let Some(&i) = open_started.last() {
+        last_open[i] = true;
+    }
     let mut all: Vec<Line<'static>> = Vec::new();
     for (i, e) in events[start..].iter().enumerate() {
         // ext_status is shared UI state: suppressed from the transcript
@@ -1276,6 +1390,8 @@ pub fn build_transcript_lines(
                     event_id,
                     ext,
                     &app.color_level(),
+                    running,
+                    last_open.get(i).copied().unwrap_or(false),
                 ),
             }
         } else {
@@ -1287,6 +1403,8 @@ pub fn build_transcript_lines(
                 event_id,
                 ext,
                 &app.color_level(),
+                running,
+                last_open.get(i).copied().unwrap_or(false),
             )
         };
         all.extend(segs);
@@ -1980,6 +2098,85 @@ mod tests {
         let joined = join(&build_transcript_lines(&app, 80, None));
         assert!(joined.contains("[context exhausted]"));
         assert!(!joined.contains("handoff session:"), "no seed, no line");
+    }
+
+    /// The compact markers render their lines (docs/auto-compact-plan.md
+    /// section 4.6). The started line shows the trigger and the
+    /// scale. The summary line names the boundary. The failed line
+    /// shows the detail.
+    #[test]
+    fn compaction_marker_lines_render() {
+        let evs = vec![
+            Event::parse_line(
+                r#"{"v":1,"type":"compaction_started","ts":"t","reason":"threshold","tokens_before":212992}"#,
+            )
+            .unwrap(),
+            Event::parse_line(
+                r#"{"v":1,"type":"compaction_summary","ts":"t","summary":"the summary of the old region","first_kept_seq":312,"reason":"threshold","tokens_before":212992,"tokens_after":33000,"read_files":[],"modified_files":[]}"#,
+            )
+            .unwrap(),
+            Event::parse_line(
+                r#"{"v":1,"type":"compaction_failed","ts":"t","reason":"overflow","last_user_seq":41,"attempts":2,"detail":"the model returned an error stop"}"#,
+            )
+            .unwrap(),
+        ];
+        let app = app_with_session(evs);
+        let joined = join(&build_transcript_lines(&app, 80, None));
+        assert!(
+            joined.contains("compacting (threshold): 213k tokens"),
+            "the started line shows the trigger and the scale: {joined}"
+        );
+        assert!(
+            joined.contains("context compacted (threshold): 213k to 33k tokens, keeping events from seq 312"),
+            "the summary line names the boundary: {joined}"
+        );
+        assert!(
+            joined.contains("the summary of the old region"),
+            "the summary body rides under the gutter: {joined}"
+        );
+        assert!(
+            joined.contains("compaction failed (overflow)"),
+            "the failed line shows: {joined}"
+        );
+        assert!(
+            joined.contains("the model returned an error stop"),
+            "the detail rides with the failed line: {joined}"
+        );
+    }
+
+    /// An open compaction marker with the loop process not running
+    /// renders the interrupted form. The closed markers render the
+    /// plain form.
+    #[test]
+    fn open_compaction_marker_renders_interrupted_when_the_loop_is_dead() {
+        let evs = vec![
+            Event::parse_line(
+                r#"{"v":1,"type":"compaction_started","ts":"t","reason":"threshold","tokens_before":212992}"#,
+            )
+            .unwrap(),
+            Event::parse_line(
+                r#"{"v":1,"type":"compaction_summary","ts":"t","summary":"s","first_kept_seq":42,"reason":"threshold","tokens_before":212992,"tokens_after":33000,"read_files":[],"modified_files":[]}"#,
+            )
+            .unwrap(),
+            // The open marker: no summary or failed after it.
+            Event::parse_line(
+                r#"{"v":1,"type":"compaction_started","ts":"t","reason":"overflow","tokens_before":99000}"#,
+            )
+            .unwrap(),
+        ];
+        let app = app_with_session(evs);
+        let joined = join(&build_transcript_lines(&app, 80, None));
+        // The transcript session has no running loop process: the
+        // last open marker renders the interrupted form, and the
+        // closed one renders the plain line.
+        assert!(
+            joined.contains("compacting (interrupted)"),
+            "the open marker with the loop dead renders interrupted: {joined}"
+        );
+        assert!(
+            joined.contains("compacting (threshold): 213k tokens"),
+            "the closed marker renders the plain form: {joined}"
+        );
     }
 
     #[test]

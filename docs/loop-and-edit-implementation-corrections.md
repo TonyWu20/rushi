@@ -788,3 +788,100 @@ at the base caps is 1.77M chars, about 221k tokens: under the
 The config caps return to 500/200, coherent with the 55k token
 budget. The 8000/2000 values of the char era outgrew both the
 budget and the window.
+
+### 63. The in-session auto-compaction replaces the handoff
+
+**Reference:** `bin/compact` (new), `bin/assemble`, `bin/claim`,
+`bin/log`, `bin/model`, `bin/tui`, `schemas/events/v1/compaction_started.json`,
+`schemas/events/v1/compaction_failed.json`,
+`schemas/events/v1/compaction_summary.json`,
+`scripts/step.sh`, `scripts/turn.sh`, `scripts/overflow-classify.sh`
+(new), `scripts/compact-e2e.sh` (new), `config.toml` `[limits]`,
+`ui_extensions/statusline`, `docs/auto-compact-plan.md`
+
+**Problem:** The automatic handoff (correction 57) ended the session
+when nothing fit: a new `<base>_h<N>` session, a `context_exhausted`
+marker, and the user reseating the task. Three coupled gaps left the
+in-session path missing. First, no trigger: the compact form
+engaged on the provider budget, and the session ran until the
+provider closed the window. Second, no recovery from the provider
+overflow error: the loop logged a terminal `error` and stopped.
+Third, no recovery from the `length` stop that truncates a tool
+call: the partial group stayed in the log and the turn died. The
+spec is `docs/auto-compact-plan.md`.
+
+**Fix:**
+
+- `bin/compact` is the new compaction binary. One LLM call
+  summarizes the old region: the cut walks backward from the last
+  kept event over the estimated tokens, it snaps to a valid cut
+  point (a user or an assistant message, never a tool result), and
+  it never crosses a turn boundary behind the cut: the keep window
+  holds the last turn whole, and the old region is a whole number
+  of steps. The old region of a fresh compact is the log since the
+  last `compaction_summary` boundary. The summary merges the
+  previous summary, the file-op lists merge the boundary lists,
+  and the `first_kept_seq` of the marker is the log sequence of the
+  event at the cut.
+- The threshold trigger fires the compact before the request, not
+  only after a failed call: the step hook runs it on every
+  `awaiting_model` entry. The trigger test is one-step: the
+  predicted reading is the last measured `usage.input_tokens` plus
+  one step of measured growth. The level is the token budget minus
+  `compact_reserve_tokens`. The kill switch is `compact_enabled`.
+- The `assemble` projection is the kept region after the last
+  boundary: the summary replaces every earlier event. The state
+  re-engages fresh when the boundary outgrows the state
+  `boundary_seq`: the pre-compaction measurements never leak into
+  the growth rate or the drop search.
+- The `Exhausted` form of the sticky compact is the last resort:
+  one forced `compact --force` call, a re-projection through the new
+  boundary, and the model call runs in the current form. No new
+  session, no `context_exhausted` marker. The old session stays the
+  one the user reopens.
+- `scripts/step.sh` claims the overflow error through
+  `scripts/overflow-classify.sh`, a bash ERE port of the pi
+  pattern tables with the exclusions. The recovery runs once: one
+  compact, one re-run. The silent-overflow case (a successful call
+  whose usage crosses the input budget) compacts without the
+  re-run. The `length` stop that truncates a tool call logs the
+  truncation notice, compacts, and re-runs. The second failure
+  runs the last-resort compaction. A failure after the last resort
+  logs the terminal `error` event and stops the loop in the
+  original session.
+- The three marker events (`compaction_started`,
+  `compaction_failed`, `compaction_summary`) validate through the
+  `bin/log` hardcoded schema list. The `compaction_summary` marker
+  carries the usage of the summary model call: the statusline
+  sums it into the cumulative totals, and the context fullness
+  stays on the last `assistant_message` input.
+- The TUI renders the three markers as semantic states: the
+  compacting line, the compacted line with the boundary sequence,
+  and the failed line. The statusline extension resends the
+  usage-bearing markers to keep the totals current.
+
+**Verification:** All `compact` tests pass (12), all `assemble`
+tests pass (45), all `claim` tests pass, all `tui` tests pass
+(325), and the workspace `cargo test` is clean. `scripts/compact-e2e.sh`
+drives `step.sh` with a scriptable stub model binary over twelve
+scenarios and asserts the marker shapes on the session event log:
+the threshold case, the overflow case, the silent-overflow base and
+post-engage, the length-stop case, the compact-failure case, the
+empty-summary case, the iterative case, the last-resort case, the
+failed-retry case, the kill-switch case, and the no-detail case.
+All 50 assertions pass. `scripts/overflow-classify.sh --self-test`
+passes. Live: a session against the SGLang server at
+127.0.0.1:30000 crosses the trigger level, the threshold compact
+fires (`status: compacted`, the `compaction_summary` marker carries
+the summary usage), the loop continues without input, and the
+iterative case merges the first summary into the second. The
+last-resort envelope unwrap runs on a failed forced compact: the
+model call sends the embedded compact-candidate request, not the
+envelope.
+
+One live defect shipped and fixed in this correction: the
+last-resort failure left the `context_exhausted` envelope in the
+request file. The model binary sent the envelope as the API body
+and the server rejected it (HTTP 400, `input` field missing).
+The step now unwraps the `.request` field on the failed
+last-resort path.

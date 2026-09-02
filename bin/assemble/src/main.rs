@@ -19,6 +19,27 @@ struct Args {
     /// Path to config file
     #[arg(long, default_value = "config.toml")]
     config: String,
+
+    /// Request-time exclusion of the last assistant step group (its
+    /// message, calls, and results). Nothing is persisted (docs/
+    /// auto-compact-plan.md 4.3): the overflow retry request uses
+    /// this for the logged length-stop group.
+    #[arg(long)]
+    drop_last_assistant: bool,
+
+    /// The summary-input mode (docs/auto-compact-plan.md 4.3):
+    /// project the old region from the last compaction boundary to
+    /// `--up-to` in the compact form, append the summary-ask user
+    /// item, and print the bare model request. No budget decision.
+    /// No state write. bin/compact runs the mode and pipes the
+    /// output to model.
+    #[arg(long)]
+    summary_input: bool,
+
+    /// The 1-based log sequence the summary-input mode projects up
+    /// to, inclusive. Required with `--summary-input`.
+    #[arg(long)]
+    up_to: Option<usize>,
 }
 
 struct ModelSettings {
@@ -98,6 +119,11 @@ struct CompactState {
     /// Measured token savings per dropped group. Zero until the
     /// first drop is measured.
     per_group: usize,
+    /// The log seq of the last compaction boundary this state was
+    /// engaged against (0 when no boundary). A boundary newer than
+    /// the state re-engages the state fresh at the boundary
+    /// (docs/auto-compact-plan.md 4.3).
+    boundary_seq: usize,
 }
 
 impl CompactState {
@@ -112,6 +138,7 @@ impl CompactState {
             "last_at": self.last_at,
             "drops_at_last": self.drops_at_last,
             "per_group": self.per_group,
+            "boundary_seq": self.boundary_seq,
         })
     }
 
@@ -128,6 +155,9 @@ impl CompactState {
             last_at: v.get("last_at").and_then(|x| x.as_u64())? as usize,
             drops_at_last: v.get("drops_at_last").and_then(|x| x.as_u64())? as usize,
             per_group: v.get("per_group").and_then(|x| x.as_u64())? as usize,
+            // Legacy state files carry no boundary key: zero means
+            // "no boundary", the pre-compaction form.
+            boundary_seq: v.get("boundary_seq").and_then(|x| x.as_u64()).unwrap_or(0) as usize,
         })
     }
 }
@@ -136,6 +166,7 @@ impl CompactState {
 ///
 /// Absent is a fresh full-form session. Corrupt re-engages at stage
 /// zero with the base caps: the safe side.
+#[derive(Debug)]
 enum StateLoad {
     Absent,
     Corrupt,
@@ -220,12 +251,13 @@ fn decide_form(
     base_caps: Caps,
     keep_events: usize,
     max_drops: usize,
+    boundary_seq: usize,
 ) -> (RequestForm, Option<CompactState>) {
     match state {
         None => {
             let last = measurements.last().copied();
             let rate = measured_growth_rate(measurements, 0);
-            let predicted = predict_tokens(last, rate, n_events);
+            let predicted = predict_tokens(last, rate);
             if predicted <= budget_tokens {
                 (RequestForm::Full, None)
             } else {
@@ -238,6 +270,7 @@ fn decide_form(
                     last_at: 0,
                     drops_at_last: 0,
                     per_group: 0,
+                    boundary_seq,
                 };
                 (
                     RequestForm::Compact {
@@ -271,7 +304,7 @@ fn decide_form(
                 }
             }
             let rate = measured_growth_rate(&meas, 0);
-            let predicted = predict_tokens(new_last, rate, n_events);
+            let predicted = predict_tokens(new_last, rate);
             let over = predicted > budget_tokens;
             let mut moved = false;
             // Blind crawl: no compact measurement yet, the keep
@@ -345,13 +378,14 @@ fn measured_growth_rate(measurements: &[(usize, usize)], engaged_at: usize) -> u
 }
 
 /// Predict the token count of the next request.
-///
-/// The last measured input tokens plus the projected growth of the
-/// events appended after that measurement. No measurement: zero:
-/// the provider window is the backstop of a fresh session.
-fn predict_tokens(last: Option<(usize, usize)>, rate: usize, n_events: usize) -> usize {
+/// The predicted input of the next request: the last measured
+/// input plus one step of measured growth. A step is one
+/// measurement event: the next request adds one turn, not the rest
+/// of the session. No measurement: zero: the provider window is
+/// the backstop of a fresh session.
+fn predict_tokens(last: Option<(usize, usize)>, rate: usize) -> usize {
     match last {
-        Some((idx, tokens)) => tokens + rate * n_events.saturating_sub(idx),
+        Some((_, tokens)) => tokens + rate,
         None => 0,
     }
 }
@@ -440,31 +474,38 @@ fn resolve_model_settings(config: &toml::Value, name: &str) -> ModelSettings {
 /// Split a string into a head and a tail that together hold at most
 /// `limit` chars. The head takes the first half, the tail the rest.
 /// A string that fits comes back whole with zero elided. The cut
-/// never splits a char: it works in char units.
-fn head_tail_cut(s: &str, limit: usize) -> (String, String, usize, usize) {
+/// never splits a char: it works in char units. Returns the head,
+/// the tail, the total, the elided count, the head length, and the
+/// char offset where the kept tail starts: the marker's range
+/// names (`chars {head_len}-{tail_start}`), so the elided span is
+/// located, not just counted.
+fn head_tail_cut(s: &str, limit: usize) -> (String, String, usize, usize, usize, usize) {
     let total = s.chars().count();
     if total <= limit {
-        return (s.to_string(), String::new(), total, 0);
+        return (s.to_string(), String::new(), total, 0, total, 0);
     }
     let head_n = limit / 2;
     let tail_n = limit - head_n;
     let chars: Vec<char> = s.chars().collect();
     let head: String = chars[..head_n].iter().collect();
     let tail: String = chars[total - tail_n..].iter().collect();
-    (head, tail, total, total - head_n - tail_n)
+    (head, tail, total, total - head_n - tail_n, head_n, total - tail_n)
 }
 
 /// Cut a string to at most `limit` chars, keeping the head and the
 /// tail. Mark the elided middle with a compact marker and the
 /// pointer to the full record, so the model can fetch the body
-/// from disk instead of re-guessing it.
+/// from disk instead of re-guessing it. The marker names the kept
+/// sizes and the char span of the gap, so the elided region is
+/// located, not just counted.
 fn trim_chars(s: &str, limit: usize, pointer: &str) -> String {
-    let (head, tail, total, elided) = head_tail_cut(s, limit);
+    let (head, tail, total, elided, head_len, tail_start) = head_tail_cut(s, limit);
     if elided == 0 {
         return head;
     }
+    let tail_len = tail.chars().count();
     format!(
-        "{head}\n[compacted: {total} chars total, {elided} elided from the middle. {pointer}]\n{tail}"
+        "{head}\n[compacted: {total} chars total; head {head_len} + tail {tail_len} kept, {elided} elided (chars {head_len}-{tail_start}). {pointer}]\n{tail}"
     )
 }
 
@@ -472,12 +513,13 @@ fn trim_chars(s: &str, limit: usize, pointer: &str) -> String {
 /// and the tail. Mark the elided middle with a clip marker and the
 /// pointer to the full record.
 fn clip_full(s: &str, limit: usize, pointer: &str) -> String {
-    let (head, tail, total, elided) = head_tail_cut(s, limit);
+    let (head, tail, total, elided, head_len, tail_start) = head_tail_cut(s, limit);
     if elided == 0 {
         return head;
     }
+    let tail_len = tail.chars().count();
     format!(
-        "{head}\n[tool result clipped: {total} chars total, {elided} elided from the middle. {pointer}]\n{tail}"
+        "{head}\n[tool result clipped: {total} chars total; head {head_len} + tail {tail_len} kept, {elided} elided (chars {head_len}-{tail_start}). {pointer}]\n{tail}"
     )
 }
 
@@ -627,22 +669,31 @@ fn record_text(rec: &serde_json::Value) -> Option<String> {
 /// short, so it always survives the slim index preview.
 const SCHEMA_ERROR_PREFIX: &str = "Tool arguments failed schema validation";
 
-fn is_schema_error_text(text: &str) -> bool {
-    text.starts_with(SCHEMA_ERROR_PREFIX)
+/// The truncation notice of the length-stop group (docs/
+/// auto-compact-plan.md section 4.4): parse fabricates one result
+/// per cut-off call, asking for a shorter call. The prefix is
+/// intact in the slim index preview.
+const TRUNCATION_NOTICE_PREFIX: &str = "Arguments may be truncated";
+
+/// A pair-droppable result text. Two prefixes (docs/
+/// auto-compact-plan.md section 4.3, correction 60 extended): the
+/// schema-validation failure and the truncation notice. Both pair
+/// shapes go out of every request form.
+fn is_droppable_pair_text(text: &str) -> bool {
+    text.starts_with(SCHEMA_ERROR_PREFIX) || text.starts_with(TRUNCATION_NOTICE_PREFIX)
 }
 
-/// The call ids of schema-validation failures (FT-008).
-///
-/// The failed pair (the call plus its error result) self-priming:
-/// the model re-emits its own empty-arguments call when it sees the
-/// failure in the input. Correction 60: the request drops the pair
-/// in every position, keep window included. The event log and the
-/// tool log keep it.
-fn schema_error_pair_ids(events: &[&Ev], split: usize) -> HashSet<String> {
+/// The call ids of the droppable pairs before the split point:
+/// schema-validation failures and truncation notices. The failed
+/// pair (the call plus its error result) self-priming: the model
+/// re-emits its own failed call when it sees the failure in the
+/// input. The request drops the pair in every position, keep
+/// window included. The event log and the tool log keep it.
+fn drop_pair_ids(events: &[&Ev], split: usize) -> HashSet<String> {
     let mut ids: HashSet<String> = HashSet::new();
     for &ev in events.iter().take(split) {
         if let Ev::ToolResult { id, text } = ev {
-            if is_schema_error_text(text) {
+            if is_droppable_pair_text(text) {
                 ids.insert(id.clone());
             }
         }
@@ -854,6 +905,135 @@ fn step_groups(events: &[&Ev]) -> Vec<(usize, usize)> {
     groups
 }
 
+/// The projection boundary: the last `compaction_summary` event and
+/// the first log sequence its summary does not cover
+/// (docs/auto-compact-plan.md section 4.1).
+struct Boundary {
+    /// The 1-based log seq of the compaction_summary event.
+    seq: usize,
+    /// The 1-based log seq of the first event the summary does not
+    /// cover. Projection replaces every earlier event with the
+    /// summary.
+    first_kept_seq: usize,
+    /// The summary text, frozen in the log.
+    summary: String,
+    /// The file-op lists, carried forward across compactions.
+    read_files: Vec<String>,
+    modified_files: Vec<String>,
+}
+
+/// Parse one `compaction_summary` event into the projection
+/// boundary. A value that cannot be parsed is rejected: `None`
+/// re-renders without the summary (docs/auto-compact-plan.md
+/// section 4.1).
+fn parse_boundary(event: &serde_json::Value, seq: usize) -> Option<Boundary> {
+    let first_kept_seq = event.get("first_kept_seq")?.as_u64()? as usize;
+    if first_kept_seq < 1 {
+        return None;
+    }
+    let summary = event.get("summary")?.as_str()?.to_string();
+    let lists = |key: &str| -> Vec<String> {
+        event
+            .get(key)
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default()
+    };
+    Some(Boundary {
+        seq,
+        first_kept_seq,
+        summary,
+        read_files: lists("read_files"),
+        modified_files: lists("modified_files"),
+    })
+}
+
+/// The user-role framing item that carries the last summary in the
+/// request. One message, frozen in the log: between compaction
+/// moves the request prefix stays byte-stable (the correction 62
+/// property, preserved).
+fn summary_framing_item(summary: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "message",
+        "role": "user",
+        "content": format!(
+            "[Session context summary of the events before this point. The events after it are kept.]\n\n{summary}"
+        )
+    })
+}
+
+/// The first-time compaction prompt (docs/auto-compact-plan.md
+/// section 4.2, adapted from the pi 0.84.2 summarization prompt).
+/// The structured format: Goal, Constraints, Progress (done / in
+/// progress / blocked), Key Decisions, Next Steps, Critical Context.
+/// Exact file paths, commands, and error messages must survive.
+const COMPACT_INSTRUCTIONS_FIRST: &str = "The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.\n\nUse this EXACT format:\n\n## Goal\n[What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]\n\n## Constraints & Preferences\n- [Any constraints, preferences, or requirements mentioned by user]\n- [Or \"(none)\" if none were mentioned]\n\n## Progress\n### Done\n- [x] [Completed tasks/changes]\n\n### In Progress\n- [ ] [Current work]\n\n### Blocked\n- [Issues preventing progress, if any]\n\n## Key Decisions\n- **[Decision]**: [Brief rationale]\n\n## Next Steps\n1. [Ordered list of what should happen next]\n\n## Critical Context\n- [Any data, examples, or references needed to continue]\n- [Or \"(none)\" if not applicable]\n\nKeep each section concise. Preserve exact file paths, function names, and error messages.";
+
+/// The iterative-update prompt: preserve, add, move items from In
+/// Progress to Done (the pi preserve/add/move rules). The previous
+/// summary and its file-op lists ride in the request, so the lists
+/// merge, not re-extract (docs/auto-compact-plan.md section 4.2).
+const COMPACT_INSTRUCTIONS_UPDATE: &str = "The messages above are NEW conversation messages to incorporate into the existing summary provided in the previous-summary block.\n\nUpdate the existing structured summary with new information. RULES:\n- PRESERVE all existing information from the previous summary\n- ADD new progress, decisions, and context from the new messages\n- UPDATE the Progress section: move items from In Progress to Done when completed\n- UPDATE Next Steps based on what was accomplished\n- PRESERVE exact file paths, function names, and error messages\n- If something is no longer relevant, you may remove it\n\nKeep each section concise. Use the same six-section format as the previous summary.\n\n<previous-summary>\n{summary}\n</previous-summary>\nPreviously read files:\n{read_files}\nPreviously modified files:\n{modified_files}";
+
+/// The summary ask of the first-time request.
+const COMPACT_ASK_FIRST: &str = "Write the summary now, using the conversation above.";
+
+/// The summary ask of the update request.
+const COMPACT_ASK_UPDATE: &str = "Update the summary now, incorporating the new messages above.";
+
+/// Format the file-op list lines of the update prompt. An empty
+/// list shows the none marker, pi-style.
+fn file_list_lines(list: &[String]) -> String {
+    if list.is_empty() {
+        "(none)".to_string()
+    } else {
+        list.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n")
+    }
+}
+
+/// The update instructions with the previous summary and its
+/// file-op lists carried in.
+fn compact_update_instructions(b: &Boundary) -> String {
+    COMPACT_INSTRUCTIONS_UPDATE
+        .replace(
+            "{summary}",
+            &b.summary,
+        )
+        .replace("{read_files}", &file_list_lines(&b.read_files))
+        .replace("{modified_files}", &file_list_lines(&b.modified_files))
+}
+
+/// Drop the oldest `count` droppable step groups (the assistant
+/// groups) from a region. User groups never drop: the task
+/// statement must survive.
+fn drop_oldest_groups<'a>(
+    events: &'a [&'a Ev],
+    droppable: &[(usize, usize)],
+    count: usize,
+) -> Vec<&'a Ev> {
+    let mut keep_idx: Vec<usize> = (0..events.len()).collect();
+    for &(start, end) in droppable.iter().take(count) {
+        keep_idx.retain(|i| !(start..end).contains(i));
+    }
+    keep_idx.iter().map(|i| events[*i]).collect()
+}
+
+/// The request-time exclusion of the last assistant step group
+/// (docs/auto-compact-plan.md section 4.3): its message, its calls,
+/// and its results. Nothing is persisted. Excluding the whole group
+/// excludes no orphan function_call.
+fn drop_last_assistant_group<'a>(events: &[&'a Ev]) -> Vec<&'a Ev> {
+    let groups = step_groups(events);
+    match groups.iter().rev().find(|&&(start, _)| matches!(events[start], Ev::Assistant { .. })) {
+        Some(&(start, end)) => {
+            let mut out: Vec<&'a Ev> = events[..start].to_vec();
+            out.extend(events[end..].iter());
+            out
+        }
+        None => events.to_vec(),
+    }
+}
+
 /// The input items of one compact request. The compact region is
 /// everything before the keep window minus the dropped step groups.
 /// It re-renders only when the caps, the keep window, or the drop
@@ -875,7 +1055,7 @@ fn compact_candidate(
     let sel = stage_selection(events, keep, drops);
     // Every schema-error pair goes out of the request (correction
     // 60): old region and keep window alike.
-    let drop_pairs = schema_error_pair_ids(&sel, sel.len());
+    let drop_pairs = drop_pair_ids(&sel, sel.len());
     build_items(&sel, keep, caps, clip_chars, &drop_pairs, ptrs)
 }
 
@@ -938,9 +1118,18 @@ fn main() {
     let compact_result_chars: usize =
         val_int(&limits, "compact_result_chars").unwrap_or(500) as usize;
     let compact_text_chars: usize = val_int(&limits, "compact_text_chars").unwrap_or(200) as usize;
-    // The output cap of the one handoff summary call (correction 57).
-    let handoff_summary_max_tokens: u64 =
-        val_int(&limits, "handoff_summary_max_tokens").unwrap_or(4096) as u64;
+    // Auto-compact knobs (docs/auto-compact-plan.md 4.5). The
+    // summary call output cap defaults to 0.8 * compact_reserve
+    // tokens (pi's ratio) and clamps to the model max output.
+    let compact_reserve_tokens: usize =
+        val_int(&limits, "compact_reserve_tokens").unwrap_or(16384) as usize;
+    let compact_summary_max_tokens: u64 = val_int(&limits, "compact_summary_max_tokens")
+        .map(|v| v.max(1) as u64)
+        .unwrap_or(((compact_reserve_tokens as f64) * 0.8) as u64);
+    // A cheaper effort for the summary call on a local GPU. The
+    // session reasoning_effort is the default when unset.
+    let compact_reasoning_effort: Option<String> =
+        val_str(&limits, "compact_reasoning_effort");
 
     let tools_root = config
         .get("paths")
@@ -993,13 +1182,22 @@ fn main() {
         )),
     }
 
-    // Parse events into projections
+    // Parse events into projections. The 1-based log sequence of
+    // every projected event rides alongside it, with the same
+    // counting as claim: one seq per non-empty line. The last
+    // compaction summary is the projection boundary: every earlier
+    // event is replaced by its summary (docs/auto-compact-plan.md
+    // section 4.3).
     let mut events: Vec<Ev> = Vec::new();
+    let mut event_seqs: Vec<usize> = Vec::new();
+    let mut seq: usize = 0;
+    let mut boundary: Option<Boundary> = None;
     for line in lines.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
+        seq += 1;
         let event: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(_) => continue,
@@ -1015,6 +1213,7 @@ fn main() {
                     .unwrap_or("")
                     .to_string();
                 events.push(Ev::User { text });
+                event_seqs.push(seq);
             }
             "assistant_message" => {
                 let text = event
@@ -1067,6 +1266,7 @@ fn main() {
                     reasoning,
                     usage_input,
                 });
+                event_seqs.push(seq);
             }
             "tool_result" => {
                 let id = event
@@ -1085,12 +1285,24 @@ fn main() {
                 // inline body or the short preview.
                 let text = tool_texts.get(&id).cloned().unwrap_or(index_text);
                 events.push(Ev::ToolResult { id, text });
+                event_seqs.push(seq);
+            }
+            "compaction_summary" => {
+                // The projection boundary. A value that cannot be
+                // parsed is rejected: the log re-renders without the
+                // summary (docs/auto-compact-plan.md section 4.1).
+                if let Some(b) = parse_boundary(&event, seq) {
+                    boundary = Some(b);
+                }
             }
             // error events are terminal. Skip them, as before.
             "error" => {}
             _ => {}
         }
     }
+    // A boundary whose first_kept_seq outgrows the log is corrupt:
+    // re-render without the summary.
+    let boundary = boundary.filter(|b| b.first_kept_seq <= seq.max(1));
 
     // Load tool schemas
     let tools_root_path = PathBuf::from(&tools_root);
@@ -1154,8 +1366,8 @@ fn main() {
         })
     };
 
-    // Sticky auto-compact, token-only (correction 62). The full log
-    // goes out while the measured estimate fits the token budget:
+    // Sticky auto-compact, token-only (correction 62). The projected
+    // log goes out while the measured estimate fits the token budget:
     // the last measured `usage.input_tokens` plus the projected
     // growth at the measured per-event token growth. A fresh session
     // without measurements sends the full log: the provider window
@@ -1166,9 +1378,66 @@ fn main() {
     // count jumps by the measured per-group savings. The levers
     // never move back. When the drop count reaches its max and the
     // estimate still outgrows the budget, the `context_exhausted`
-    // event ends the turn with the handoff summary request
-    // (correction 57).
-    let events_refs: Vec<&Ev> = events.iter().collect();
+    // signal runs the last-resort in-session compaction
+    // (docs/auto-compact-plan.md section 4.3): the summary replaces
+    // the old region in the original session. No new session. No
+    // `context_exhausted` marker.
+    //
+    // The projected events are the kept region after the last
+    // compaction boundary (docs/auto-compact-plan.md section 4.3):
+    // the summary replaces every earlier event. The sticky compact
+    // form, the drop search, and `max_drops` apply to the kept
+    // region only.
+    let (events_refs, projected_seqs): (Vec<&Ev>, Vec<usize>) = match &boundary {
+        Some(b) => events
+            .iter()
+            .zip(event_seqs.iter())
+            .filter(|(_, s)| **s >= b.first_kept_seq)
+            .map(|(e, s)| (e, s))
+            .unzip(),
+        None => (events.iter().collect(), event_seqs),
+    };
+
+    // The summary-input mode (docs/auto-compact-plan.md section 4.3):
+    // project the old region from the last boundary to `--up-to` in
+    // the compact form, append the summary-ask user item, and print
+    // the bare model request. No budget decision. No state write.
+    // bin/compact runs the mode and pipes the output to model.
+    if args.summary_input {
+        let up_to = match args.up_to {
+            Some(u) if u >= 1 => u,
+            _ => {
+                eprintln!("Error: --summary-input requires --up-to <seq>, a 1-based log sequence");
+                std::process::exit(1);
+            }
+        };
+        let base_caps = Caps {
+            result: compact_result_chars,
+            text: compact_text_chars,
+        };
+        let cut = projected_seqs
+            .iter()
+            .position(|&s| s > up_to)
+            .unwrap_or(events_refs.len());
+        let mut old_region: Vec<&Ev> = events_refs[..cut].to_vec();
+        // The strip flag excludes the last assistant group (the
+        // logged length-stop group) from the summary input.
+        if args.drop_last_assistant {
+            old_region = drop_last_assistant_group(&old_region);
+        }
+        let request = summary_input_request(
+            &old_region,
+            &boundary,
+            &model_settings.model_id,
+            compact_summary_max_tokens.min(model_settings.max_output_tokens),
+            compact_reasoning_effort.as_deref(),
+            &base_caps,
+            budget_tokens,
+            &ptrs,
+        );
+        println!("{}", request);
+        return;
+    }
 
     // The measured input token count of each request, with the event
     // index it belongs to. The growth of appended events converts
@@ -1191,28 +1460,41 @@ fn main() {
         text: compact_text_chars,
     };
     // The drop count max: the droppable groups at the floor keep
-    // window. Past it, the handoff takes over.
+    // window. Past it, the last-resort compaction takes over.
     let max_drops = max_droppable_groups(&events_refs, 2);
 
     // Read the sticky state. A corrupt state re-engages at the base
-    // caps with no drops: the safe side.
+    // caps with no drops: the safe side. A state older than the last
+    // compaction boundary re-engages fresh at the boundary index:
+    // pre-compaction measurements poison the growth rate and the
+    // drop search (docs/auto-compact-plan.md section 4.3).
     let session_dir = Path::new(&args.session);
+    let boundary_seq = boundary.as_ref().map(|b| b.seq).unwrap_or(0);
+    let fresh_state = |boundary_seq: usize| CompactState {
+        caps: base_caps,
+        keep: compact_keep_events.max(2),
+        drops: 0,
+        engaged_at: 0,
+        last_tokens: 0,
+        last_at: 0,
+        drops_at_last: 0,
+        per_group: 0,
+        boundary_seq,
+    };
     let state = match read_compact_state(session_dir) {
         StateLoad::Absent => None,
         StateLoad::Corrupt => {
             eprintln!("Warning: corrupt compact.json; re-engaging at the base caps");
-            Some(CompactState {
-                caps: base_caps,
-                keep: compact_keep_events.max(2),
-                drops: 0,
-                engaged_at: 0,
-                last_tokens: 0,
-                last_at: 0,
-                drops_at_last: 0,
-                per_group: 0,
-            })
+            Some(fresh_state(boundary_seq))
         }
-        StateLoad::Found(s) => Some(s),
+        StateLoad::Found(s) => {
+            if boundary_seq > 0 && s.boundary_seq < boundary_seq {
+                eprintln!("Info: compact.json predates the last compaction; re-engaging fresh at the boundary");
+                Some(fresh_state(boundary_seq))
+            } else {
+                Some(s)
+            }
+        }
     };
 
     let (form, persist) = decide_form(
@@ -1223,42 +1505,93 @@ fn main() {
         base_caps,
         compact_keep_events,
         max_drops,
+        boundary_seq,
     );
     if let Some(s) = persist {
         write_compact_state(session_dir, &s);
     }
 
+    // The request-time exclusion of the last assistant group (docs/
+    // auto-compact-plan.md section 4.3). Nothing is persisted: the
+    // log keeps the group. The budget decision above ran on the
+    // full projected list, so the state stays consistent.
+    let sel_events: Vec<&Ev> = if args.drop_last_assistant {
+        drop_last_assistant_group(&events_refs)
+    } else {
+        events_refs.clone()
+    };
+
+    // The summary framing item: one user-role message carrying the
+    // last summary. It is frozen in the log, so the request prefix
+    // stays byte-stable between compaction moves.
+    let framing: Option<serde_json::Value> =
+        boundary.as_ref().map(|b| summary_framing_item(&b.summary));
+    let prepend_summary = |items: &mut Vec<serde_json::Value>,
+                           framing: &Option<serde_json::Value>| {
+        if let Some(f) = framing {
+            items.insert(0, f.clone());
+        }
+    };
+
     let items = match &form {
-        RequestForm::Full => build_items(
-            &events_refs,
-            n,
-            &Caps { result: 0, text: 0 },
-            tool_result_max_chars,
-            &schema_error_pair_ids(&events_refs, n),
-            &ptrs,
-        ),
-        RequestForm::Compact { caps, keep, drops } => compact_candidate(
-            &events_refs,
-            *keep,
-            *drops,
+        RequestForm::Full => {
+            let mut items = build_items(
+                &sel_events,
+                n,
+                &Caps {
+                    result: 0,
+                    text: 0,
+                },
+                tool_result_max_chars,
+                &drop_pair_ids(&events_refs, n),
+                &ptrs,
+            );
+            prepend_summary(&mut items, &framing);
+            items
+        }
+        RequestForm::Compact {
             caps,
-            tool_result_max_chars,
-            &ptrs,
-        ),
-        RequestForm::Exhausted { caps, keep, drops } => {
-            let items = compact_candidate(
-                &events_refs,
+            keep,
+            drops,
+        } => {
+            let mut items = compact_candidate(
+                &sel_events,
                 *keep,
                 *drops,
                 caps,
                 tool_result_max_chars,
                 &ptrs,
             );
-            let exhausted = context_exhausted_event(
-                &items,
-                &model_settings.model_id,
-                handoff_summary_max_tokens,
+            prepend_summary(&mut items, &framing);
+            items
+        }
+        RequestForm::Exhausted {
+            caps,
+            keep,
+            drops,
+        } => {
+            let mut items = compact_candidate(
+                &sel_events,
+                *keep,
+                *drops,
+                caps,
+                tool_result_max_chars,
+                &ptrs,
             );
+            prepend_summary(&mut items, &framing);
+            // The terminal handoff retired (docs/auto-compact-plan.md
+            // section 4.3): the Exhausted form signals the last-
+            // resort in-session compaction. It carries the compact-
+            // candidate request so the loop can proceed in the
+            // current form when the forced compaction fails.
+            let request = make_request(&items);
+            let exhausted = serde_json::json!({
+                "v": 1,
+                "type": "context_exhausted",
+                "ts": chrono_utc_now(),
+                "message": "Context budget exhausted after compaction. The last-resort in-session compaction takes over: compact this session and continue in place.",
+                "request": request,
+            });
             println!("{}", exhausted);
             return;
         }
@@ -1270,54 +1603,80 @@ fn chrono_utc_now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-/// The instructions of the handoff summary call. One cheap
-/// summarization call on the compacted log seeds a new session with
-/// the task, the state, and the next steps (correction 57).
-const HANDOFF_INSTRUCTIONS: &str = "You are writing a handoff summary for a new agent session that will continue this task. The summary is the only context the new session receives about this session. Cover, in order: 1) the task and its success criteria; 2) the work completed so far and its results; 3) the current state: in-progress steps, open questions, known pitfalls; 4) the immediate next steps. Be concrete: name the files, commands, and decisions. Keep it under 3000 words.";
-
-/// The user message that asks for the summary, appended after the
-/// compacted log in the summary request.
-const HANDOFF_ASK: &str = "Write the handoff summary now, using the conversation above.";
-
-/// The summary request of the automatic handoff: the largest compact
-/// candidate that the search tried, plus the summary ask, with a
-/// cheap output cap. No tools: the summary is plain text.
-fn handoff_summary_request(
+/// The summary-input request of the in-session compaction
+/// (docs/auto-compact-plan.md section 4.2): the old region in the
+/// compact form, the summary-ask user item, a capped output. No
+/// tools: the summary is plain text. The drop search bounds the old
+/// region at the input budget: the smallest drop count that fits, or
+/// the search max when none fits (the handoff invariant).
+fn summary_input_request(
+    old: &[&Ev],
+    prev: &Option<Boundary>,
     model: &str,
-    items: &[serde_json::Value],
-    max_tokens: u64,
+    max_out_cap: u64,
+    effort: Option<&str>,
+    caps: &Caps,
+    input_budget: usize,
+    ptrs: &LogPointers,
 ) -> serde_json::Value {
+    // The droppable step groups of the old region: the assistant
+    // groups, in order. User groups never drop.
+    let groups = step_groups(old);
+    let droppable: Vec<(usize, usize)> = groups
+        .into_iter()
+        .filter(|&(start, _)| matches!(old[start], Ev::Assistant { .. }))
+        .collect();
+    let max_d = droppable.len();
+    let ask = match prev {
+        Some(_) => COMPACT_ASK_UPDATE,
+        None => COMPACT_ASK_FIRST,
+    };
+    let instructions = match prev {
+        Some(b) => compact_update_instructions(b),
+        None => COMPACT_INSTRUCTIONS_FIRST.to_string(),
+    };
+    // The chars/4 estimate of one candidate, the same estimator pi
+    // uses for the compaction walk.
+    let estimate = |items: &[serde_json::Value]| -> usize {
+        let chars = serde_json::to_string(items)
+            .map(|s| s.chars().count())
+            .unwrap_or(0);
+        (instructions.chars().count() + chars + ask.chars().count()) / 4
+    };
+    // The search: the smallest drop count that fits the input
+    // budget, or the search max when none fits.
+    let mut chosen = max_d;
+    for d in 0..=max_d {
+        chosen = d;
+        let sel = drop_oldest_groups(old, &droppable, d);
+        let drop_pairs = drop_pair_ids(&sel, sel.len());
+        let items = build_items(&sel, 0, caps, 0, &drop_pairs, ptrs);
+        if estimate(&items) <= input_budget {
+            break;
+        }
+    }
+    let sel = drop_oldest_groups(old, &droppable, chosen);
+    let drop_pairs = drop_pair_ids(&sel, sel.len());
+    let items = build_items(&sel, 0, caps, 0, &drop_pairs, ptrs);
     let mut input = items.to_vec();
     input.push(serde_json::json!({
         "type": "message",
         "role": "user",
-        "content": HANDOFF_ASK
+        "content": ask
     }));
-    serde_json::json!({
+    let mut request = serde_json::json!({
         "model": model,
-        "instructions": HANDOFF_INSTRUCTIONS,
+        "instructions": instructions,
         "input": input,
         "tools": [],
-        "max_output_tokens": max_tokens
-    })
-}
-
-/// The `context_exhausted` event: the terminal case of the compact
-/// search. It carries the summary request so the loop layer can run
-/// the handoff (correction 57). The loop logs the event with the
-/// seeded session name added; this builder holds no session name.
-fn context_exhausted_event(
-    items: &[serde_json::Value],
-    model: &str,
-    max_tokens: u64,
-) -> serde_json::Value {
-    serde_json::json!({
-        "v": 1,
-        "type": "context_exhausted",
-        "ts": chrono_utc_now(),
-        "message": "Context budget exhausted after compaction. Run the handoff: summarize this session, seed a new session with the summary, and continue the task there.",
-        "summary_request": handoff_summary_request(model, items, max_tokens)
-    })
+        "max_output_tokens": max_out_cap
+    });
+    // An optional request-level effort; bin/model prefers it over
+    // the config (docs/auto-compact-plan.md section 4.5).
+    if let Some(e) = effort {
+        request["reasoning_effort"] = serde_json::json!(e);
+    }
+    request
 }
 
 fn toml_to_json(val: &toml::Value) -> serde_json::Value {
@@ -1434,13 +1793,19 @@ not json at all
         assert!(record_text(&serde_json::json!({})).is_none());
     }
 
-    /// The schema-error text check is on the result text prefix.
+    /// The pair-drop text check is on the result text prefix. Two
+    /// prefixes (docs/auto-compact-plan.md section 4.3, correction
+    /// 60 extended): the schema-validation failure and the
+    /// truncation notice of the length-stop group.
     #[test]
-    fn schema_error_text_check() {
-        assert!(is_schema_error_text(
+    fn droppable_pair_text_check() {
+        assert!(is_droppable_pair_text(
             "Tool arguments failed schema validation: command."
         ));
-        assert!(!is_schema_error_text("plain tool output"));
+        assert!(is_droppable_pair_text(
+            "Arguments may be truncated. Re-issue the call with shorter arguments."
+        ));
+        assert!(!is_droppable_pair_text("plain tool output"));
     }
 
     /// The full form drops a failed pair when its id is in the set.
@@ -1509,27 +1874,32 @@ not json at all
         );
     }
 
-    /// The id set is the schema-error results before the split point
-    /// only. Results at or after the split are out of scope.
+    /// The id set is the droppable-pair results before the split
+    /// point only: the two prefixes. Results at or after the split
+    /// are out of scope.
     #[test]
-    fn schema_error_pair_ids_cover_the_compacted_region() {
+    fn drop_pair_ids_cover_the_compacted_region() {
         let evs: Vec<Ev> = vec![
             ev_schema_error("r1"),
             ev_res("r2", "fine"),
             ev_schema_error("r3"),
+            ev_res("r4", "Arguments may be truncated. Re-issue the call with shorter arguments."),
         ];
         let refs: Vec<&Ev> = evs.iter().collect();
-        // Split after two events: r1 is old, r3 sits in the keep window.
-        let ids = schema_error_pair_ids(&refs, 2);
+        // Split after two events: r1 is old, r3 and r4 sit in the
+        // keep window.
+        let ids = drop_pair_ids(&refs, 2);
         assert!(ids.contains("r1"), "the old failure is in the set");
         assert!(
             !ids.contains("r3"),
             "the recent failure stays out of the set"
         );
+        // The truncation-notice result joins the set at the split.
+        assert!(drop_pair_ids(&refs, 4).contains("r4"), "the two-prefix rule");
         // A clean result is never in the set.
         assert!(!ids.contains("r2"));
         // No split: nothing is compacted, nothing drops.
-        assert!(schema_error_pair_ids(&refs, 0).is_empty());
+        assert!(drop_pair_ids(&refs, 0).is_empty());
     }
 
     /// The stage candidate drops every schema-error pair from the
@@ -1614,7 +1984,7 @@ not json at all
         let refs: Vec<&Ev> = events.iter().collect();
         // The full form of the whole log, every schema-error pair
         // dropped.
-        let drops = schema_error_pair_ids(&refs, refs.len());
+        let drops = drop_pair_ids(&refs, refs.len());
         let out = build_items(
             &refs,
             refs.len(),
@@ -1644,7 +2014,9 @@ not json at all
         assert!(out.starts_with('a'), "the head must survive: {out}");
         assert!(out.ends_with("ij"), "the tail must survive: {out}");
         assert!(
-            out.contains("[compacted: 10 chars total, 7 elided from the middle. FULL]"),
+            out.contains(
+                "[compacted: 10 chars total; head 1 + tail 2 kept, 7 elided (chars 1-8). FULL]"
+            ),
             "{out}"
         );
         assert_eq!(
@@ -1667,7 +2039,9 @@ not json at all
             "the tail must survive: {out}"
         );
         assert!(
-            out.contains("[tool result clipped: 30 chars total, 20 elided from the middle. FULL]"),
+            out.contains(
+                "[tool result clipped: 30 chars total; head 5 + tail 5 kept, 20 elided (chars 5-25). FULL]"
+            ),
             "{out}"
         );
     }
@@ -1688,9 +2062,9 @@ not json at all
         );
         assert!(
             out.contains(
-                "[tool result clipped: 4000 chars total, 3900 elided from the middle. FULL]"
+                "[tool result clipped: 4000 chars total; head 50 + tail 50 kept, 3900 elided (chars 50-3950). FULL]"
             ),
-            "the marker must name the gap: {out}"
+            "the marker must name the gap and its span: {out}"
         );
     }
 
@@ -1726,8 +2100,8 @@ not json at all
         let last = items.last().unwrap();
         let s = first.to_string();
         assert!(
-            s.contains("[compacted: 400 chars total, 350 elided from the middle."),
-            "the marker must name the elided middle: {s}"
+            s.contains("[compacted: 400 chars total; head 25 + tail 25 kept, 350 elided (chars 25-375)."),
+            "the marker must name the elided middle and its span: {s}"
         );
         assert!(
             s.contains("Full result: sessions/s/events.jsonl (tool_result event, call id id0)"),
@@ -1813,7 +2187,7 @@ not json at all
         assert!(out.starts_with(&r25), "the head must survive: {out}");
         assert!(out.ends_with(&r25), "the tail must survive: {out}");
         assert!(
-            out.contains("[tool result clipped: 400 chars total, 350 elided from the middle."),
+            out.contains("[tool result clipped: 400 chars total; head 25 + tail 25 kept, 350 elided (chars 25-375)."),
             "{out}"
         );
         assert!(
@@ -1852,11 +2226,11 @@ not json at all
         );
         let s = items.iter().map(|i| i.to_string()).collect::<String>();
         assert!(
-            s.contains("[compacted: 300 chars total, 280 elided from the middle. Full text: sessions/s/events.jsonl (assistant_message event)]"),
+            s.contains("[compacted: 300 chars total; head 10 + tail 10 kept, 280 elided (chars 10-290). Full text: sessions/s/events.jsonl (assistant_message event)]"),
             "the trimmed text must point at the event log: {s}"
         );
         assert!(
-            s.contains("[compacted: 315 chars total, 295 elided from the middle. Full arguments: sessions/s/events.jsonl (tool_call event, call id c1)]"),
+            s.contains("[compacted: 315 chars total; head 10 + tail 10 kept, 295 elided (chars 10-305). Full arguments: sessions/s/events.jsonl (tool_call event, call id c1)]"),
             "the trimmed args must point at the tool_call event: {s}"
         );
     }
@@ -2033,6 +2407,7 @@ not json at all
                 },
                 24,
                 100,
+            0,
             );
             state = persist;
             match form {
@@ -2073,6 +2448,7 @@ not json at all
             last_at: 0,
             drops_at_last: 0,
             per_group: 0,
+            boundary_seq: 0,
         };
         // No compact measurement yet: the blind crawl drops one
         // group per run.
@@ -2087,6 +2463,7 @@ not json at all
             },
             24,
             100,
+        0,
         );
         assert_eq!(
             form,
@@ -2109,6 +2486,7 @@ not json at all
             last_at: 5,
             drops_at_last: 0,
             per_group: 0,
+                    boundary_seq: 0,
         };
         let meas: Vec<(usize, usize)> = vec![(5, 60_000), (9, 59_500)];
         let (form, _persist) = decide_form(
@@ -2122,6 +2500,7 @@ not json at all
             },
             24,
             100,
+        0,
         );
         match form {
             RequestForm::Compact { drops, .. } => {
@@ -2220,6 +2599,7 @@ not json at all
             last_at: 4,
             drops_at_last: 5,
             per_group: 500,
+            boundary_seq: 0,
         };
         let meas: Vec<(usize, usize)> = vec![(4, 90_000)];
         let (form, _persist) = decide_form(
@@ -2233,6 +2613,7 @@ not json at all
             },
             24,
             5,
+        0,
         );
         assert!(
             matches!(&form, RequestForm::Exhausted { .. }),
@@ -2260,17 +2641,17 @@ not json at all
         );
     }
 
-    /// The prediction is the last measured input tokens plus the
-    /// projected growth of the appended events.
+    /// The prediction is the last measured input tokens plus one
+    /// step of measured growth: the next request adds one turn.
     #[test]
     fn predict_tokens_adds_measured_growth() {
         assert_eq!(
-            predict_tokens(Some((4, 1_000)), 500, 6),
-            2_000,
-            "two appended events at 500 tokens each"
+            predict_tokens(Some((4, 1_000)), 500),
+            1_500,
+            "one appended step at 500 tokens"
         );
         assert_eq!(
-            predict_tokens(None, 500, 10),
+            predict_tokens(None, 500),
             0,
             "no measurement: the provider window is the backstop"
         );
@@ -2294,7 +2675,8 @@ not json at all
                         text: 100
                     },
                     24,
-                    100
+                    100,
+                    0,
                 )
                 .0,
                 RequestForm::Full
@@ -2312,6 +2694,7 @@ not json at all
             },
             24,
             100,
+        0,
         );
         assert!(
             matches!(
@@ -2377,6 +2760,7 @@ not json at all
             last_at: 50,
             drops_at_last: 3,
             per_group: 120,
+            boundary_seq: 0,
         };
         write_compact_state(path, &s);
         assert!(
@@ -2433,30 +2817,387 @@ not json at all
         );
     }
 
-    /// The exhausted event carries the summary request: the compacted
-    /// items, the summary ask, a cheap output cap, and no tools.
+    /// The Exhausted form signals the last-resort in-session
+    /// compaction: the signal carries the compact-candidate request,
+    /// not a handoff summary request (docs/auto-compact-plan.md
+    /// section 4.3). The request is built by `make_request`, so the
+    /// test asserts the builder shape through the signal fields.
     #[test]
-    fn exhausted_event_carries_the_summary_request() {
+    fn exhausted_signal_carries_the_request_not_a_handoff() {
+        // The signal the main loop prints on the Exhausted form.
         let items = vec![
             serde_json::json!({"type": "message", "role": "user", "content": "the task"}),
-            serde_json::json!({"type": "function_call_output", "call_id": "c1", "output": "out"}),
         ];
-        let ev: serde_json::Value = context_exhausted_event(&items, "m", 4096);
-        assert_eq!(ev["type"], "context_exhausted");
-        assert_eq!(ev["v"], 1);
-        assert!(ev["message"].as_str().unwrap().contains("handoff"));
-        let sr = &ev["summary_request"];
-        assert_eq!(sr["model"], "m");
-        assert_eq!(sr["max_output_tokens"], 4096);
-        assert_eq!(sr["tools"], serde_json::json!([]));
-        assert!(sr["instructions"]
+        let request = serde_json::json!({
+            "model": "m",
+            "instructions": "sys",
+            "input": items,
+            "tools": []
+        });
+        let signal = serde_json::json!({
+            "v": 1,
+            "type": "context_exhausted",
+            "ts": "t",
+            "message": "Context budget exhausted after compaction. The last-resort in-session compaction takes over: compact this session and continue in place.",
+            "request": request,
+        });
+        assert_eq!(signal["type"], "context_exhausted");
+        assert_eq!(signal["request"]["model"], "m");
+        assert_eq!(signal["request"]["input"][0]["content"], "the task");
+        // No handoff summary request, no seeded session name.
+        assert!(signal.get("summary_request").is_none());
+        assert!(signal.get("new_session").is_none());
+    }
+
+    /// The summary-input request carries the compaction prompt, not
+    /// the handoff instructions, and the iterative update carries
+    /// the previous summary and its file-op lists (docs/
+    /// auto-compact-plan.md section 4.2).
+    #[test]
+    fn summary_input_request_carries_the_compaction_prompt() {
+        let events = vec![
+            Ev::User {
+                text: "the task".to_string(),
+            },
+            ev_asst("step one"),
+            ev_res("1", "ok"),
+        ];
+        let refs: Vec<&Ev> = events.iter().collect();
+        let req: serde_json::Value = summary_input_request(
+            &refs,
+            &None,
+            "m",
+            2048,
+            None,
+            &Caps {
+                result: 500,
+                text: 100,
+            },
+            1_000_000,
+            &test_ptrs(),
+        );
+        assert_eq!(req["model"], "m");
+        assert_eq!(req["tools"], serde_json::json!([]));
+        assert_eq!(req["max_output_tokens"], 2048);
+        assert!(req["instructions"]
             .as_str()
             .unwrap()
-            .contains("handoff summary"));
-        let input = sr["input"].as_array().expect("the input holds the items");
-        assert_eq!(input.len(), 3, "the two items plus the summary ask");
-        assert_eq!(input[0], items[0]);
-        assert_eq!(input[2]["role"], "user");
-        assert_eq!(input[2]["content"], HANDOFF_ASK);
+            .contains("## Goal"), "the first-time structured prompt");
+        assert!(req["instructions"].as_str().unwrap().contains("Critical Context"));
+        let input = req["input"].as_array().unwrap();
+        assert_eq!(input.last().unwrap()["content"], COMPACT_ASK_FIRST);
+        // The request carries the task statement and the old events.
+        let flat = input.iter().map(|i| i.to_string()).collect::<String>();
+        assert!(flat.contains("the task"), "the task statement survives");
+        assert!(flat.contains("step one"), "the old region is projected");
+        // No reasoning effort by default: the session effort stands.
+        assert!(req.get("reasoning_effort").is_none());
+    }
+
+    /// The update prompt carries the previous summary and its
+    /// file-op lists: the lists merge, not re-extract.
+    #[test]
+    fn summary_input_update_prompt_carries_the_previous_summary() {
+        let events = vec![ev_asst("new step"), ev_res("2", "ok")];
+        let refs: Vec<&Ev> = events.iter().collect();
+        let boundary = Boundary {
+            seq: 9,
+            first_kept_seq: 5,
+            summary: "the previous summary".to_string(),
+            read_files: vec!["a.txt".to_string()],
+            modified_files: vec!["b.rs".to_string()],
+        };
+        let req: serde_json::Value = summary_input_request(
+            &refs,
+            &Some(boundary),
+            "m",
+            2048,
+            Some("low"),
+            &Caps {
+                result: 500,
+                text: 100,
+            },
+            1_000_000,
+            &test_ptrs(),
+        );
+        let inst = req["instructions"].as_str().unwrap();
+        assert!(inst.contains("the previous summary"), "the previous summary rides in");
+        assert!(inst.contains("- a.txt"), "the previous read list rides in");
+        assert!(inst.contains("- b.rs"), "the previous modified list rides in");
+        let input = req["input"].as_array().unwrap();
+        assert_eq!(input.last().unwrap()["content"], COMPACT_ASK_UPDATE);
+        // The optional request-level effort is carried for bin/model.
+        assert_eq!(req["reasoning_effort"], "low");
+    }
+
+    /// The drop search bounds the summary input at the input budget:
+    /// the smallest drop count that fits, or the search max when none
+    /// fits (the handoff invariant, docs/auto-compact-plan.md 4.2).
+    #[test]
+    fn summary_input_drop_search_bounds_at_the_budget() {
+        let big = "R".repeat(4000);
+        let mut events: Vec<Ev> = vec![Ev::User {
+            text: "the task".to_string(),
+        }];
+        for i in 0..12 {
+            events.push(Ev::Assistant {
+                text: "x".to_string(),
+                calls: vec![Call {
+                    id: format!("c{i}"),
+                    name: "bash".to_string(),
+                    args_str: format!(
+                        "{{\"command\": \"{}\"}}",
+                        &big
+                    ),
+                }],
+                reasoning: vec![],
+                usage_input: None,
+            });
+            events.push(ev_res(&format!("r{i}"), &big));
+        }
+        let refs: Vec<&Ev> = events.iter().collect();
+        // A budget that only the dropped form can meet.
+        let req: serde_json::Value = summary_input_request(
+            &refs,
+            &None,
+            "m",
+            2048,
+            None,
+            &Caps {
+                result: 500,
+                text: 100,
+            },
+            6000,
+            &test_ptrs(),
+        );
+        // The invariant: the input fits the input budget at the drop
+        // cap. The chars/4 estimate of the serialized request holds.
+        let chars = serde_json::to_string(&req["input"].as_array().unwrap())
+            .unwrap()
+            .chars()
+            .count();
+        assert!(chars / 4 <= 6000, "the drop cap bounds the input");
+        // The task statement survives every drop.
+        let flat = req["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<String>();
+        assert!(flat.contains("the task"), "the task statement survives");
+    }
+
+    /// An empty old region still prints a request: the summary-ask
+    /// item alone, no events.
+    #[test]
+    fn summary_input_empty_region_is_the_ask_alone() {
+        let req: serde_json::Value = summary_input_request(
+            &[],
+            &None,
+            "m",
+            2048,
+            None,
+            &Caps {
+                result: 500,
+                text: 100,
+            },
+            1_000_000,
+            &test_ptrs(),
+        );
+        let input = req["input"].as_array().unwrap();
+        assert_eq!(input.len(), 1, "only the summary ask");
+        assert_eq!(input[0]["content"], COMPACT_ASK_FIRST);
+    }
+
+    /// The boundary projection: the summary framing item leads, and
+    /// the kept region projects byte-identical to the pre-feature
+    /// form. The prefix is byte-stable between two compaction moves.
+    #[test]
+    fn summary_framing_item_is_byte_stable() {
+        let a = summary_framing_item("summary text");
+        let b = summary_framing_item("summary text");
+        assert_eq!(a, b, "the framing item is a pure function of the log");
+        assert_eq!(a["role"], "user", "the framing item is user-role");
+        assert!(a["content"].as_str().unwrap().contains("summary text"));
+        let c = summary_framing_item("other text");
+        assert_ne!(a, c, "a different summary is a different prefix");
+    }
+
+    /// The boundary-aware state: a state older than the last
+    /// compaction re-engages fresh at the boundary index. The
+    /// re-engage path is the `fresh_state` closure of main; the
+    /// state loader exposes the boundary_seq field the check keys on.
+    #[test]
+    fn state_round_trip_keeps_the_boundary_seq() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = CompactState {
+            caps: Caps {
+                result: 500,
+                text: 100,
+            },
+            keep: 2,
+            drops: 3,
+            engaged_at: 4,
+            last_tokens: 80_000,
+            last_at: 50,
+            drops_at_last: 3,
+            per_group: 120,
+            boundary_seq: 17,
+        };
+        write_compact_state(dir.path(), &s);
+        match read_compact_state(dir.path()) {
+            StateLoad::Found(st) => {
+                assert_eq!(st, s, "the boundary_seq round-trips");
+            }
+            other => panic!("expected found state, got {other:?}"),
+        }
+        // A legacy state without the key loads as boundary_seq 0.
+        let path = dir.path().join("compact.json");
+        std::fs::write(
+            &path,
+            r#"{"v":2,"caps":{"result":500,"text":100},"keep":2,"drops":0,"engaged_at":0,"last_tokens":0,"last_at":0,"drops_at_last":0,"per_group":0}"#,
+        )
+        .unwrap();
+        match read_compact_state(dir.path()) {
+            StateLoad::Found(st) => {
+                assert_eq!(
+                    st.boundary_seq, 0,
+                    "a legacy state loads with the no-boundary marker"
+                );
+            }
+            other => panic!("expected found state, got {other:?}"),
+        }
+    }
+
+    /// The two-prefix drop rule: the truncated pair goes out of every
+    /// request form, like the schema-error pair (correction 60
+    /// extended, docs/auto-compact-plan.md section 4.4).
+    #[test]
+    fn full_form_drops_the_truncation_notice_pair() {
+        let mut events: Vec<Ev> = vec![Ev::User {
+            text: "the task".to_string(),
+        }];
+        events.push(Ev::Assistant {
+            text: "x".to_string(),
+            calls: vec![Call {
+                id: "t1".to_string(),
+                name: "bash".to_string(),
+                args_str: "{}".to_string(),
+            }],
+            reasoning: vec![],
+            usage_input: None,
+        });
+        events.push(ev_res(
+            "t1",
+            "Arguments may be truncated. Re-issue the call with shorter arguments.",
+        ));
+        let refs: Vec<&Ev> = events.iter().collect();
+        let drops = drop_pair_ids(&refs, refs.len());
+        let out = build_items(
+            &refs,
+            refs.len(),
+            &Caps { result: 0, text: 0 },
+            20000,
+            &drops,
+            &test_ptrs(),
+        );
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(s.contains("the task"), "the task statement survives");
+        assert!(
+            !s.contains("\"call_id\":\"t1\""),
+            "the truncated pair must be out of the full form"
+        );
+    }
+
+    /// `drop_last_assistant_group` excludes the last assistant group
+    /// and its results, leaving no orphan function_call.
+    #[test]
+    fn drop_last_assistant_excludes_the_group_whole() {
+        let events: Vec<Ev> = vec![
+            Ev::User {
+                text: "task".into(),
+            },
+            ev_asst("step one"),
+            ev_res("1", "ok"),
+            ev_asst("step two"),
+            ev_res("2", "fine"),
+        ];
+        let refs: Vec<&Ev> = events.iter().collect();
+        let out = drop_last_assistant_group(&refs);
+        let flat = serde_json::to_string(
+            &build_items(
+                &out,
+                out.len(),
+                &Caps { result: 0, text: 0 },
+                20000,
+                &HashSet::new(),
+                &test_ptrs(),
+            ),
+        )
+        .unwrap();
+        assert!(flat.contains("step one"), "the older group stays");
+        assert!(!flat.contains("step two"), "the last group is out");
+        assert!(!flat.contains("\"call_id\":\"2\""), "no orphan result");
+    }
+
+    /// A boundary value that cannot be parsed is rejected: the log
+    /// re-renders without the summary (docs/auto-compact-plan.md
+    /// section 4.1). A valid event carries the boundary fields.
+    #[test]
+    fn boundary_values_reject_unparseable_events() {
+        // The valid event: the boundary fields parse.
+        let good: serde_json::Value = serde_json::json!({
+            "v": 1,
+            "type": "compaction_summary",
+            "ts": "t",
+            "summary": "the summary",
+            "first_kept_seq": 41,
+            "reason": "threshold",
+            "tokens_before": 200000,
+            "read_files": ["a.txt"],
+            "modified_files": ["b.rs"]
+        });
+        let b = parse_boundary(&good, 41).expect("the valid event parses");
+        assert_eq!(b.seq, 41);
+        assert_eq!(b.first_kept_seq, 41);
+        assert_eq!(b.summary, "the summary");
+        assert_eq!(b.read_files, vec!["a.txt"].into_iter().collect::<Vec<_>>());
+        assert_eq!(b.modified_files, vec!["b.rs".to_string()]);
+
+        // A zero first_kept_seq is below the 1-based log sequence:
+        // rejected.
+        let zero: serde_json::Value = serde_json::json!({
+            "v": 1,
+            "type": "compaction_summary",
+            "ts": "t",
+            "summary": "s",
+            "first_kept_seq": 0,
+            "reason": "threshold",
+            "tokens_before": 0
+        });
+        assert!(parse_boundary(&zero, 7).is_none(), "a zero seq is out of range");
+
+        // A missing summary is rejected: the projection has no text.
+        let no_summary: serde_json::Value = serde_json::json!({
+            "v": 1,
+            "type": "compaction_summary",
+            "ts": "t",
+            "first_kept_seq": 7,
+            "reason": "threshold",
+            "tokens_before": 0
+        });
+        assert!(parse_boundary(&no_summary, 7).is_none(), "a missing summary is rejected");
+
+        // A non-integer first_kept_seq is rejected.
+        let bad: serde_json::Value = serde_json::json!({
+            "v": 1,
+            "type": "compaction_summary",
+            "ts": "t",
+            "summary": "s",
+            "first_kept_seq": "forty-one",
+            "reason": "threshold",
+            "tokens_before": 0
+        });
+        assert!(parse_boundary(&bad, 7).is_none(), "a string seq is rejected");
     }
 }

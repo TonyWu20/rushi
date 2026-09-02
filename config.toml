@@ -56,20 +56,17 @@ tool_result_max_chars = 20000
 bash_max_output_bytes = 16000
 bash_timeout_default = 60
 bash_timeout_max = 300
-# Auto-compact knobs (correction 62: the sticky cache-first form).
-# The token budget engages the compact form once, at the base caps
-# below. After that the compact form is sticky: the caps freeze,
-# the keep window halves down to two, and the oldest step groups
-# drop out. Each over-budget reading moves one lever: a keep
+# Auto-compact knobs (docs/auto-compact-plan.md, correction 63).
+# The compact form freezes at the caps below and trims to the keep
+# window. The token budget engages the compact form once, at the
+# base caps below. After that the compact form is sticky: the caps
+# freeze, the keep window halves down to two, and the oldest step
+# groups drop out. Each over-budget reading moves one lever: a keep
 # halving, or a drop jump sized by the measured per-group savings.
 # The levers never move back. The compact region re-renders only
 # when a lever moves, so the request prefix stays byte-stable for
 # the provider prefix cache in between. The lever state persists in
-# the session dir as compact.json. When the drop count reaches its
-# max and the estimate still outgrows the budget, the automatic
-# handoff takes over: one cheap summarization call on the compacted
-# log seeds a new session, and the TUI offers a one-key resume
-# there (correction 57).
+# the session dir as compact.json.
 #
 # The caps are the freeze values. They are coherent with the token
 # budget: the compact request must fit under it. The 8000/2000
@@ -78,9 +75,23 @@ bash_timeout_max = 300
 compact_keep_events = 24
 compact_result_chars = 500
 compact_text_chars = 200
-# The output cap of the one handoff summary call. Cheap by default:
-# the summary is a seed, not a report.
-handoff_summary_max_tokens = 25600
+
+# The in-session auto-compact (docs/auto-compact-plan.md).
+# compact_enabled is the kill switch: it gates the threshold hook
+# and the overflow compaction. Off sends the overflow path to the
+# last-resort forced compaction.
+# compact_reserve_tokens: the trigger sits at context_budget_tokens
+# minus the reserve.
+# compact_keep_tokens: the keep window of the compact cut.
+# compact_summary_max_tokens: the output cap of the summary call.
+# It defaults to 0.8 of the reserve.
+compact_enabled = true
+compact_reserve_tokens = 16384
+compact_keep_tokens = 20000
+compact_summary_max_tokens = 13107
+# compact_reasoning_effort: optional. The summary call's reasoning
+# effort. A cheaper value cuts the summary latency on a local GPU.
+# Omitted: the session effort stands.
 
 [system_prompt]
 # Borrowed from the pi coding agent default prompt.

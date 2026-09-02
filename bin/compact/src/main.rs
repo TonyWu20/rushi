@@ -1,0 +1,1502 @@
+//! compact: the session-internal auto-compaction binary.
+//!
+//! It reads the event log, decides whether the in-session trigger fires
+//! (docs/auto-compact-plan.md sections 3-5), cuts the old region,
+//! calls the LLM once for the summary through the `assemble
+//! --summary-input` and `model` binaries, and appends the
+//! `compaction_started` / `compaction_summary` / `compaction_failed`
+//! markers through `log`. The loop keeps the session: no handoff, no
+//! new session directory.
+//!
+//! The trigger math and the chars/4 estimator are copied from bin/
+//! assemble (no shared crate: correction 4). The copy is noted in
+//! notes/itches.md.
+
+use std::collections::HashSet;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use clap::Parser;
+use serde_json::Value;
+
+/// The one-shot auto-compaction call. It exits 0 with a status JSON on
+/// stdout in every state: noop, compacted, failed (exit 1 only when a
+/// summary was required and both attempts failed).
+#[derive(Parser, Debug)]
+#[command(about = "in-session auto-compaction", version)]
+struct Args {
+    /// The session directory (events.jsonl lives inside).
+    session: PathBuf,
+    /// The config.toml path.
+    #[arg(long, default_value = "config.toml")]
+    config: PathBuf,
+    /// The trigger reason: threshold or overflow. The default is the
+    /// threshold check, where the cooldown and the trigger test
+    /// apply.
+    #[arg(long, value_enum, default_value = "threshold")]
+    reason: Reason,
+    /// Exclude the last assistant group from the old region: the
+    /// retry after a recoverable length-stop failure.
+    #[arg(long)]
+    strip_last_assistant: bool,
+    /// Force the compact even when the trigger is cold and the
+    /// feature is disabled: the last-resort path.
+    #[arg(long)]
+    force: bool,
+    /// The event schema directory. The default is the sibling of the
+    // running binary's repo checkout: the e2e runs the loop from a
+    // work directory, where the repo-relative default does not exist.
+    #[arg(long)]
+    schemas: Option<PathBuf>,
+    /// The path of the assemble binary (the sibling by default).
+    #[arg(long)]
+    assemble: Option<PathBuf>,
+    /// The path of the model binary (the sibling by default).
+    #[arg(long)]
+    model: Option<PathBuf>,
+    /// The path of the log binary (the sibling by default).
+    #[arg(long)]
+    log: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum Reason {
+    Threshold,
+    Overflow,
+}
+
+fn sibling(name: &str) -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join(name)))
+        .unwrap_or_else(|| PathBuf::from(name))
+}
+
+/// The binary resolution: the explicit flag, then the env override
+/// (the e2e suite points the summary call at a stub), then the
+/// sibling of the running binary.
+fn resolve_bin(flag: &Option<PathBuf>, env: &str, name: &str) -> PathBuf {
+    if let Some(p) = flag {
+        return p.clone();
+    }
+    if let Ok(p) = std::env::var(env) {
+        return PathBuf::from(p);
+    }
+    sibling(name)
+}
+
+/// The caps of a compact-form estimate: text trimmed to the cap,
+/// reasoning dropped. A None cap keeps the text full.
+#[derive(Clone, Copy, Debug)]
+struct Caps {
+    result: Option<u64>,
+    text: Option<u64>,
+}
+
+/// One compact-state record as loaded from session/compact.json. The
+/// fields are all loaded for the round-trip fidelity: the current
+/// trigger rule reads the engaged_at, boundary_seq, and caps, and the
+/// rest stay for the future rules.
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+struct StateInfo {
+    caps: Caps,
+    keep: u64,
+    drops: u64,
+    engaged_at: u64,
+    last_tokens: u64,
+    last_at: u64,
+    per_group: u64,
+    boundary_seq: u64,
+}
+
+/// The last `compaction_summary` marker, projected. The first_kept_seq
+/// below 1 is rejected: the log re-renders without the summary (docs/
+/// auto-compact-plan.md section 4.1). The summary text is kept for
+/// record fidelity: the update prompt reads it from the log event,
+/// not from this struct.
+#[derive(Clone, Debug)]
+struct Boundary {
+    seq: usize,
+    first_kept_seq: usize,
+    #[allow(dead_code)]
+    summary: String,
+    read_files: Vec<String>,
+    modified_files: Vec<String>,
+}
+
+/// A compact event: the three shapes that carry projection tokens.
+#[derive(Clone, Debug, PartialEq)]
+enum Ev {
+    User {
+        text: String,
+    },
+    Assistant {
+        text: String,
+        calls: Vec<Call>,
+        reasoning_chars: u64,
+    },
+    Result {
+        call_id: String,
+        chars: u64,
+    },
+}
+
+/// One tool call inside an assistant message: the name and the
+/// serialized arguments.
+#[derive(Clone, Debug, PartialEq)]
+struct Call {
+    name: String,
+    args_str: String,
+}
+
+/// A parsed event line with its 1-based log sequence.
+#[derive(Clone, Debug)]
+struct LogEvent {
+    seq: usize,
+    value: Value,
+}
+
+/// The reason string, for the markers and the status.
+impl Reason {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Reason::Threshold => "threshold",
+            Reason::Overflow => "overflow",
+        }
+    }
+}
+
+/// The trigger decision input, flattened for testability.
+#[derive(Debug)]
+struct TriggerInput {
+    /// The trigger level: budget minus reserve, clamped below the
+    /// budget when the reserve is zero.
+    trigger_level: u64,
+    /// Whether the trim form moved a lever: a drop group or a
+    /// halved keep window. A fresh re-engage moved nothing: the
+    /// cold check decides.
+    trim_engaged: bool,
+    /// The trigger-form measurements, oldest first: the log sequence
+    /// and the provider usage.
+    trigger_readings: Vec<(usize, u64)>,
+    /// The last user message log sequence.
+    last_user_seq: usize,
+    /// The `last_user_seq` of the last `compaction_failed` marker.
+    failed_user_seq: Option<usize>,
+    /// The cooldown rule, enabled for the threshold trigger only.
+    cooldown: bool,
+    /// The feature kill switch.
+    enabled: bool,
+    /// The forced call: the last-resort path.
+    force: bool,
+    /// The overflow trigger: the provider said the window is full.
+    overflow: bool,
+}
+
+/// The trigger decision.
+#[derive(Debug, PartialEq)]
+enum Decision {
+    /// No compact: the reason rides with the status.
+    Noop(String),
+    /// Fire: the compact call carries the predicted reading.
+    Fire {
+        predicted: u64,
+    },
+}
+
+/// The measured growth rate of the trigger-form measurements: the
+/// average delta of the consecutive deltas, or 0 with one reading.
+fn measured_growth_rate(readings: &[(usize, u64)]) -> u64 {
+    if readings.len() < 2 {
+        return 0;
+    }
+    let mut deltas = Vec::with_capacity(readings.len() - 1);
+    for pair in readings.windows(2) {
+        let d = pair[1].1.saturating_sub(pair[0].1);
+        if d > 0 {
+            deltas.push(d);
+        }
+    }
+    if deltas.is_empty() {
+        return 0;
+    }
+    let total: u64 = deltas.iter().sum();
+    total / deltas.len() as u64
+}
+
+/// The trigger test. It fires when the trim is already engaged (any
+/// trigger path: the trim has not recovered) or when the latest
+/// trigger-form reading is at or over the level, or when the
+/// predicted reading crosses it. The overflow and the force skip the
+/// trigger test entirely. The threshold trigger is gated by the
+/// feature switch and the cooldown.
+fn decide_trigger(inp: &TriggerInput) -> Decision {
+    if !inp.enabled && !inp.force && !inp.overflow {
+        return Decision::Noop("the feature is disabled".to_string());
+    }
+    if inp.cooldown && inp.force == false && inp.overflow == false {
+        if let Some(failed) = inp.failed_user_seq {
+            if inp.last_user_seq <= failed {
+                return Decision::Noop(format!(
+                    "the cooldown: the user has not moved past the failed compact (user seq {failed})"
+                ));
+            }
+        }
+    }
+    if inp.force || inp.overflow {
+        let last = inp
+            .trigger_readings
+            .last()
+            .map(|r| r.1)
+            .unwrap_or(0);
+        return Decision::Fire {
+            predicted: last,
+        };
+    }
+    if !inp.trim_engaged
+        && inp
+            .trigger_readings
+            .iter()
+            .all(|r| r.1 < inp.trigger_level)
+    {
+        // No reading crosses the level: the trigger is cold. The
+        // predicted reading is still checked: one step of measured
+        // growth ahead, the next request adds one turn, not the
+        // rest of the session.
+        let rate = measured_growth_rate(&inp.trigger_readings);
+        if inp.trigger_readings.last().is_some() {
+            let last = inp.trigger_readings.last().map(|r| r.1).unwrap_or(0);
+            let predicted = last + rate;
+            if predicted <= inp.trigger_level {
+                return Decision::Noop("the trigger is cold".to_string());
+            }
+        } else {
+            return Decision::Noop("no trigger-form reading yet".to_string());
+        }
+        let last = inp.trigger_readings.last().map(|r| r.1).unwrap_or(0);
+        return Decision::Fire {
+            predicted: last + rate,
+        };
+    }
+    // The trim engaged or a reading crossed the level: fire.
+    let last = inp
+        .trigger_readings
+        .last()
+        .map(|r| r.1)
+        .unwrap_or(0);
+    Decision::Fire {
+        predicted: last,
+    }
+}
+
+/// The chars/4 estimator of one projected event. It mirrors bin/
+/// assemble `est_tokens` for the three event shapes: user content
+/// chars, assistant text plus call argument chars, the tool result
+/// body capped at the form cap. The copy is noted in notes/itches.md.
+fn est_tokens(ev: &Ev, caps: &Caps) -> u64 {
+    let chars: u64 = match ev {
+        Ev::User { text } => text.chars().count() as u64,
+        Ev::Assistant {
+            text,
+            calls,
+            reasoning_chars,
+        } => {
+            let text_chars = if let Some(cap) = caps.text {
+                std::cmp::min(text.chars().count() as u64, cap)
+            } else {
+                text.chars().count() as u64
+            };
+            let call_chars: u64 = calls.iter().map(|c| c.args_str.chars().count() as u64).sum();
+            let call_cap = if let Some(cap) = caps.text {
+                std::cmp::min(call_chars, cap)
+            } else {
+                call_chars
+            };
+            text_chars + call_cap + reasoning_chars
+        }
+        Ev::Result { chars, .. } => {
+            if let Some(cap) = caps.result {
+                std::cmp::min(*chars, cap)
+            } else {
+                *chars
+            }
+        }
+    };
+    chars / 4
+}
+
+/// The cut point of the old region: it walks backward from the last
+/// kept event, accumulating the estimated tokens of the projected
+/// items, until `keep_tokens` is reached. The cut snaps to a valid
+/// cut point: a user or an assistant message, never a tool result.
+/// It never crosses a turn boundary behind the cut: the keep window
+/// holds the last turn whole, and the old region is a whole number
+/// of steps (assemble's drop groups, pi parity).
+/// The return is the 0-based index of the first kept event (the
+/// cut). A cut at index 0 leaves an empty old region: the no-op.
+fn find_cut(
+    kept: &[Ev],
+    keep_tokens: u64,
+    caps: &Caps,
+) -> usize {
+    let total: u64 = kept.iter().map(|e| est_tokens(e, caps)).sum();
+    if total <= keep_tokens {
+        return 0;
+    }
+    let mut acc = 0u64;
+    let mut cut = kept.len();
+    for ev in kept.iter().rev() {
+        acc += est_tokens(ev, caps);
+        cut -= 1;
+        if acc >= keep_tokens {
+            break;
+        }
+    }
+    // Snap the cut to the valid cut point: a user or an assistant
+    // message, never a tool result. A result must follow its call.
+    // It never crosses a turn boundary behind the cut: the keep
+    // window holds the last turn whole. The old region is a whole
+    // number of steps (assemble's drop groups, pi parity).
+    while cut > 0 {
+        match &kept[cut] {
+            Ev::Assistant { .. } | Ev::User { .. } => break,
+            _ => {
+                cut -= 1;
+            }
+        }
+    }
+    if let Some(i) = (0..cut).rev().find(|&i| matches!(kept[i], Ev::User { .. })) {
+        cut = i;
+    }
+    cut
+}
+
+/// The estimated tokens after the compact: the summary framing item
+/// plus the kept events in the full form (the next request re-
+/// engages fresh at the boundary, so the full-form estimate is the
+/// one the next request will use).
+fn est_tokens_after(kept: &[Ev], summary: &str, clip: u64) -> u64 {
+    let framing: u64 = summary.chars().count() as u64 / 4 + 64;
+    let full_caps = Caps {
+        result: Some(clip),
+        text: None,
+    };
+    let mut total = framing;
+    for ev in kept.iter() {
+        if let Ev::Result { chars, .. } = ev {
+            total += std::cmp::min(*chars, clip) / 4;
+        } else {
+            total += est_tokens(ev, &full_caps);
+        }
+    }
+    total
+}
+
+/// The file operations of the old region, extracted from the
+/// assistant messages' tool calls: read names the file, write and
+/// edit modify it. The lists merge with the previous boundary's
+/// lists, not re-extract (docs/auto-compact-plan.md section 4.1).
+fn extract_file_ops(events: &[LogEvent]) -> (Vec<String>, Vec<String>) {
+    let mut reads: Vec<String> = Vec::new();
+    let mut modified: Vec<String> = Vec::new();
+    for e in events {
+        if e.value.get("type").and_then(|t| t.as_str()) != Some("assistant_message") {
+            continue;
+        }
+        let calls = match e.value.get("tool_calls").and_then(|c| c.as_array()) {
+            Some(c) => c,
+            None => continue,
+        };
+        for call in calls {
+            let name = call.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let args = call.get("arguments");
+            let path = args
+                .and_then(|a| a.get("file_path"))
+                .and_then(|f| f.as_str())
+                .map(str::to_string);
+            if name == "read" {
+                if let Some(p) = path {
+                    reads.push(p);
+                }
+            } else if name == "write" || name == "edit" {
+                if let Some(p) = path {
+                    modified.push(p);
+                }
+            }
+        }
+    }
+    fn dedup(v: &mut Vec<String>) {
+        let mut seen = HashSet::new();
+        v.retain(|s| seen.insert(s.clone()));
+    }
+    dedup(&mut reads);
+    dedup(&mut modified);
+    (reads, modified)
+}
+
+fn read_state(session: &Path) -> Option<StateInfo> {
+    let p = session.join("compact.json");
+    let raw = std::fs::read_to_string(&p).ok()?;
+    let v: Value = serde_json::from_str(&raw).ok()?;
+    if v.get("v").and_then(|x| x.as_u64()) != Some(2) {
+        return None;
+    }
+    let caps_v = v.get("caps")?;
+    let caps = Caps {
+        result: caps_v.get("result").and_then(|x| x.as_u64()),
+        text: caps_v.get("text").and_then(|x| x.as_u64()),
+    };
+    Some(StateInfo {
+        caps,
+        keep: v.get("keep").and_then(|x| x.as_u64()).unwrap_or(2),
+        drops: v.get("drops").and_then(|x| x.as_u64()).unwrap_or(0),
+        engaged_at: v.get("engaged_at").and_then(|x| x.as_u64()).unwrap_or(0),
+        last_tokens: v.get("last_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
+        last_at: v.get("last_at").and_then(|x| x.as_u64()).unwrap_or(0),
+        per_group: v.get("per_group").and_then(|x| x.as_u64()).unwrap_or(0),
+        boundary_seq: v
+            .get("boundary_seq")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0),
+    })
+}
+
+/// The boundary fields of a `compaction_summary` marker. The
+/// `first_kept_seq` below 1 is rejected: the log re-renders without
+/// the summary.
+fn parse_boundary(e: &LogEvent) -> Option<Boundary> {
+    if e.value.get("type").and_then(|t| t.as_str()) != Some("compaction_summary") {
+        return None;
+    }
+    let fk = e
+        .value
+        .get("first_kept_seq")
+        .and_then(|f| f.as_u64())
+        .filter(|f| *f >= 1)?;
+    Some(Boundary {
+        seq: e.seq,
+        first_kept_seq: fk as usize,
+        summary: e
+            .value
+            .get("summary")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string(),
+        read_files: e
+            .value
+            .get("read_files")
+            .and_then(|a| a.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        modified_files: e
+            .value
+            .get("modified_files")
+            .and_then(|a| a.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
+}
+
+/// The event log of the session: the raw lines with their 1-based
+/// sequences. Lines that are not objects are skipped: the log is
+/// append-only, and a corrupt line must not kill the loop.
+fn read_events(path: &Path) -> Vec<LogEvent> {
+    let mut out = Vec::new();
+    let raw = match std::fs::read_to_string(path) {
+        Ok(r) => r,
+        Err(_) => return out,
+    };
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if v.get("type").is_none() {
+            continue;
+        }
+        out.push(LogEvent {
+            seq: out.len() + 1,
+            value: v,
+        });
+    }
+    out
+}
+
+fn ts_now() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// Append one event line through the `log` binary: the event JSON
+/// goes to the log's stdin, and the log assigns the ts and seq.
+fn append_event(
+    log_bin: &Path,
+    session: &Path,
+    schemas: &Path,
+    event: &Value,
+) -> Result<(), String> {
+    let body = serde_json::to_string(event).map_err(|e| e.to_string())?;
+    let mut child = Command::new(log_bin)
+        .arg("--session")
+        .arg(session)
+        .arg("--schemas")
+        .arg(schemas)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawn log: {e}"))?
+        ;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(body.as_bytes())
+            .map_err(|e| format!("write log stdin: {e}"))?;
+    }
+    let status = child
+        .wait()
+        .map_err(|e| format!("wait log: {e}"))?
+        ;
+    if !status.success() {
+        return Err(format!("log exited {status}"));
+    }
+    Ok(())
+}
+
+fn main() {
+    let args = Args::parse();
+    // The schema directory: the explicit flag, then the repo layout
+    // next to the running binary (target/debug/../../schemas), then
+    // the repo-relative default for a checkout-local run.
+    let schemas_dir: PathBuf = match &args.schemas {
+        Some(p) => p.clone(),
+        None => std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("..").join("..").join("schemas").join("events").join("v1")))
+            .filter(|p| p.exists())
+            .unwrap_or_else(|| PathBuf::from("schemas/events/v1")),
+    };
+
+    // The cooldown and the trigger need the log. The force and the
+    // overflow skip the trigger test but still read the log for the
+    // boundary and the cut.
+    let events_path = args.session.join("events.jsonl");
+    let events = read_events(&events_path);
+
+    // The boundary: the last parseable `compaction_summary`.
+    let boundary: Option<Boundary> = events
+        .iter()
+        .filter_map(|e| parse_boundary(e))
+        .last();
+
+    // The cooldown anchor: the `last_user_seq` of the last
+    // `compaction_failed` marker.
+    let failed_user_seq: Option<usize> = events
+        .iter()
+        .filter(|e| e.value.get("type").and_then(|t| t.as_str()) == Some("compaction_failed"))
+        .last()
+        .and_then(|e| e.value.get("last_user_seq").and_then(|s| s.as_u64()))
+        .map(|s| s as usize);
+
+    // The user messages: the last one anchors the cooldown.
+    let last_user_seq: usize = events
+        .iter()
+        .filter(|e| e.value.get("type").and_then(|t| t.as_str()) == Some("user_message"))
+        .last()
+        .map(|e| e.seq)
+        .unwrap_or(0);
+
+    // The kept region: after the boundary, or the whole log.
+    let first_kept = boundary.as_ref().map(|b| b.first_kept_seq).unwrap_or(0);
+    let kept_events: Vec<LogEvent> = events
+        .iter()
+        .filter(|e| e.seq >= first_kept)
+        .cloned()
+        .collect();
+
+    let state = read_state(&args.session);
+    // The state: current only at the last boundary. A state from
+    // before the last boundary is stale: the trim re-engages fresh.
+    let state_current = match (&state, &boundary) {
+        (Some(s), Some(b)) => s.boundary_seq == b.seq as u64,
+        (Some(_), None) => true,
+        (None, _) => false,
+    };
+    let trim_engaged = state_current && state.is_some();
+
+    // The measurements: the provider usage of the assistant
+    // messages, as the (log sequence, tokens) pairs. The log stores
+    // the request input as `usage.input_tokens`.
+    let mut measurements: Vec<(usize, u64)> = Vec::new();
+    for e in &kept_events {
+        if e.value.get("type").and_then(|t| t.as_str()) != Some("assistant_message") {
+            continue;
+        }
+        let tokens = e
+            .value
+            .get("usage")
+            .and_then(|u| u.get("input_tokens"))
+            .and_then(|i| i.as_u64())
+            .unwrap_or(0);
+        if tokens > 0 {
+            measurements.push((e.seq, tokens));
+        }
+    }
+
+    // The trigger-form readings: between the boundary and the trim
+    // engagement, or all of them when the state file is absent. The
+    // stale guard drops the readings older than the boundary (the
+    // summary covers them).
+    let engaged_at = state.as_ref().map(|s| s.engaged_at).unwrap_or(0);
+    let trigger_readings: Vec<(usize, u64)> = if trim_engaged {
+        measurements
+            .iter()
+            .filter(|(seq, _)| {
+                if trim_engaged {
+                    let kept_idx = kept_events
+                        .iter()
+                        .position(|e| e.seq == *seq)
+                        .unwrap_or(usize::MAX);
+                    kept_idx < engaged_at as usize
+                } else {
+                    true
+                }
+            })
+            .cloned()
+            .collect()
+    } else {
+        measurements.clone()
+    };
+
+    // The config: the budget and the compact knobs.
+    let cfg = load_config(&args.config);
+    let empty = toml::Value::Table(toml::map::Map::new());
+    let limits = cfg.get("limits").unwrap_or(&empty);
+    let budget = resolve_budget(&cfg);
+    let reserve = val_int(limits, "compact_reserve_tokens").unwrap_or(16_384) as u64;
+    let enabled = val_bool(limits, "compact_enabled").unwrap_or(true);
+
+    let trigger_level = if reserve == 0 {
+        eprintln!(
+            "Warning: compact_reserve_tokens is 0: the trigger inverts. Clamping the trigger to one reserve below the budget."
+        );
+        budget.saturating_sub(1)
+    } else {
+        budget.saturating_sub(reserve)
+    };
+
+    let overflow = matches!(args.reason, Reason::Overflow);
+    // The trigger decision. The trim-engaged rule fires only when
+    // the trim actually moved a lever: a drop group or a halved
+    // keep window. A fresh re-engage after a boundary reset moved
+    // nothing: the cold check decides, and the compact loop does not
+    // re-fire on every step.
+    let keep_base: u64 = val_int(
+        cfg.get("limits").unwrap_or(&toml::Value::Table(toml::map::Map::new())),
+        "compact_keep_events",
+    )
+    .unwrap_or(24) as u64;
+    let trim_trimming = state.as_ref().is_some_and(|s| {
+        s.drops > 0 || s.keep < keep_base
+    }) && state_current;
+    let trim_engaged = trim_trimming;
+    // The trigger decision. The tokens_before of the Fire branch is
+    // the newest measurement of the kept region: the current context
+    // size the compact replaces. A stale trigger-form reading from
+    // the trim engagement would misreport the compact scale.
+    let last_measurement = measurements.last().map(|m| m.1).unwrap_or(0);
+    let decision = decide_trigger(&TriggerInput {
+        trigger_level,
+        trim_engaged,
+        trigger_readings: trigger_readings.clone(),
+        last_user_seq,
+        failed_user_seq,
+        cooldown: true,
+        enabled,
+        force: args.force,
+        overflow,
+    });
+
+    match decision {
+        Decision::Noop(detail) => {
+            let status = serde_json::json!({
+                "status": "noop",
+                "reason": args.reason.as_str(),
+                "detail": detail,
+            });
+            println!("{}", serde_json::to_string(&status).unwrap());
+            std::process::exit(0);
+        }
+        Decision::Fire {
+            predicted,
+        } => {
+            let _ = predicted;
+            run_compaction(
+                &args,
+                &schemas_dir,
+                &kept_events,
+                &boundary,
+                last_measurement,
+                overflow,
+                last_user_seq,
+                trim_engaged,
+                state,
+            )
+        }
+    }
+}
+
+/// The compact run: the cut, the summary call, the marker appends.
+fn run_compaction(
+    args: &Args,
+    schemas_dir: &Path,
+    kept_events: &[LogEvent],
+    boundary: &Option<Boundary>,
+    tokens_before: u64,
+    overflow: bool,
+    last_user_seq: usize,
+    trim_engaged: bool,
+    state: Option<StateInfo>,
+) -> ! {
+    let cfg = load_config(&args.config);
+    let empty = toml::Value::Table(toml::map::Map::new());
+    let limits = cfg.get("limits").unwrap_or(&empty);
+    let keep_tokens: u64 = val_int(limits, "compact_keep_tokens").unwrap_or(20_000) as u64;
+    let caps: Caps = Caps {
+        result: Some(val_int(limits, "compact_result_chars").unwrap_or(500) as u64),
+        text: Some(val_int(limits, "compact_text_chars").unwrap_or(200) as u64),
+    };
+    let clip: u64 = val_int(limits, "tool_result_max_chars").unwrap_or(20_000) as u64;
+
+    // The projected kept events, for the estimator. The marker
+    // types project to an empty user: zero tokens, no group effect.
+    let projected: Vec<Ev> = kept_events.iter().map(|e| project_event(&e.value)).collect();
+
+    // The estimate caps: the current form's caps. The trim engaged
+    // uses the caps the state file recorded at the engagement, the
+    // full form the result clip only.
+    let est_caps: Caps = if trim_engaged {
+        state.map(|s| s.caps).unwrap_or(caps)
+    } else {
+        Caps {
+            result: Some(clip),
+            text: None,
+        }
+    };
+    let cut = find_cut(&projected, keep_tokens, &est_caps);
+    if cut == 0 {
+        let status = serde_json::json!({
+            "status": "noop",
+            "reason": args.reason.as_str(),
+            "detail": "the old region is empty: the keep window covers the log",
+        });
+        println!("{}", serde_json::to_string(&status).unwrap());
+        std::process::exit(0);
+    }
+
+    // The old region: the projected events before the cut.
+    let old = &projected[..cut];
+    let old_events: Vec<LogEvent> = kept_events[..cut].to_vec();
+    let up_to = old_events.last().map(|e| e.seq).unwrap_or(0);
+
+    // The strip-last-assistant retry: drop the last group of the
+    // old region before the summary call.
+    let summary_events: &[LogEvent] = if args.strip_last_assistant {
+        let last_group = old
+            .iter()
+            .rposition(|e| matches!(e, Ev::Assistant { .. }))
+            .map(|i| i + 1)
+            .unwrap_or(old.len());
+        &old_events[..last_group]
+    } else {
+        &old_events
+    };
+
+    // The marker: the compact is in flight.
+    let reason_str = args.reason.as_str().to_string();
+    let started = serde_json::json!({
+        "v": 1,
+        "type": "compaction_started",
+        "ts": ts_now(),
+        "reason": reason_str,
+        "tokens_before": tokens_before,
+    });
+    let log_bin = resolve_bin(&args.log, "LOG_BIN", "log");
+    if let Err(e) = append_event(&log_bin, &args.session, &schemas_dir, &started) {
+        eprintln!("compact: append compaction_started failed: {e}");
+    }
+
+    // The summary input: assemble prints the request JSON on
+    // stdout.
+    let assemble_bin = args.assemble.clone().unwrap_or_else(|| sibling("assemble"));
+    let up_to_str = up_to.to_string();
+    let mut cmd = Command::new(&assemble_bin);
+    cmd.arg("--session")
+        .arg(&args.session)
+        .arg("--config")
+        .arg(&args.config)
+        .arg("--summary-input")
+        .arg("--up-to")
+        .arg(&up_to_str);
+    if args.strip_last_assistant {
+        cmd.arg("--drop-last-assistant");
+    }
+    let out = cmd.output().unwrap_or_else(|e| {
+        fail_and_exit(args, &schemas_dir, overflow, last_user_seq, "the assemble call failed", &e.to_string());
+    });
+    if !out.status.success() {
+        fail_and_exit(
+            args,
+            &schemas_dir,
+            overflow,
+            last_user_seq,
+            "the assemble call failed",
+            &String::from_utf8_lossy(&out.stderr),
+        );
+    }
+    let request: Value = match serde_json::from_slice(&out.stdout) {
+        Ok(v) => v,
+        Err(e) => fail_and_exit(
+            args,
+            &schemas_dir,
+            overflow,
+            last_user_seq,
+            "the assemble output is not a request",
+            &e.to_string(),
+        ),
+    };
+
+    // The summary call: two attempts, through the model binary. The
+    // request JSON goes to the model's stdin, and the model appends
+    // its own assistant_message, tool_result, and stop markers to
+    // the session log.
+    let model_bin = resolve_bin(&args.model, "MODEL_BIN", "model");
+    let request_str = serde_json::to_string(&request).unwrap();
+    let mut last_err = String::new();
+    let mut summary_usage: Option<Value> = None;
+    let summary: Option<String> = (0..2).find_map(|attempt| {
+        let mut child = match Command::new(&model_bin)
+            .arg("--config")
+            .arg(&args.config)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                last_err = format!("attempt {}: spawn model: {e}", attempt + 1);
+                return None;
+            }
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            if let Err(e) = stdin.write_all(request_str.as_bytes()) {
+                last_err = format!("attempt {}: write model stdin: {e}", attempt + 1);
+                return None;
+            }
+        }
+        let out = match child.wait_with_output() {
+            Ok(o) => o,
+            Err(e) => {
+                last_err = format!("attempt {}: wait model: {e}", attempt + 1);
+                return None;
+            }
+        };
+        if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                last_err = format!(
+                    "attempt {}: the model binary exited {} ({})",
+                    attempt + 1,
+                    out.status.code().unwrap_or(-1),
+                    stderr.trim()
+                );
+                return None;
+            }
+            let resp: Value = match serde_json::from_slice(&out.stdout) {
+                Ok(v) => v,
+                Err(e) => {
+                    last_err = format!(
+                        "attempt {}: the model output is not JSON: {e}",
+                        attempt + 1
+                    );
+                    return None;
+                }
+            };
+            let stop = resp.get("stop_reason").and_then(|s| s.as_str()).unwrap_or("");
+            if stop == "error" {
+                let detail = resp
+                    .get("detail")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("no detail");
+                last_err = format!("attempt {}: the model returned an error stop: {detail}", attempt + 1);
+                return None;
+            }
+            let text = resp.get("text").and_then(|t| t.as_str()).unwrap_or("");
+            if text.trim().is_empty() {
+                last_err = format!("attempt {}: an empty summary (stop reason {stop})", attempt + 1);
+                return None;
+            }
+            // The usage of the winning attempt rides the marker:
+            // the statusline sums it into the cumulative totals
+            // (docs/auto-compact-plan.md section 4.6).
+            let usage = resp.get("usage").cloned();
+            summary_usage = usage;
+            Some(text.trim().to_string())
+        });
+
+    let summary = match summary {
+        Some(s) => s,
+        None => fail_and_exit(args, &schemas_dir, overflow, last_user_seq, "both summary attempts failed", &last_err),
+    };
+
+    // The file ops: merge with the previous boundary's lists, not
+    // re-extract (docs/auto-compact-plan.md section 4.1).
+    let (reads, modified) = extract_file_ops(summary_events);
+    let read_files: Vec<String> = if let Some(b) = boundary.as_ref() {
+        let mut v = b.read_files.clone();
+        for r in &reads {
+            if !v.contains(r) {
+                v.push(r.clone());
+            }
+        }
+        v
+    } else {
+        reads
+    };
+    let modified_files: Vec<String> = if let Some(b) = boundary.as_ref() {
+        let mut v = b.modified_files.clone();
+        for m in &modified {
+            if !v.contains(m) {
+                v.push(m.clone());
+            }
+        }
+        v
+    } else {
+        modified
+    };
+
+    // The first kept sequence of the new boundary: the log
+    // sequence of the event at the cut.
+    let first_kept_seq = kept_events.get(cut).map(|e| e.seq).unwrap_or(1);
+    if first_kept_seq < 1 {
+        fail_and_exit(
+            args,
+            &schemas_dir,
+            overflow,
+            last_user_seq,
+            "the first_kept_seq is below 1",
+            "the producer check rejected the marker",
+        );
+    }
+
+    // The tokens after: the full-form estimate of the kept region
+    // plus the summary framing.
+    let kept_projected: Vec<Ev> = projected[cut..].to_vec();
+    let tokens_after = est_tokens_after(&kept_projected, &summary, clip);
+
+    let mut done = serde_json::json!({
+        "v": 1,
+        "type": "compaction_summary",
+        "ts": ts_now(),
+        "summary": summary,
+        "first_kept_seq": first_kept_seq,
+        "reason": reason_str,
+        "tokens_before": tokens_before,
+        "tokens_after": tokens_after,
+        "read_files": read_files,
+        "modified_files": modified_files,
+    });
+    if let Some(u) = summary_usage {
+        done["usage"] = u;
+    }
+    if let Err(e) = append_event(&log_bin, &args.session, &schemas_dir, &done) {
+        eprintln!("compact: append compaction_summary failed: {e}");
+    }
+
+    let status = serde_json::json!({
+        "status": "compacted",
+        "reason": reason_str,
+        "first_kept_seq": first_kept_seq,
+        "tokens_before": tokens_before,
+        "tokens_after": tokens_after,
+    });
+    println!("{}", serde_json::to_string(&status).unwrap());
+    std::process::exit(0);
+}
+
+/// The failure path: the `compaction_failed` marker, the detail on
+/// stderr, the failed status on stdout, exit 1. The last_user_seq
+/// anchors the cooldown of the next threshold trigger.
+fn fail_and_exit(
+    args: &Args,
+    schemas_dir: &Path,
+    overflow: bool,
+    last_user_seq: usize,
+    short: &str,
+    detail: &str,
+) -> ! {
+    let reason_str = args.reason.as_str().to_string();
+    let failed = serde_json::json!({
+        "v": 1,
+        "type": "compaction_failed",
+        "ts": ts_now(),
+        "reason": reason_str,
+        "last_user_seq": last_user_seq,
+        "attempts": 2,
+        "detail": detail,
+    });
+    let log_bin = resolve_bin(&args.log, "LOG_BIN", "log");
+    if let Err(e) = append_event(&log_bin, &args.session, &schemas_dir, &failed) {
+        eprintln!("compact: append compaction_failed failed: {e}");
+    }
+    eprintln!("compact: {short}: {detail}");
+    let status = serde_json::json!({
+        "status": "failed",
+        "reason": reason_str,
+        "overflow": overflow,
+        "detail": detail,
+    });
+    println!("{}", serde_json::to_string(&status).unwrap());
+    std::process::exit(1);
+}
+
+/// The config loader: the toml value the compact knobs read. The
+/// model resolution is copied from bin/assemble (correction 4: no
+/// shared crate). The copy is noted in notes/itches.md.
+fn load_config(path: &Path) -> toml::Value {
+    let raw = std::fs::read_to_string(path).unwrap_or_default();
+    toml::from_str(&raw).unwrap_or(toml::Value::Table(toml::map::Map::new()))
+}
+
+fn val_int(v: &toml::Value, key: &str) -> Option<i64> {
+    v.get(key).and_then(|x| x.as_integer())
+}
+
+/// The string value. Copied with the int form from bin/assemble so
+/// the knob additions stay one edit apart.
+#[allow(dead_code)]
+fn val_str(v: &toml::Value, key: &str) -> Option<String> {
+    v.get(key).and_then(|x| x.as_str()).map(|s| s.to_string())
+}
+
+fn val_bool(v: &toml::Value, key: &str) -> Option<bool> {
+    v.get(key).and_then(|x| x.as_bool())
+}
+
+/// The active model name: the MODEL env var or the config.
+fn resolve_active_model(config: &toml::Value) -> String {
+    std::env::var("MODEL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            config
+                .get("active")
+                .and_then(|a| a.get("model"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("deepseek")
+                .to_string()
+        })
+}
+
+/// The context budget: the model window minus the output
+/// reservation, clamped by the user knob (the assemble rule).
+fn resolve_budget(config: &toml::Value) -> u64 {
+    let active = resolve_active_model(config);
+    let empty = toml::Value::Table(toml::map::Map::new());
+    let model_root = config.get("model").unwrap_or(&empty);
+    let mdl = model_root.get(&active).unwrap_or(&empty);
+    let max_out = val_int(mdl, "max_output_tokens")
+        .or_else(|| val_int(model_root, "max_output_tokens"))
+        .unwrap_or(4096) as u64;
+    let window = val_int(mdl, "context_tokens").unwrap_or(131072) as u64;
+    let window_input = window.saturating_sub(max_out);
+    let budget = val_int(&config.get("limits").unwrap_or(&empty), "context_budget_tokens")
+        .map(|v| (v.max(1)) as u64)
+        .unwrap_or(window_input)
+        .min(window_input.max(1));
+    budget.max(1)
+}
+
+/// The projection of one raw event to the estimator shape. The
+/// marker types project to nothing.
+fn project_event(v: &Value) -> Ev {
+    let t = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
+    match t {
+        "user_message" => Ev::User {
+            text: v
+                .get("content")
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_string(),
+        },
+        "assistant_message" => {
+            let text = v
+                .get("content")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let reasoning_chars: u64 = v
+                .get("reasoning")
+                .and_then(|r| r.as_array())
+                .map(|r| r.iter().map(|b| b.to_string().chars().count() as u64).sum())
+                .unwrap_or(0);
+            let calls: Vec<Call> = v
+                .get("tool_calls")
+                .and_then(|c| c.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|c| {
+                            Some(Call {
+                                name: c.get("name")?.as_str()?.to_string(),
+                                args_str: c
+                                    .get("arguments")
+                                    .map(|a| a.to_string())
+                                    .unwrap_or_else(|| "{}".to_string()),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ev::Assistant {
+                text,
+                calls,
+                reasoning_chars,
+            }
+        }
+        "tool_result" => Ev::Result {
+            call_id: v
+                .get("id")
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_string(),
+            chars: v
+                .get("value")
+                .and_then(|o| o.get("text"))
+                .and_then(|s| s.as_str())
+                .map(|s| s.chars().count() as u64)
+                .unwrap_or(0),
+        },
+        _ => Ev::User {
+            text: String::new(),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ev_user(t: &str) -> Ev {
+        Ev::User {
+            text: t.to_string(),
+        }
+    }
+    fn ev_asst(text: &str) -> Ev {
+        Ev::Assistant {
+            text: text.to_string(),
+            calls: vec![],
+            reasoning_chars: 0,
+        }
+    }
+    fn ev_res(call: &str, body: &str) -> Ev {
+        Ev::Result {
+            call_id: call.to_string(),
+            chars: body.chars().count() as u64,
+        }
+    }
+
+    #[test]
+    fn est_tokens_mirrors_the_assemble_estimator() {
+        let caps = Caps {
+            result: Some(500),
+            text: Some(100),
+        };
+        // The user content: the chars over 4.
+        assert_eq!(est_tokens(&ev_user(&"a".repeat(400)), &caps), 100);
+        // The assistant text is capped at the cap, the call args
+        // capped too.
+        let big = "b".repeat(400);
+        let ev = Ev::Assistant {
+            text: big.clone(),
+            calls: vec![Call {
+                name: "bash".to_string(),
+                args_str: big,
+            }],
+            reasoning_chars: 0,
+        };
+        // The text caps at 100 chars, the args at 100: 200 chars
+        // over 4 is 50.
+        assert_eq!(est_tokens(&ev, &caps), 50);
+        // The reasoning chars ride in unbounded: 1 + 1000 chars
+        // over 4 is 250.
+        let ev = Ev::Assistant {
+            text: "x".to_string(),
+            calls: vec![],
+            reasoning_chars: 1000,
+        };
+        assert_eq!(est_tokens(&ev, &caps), 250);
+        // The result is capped at the cap.
+        assert_eq!(est_tokens(&ev_res("1", &"c".repeat(4000)), &caps), 125);
+        // The full form: no caps.
+        let full = Caps {
+            result: None,
+            text: None,
+        };
+        assert_eq!(est_tokens(&ev_res("1", &"c".repeat(4000)), &full), 1000);
+    }
+
+    #[test]
+    fn cut_snaps_to_the_group_start() {
+        // The session shape: user, assistant, result, user, assistant,
+        // result. A keep window that lands in the last result cuts
+        // at the second group's start, then the split-turn rule pulls
+        // it back to the second user (pi parity).
+        let kept = vec![
+            ev_user("task one"),
+            ev_asst("step one"),
+            ev_res("1", &"x".repeat(4000)),
+            ev_user("task two"),
+            ev_asst("step two"),
+            ev_res("2", &"y".repeat(4000)),
+        ];
+        let caps = Caps {
+            result: Some(1000),
+            text: None,
+        };
+        // Each result is 250 tokens. A keep window of 150 stops
+        // inside the last result: the cut snaps to the group start,
+        // then pulls back to the user that started the turn.
+        let cut = find_cut(&kept, 150, &caps);
+        assert_eq!(cut, 3, "the cut sits at the second user");
+    }
+
+    #[test]
+    fn cut_pulls_in_the_orphan_user() {
+        let kept = vec![
+            ev_user("task"),
+            ev_asst("step one"),
+            ev_res("1", &"x".repeat(4000)),
+        ];
+        let caps = Caps {
+            result: Some(1000),
+            text: None,
+        };
+        let cut = find_cut(&kept, 10, &caps);
+        // The walk stops before the user message: the orphan rule
+        // pulls the cut back to the user.
+        assert_eq!(cut, 0, "the orphan user sits behind the cut: it comes along");
+    }
+
+    #[test]
+    fn cut_at_zero_is_the_empty_region() {
+        let kept = vec![ev_user("task"), ev_asst("step one")];
+        let caps = Caps {
+            result: None,
+            text: None,
+        };
+        assert_eq!(find_cut(&kept, 1_000_000, &caps), 0);
+    }
+
+    #[test]
+    fn trigger_fires_on_a_crossing_reading() {
+        let inp = TriggerInput {
+            trigger_level: 100,
+            trim_engaged: false,
+            trigger_readings: vec![(1, 40), (2, 60), (3, 110)],
+            last_user_seq: 3,
+            failed_user_seq: None,
+            cooldown: true,
+            enabled: true,
+            force: false,
+            overflow: false,
+        };
+        match decide_trigger(&inp) {
+            Decision::Noop(d) => panic!("expected fire, got noop: {d}"),
+            Decision::Fire { .. } => {}
+        }
+    }
+
+    #[test]
+    fn trigger_fires_on_the_predicted_crossing() {
+        // The last reading is below the level, but the measured
+        // growth rate predicts the crossing.
+        let inp = TriggerInput {
+            trigger_level: 200,
+            trim_engaged: false,
+            trigger_readings: vec![(1, 100), (2, 150), (3, 190)],
+            last_user_seq: 3,
+            failed_user_seq: None,
+            cooldown: true,
+            enabled: true,
+            force: false,
+            overflow: false,
+        };
+        match decide_trigger(&inp) {
+            Decision::Noop(d) => panic!("expected fire, got noop: {d}"),
+            Decision::Fire { predicted, .. } => {
+                assert!(predicted > 200, "the predicted reading crosses");
+            }
+        }
+    }
+
+    #[test]
+    fn trigger_cold_is_the_noop() {
+        let inp = TriggerInput {
+            trigger_level: 10_000,
+            trim_engaged: false,
+            trigger_readings: vec![(1, 100), (2, 200)],
+            last_user_seq: 2,
+            failed_user_seq: None,
+            cooldown: true,
+            enabled: true,
+            force: false,
+            overflow: false,
+        };
+        match decide_trigger(&inp) {
+            Decision::Noop(_) => {}
+            Decision::Fire { .. } => panic!("a cold trigger must not fire"),
+        }
+    }
+
+    #[test]
+    fn trim_engaged_fires_any_trigger() {
+        let inp = TriggerInput {
+            trigger_level: 100_000,
+            trim_engaged: true,
+            trigger_readings: vec![],
+            last_user_seq: 5,
+            failed_user_seq: None,
+            cooldown: true,
+            enabled: true,
+            force: false,
+            overflow: false,
+        };
+        match decide_trigger(&inp) {
+            Decision::Noop(d) => panic!("expected fire, got noop: {d}"),
+            Decision::Fire { .. } => {}
+        }
+    }
+
+    #[test]
+    fn cooldown_gates_the_threshold_trigger() {
+        let inp = TriggerInput {
+            trigger_level: 100,
+            trim_engaged: false,
+            trigger_readings: vec![(1, 90), (2, 95)],
+            last_user_seq: 5,
+            failed_user_seq: Some(5),
+            cooldown: true,
+            enabled: true,
+            force: false,
+            overflow: false,
+        };
+        match decide_trigger(&inp) {
+            Decision::Noop(d) => {
+                assert!(d.contains("cooldown"), "the detail names the gate");
+            }
+            Decision::Fire { .. } => panic!("the cooldown must hold"),
+        }
+        // The overflow skips the cooldown.
+        let inp = TriggerInput {
+            overflow: true,
+            ..inp
+        };
+        match decide_trigger(&inp) {
+            Decision::Noop(d) => panic!("the overflow skips the cooldown: {d}"),
+            Decision::Fire { .. } => {}
+        }
+    }
+
+    #[test]
+    fn the_kill_switch_holds_the_threshold() {
+        let inp = TriggerInput {
+            trigger_level: 100,
+            trim_engaged: false,
+            trigger_readings: vec![(1, 40), (2, 90)],
+            last_user_seq: 2,
+            failed_user_seq: None,
+            cooldown: true,
+            enabled: false,
+            force: false,
+            overflow: false,
+        };
+        match decide_trigger(&inp) {
+            Decision::Noop(d) => {
+                assert!(d.contains("disabled"), "the detail names the switch");
+            }
+            Decision::Fire { .. } => panic!("the disabled feature must not fire"),
+        }
+        // The force and the overflow skip the switch.
+        let forced = TriggerInput {
+            force: true,
+            ..inp
+        };
+        match decide_trigger(&forced) {
+            Decision::Noop(d) => panic!("the force skips the switch: {d}"),
+            Decision::Fire { .. } => {}
+        }
+    }
+
+    #[test]
+    fn extract_file_ops_reads_and_writes() {
+        let events = vec![
+            LogEvent {
+                seq: 1,
+                value: serde_json::json!({
+                    "type": "assistant_message",
+                    "tool_calls": [
+                        {"name": "read", "arguments": {"file_path": "a.txt"}},
+                        {"name": "write", "arguments": {"file_path": "b.rs"}},
+                        {"name": "edit", "arguments": {"file_path": "b.rs"}},
+                        {"name": "bash", "arguments": {"command": "ls"}},
+                    ]
+                }),
+            },
+            LogEvent {
+                seq: 2,
+                value: serde_json::json!({"type": "user_message", "content": "hi"}),
+            },
+        ];
+        let (reads, modified) = extract_file_ops(&events);
+        assert_eq!(reads, vec!["a.txt".to_string()]);
+        assert_eq!(modified, vec!["b.rs".to_string()], "the dedup keeps one");
+    }
+
+    #[test]
+    fn parse_boundary_rejects_the_bad_events() {
+        let bad_zero = LogEvent {
+            seq: 7,
+            value: serde_json::json!({
+                "v": 1,
+                "type": "compaction_summary",
+                "first_kept_seq": 0,
+                "summary": "s",
+            }),
+        };
+        assert!(parse_boundary(&bad_zero).is_none());
+        let good = LogEvent {
+            seq: 7,
+            value: serde_json::json!({
+                "v": 1,
+                "type": "compaction_summary",
+                "first_kept_seq": 3,
+                "summary": "the summary",
+                "read_files": ["a.txt"],
+                "modified_files": ["b.rs"],
+            }),
+        };
+        let b = parse_boundary(&good).unwrap();
+        assert_eq!(b.first_kept_seq, 3);
+        assert_eq!(b.read_files, vec!["a.txt".to_string()]);
+    }
+}

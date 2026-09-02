@@ -67,7 +67,9 @@ trackable and replayable from the log.
   No summary of the body. Correction 61 trims it head and tail:
   the compact caps and the full-pass clip keep the first half of
   the cap as the head and the rest as the tail. The marker names
-  the elided middle and points at the full record: the `tools.jsonl`
+  the elided middle and its exact character span (e.g.
+  `chars 25-375` for a 400-char body cut to 50) and points at the
+  full record: the `tools.jsonl`
   path, the call id, and a `jq` fetch command. A session without
   the log points at the inline event log instead. The system prompt
   carries the `Full tool records` block with the fetch recipe, so

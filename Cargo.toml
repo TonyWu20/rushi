@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "bin/claim",
     "bin/assemble",
+    "bin/compact",
     "bin/model",
     "bin/parse",
     "bin/route",

@@ -1065,8 +1065,18 @@ impl ExtHost {
             }
             let m = s.manifest.clone();
             if m.caps.iter().any(|c| c == "status") {
+                // The re-send set (docs/auto-compact-plan.md
+                // section 4.6): every usage-bearing assistant
+                // message, plus the compaction markers that carry
+                // the summary call's usage. The summary usage joins
+                // the cumulative totals; the marker without a usage
+                // object is not resent.
                 for (gi, e) in events.iter().enumerate() {
-                    if e.kind() == EventKind::AssistantMessage && e.get("usage").is_some() {
+                    let is_usage_msg =
+                        e.kind() == EventKind::AssistantMessage && e.get("usage").is_some();
+                    let is_compaction =
+                        e.kind() == EventKind::CompactionSummary && e.get("usage").is_some();
+                    if is_usage_msg || is_compaction {
                         if let Some(obj) = e.obj() {
                             self.send_op(
                                 i,

@@ -353,6 +353,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "compact"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "serde_json",
+ "tempfile",
+ "toml 0.7.8",
+]
+
+[[package]]
 name = "compact_str"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

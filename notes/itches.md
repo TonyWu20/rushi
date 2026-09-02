@@ -43,3 +43,24 @@ portable. The TUI copy (`port_file.rs`) supports only `const`,
 `required`, `properties`, `items`, and primitive `type` checks
 (string/integer/number/boolean/array/object). Do not grow the three
 copies in parallel.
+
+## The compact trigger math is a second copy (2026-09-03)
+
+`bin/compact` duplicates the trigger math and the cut walk of
+`bin/assemble` (phase-1 policy: no shared crate). The one-step
+predicted reading (`last + rate`), the `est_tokens` estimator, and
+the backward cut walk each live in both binaries. The estimator
+copy is noted in the `find_cut` doc comment. Keep the two copies in
+sync. Do not grow them in parallel.
+
+The trigger math joins the `LogLine` and validator copies as a
+promotion candidate for a shared `core`/`bin/common` crate.
+
+## The marker schemas join the validator list (2026-09-03)
+
+The three auto-compact marker schemas (`compaction_started`,
+`compaction_failed`, `compaction_summary`) join the `bin/log`
+hardcoded schema list and the `bin/claim` no-op list. The
+`bin/compact` binary does not validate: it pipes every marker
+through `bin/log`, the owner of the validator list. The
+`bin/tui` semantic parser gains the three `EventKind`s.

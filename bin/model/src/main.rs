@@ -101,27 +101,21 @@ fn main() {
         .or_else(|| val_str(model_root, "reasoning_effort"))
         .unwrap_or_else(|| "medium".to_string());
 
-    // "off" is not an API effort value; it normalizes to "none".
-    // The normalized value is what the request carries, and it is
-    // the value `--describe` reports.
-    let effort = if reasoning_effort.eq_ignore_ascii_case("off") {
-        "none".to_string()
-    } else {
-        reasoning_effort.clone()
-    };
-
     let api_key_env = val_str(mdl, "api_key_env").unwrap_or_else(|| "MODEL_API_KEY".to_string());
 
     let api_key = std::env::var(api_key_env).unwrap_or_default();
 
     if args.describe {
         // The resolved call config, one JSON object. The loop reads
-        // `thinking_level` and publishes it; nothing here touches
-        // the network or the session log.
+        // `thinking_level` and publishes it; the overflow guard reads
+        // `model_id` (the request model source, the model field of
+        // every assemble request). Nothing here touches the network
+        // or the session log.
         let out = serde_json::json!({
             "active": active_model,
-            "reasoning_effort": effort,
-            "thinking_level": thinking_level_for(&effort),
+            "model_id": model_name,
+            "reasoning_effort": normalize_effort(&reasoning_effort),
+            "thinking_level": thinking_level_for(&normalize_effort(&reasoning_effort)),
         });
         println!("{out}");
         return;
@@ -140,6 +134,12 @@ fn main() {
             std::process::exit(1);
         }
     };
+
+    // The config effort is the default. An optional request-level
+    // `reasoning_effort` wins: the compaction summary call carries
+    // its own (cheaper) effort (docs/auto-compact-plan.md 4.5).
+    let request_effort = request.get("reasoning_effort").and_then(|v| v.as_str());
+    let effort = resolve_effort(&reasoning_effort, request_effort);
 
     // Build API request
     let url = format!("{}/v1/responses", base_url);
@@ -179,6 +179,26 @@ fn main() {
             });
             println!("{}", error_event);
         }
+    }
+}
+
+/// "off" is not an API effort value; it normalizes to "none". The
+/// normalized value is what the request carries, and it is the
+/// value `--describe` reports.
+fn normalize_effort(effort: &str) -> String {
+    if effort.eq_ignore_ascii_case("off") {
+        "none".to_string()
+    } else {
+        effort.to_string()
+    }
+}
+
+/// The effective effort of one call: the request-level value wins
+/// over the config value. Both normalize "off" to "none".
+fn resolve_effort(config_effort: &str, request_effort: Option<&str>) -> String {
+    match request_effort {
+        Some(e) => normalize_effort(e),
+        None => normalize_effort(config_effort),
     }
 }
 
@@ -1139,5 +1159,15 @@ mod tests {
             "an unknown effort claims no thinking"
         );
         assert_eq!(thinking_level_for(""), 0);
+    }
+
+    /// An optional request-level effort wins over the config value;
+    /// the config value stands when the request carries none.
+    #[test]
+    fn resolve_effort_prefers_the_request_value() {
+        assert_eq!(resolve_effort("xhigh", None), "xhigh", "no request value: the config effort");
+        assert_eq!(resolve_effort("xhigh", Some("low")), "low", "the request value wins");
+        assert_eq!(resolve_effort("xhigh", Some("off")), "none", "the request off normalizes");
+        assert_eq!(resolve_effort("off", None), "none", "the config off normalizes");
     }
 }

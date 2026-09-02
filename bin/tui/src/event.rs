@@ -42,8 +42,22 @@ pub enum EventKind {
     /// automatic handoff: it summarized the session and seeded a new
     /// session with the summary. The event's `new_session` names the
     /// seeded session; an empty value means the summary call failed
-    /// and no session was seeded (correction 57).
+    /// and no session was seeded (correction 57). The marker is
+    /// legacy: the in-session compact (correction 63) no longer
+    /// records it.
     ContextExhausted,
+    /// The in-session auto-compact started. The summary call runs
+    /// while the marker is open. The renderer closes the marker at
+    /// the matching summary or failed event, or at the loop death
+    /// (docs/auto-compact-plan.md section 4.6).
+    CompactionStarted,
+    /// The in-session auto-compact succeeded. The summary and the
+    /// `first_kept_seq` boundary ride with the event; the log
+    /// projects through the boundary from here.
+    CompactionSummary,
+    /// The in-session auto-compact failed. The `last_user_seq` of
+    /// the marker anchors the threshold trigger cooldown.
+    CompactionFailed,
     /// `type` value outside the known vocabulary. Render raw JSON.
     UnknownType,
     /// Known `type` but `v` outside [`SUPPORTED_VERSIONS`] (or missing).
@@ -67,6 +81,9 @@ impl EventKind {
         EventKind::Error,
         EventKind::ExtStatus,
         EventKind::ContextExhausted,
+        EventKind::CompactionStarted,
+        EventKind::CompactionSummary,
+        EventKind::CompactionFailed,
     ];
 
     /// The wire `type` value for a semantic kind; `None` for fallback kinds.
@@ -82,6 +99,9 @@ impl EventKind {
             EventKind::Error => "error",
             EventKind::ExtStatus => "ext_status",
             EventKind::ContextExhausted => "context_exhausted",
+            EventKind::CompactionStarted => "compaction_started",
+            EventKind::CompactionSummary => "compaction_summary",
+            EventKind::CompactionFailed => "compaction_failed",
             EventKind::UnknownType | EventKind::UnsupportedVersion | EventKind::BadLine => {
                 return None
             }
@@ -102,6 +122,9 @@ impl EventKind {
             "error" => EventKind::Error,
             "ext_status" => EventKind::ExtStatus,
             "context_exhausted" => EventKind::ContextExhausted,
+            "compaction_started" => EventKind::CompactionStarted,
+            "compaction_summary" => EventKind::CompactionSummary,
+            "compaction_failed" => EventKind::CompactionFailed,
             _ => return None,
         })
     }
@@ -379,6 +402,9 @@ mod tests {
                         | EventKind::Error
                         | EventKind::ExtStatus
                         | EventKind::ContextExhausted
+                        | EventKind::CompactionStarted
+                        | EventKind::CompactionSummary
+                        | EventKind::CompactionFailed
                 ),
                 "type {wire} fell through to fallback"
             );
@@ -551,6 +577,41 @@ mod tests {
             .expect("line must parse");
         assert_eq!(e.kind(), EventKind::ContextExhausted);
         assert_eq!(e.get_str("new_session"), None);
+    }
+
+    /// The compact markers parse semantically. Their fields degrade
+    /// safely: missing numbers read as `None`, never crash (G5).
+    #[test]
+    fn compaction_marker_lines_are_semantic() {
+        let e = Event::parse_line(
+            r#"{"v":1,"type":"compaction_started","ts":"t","reason":"threshold","tokens_before":212992}"#,
+        )
+        .expect("line must parse");
+        assert_eq!(e.kind(), EventKind::CompactionStarted);
+        assert_eq!(e.get_str("reason"), Some("threshold"));
+        assert_eq!(e.get_i64("tokens_before"), Some(212_992));
+
+        let e = Event::parse_line(
+            r#"{"v":1,"type":"compaction_summary","ts":"t","summary":"s","first_kept_seq":312,"reason":"threshold","tokens_before":212992,"tokens_after":33000,"read_files":["a.txt"],"modified_files":["b.rs"]}"#,
+        )
+        .expect("line must parse");
+        assert_eq!(e.kind(), EventKind::CompactionSummary);
+        assert_eq!(e.get_i64("first_kept_seq"), Some(312));
+        assert_eq!(e.get_i64("tokens_after"), Some(33_000));
+
+        let e = Event::parse_line(
+            r#"{"v":1,"type":"compaction_failed","ts":"t","reason":"overflow","last_user_seq":41,"attempts":2,"detail":"the model returned an error stop"}"#,
+        )
+        .expect("line must parse");
+        assert_eq!(e.kind(), EventKind::CompactionFailed);
+        assert_eq!(e.get_i64("last_user_seq"), Some(41));
+
+        // The degraded form: no optional field crashes the parse.
+        let e = Event::parse_line(r#"{"v":1,"type":"compaction_started","ts":"t"}"#)
+            .expect("line must parse");
+        assert_eq!(e.kind(), EventKind::CompactionStarted);
+        assert_eq!(e.get_str("reason"), None);
+        assert_eq!(e.get_i64("tokens_before"), None);
     }
 
     #[test]

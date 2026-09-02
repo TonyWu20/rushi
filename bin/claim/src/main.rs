@@ -231,6 +231,50 @@ mod tests {
         assert_eq!(seq, 2);
     }
 
+    /// The three compaction marker types are no-ops for the state
+    /// machine (docs/auto-compact-plan.md section 4.1): they leave
+    /// the `awaiting_model` and `idle` tails unchanged.
+    #[test]
+    fn compaction_markers_leave_awaiting_model_unchanged() {
+        let markers = [
+            r#"{"v":1,"type":"compaction_started","ts":"t","reason":"threshold","tokens_before":212000}"#,
+            r#"{"v":1,"type":"compaction_failed","ts":"t","reason":"overflow","detail":"the summary call stopped with error","last_user_seq":3}"#,
+            r#"{"v":1,"type":"compaction_summary","ts":"t","summary":"s","first_kept_seq":1,"reason":"threshold","tokens_before":212000,"tokens_after":33000}"#,
+        ];
+        for m in &markers {
+            let log = format!(
+                "{}\n{}",
+                line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"go"})),
+                m
+            );
+            let (state, seq, pending) = derive_state(&log);
+            assert_eq!(state, "awaiting_model", "{m}");
+            assert_eq!(seq, 1, "the marker adds no user message");
+            assert!(pending.is_empty());
+        }
+    }
+
+    /// The markers keep an `idle` tail idle: a finished turn that
+    /// compacts in place stays idle, with no pending work.
+    #[test]
+    fn compaction_markers_leave_idle_unchanged() {
+        let done = line(
+            &serde_json::json!({
+                "v":1,"type":"assistant_message","ts":"t","content":"done","tool_calls":[]
+            }),
+        );
+        for m in [
+            r#"{"v":1,"type":"compaction_started","ts":"t","reason":"overflow","tokens_before":0}"#,
+            r#"{"v":1,"type":"compaction_failed","ts":"t","reason":"threshold","detail":"d","last_user_seq":0}"#,
+            r#"{"v":1,"type":"compaction_summary","ts":"t","summary":"s","first_kept_seq":2,"reason":"overflow","tokens_before":212000}"#,
+        ] {
+            let log = format!("{}\n{}", done, m);
+            let (state, _, pending) = derive_state(&log);
+            assert_eq!(state, "idle", "{m}");
+            assert!(pending.is_empty());
+        }
+    }
+
     #[test]
     fn error_after_exhaustion_stays_exhausted() {
         // The handoff flow logs a failed summary error before the

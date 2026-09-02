@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["v", "type", "ts", "reason", "detail", "last_user_seq"],
+  "properties": {
+    "v": { "type": "integer", "const": 1 },
+    "type": { "type": "string", "const": "compaction_failed" },
+    "ts": { "type": "string", "format": "date-time" },
+    "reason": {
+      "type": "string",
+      "enum": ["threshold", "overflow"],
+      "description": "which trigger path the failed summary call belonged to. The enum keyword is outside the validator subset; the producer (bin/compact) enforces it."
+    },
+    "detail": {
+      "type": "string",
+      "description": "the failure detail of the last summary attempt."
+    },
+    "last_user_seq": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "the 1-based log sequence of the log's last user_message at failure, or 0 when the log holds none. The threshold check skips while the log's last user_message seq is at or below this value; the next user message re-arms it. The minimum keyword is outside the validator subset; the producer enforces it."
+    }
+  }
+}

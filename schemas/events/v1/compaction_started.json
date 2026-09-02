@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["v", "type", "ts", "reason", "tokens_before"],
+  "properties": {
+    "v": { "type": "integer", "const": 1 },
+    "type": { "type": "string", "const": "compaction_started" },
+    "ts": { "type": "string", "format": "date-time" },
+    "reason": {
+      "type": "string",
+      "enum": ["threshold", "overflow"],
+      "description": "which trigger fired. The enum keyword is outside the validator subset; the producer (bin/compact) enforces it."
+    },
+    "tokens_before": {
+      "type": "integer",
+      "description": "the measured input tokens at trigger time. Zero when the trigger fired without a trigger-based reading."
+    }
+  }
+}
