@@ -31,19 +31,6 @@ use crate::app::App;
 use crate::event::{Event, EventKind};
 use crate::highlight;
 
-/// The input-area border colors, one per thinking level. Level 0 is
-/// the idle gray (no thinking published); higher levels warm the
-/// border from blue through green toward the "thinking" green.
-fn thinking_border(level: u32) -> Color {
-    match level {
-        0 => Color::DarkGray,
-        1 => Color::Blue,
-        2 => Color::Cyan,
-        3 => Color::Green,
-        _ => Color::Yellow,
-    }
-}
-
 /// Map the frame spec's border choice to a ratatui border type. The
 /// default (a `None` border on the spec) is the rounded corners.
 fn border_style(b: crate::ext::FrameBorderStyle) -> BorderType {
@@ -160,46 +147,6 @@ fn result_status(value: Option<&serde_json::Value>, err: bool) -> String {
         (None, true) => "error".to_string(),
         (None, false) => "ok".to_string(),
     }
-}
-
-/// Extract display text from a tool_result value, most readable
-/// first: `text`, then `stdout` + `stderr`, then a plain string
-/// value, then full compact JSON as the last resort. The extraction
-/// takes the whole value: the cap applies at render time, where the
-/// body folds to the preview (docs/tui-tool-display-port.md). JSON
-/// highlighting is applied at render time when the text parses as a
-/// complete JSON document.
-fn result_text(value: Option<&serde_json::Value>, err: bool) -> String {
-    let Some(v) = value else {
-        return if err {
-            "[missing value]".to_string()
-        } else {
-            String::new()
-        };
-    };
-    if let Some(t) = v.get("text").and_then(|x| x.as_str()) {
-        return t.to_string();
-    }
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(so) = v.get("stdout").and_then(|x| x.as_str()) {
-        if !so.is_empty() {
-            parts.push(so.to_string());
-        }
-    }
-    if let Some(se) = v.get("stderr").and_then(|x| x.as_str()) {
-        if !se.is_empty() {
-            parts.push(format!("[stderr]\n{se}"));
-        }
-    }
-    if !parts.is_empty() {
-        return parts.join("\n");
-    }
-    if let Some(s) = v.as_str() {
-        return s.to_string();
-    }
-    // Last resort: compact JSON so nothing is hidden. No cap: the
-    // value is displayed in full.
-    v.to_string()
 }
 
 /// The token count as a compact `k` figure: 212992 renders as
@@ -797,27 +744,6 @@ fn wrap_styled(segs: Vec<(Style, String)>, width: usize) -> Vec<Line<'static>> {
     out
 }
 
-/// Wrap markdown-like message content, preserving the highlight
-/// module's styles per segment. Fence state spans the hard lines; a
-/// trailing newline is dropped like every other body render. Segments
-/// of one hard line wrap continuously (one visual line per wrap,
-/// not one per token). `base` is the foreground of the unstyled
-/// plain-text runs (the capability-aware prose color); styled runs
-/// (headings, quotes, lists, ...) keep their own styles.
-fn wrap_markdown(text: &str, wrap_w: usize, base: Style) -> Vec<Line<'static>> {
-    let mut out: Vec<Line<'static>> = Vec::new();
-    let mut fence = false;
-    for hard in text.trim_end_matches('\n').split('\n') {
-        if hard.is_empty() {
-            out.push(Line::default());
-            continue;
-        }
-        let segs = with_plain_base(highlight::markdown_line(hard, &mut fence), base);
-        out.extend(wrap_flow(segs, wrap_w));
-    }
-    out
-}
-
 /// The marker-free markdown render (docs/tui-markdown-render.md):
 /// the styles in, the markers out. The fence state spans the hard
 /// lines; consecutive table rows draw as a box-drawing grid
@@ -918,20 +844,6 @@ fn thinking_text(reasoning: Option<&Vec<serde_json::Value>>) -> Option<String> {
     } else {
         Some(parts.join("\n"))
     }
-}
-
-/// Wrap JSON tool-result text with the highlight module's JSON styles.
-fn wrap_json(text: &str, wrap_w: usize, base: Style) -> Vec<Line<'static>> {
-    let mut out: Vec<Line<'static>> = Vec::new();
-    for hard in text.trim_end_matches('\n').split('\n') {
-        if hard.is_empty() {
-            out.push(Line::default());
-            continue;
-        }
-        let segs = with_plain_base(highlight::json_line(hard), base);
-        out.extend(wrap_flow(segs, wrap_w));
-    }
-    out
 }
 
 /// Give the style-free segments of a highlight flow a `base`
@@ -2861,10 +2773,12 @@ mod tests {
         // The box cells carry the light box background; the token
         // colors are the foregrounds. Compare fg + modifiers, not
         // the full style (the bg is the box role). Each cell is
-        // padded to the pane width: trim before comparing.
-        let key = highlight::json_key_style();
-        let num = highlight::json_number_style();
-        let nul = highlight::json_null_style();
+        // padded to the pane width: trim before comparing. The
+        // expected styles are the palette roles of `json_line_p`.
+        let p = app.palette();
+        let key = p.style(crate::color::Role::JsonKey, Modifier::BOLD);
+        let num = p.style(crate::color::Role::JsonNumber, Modifier::empty());
+        let nul = p.style(crate::color::Role::JsonNull, Modifier::DIM);
         let spans: Vec<(Style, &str)> = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| (s.style, s.content.as_ref())))
@@ -3804,7 +3718,6 @@ mod tests {
 #[cfg(test)]
 mod cursor_span_tests {
     use super::cursor_line_spans;
-    use super::thinking_border;
     use super::thinking_text;
     use super::wrap_thinking;
     use ratatui::style::{Color, Modifier};
@@ -3853,24 +3766,6 @@ mod cursor_span_tests {
         // On-char on an empty line degrades to the blank cell.
         let (_b, c, _a) = cursor_line_spans("", 0, true);
         assert_eq!(c, ' ');
-    }
-
-    #[test]
-    fn thinking_border_maps_the_level_palette() {
-        // The docs/tui.md section 7.2 table: 0 gray (the idle
-        // default, no thinking published), 1 blue, 2 cyan, 3 green,
-        // 4+ yellow. The input-area border and the working-row
-        // spinner both render in this color.
-        assert_eq!(thinking_border(0), Color::DarkGray);
-        assert_eq!(thinking_border(1), Color::Blue);
-        assert_eq!(thinking_border(2), Color::Cyan);
-        assert_eq!(thinking_border(3), Color::Green);
-        assert_eq!(thinking_border(4), Color::Yellow);
-        assert_eq!(
-            thinking_border(9),
-            Color::Yellow,
-            "4 and up collapse into the highest bucket"
-        );
     }
 
     #[test]

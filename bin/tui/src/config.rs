@@ -678,7 +678,6 @@ plain_text = "#cdd6f4"
         let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
         use crate::tool_display::*;
         assert_eq!(cfg.tool_display, ToolDisplay::preset(Preset::OpenCode));
-        assert_eq!(cfg.tool_display.effective_preset(), Preset::OpenCode);
     }
 
     /// A preset table with no overrides keeps the preset value table
@@ -701,13 +700,12 @@ preset = "verbose"
         assert_eq!(cfg.tool_display, ToolDisplay::preset(Preset::Verbose));
         assert_eq!(cfg.tool_display.preview_lines, 12);
         assert_eq!(cfg.tool_display.bash_collapsed_lines, 20);
-        assert_eq!(cfg.tool_display.effective_preset(), Preset::Verbose);
     }
 
-    /// A field override drops the preset to `Custom`: the override
-    /// wins over the preset table value.
+    /// A field override wins over the preset table value: the
+    /// override stays, the untouched fields keep the preset values.
     #[test]
-    fn tool_display_override_drops_to_custom() {
+    fn tool_display_override_wins_over_preset() {
         let dir = tempfile::tempdir().unwrap();
         write(
             dir.path(),
@@ -728,7 +726,6 @@ preview_lines = 12
         // The untouched fields keep the preset values.
         assert_eq!(cfg.tool_display.search_mode, SearchMode::Hidden);
         assert_eq!(cfg.tool_display.bash_mode, OutputMode::Preview);
-        assert_eq!(cfg.tool_display.effective_preset(), Preset::Custom);
     }
 
     /// An unknown preset name is a hard error at load.

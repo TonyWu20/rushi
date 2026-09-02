@@ -45,21 +45,6 @@ pub enum Preset {
     /// Larger previews: read and search show 12 preview lines, bash
     /// 20.
     Verbose,
-    /// The config values match no preset: the user overrode a field.
-    Custom,
-}
-
-impl Preset {
-    /// The wire name of the preset in the config (`opencode`,
-    /// `balanced`, `verbose`).
-    pub fn key(self) -> &'static str {
-        match self {
-            Preset::OpenCode => "opencode",
-            Preset::Balanced => "balanced",
-            Preset::Verbose => "verbose",
-            Preset::Custom => "custom",
-        }
-    }
 }
 
 /// Parse one preset name from the config. Case-insensitive.
@@ -82,17 +67,6 @@ pub enum OutputMode {
     Preview,
 }
 
-impl OutputMode {
-    /// The wire name in the config (`hidden`, `summary`, `preview`).
-    pub fn key(self) -> &'static str {
-        match self {
-            OutputMode::Hidden => "hidden",
-            OutputMode::Summary => "summary",
-            OutputMode::Preview => "preview",
-        }
-    }
-}
-
 pub fn parse_output_mode(s: &str) -> Option<OutputMode> {
     Some(match s.trim().to_ascii_lowercase().as_str() {
         "hidden" => OutputMode::Hidden,
@@ -110,17 +84,6 @@ pub enum SearchMode {
     Hidden,
     Count,
     Preview,
-}
-
-impl SearchMode {
-    /// The wire name in the config (`hidden`, `count`, `preview`).
-    pub fn key(self) -> &'static str {
-        match self {
-            SearchMode::Hidden => "hidden",
-            SearchMode::Count => "count",
-            SearchMode::Preview => "preview",
-        }
-    }
 }
 
 pub fn parse_search_mode(s: &str) -> Option<SearchMode> {
@@ -141,17 +104,6 @@ pub enum DiffView {
     Auto,
     Split,
     Unified,
-}
-
-impl DiffView {
-    /// The wire name in the config (`auto`, `split`, `unified`).
-    pub fn key(self) -> &'static str {
-        match self {
-            DiffView::Auto => "auto",
-            DiffView::Split => "split",
-            DiffView::Unified => "unified",
-        }
-    }
 }
 
 pub fn parse_diff_view(s: &str) -> Option<DiffView> {
@@ -222,19 +174,7 @@ impl ToolDisplay {
                 expanded_preview_max_lines: 4000,
                 diff_view: DiffView::Auto,
             },
-            Preset::Custom => Self::preset(Preset::OpenCode),
         }
-    }
-
-    /// The preset whose value table equals this one; `Custom` when a
-    /// field was overridden.
-    pub fn effective_preset(&self) -> Preset {
-        for p in [Preset::OpenCode, Preset::Balanced, Preset::Verbose] {
-            if Self::preset(p) == *self {
-                return p;
-            }
-        }
-        Preset::Custom
     }
 
     /// The split threshold of the `auto` diff layout: split when the
@@ -1031,26 +971,6 @@ mod tests {
         assert_eq!(v.bash_mode, OutputMode::Preview);
         assert_eq!(v.preview_lines, 12);
         assert_eq!(v.bash_collapsed_lines, 20);
-    }
-
-    #[test]
-    fn effective_preset_detects_the_tables() {
-        assert_eq!(
-            ToolDisplay::preset(Preset::OpenCode).effective_preset(),
-            Preset::OpenCode
-        );
-        assert_eq!(
-            ToolDisplay::preset(Preset::Balanced).effective_preset(),
-            Preset::Balanced
-        );
-        assert_eq!(
-            ToolDisplay::preset(Preset::Verbose).effective_preset(),
-            Preset::Verbose
-        );
-        // An override drops the preset to `Custom`.
-        let mut c = ToolDisplay::preset(Preset::OpenCode);
-        c.preview_lines = 5;
-        assert_eq!(c.effective_preset(), Preset::Custom);
     }
 
     #[test]

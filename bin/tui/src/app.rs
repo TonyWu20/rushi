@@ -545,19 +545,6 @@ impl App {
         &self.events
     }
 
-    /// Map tool_call id -> tool name, for result-line rendering.
-    /// Pure presentation lookup, not decision logic.
-    pub fn call_names(&self) -> HashMap<String, String> {
-        let mut m = HashMap::new();
-        for e in &self.events {
-            if e.kind() == EventKind::ToolCall {
-                if let (Some(id), Some(name)) = (e.get_str("id"), e.get_str("name")) {
-                    m.insert(id.to_string(), name.to_string());
-                }
-            }
-        }
-        m
-    }
 
     /// Map tool_call id -> (name, arguments), for result rendering.
     /// The arguments are the call arguments verbatim: the write
