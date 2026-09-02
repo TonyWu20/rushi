@@ -15,3 +15,7 @@ test.txt
 
 ## Python bytecode
 __pycache__/
+
+## Embedded reference repos (external checkouts; never part of the
+## distribution, so they must never be swept in by `git add -A`)
+scratch/refs/pi-vim
