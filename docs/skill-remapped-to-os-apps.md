@@ -1,7 +1,12 @@
 # OS + Applications: the base distribution and project-specific tools
 
-Status: Proposal (2026-09-02). Not built. Do not build until the
-human approves.
+Status: Approved (2026-09-03). Applied so far: the application
+scripts sit on the agent-visible path (`scripts/`), and each of the
+four aligned apps self-documents via `--help` (`band_match`,
+`timestamp_compare`, `capture-thinking-border`, `verify-reattach`);
+no SKILL.md exists. Not built yet: the `tools --list` catalog and
+the TUI `/`-window (section 5); the fenced-host failure reporting
+audit (section 6).
 
 Seeded from concrete friction this session: the PTY-capture /
 TUI-verify procedure was inlined three times before it consolidated

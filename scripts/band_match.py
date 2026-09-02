@@ -1,16 +1,44 @@
-"""Band-matched comparison of model round-trip time:
-harness sessions/better-ui-colors_h1 vs ALL pi session records.
+#!/usr/bin/env python3
+r"""band_match: what the harness-vs-pi model-time comparison shows.
 
-Harness: assistant_message ts = response completion (1s precision).
-  model_time = ts(assistant_i) - ts(last prior tool_result | user_message)
-pi: assistant message ts = request start (ms precision).
-  model_time = ts(last toolResult) - ts(assistant) - tool_exec_estimate
-  (Agent tools: details.durationMs; fast tools: 0.3s allowance each;
-   bash groups: excluded (exec unknown); ask_user_question turns: excluded)
+An application (docs/skill-remapped-to-os-apps.md sections 1-4): a
+project-specific, short-lived command on the agent-visible path
+(`scripts/`), needed only when re-checking harness-vs-pi model
+latency (`notes/harness-vs-pi-model-latency.md`). It is not in the
+base distribution. Discovery is on demand: `ls scripts/`, then this
+`--help`. There is no SKILL.md: the interface below is the
+documentation.
+
+WHAT IT DOES
+  Band-matched comparison of model round-trip time between one
+  harness session log and the pi session records.
+    - harness: `assistant_message.ts` = response completion (1s).
+      model_time = ts(assistant_i) - ts(last prior tool_result).
+    - pi: assistant ts = request start (ms).
+      model_time = ts(last toolResult) - ts(assistant) - tool exec
+      (Agent tools: `details.durationMs`; fast tools: a 0.3s
+      allowance each; bash groups and ask_user_question turns:
+      excluded).
+  Prints: model time by input band, the latency floor
+  (out < 300 tokens), matched pairs, throughput, and the same-day
+  pi sample.
+
+USAGE
+  band_match.py HARNESS_EVENTS [--pi-dir PATH]
+
+EXAMPLES
+  # the 2026-08-31 analysis (notes/harness-vs-pi-model-latency.md):
+  band_match.py sessions/better-ui-colors_h1/events.jsonl
+  # a different pi session store:
+  band_match.py sessions/x/events.jsonl --pi-dir /tmp/pi-sessions
 """
-import json, os, statistics, glob, sys
+import argparse
+import glob
+import json
+import os
+import statistics
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime
 
 
 def pctl(a, q):
@@ -95,33 +123,41 @@ def band_row(rows):
     return dict(n=len(rows), med=pctl(g, .5), p90=pctl(g, .9), max=max(g) if g else None)
 
 
+def band_table(rows_a, rows_b, label_a, label_b):
+    print(f"band     {label_a:24s}  {label_b}")
+    for b in range(0, 7):
+        lo, hi = b * 10000, b * 10000 + 9999
+        ra = [r for r in rows_a if r['intok'] and lo <= r['intok'] < hi]
+        rb = [r for r in rows_b if r['intok'] and lo <= r['intok'] < hi]
+        a, b_ = band_row(ra), band_row(rb)
+        sa = f"n={a['n']:3d} med={a['med']:6.1f} p90={a['p90']:6.1f}" if ra else 'n=  0'
+        sb = f"n={b_['n']:3d} med={b_['med']:6.1f} p90={b_['p90']:6.1f}" if rb else 'n=  0'
+        print(f"{b*10:2d}-{b*10+1}k  {sa:24s}  {sb}")
+
+
 def main():
-    h1 = harness_turns(sys.argv[1])
-    files = sorted(glob.glob(os.path.expanduser('~/.pi/agent/sessions/*/*.jsonl')))
+    ap = argparse.ArgumentParser(
+        description="Band-matched comparison of model round-trip time: "
+                    "one harness session log vs the pi session records.")
+    ap.add_argument("harness_events",
+                   help="the harness session events.jsonl")
+    ap.add_argument("--pi-dir", default=os.path.expanduser("~/.pi/agent/sessions"),
+                    help="the pi session store (default: ~/.pi/agent/sessions)")
+    args = ap.parse_args()
+
+    h1 = harness_turns(args.harness_events)
+    files = sorted(glob.glob(os.path.join(
+        os.path.expanduser(args.pi_dir), "*", "*.jsonl")))
     pt = pi_turns(files)
     print(f"h1 turns: {len(h1)}   pi clean turns: {len(pt)} across {len(files)} files")
 
     print('\n--- model time by input band ---')
-    print('band     h1(n/med/p90)                  pi(n/med/p90)')
-    for b in range(0, 7):
-        lo, hi = b * 10000, b * 10000 + 9999
-        hr = [r for r in h1 if r['intok'] and lo <= r['intok'] < hi]
-        pr = [r for r in pt if r['intok'] and lo <= r['intok'] < hi]
-        h, p = band_row(hr), band_row(pr)
-        hs = f"n={h['n']:3d} med={h['med']:6.1f} p90={h['p90']:6.1f}" if hr else 'n=  0'
-        ps = f"n={p['n']:3d} med={p['med']:6.1f} p90={p['p90']:6.1f}" if pr else 'n=  0'
-        print(f"{b*10:2d}-{b*10+1}k  {hs:24s}  {ps}")
+    band_table(h1, pt, "h1(n/med/p90)", "pi(n/med/p90)")
 
     print('\n--- latency floor (out < 300 tokens) by input band ---')
-    print('band     h1(n/med/p90)                  pi(n/med/p90)')
-    for b in range(0, 7):
-        lo, hi = b * 10000, b * 10000 + 9999
-        hr = [r for r in h1 if r['intok'] and r.get('out') is not None and r['out'] < 300 and lo <= r['intok'] < hi]
-        pr = [r for r in pt if r['intok'] and r.get('out') is not None and r['out'] < 300 and lo <= r['intok'] < hi]
-        h, p = band_row(hr), band_row(pr)
-        hs = f"n={h['n']:3d} med={h['med']:6.1f} p90={h['p90']:6.1f}" if hr else 'n=  0'
-        ps = f"n={p['n']:3d} med={p['med']:6.1f} p90={p['p90']:6.1f}" if pr else 'n=  0'
-        print(f"{b*10:2d}-{b*10+1}k  {hs:24s}  {ps}")
+    hf = [r for r in h1 if r.get('out') is not None and r['out'] < 300]
+    pf = [r for r in pt if r.get('out') is not None and r['out'] < 300]
+    band_table(hf, pf, "h1(n/med/p90)", "pi(n/med/p90)")
 
     print('\n--- matched pairs (|din|<=3k, |dout|<=max(10%,300)) ---')
     ratios = []

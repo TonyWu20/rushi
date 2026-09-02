@@ -155,7 +155,7 @@ Every row is a check.
 | Config edit | The effort changes between steps | The next step publishes the new level. |
 | Unit, loop side | The mapping table in section 2 | `bin/model` tests cover every documented effort, case-insensitivity, and the unknown-effort fallback. |
 | Unit, TUI side | Last value wins, out-of-range clamp, non-integer fallback, watch-event update, session switch | `bin/tui` tests in `app.rs` (`thinking_level_*`) and `render.rs` (`thinking_border_maps_the_level_palette`). |
-| PTY capture | `scratch/capture-thinking-border.py` runs the TUI under a pty against a marker log and a marker-free log | The marker session emits the yellow-family SGR; the plain session emits gray and no yellow. |
+| PTY capture | `scripts/capture-thinking-border.py` runs the TUI under a pty against a marker log and a marker-free log | The marker session emits the yellow-family SGR; the plain session emits gray and no yellow. |
 | Statusline dump | The same pty run with the reference statusline enabled (`scratch/ext-only` layer) | The footer renders its usage pill and holds no `model_thinking` or `loop_phase` text. The 2026-09-02 revision dropped the `ext_status` dump from both statusline implementations. |
 
 ## 6. What this does not do
@@ -275,7 +275,7 @@ the publish in the config section. This doc lands in
   sent, and the 0-4 level.
 - One loop step appends exactly one `model_thinking` event. A
   second step appends none.
-- `scratch/capture-thinking-border.py` passes: the marker log
+- `scripts/capture-thinking-border.py` passes: the marker log
   renders a yellow input-area border, the marker-free log
   renders gray.
 - With the reference statusline enabled, the footer shows no

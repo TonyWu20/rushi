@@ -1,18 +1,40 @@
-"""Final comparison: harness session vs pi session, model-interaction timing.
+#!/usr/bin/env python3
+r"""timestamp_compare: model-interaction timing, one harness session
+vs one or more pi sessions.
 
-Semantics (verified in source and data):
-- Harness events.jsonl: assistant_message ts = model response COMPLETION.
-  tool_call ts ~= tool_result ts at start; tool_result ts = tool completion.
-  Second-precision timestamps.
-- pi session jsonl: assistant message ts = request START (6-12 ms after the
-  prior event). toolResult ts = tool completion (ms precision).
-  Agent tool results carry details.durationMs = subagent wall time.
+An application (docs/skill-remapped-to-os-apps.md sections 1-4): a
+project-specific, short-lived command on the agent-visible path
+(`scripts/`), needed only when re-checking harness-vs-pi model
+latency (`notes/harness-vs-pi-model-latency.md`). It is not in the
+base distribution. Discovery is on demand: `ls scripts/`, then this
+`--help`. There is no SKILL.md: the interface below is the
+documentation.
 
-Metrics:
-- Harness model time  = ts(assistant) - ts(last prior tool_result | user_message)
-- pi model time       = ts(last toolResult of group) - ts(assistant) - tool_exec
+TIMING SEMANTICS (verified in source and data)
+  - Harness `events.jsonl`: `assistant_message.ts` = model response
+    COMPLETION (1s precision). `tool_result.ts` = tool completion.
+    model time = ts(assistant) - ts(last prior tool_result).
+  - pi session jsonl: the assistant message ts = request START
+    (ms precision). `toolResult.ts` = tool completion.
+    model time = ts(last toolResult) - ts(assistant) - tool exec
+    (Agent tools: `details.durationMs`; fast tools: a 0.3s
+    allowance each; bash groups excluded; ask_user_question turns
+    excluded).
+  Prints per source: model time, tool exec, user-started turns,
+  model time by input band, and response throughput.
+
+USAGE
+  timestamp_compare.py HARNESS_EVENTS [PI_FILE]...
+
+EXAMPLES
+  timestamp_compare.py sessions/better-ui-colors_h1/events.jsonl \
+      ~/.pi/agent/sessions/--home-tony-programming-rust-unix-harness--/01a057dd.jsonl
 """
-import json, os, statistics, sys
+import argparse
+import json
+import os
+import statistics
+import sys
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -56,7 +78,8 @@ def print_block(name, note, model_gaps, tool_gaps, user_turns, bands, extra=None
         print(extra)
 
 
-def harness_report(path):
+def harness_report(path, label=None):
+    label = label or os.path.basename(path)
     lines = [json.loads(l) for l in open(path) if l.strip()]
     events = [(parse(e['ts']), e) for e in lines]
     n = len(events)
@@ -94,7 +117,7 @@ def harness_report(path):
             tool_gaps.append((last_res - call_ts).total_seconds())
     tp = [o / g for it, o, g in in_out]
     extra = f"resp tok/s (out/gap, gap>5s): med={fmt(pctl(tp, .5), '')} p10={fmt(pctl(tp, .1), '')}" if tp else ''
-    print_block('harness better-ui-colors_h1', '(ts=completion, 1s precision)', model_gaps, tool_gaps, user_turns, bands, extra)
+    print_block('harness ' + label, '(ts=completion, 1s precision)', model_gaps, tool_gaps, user_turns, bands, extra)
     return model_gaps, tool_gaps
 
 
@@ -166,7 +189,18 @@ def pi_report(path):
     return model_gaps, tool_gaps
 
 
-if __name__ == '__main__':
-    harness_report(sys.argv[1])
-    for p in sys.argv[2:]:
+def main():
+    ap = argparse.ArgumentParser(
+        description="Model-interaction timing: one harness session log "
+                    "vs one or more pi session records.")
+    ap.add_argument("harness_events", help="the harness session events.jsonl")
+    ap.add_argument("pi_files", nargs="*",
+                    help="pi session jsonl files (optional)")
+    args = ap.parse_args()
+    harness_report(args.harness_events)
+    for p in args.pi_files:
         pi_report(p)
+
+
+if __name__ == '__main__':
+    main()

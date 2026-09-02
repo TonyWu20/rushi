@@ -3,7 +3,7 @@
 Source data:
 - Harness: `sessions/better-ui-colors_h1/events.jsonl` (1441 events at analysis time, loop still live at 15:09Z).
 - pi: `~/.pi/agent/sessions/--home-tony-programming-rust-unix-harness--/*.jsonl` (this directory).
-- Repro scripts: `scratch/timestamp_compare.py`, `scratch/band_match.py`.
+- Repro scripts: `scripts/timestamp_compare.py`, `scripts/band_match.py`.
 - Both clients hit the same backend: sglang @ `127.0.0.1:30000`, model `Qwen3.8-27B-NVFP4-RTX5090-DSPARK` (262k ctx, fp8 KV, `max_running_requests=4`, fcfs, chunked prefill 2048). Confirmed in `config.toml` and `~/.pi/agent/models.json`.
 
 ## Timestamp semantics (verified in source)

@@ -1,13 +1,42 @@
 #!/usr/bin/env python3
-"""Capture the SGR codes the tui emits for the input-area border.
+r"""capture-thinking-border: the marker-vs-plain SGR comparison.
 
-Run the built tui under a pseudo-terminal against two sessions:
-one whose log holds a `model_thinking` ext_status (value 4, the
-yellow bucket) and one with no marker (the default, gray). Compare
-the emitted color sequences: the marker session must carry the
-yellow-family codes the other lacks. The TUI is SIGKILLed after a
-few frames; the stream, not the quit gate, is under test.
+An application (docs/skill-remapped-to-os-apps.md sections 1-4): a
+project-specific, short-lived command on the agent-visible path
+(`scripts/`), needed only while the TUI thinking-level border is
+under development (`docs/tui-thinking-level-input-box.md`). It is
+not in the base distribution. Discovery is on demand: `ls scripts/`,
+then this `--help`. There is no SKILL.md: the interface below is
+the documentation.
+
+The general pty-capture procedure is the reference application,
+`scripts/tui-capture.py`; this script is its two-session
+specialization: it compares the SGR color families the input-area
+border emits for a marker log against a marker-free log.
+
+WHAT IT DOES
+  Runs the built `tui` under a pseudo-terminal against two sessions:
+  one whose log holds a `model_thinking` ext_status (value 4, the
+  yellow bucket) and one with no marker (the default, gray). It
+  classifies every emitted SGR sequence into color families and
+  checks: the marker session carries yellow-family codes; the plain
+  session carries gray and no yellow. The TUI is SIGKILLed after a
+  few frames; the stream, not the quit gate, is under test.
+  Exit 0 on PASS, 1 on FAIL.
+
+USAGE
+  capture-thinking-border.py [--repo PATH] [--bin PATH]
+                            [--marker-session NAME] [--plain-session NAME]
+                            [--cols N] [--rows N] [--seconds N]
+
+EXAMPLES
+  # the default: repo-local sessions, target/debug/tui:
+  capture-thinking-border.py
+  # a release binary, custom session names:
+  capture-thinking-border.py --bin ../target/release/tui \
+      --marker-session think-yellow --plain-session think-gray
 """
+import argparse
 import fcntl
 import os
 import pty
@@ -18,23 +47,21 @@ import sys
 import termios
 import time
 
-ROOT = "/home/tony/programming/rust-unix-harness"
-BIN = os.path.join(ROOT, "target/debug/tui")
-MARKER_SESSION = "scratch-thinking-publish"
-PLAIN_SESSION = "scratch-thinking-none"
-COLS, ROWS = 100, 30
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(HERE)
+
 WATCH_SECONDS = 6.0
 
 
-def capture(session: str) -> bytes:
+def capture(bin_path, session, repo, cols, rows, watch_seconds):
     pid, master = pty.fork()
     if pid == 0:
-        os.chdir(ROOT)
+        os.chdir(repo)
         env = dict(os.environ)
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
-        os.execve(BIN, [BIN, session], env)
-    winsz = struct.pack("hhhh", ROWS, COLS, 0, 0)
+        os.execve(bin_path, [bin_path, session], env)
+    winsz = struct.pack("hhhh", rows, cols, 0, 0)
     fcntl.ioctl(master, termios.TIOCSWINSZ, winsz)
     raw = bytearray()
     start = time.monotonic()
@@ -48,7 +75,7 @@ def capture(session: str) -> bytes:
             if not chunk:
                 break
             raw.extend(chunk)
-        if time.monotonic() - start > WATCH_SECONDS:
+        if time.monotonic() - start > watch_seconds:
             try:
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
@@ -106,15 +133,36 @@ def sgr_families(raw: bytes) -> dict:
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="Compare the SGR color families the tui input-area "
+                    "border emits for a marker log and a marker-free log.")
+    ap.add_argument("--repo", default=REPO,
+                    help="the repo root (default: the parent of scripts/)")
+    ap.add_argument("--bin", default=None,
+                    help="the tui binary to run (default: $repo/target/debug/tui)")
+    ap.add_argument("--marker-session", default="scratch-thinking-publish",
+                    help="the session with a model_thinking marker in its log")
+    ap.add_argument("--plain-session", default="scratch-thinking-none",
+                    help="the session with no marker (the default border)")
+    ap.add_argument("--cols", type=int, default=100)
+    ap.add_argument("--rows", type=int, default=30)
+    ap.add_argument("--seconds", type=float, default=WATCH_SECONDS,
+                    help="how long to watch each run before SIGKILL")
+    args = ap.parse_args()
+    if args.bin is None:
+        args.bin = os.path.join(args.repo, "target", "debug", "tui")
+
     # A session with no marker in the log: the default gray border.
-    plain_dir = os.path.join(ROOT, "sessions", PLAIN_SESSION)
+    plain_dir = os.path.join(args.repo, "sessions", args.plain_session)
     os.makedirs(plain_dir, exist_ok=True)
     if not os.path.exists(os.path.join(plain_dir, "events.jsonl")):
         with open(os.path.join(plain_dir, "events.jsonl"), "w") as f:
             f.write('{"v":1,"type":"user_message","ts":"2026-09-01T00:00:00Z","content":"hello"}\n')
 
-    marker = sgr_families(capture(MARKER_SESSION))
-    plain = sgr_families(capture(PLAIN_SESSION))
+    marker = sgr_families(capture(args.bin, args.marker_session, args.repo,
+                                  args.cols, args.rows, args.seconds))
+    plain = sgr_families(capture(args.bin, args.plain_session, args.repo,
+                                 args.cols, args.rows, args.seconds))
 
     for name, cap in [("marker=4 (expect yellow)", marker), ("no marker (expect gray)", plain)]:
         print(f"== {name}: {len(cap['counts'])} distinct SGR sequences")
