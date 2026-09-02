@@ -40,6 +40,15 @@ struct Args {
     /// to, inclusive. Required with `--summary-input`.
     #[arg(long)]
     up_to: Option<usize>,
+
+    /// The follow-queue turn flag (docs/tui-pending-user-messages.md
+    /// stage 2): inject the pending `follow` user messages into the
+    /// model input. Without the flag, follow messages stay out of
+    /// the input: they wait for a turn restart. Steer messages
+    /// (the missing field) always ride the input, in-flight step
+    /// included.
+    #[arg(long)]
+    inject_follow: bool,
 }
 
 struct ModelSettings {
@@ -1059,6 +1068,32 @@ fn compact_candidate(
     build_items(&sel, keep, caps, clip_chars, &drop_pairs, ptrs)
 }
 
+/// The delivery-queue gate of the user event (docs/tui-pending-user-
+/// messages.md stage 2). Returns `Some(text)` when the event rides
+/// the model input, `None` when it stays out. `follow` messages
+/// ride only on a turn restart (`inject_follow`); the missing field
+/// means steer, and steer always rides.
+fn user_event_rides(
+    event: &serde_json::Value,
+    inject_follow: bool,
+) -> Option<String> {
+    let follow = event
+        .get("queue")
+        .and_then(|q| q.as_str())
+        .unwrap_or("steer")
+        == "follow";
+    if follow && !inject_follow {
+        return None;
+    }
+    Some(
+        event
+            .get("content")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string(),
+    )
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -1207,13 +1242,16 @@ fn main() {
 
         match event_type {
             "user_message" => {
-                let text = event
-                    .get("content")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                events.push(Ev::User { text });
-                event_seqs.push(seq);
+                // The delivery queue (docs/tui-pending-user-messages.md
+                // stage 2): `follow` messages wait for a turn
+                // restart; the flag injects them into this request.
+                // A missing field means steer. The seq counting
+                // keeps every log line: a skipped event still owns
+                // its sequence.
+                if let Some(text) = user_event_rides(&event, args.inject_follow) {
+                    events.push(Ev::User { text });
+                    event_seqs.push(seq);
+                }
             }
             "assistant_message" => {
                 let text = event
@@ -3199,5 +3237,25 @@ not json at all
             "tokens_before": 0
         });
         assert!(parse_boundary(&bad, 7).is_none(), "a string seq is rejected");
+    }
+
+    /// The delivery-queue gate (docs/tui-pending-user-messages.md
+    /// stage 2): steer always rides; follow rides only on a turn
+    /// restart.
+    #[test]
+    fn user_event_rides_by_queue() {
+        let steer = serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"a"});
+        assert!(user_event_rides(&steer, false).is_some(), "steer rides");
+        let steer_explicit =
+            serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"a","queue":"steer"});
+        assert!(user_event_rides(&steer_explicit, false).is_some());
+        let follow =
+            serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"b","queue":"follow"});
+        assert!(user_event_rides(&follow, false).is_none(), "follow waits");
+        assert_eq!(
+            user_event_rides(&follow, true),
+            Some("b".to_string()),
+            "the restart injects the follow message"
+        );
     }
 }

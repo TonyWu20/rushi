@@ -49,7 +49,8 @@ fn main() {
         }
     };
 
-    let (state, last_user_message_seq, pending_tool_calls) = derive_state(&lines);
+    let (state, last_user_message_seq, pending_tool_calls, pending_follow_ups) =
+        derive_state(&lines);
 
     let session_name = PathBuf::from(&args.session)
         .file_name()
@@ -63,14 +64,16 @@ fn main() {
             "session": session_name,
             "state": state,
             "last_user_message_seq": last_user_message_seq,
-            "pending_tool_calls": pending_tool_calls
+            "pending_tool_calls": pending_tool_calls,
+            "pending_follow_ups": pending_follow_ups
         })
     );
 }
 
 /// The state machine over the log lines. Returns the state, the
-/// 1-based sequence of the last user message, and the unresolved
-/// tool calls.
+/// 1-based sequence of the last user message, the unresolved tool
+/// calls, and the pending follow-queue message sequences
+/// (docs/tui-pending-user-messages.md stage 2).
 ///
 /// States:
 /// - `idle`: nothing owed (no log activity, or a terminal event).
@@ -79,10 +82,19 @@ fn main() {
 /// - `exhausted`: a `context_exhausted` event closed the session
 ///   through the automatic handoff (correction 57). The TUI offers a
 ///   one-key resume in the seeded session.
-fn derive_state(lines: &str) -> (String, usize, Vec<serde_json::Value>) {
+///
+/// The delivery queues (stage 2): a `user_message` in the `follow`
+/// queue wakes no state; it waits for the turn boundary and rides
+/// `pending_follow_ups`. A steer message (the missing field) sets
+/// `awaiting_model`, as before. A turn boundary (an assistant
+/// message with no tool calls, an error, or a closed handoff)
+/// consumes the pending follow-ups: they ran as new turns through
+/// the boundary.
+fn derive_state(lines: &str) -> (String, usize, Vec<serde_json::Value>, Vec<usize>) {
     let mut last_user_message_seq: usize = 0;
     let mut state = "idle".to_string();
     let mut pending_tool_calls: Vec<serde_json::Value> = Vec::new();
+    let mut pending_follow_ups: Vec<usize> = Vec::new();
     let mut i = 0;
 
     for line in lines.lines() {
@@ -101,7 +113,18 @@ fn derive_state(lines: &str) -> (String, usize, Vec<serde_json::Value>) {
         match event_type {
             "user_message" => {
                 last_user_message_seq = i;
-                state = "awaiting_model".to_string();
+                // The follow queue writes the field; a missing
+                // field means steer.
+                let follow = event
+                    .get("queue")
+                    .and_then(|q| q.as_str())
+                    .unwrap_or("steer")
+                    == "follow";
+                if follow {
+                    pending_follow_ups.push(i);
+                } else {
+                    state = "awaiting_model".to_string();
+                }
             }
             "tool_result" => {
                 state = "awaiting_model".to_string();
@@ -116,24 +139,31 @@ fn derive_state(lines: &str) -> (String, usize, Vec<serde_json::Value>) {
                                 pending_tool_calls.push(tc.clone());
                             }
                         } else {
+                            // The turn boundary: the pending
+                            // follow-ups ran as new turns through
+                            // it. Consume them.
                             state = "idle".to_string();
                             pending_tool_calls.clear();
+                            pending_follow_ups.clear();
                         }
                     }
                 } else {
                     state = "idle".to_string();
                     pending_tool_calls.clear();
+                    pending_follow_ups.clear();
                 }
             }
             "error" => {
                 state = "idle".to_string();
                 pending_tool_calls.clear();
+                pending_follow_ups.clear();
             }
             // The handoff closed the turn. The seeded session holds
             // the task; this one is done.
             "context_exhausted" => {
                 state = "exhausted".to_string();
                 pending_tool_calls.clear();
+                pending_follow_ups.clear();
             }
             _ => {}
         }
@@ -171,7 +201,7 @@ fn derive_state(lines: &str) -> (String, usize, Vec<serde_json::Value>) {
         }
     }
 
-    (state, last_user_message_seq, pending_tool_calls)
+    (state, last_user_message_seq, pending_tool_calls, pending_follow_ups)
 }
 
 #[cfg(test)]
@@ -184,16 +214,17 @@ mod tests {
 
     #[test]
     fn empty_log_is_idle() {
-        let (state, seq, pending) = derive_state("");
+        let (state, seq, pending, follows) = derive_state("");
         assert_eq!(state, "idle");
         assert_eq!(seq, 0);
         assert!(pending.is_empty());
+        assert!(follows.is_empty());
     }
 
     #[test]
     fn user_message_awaits_model() {
         let log = line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"go"}));
-        let (state, seq, _) = derive_state(&log);
+        let (state, seq, _, _) = derive_state(&log);
         assert_eq!(state, "awaiting_model");
         assert_eq!(seq, 1);
     }
@@ -207,7 +238,7 @@ mod tests {
                 &serde_json::json!({"v":1,"type":"context_exhausted","ts":"t","message":"m","new_session":"s1_h1","summary_request":{}})
             )
         );
-        let (state, _, pending) = derive_state(&log);
+        let (state, _, pending, _) = derive_state(&log);
         assert_eq!(state, "exhausted");
         assert!(pending.is_empty());
     }
@@ -226,7 +257,7 @@ mod tests {
                 &serde_json::json!({"v":1,"type":"context_exhausted","ts":"t","message":"m","new_session":"s1_h2"})
             )
         );
-        let (state, seq, _) = derive_state(&log);
+        let (state, seq, _, _) = derive_state(&log);
         assert_eq!(state, "exhausted");
         assert_eq!(seq, 2);
     }
@@ -247,7 +278,7 @@ mod tests {
                 line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"go"})),
                 m
             );
-            let (state, seq, pending) = derive_state(&log);
+            let (state, seq, pending, _) = derive_state(&log);
             assert_eq!(state, "awaiting_model", "{m}");
             assert_eq!(seq, 1, "the marker adds no user message");
             assert!(pending.is_empty());
@@ -269,7 +300,7 @@ mod tests {
             r#"{"v":1,"type":"compaction_summary","ts":"t","summary":"s","first_kept_seq":2,"reason":"overflow","tokens_before":212000}"#,
         ] {
             let log = format!("{}\n{}", done, m);
-            let (state, _, pending) = derive_state(&log);
+            let (state, _, pending, _) = derive_state(&log);
             assert_eq!(state, "idle", "{m}");
             assert!(pending.is_empty());
         }
@@ -288,7 +319,71 @@ mod tests {
                 &serde_json::json!({"v":1,"type":"context_exhausted","ts":"t","message":"m","new_session":""})
             )
         );
-        let (state, _, _) = derive_state(&log);
+        let (state, _, _, _) = derive_state(&log);
         assert_eq!(state, "exhausted");
+    }
+
+    // ── stage 2: the delivery queues ─────────────────────────
+    // docs/tui-pending-user-messages.md section 4.
+
+    /// A follow-queue message wakes no state: the loop stays idle
+    /// and the message rides `pending_follow_ups`.
+    #[test]
+    fn follow_message_keeps_idle_and_counts() {
+        let log = line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"later","queue":"follow"}));
+        let (state, seq, pending, follows) = derive_state(&log);
+        assert_eq!(state, "idle", "follow wakes no work");
+        assert_eq!(seq, 1);
+        assert!(pending.is_empty());
+        assert_eq!(follows, vec![1]);
+    }
+
+    /// A steer message (the missing queue field) still wakes the
+    /// model: the stage-1 behavior holds for old lines.
+    #[test]
+    fn steer_message_wakes_the_model() {
+        let log = line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"now"}));
+        let (state, _, pending, follows) = derive_state(&log);
+        assert_eq!(state, "awaiting_model");
+        assert!(pending.is_empty());
+        assert!(follows.is_empty());
+    }
+
+    /// An explicit steer queue value behaves like the missing field.
+    #[test]
+    fn explicit_steer_wakes_the_model() {
+        let log = line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"now","queue":"steer"}));
+        let (state, _, _, follows) = derive_state(&log);
+        assert_eq!(state, "awaiting_model");
+        assert!(follows.is_empty());
+    }
+
+    /// The turn boundary consumes the pending follow-ups: an
+    /// assistant message with no tool calls runs them as new turns.
+    #[test]
+    fn turn_boundary_consumes_the_follow_ups() {
+        let log = format!(
+            "{}\n{}\n{}",
+            line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"go"})),
+            line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"later","queue":"follow"})),
+            line(&serde_json::json!({"v":1,"type":"assistant_message","ts":"t","content":"done","tool_calls":[]}))
+        );
+        let (state, _, _, follows) = derive_state(&log);
+        assert_eq!(state, "idle");
+        assert!(follows.is_empty(), "the boundary consumed the follow-up");
+    }
+
+    /// A follow-up pending with a steer wake keeps both: the steer
+    /// sets `awaiting_model`, the follow rides the count.
+    #[test]
+    fn steer_and_follow_coexist() {
+        let log = format!(
+            "{}\n{}",
+            line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"later","queue":"follow"})),
+            line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"now"}))
+        );
+        let (state, _, _, follows) = derive_state(&log);
+        assert_eq!(state, "awaiting_model");
+        assert_eq!(follows, vec![1]);
     }
 }

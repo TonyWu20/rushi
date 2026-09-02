@@ -171,6 +171,12 @@ fn validate_against_schema(value: &serde_json::Value, schema: &serde_json::Value
     if let Some(const_val) = schema.get("const") {
         return value == const_val;
     }
+    // Check enum constraint: the value must equal one of the
+    // listed values (docs/tui-pending-user-messages.md stage 2: the
+    // user_message queue field).
+    if let Some(allowed) = schema.get("enum").and_then(|e| e.as_array()) {
+        return allowed.iter().any(|a| value == a);
+    }
     let schema_type = schema.get("type").and_then(|t| t.as_str());
     match schema_type {
         Some("object") => {

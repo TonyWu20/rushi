@@ -12,8 +12,12 @@ SESSIONS_ROOT=$(awk -F'"' '/^sessions_root[[:space:]]*=[[:space:]]*/{print $2; e
 
 while true; do
   "$SCRIPT_DIR/step.sh" "$SESSION" || exit 1
-  STATE=$("$BIN_DIR/claim" --session "$SESSIONS_ROOT/$SESSION" | jq -r .state)
-  if [ "$STATE" = "idle" ]; then
+  CLAIM=$("$BIN_DIR/claim" --session "$SESSIONS_ROOT/$SESSION")
+  STATE=$(echo "$CLAIM" | jq -r .state)
+  # The follow-queue count (docs/tui-pending-user-messages.md
+  # stage 2): the pending follow-up messages run as new turns.
+  FOLLOW_UPS=$(echo "$CLAIM" | jq -r '.pending_follow_ups | length')
+  if [ "$STATE" = "idle" ] && [ "$FOLLOW_UPS" -eq 0 ]; then
     break
   fi
   # exhausted: the automatic handoff recorded a context_exhausted

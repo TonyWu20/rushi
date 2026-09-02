@@ -30,6 +30,14 @@ struct Args {
 
     /// Message content. If omitted, read from stdin.
     content: Option<String>,
+
+    /// Delivery queue for the message (docs/tui-pending-user-
+    /// messages.md stage 2): `steer` injects at the next step of
+    /// the running loop; `follow` runs only after the loop would
+    /// stop. The field is written for `follow` only: the steer
+    /// line keeps the stage-1 shape.
+    #[arg(long, default_value = "steer")]
+    queue: String,
 }
 
 fn main() {
@@ -59,12 +67,20 @@ fn main() {
     }
 
     let ts = chrono_utc_now();
-    let event = serde_json::json!({
+    let mut event = serde_json::json!({
         "v": 1,
         "type": "user_message",
         "ts": ts,
         "content": content
     });
+    // The follow queue writes the field; the steer queue leaves it
+    // absent (a missing field means `steer`).
+    if args.queue == "follow" {
+        event["queue"] = serde_json::json!("follow");
+    } else if args.queue != "steer" {
+        eprintln!("Error: queue must be `steer` or `follow`.");
+        std::process::exit(1);
+    }
 
     // Validate the produced event against the schema (G3).
     validate_event(&event, &args.schemas);
@@ -196,6 +212,11 @@ fn validate_event(event: &serde_json::Value, schemas_dir: &str) {
 fn matches_schema(value: &serde_json::Value, schema: &serde_json::Value) -> bool {
     if let Some(const_val) = schema.get("const") {
         return value == const_val;
+    }
+    // The enum constraint (docs/tui-pending-user-messages.md
+    // stage 2): the value must equal one of the listed values.
+    if let Some(allowed) = schema.get("enum").and_then(|e| e.as_array()) {
+        return allowed.iter().any(|a| value == a);
     }
     match schema.get("type").and_then(|t| t.as_str()) {
         Some("object") => {

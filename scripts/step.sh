@@ -5,8 +5,15 @@ SESSION="$1"
 CONFIG="${CONFIG:-config.toml}"
 SESSIONS_ROOT=$(awk -F'"' '/^sessions_root[[:space:]]*=/{print $2; exit}' "$CONFIG")
 SESSION_DIR="$SESSIONS_ROOT/$SESSION"
+# The assemble arguments, built from this step's own session.
+# A caller-exported ASSEMBLE_ARGS must not chain stale session
+# arguments into the loop.
+ASSEMBLE_ARGS=(--session "$SESSION_DIR" --config "$CONFIG")
 WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/step.XXXXXX")
 trap 'rm -rf "$WORKDIR"' EXIT
+# A fatal signal skips the EXIT trap. Clean the workdir and exit on
+# Ctrl+C (INT) or TERM, so the step leaves no /tmp/step.XXXXXX dir.
+trap 'rm -rf "$WORKDIR"; exit 1' INT TERM
 
 # 1. claim: pure projection. Decide what is owed.
 BIN_DIR="$(cd "$(dirname "$0")/../target/debug" && pwd)"
@@ -142,8 +149,7 @@ run_last_resort_compaction() {
   status=$("$COMPACT_BIN" "$SESSION_DIR" --config "$CONFIG" \
     --reason "${1:-overflow}" --force 2>/dev/null | jq -r '.status // "failed"')
   if [[ "$status" == "compacted" ]]; then
-    "$ASSEMBLE_BIN" --session "$SESSION_DIR" --config "$CONFIG" \
-      > "$WORKDIR/model-request.json" || exit 1
+    "$ASSEMBLE_BIN" "${ASSEMBLE_ARGS[@]}" > "$WORKDIR/model-request.json" || exit 1
     return 0
   fi
   return 1
@@ -159,8 +165,16 @@ publish_model_thinking
 STATE=$(jq -r .state "$WORKDIR/claim.json")
 
 # 2. idle: nothing owed. Append nothing (G1 idempotent replay).
+FOLLOW_UPS=$(jq -r '.pending_follow_ups | length' "$WORKDIR/claim.json")
 if [ "$STATE" = "idle" ]; then
-  exit 0
+  if [ "$FOLLOW_UPS" -eq 0 ]; then
+    exit 0
+  fi
+  # The follow drain (docs/tui-pending-user-messages.md stage 2):
+  # the queued follow messages ride this new turn, one turn per
+  # drain. The flag is this step's. In-flight steps of the turn
+  # see a live state and do not re-inject.
+  ASSEMBLE_ARGS+=("--inject-follow")
 fi
 
 # 2.5. exhausted: the handoff closed this session (correction 57).
@@ -204,12 +218,14 @@ resolve_compact_config "${ACTIVE_MODEL:-}"
 # user message in an idle session. No-op when the trigger is cold
 # or the cooldown from a failed summary call is active. The kill
 # switch gates it. A failed compact leaves its marker in the log;
-# the step proceeds in the current form.
+# the step proceeds in the current form. Its stdout is the status
+# JSON for pipe consumers. The session log holds the record. The
+# loop must not leak the line to the user terminal.
 if [[ "$COMPACT_ENABLED" == "true" ]]; then
-  "$COMPACT_BIN" "$SESSION_DIR" --config "$CONFIG" --reason threshold || true
+  "$COMPACT_BIN" "$SESSION_DIR" --config "$CONFIG" --reason threshold > /dev/null || true
 fi
 
-"$ASSEMBLE_BIN" --session "$SESSION_DIR" --config "$CONFIG" > "$WORKDIR/model-request.json" || exit 1
+"$ASSEMBLE_BIN" "${ASSEMBLE_ARGS[@]}" > "$WORKDIR/model-request.json" || exit 1
 if jq -e '.type == "error"' "$WORKDIR/model-request.json" > /dev/null; then
   "$BIN_DIR/log" --session "$SESSION_DIR" --schemas "$SCHEMA_DIR" < "$WORKDIR/model-request.json" || exit 1
   exit 0
@@ -312,11 +328,11 @@ while true; do
       fi
       if [[ "$COMPACT_ENABLED" == "true" && "$OVF_RECOVERED" = "0" ]]; then
         OVF_RECOVERED=1
-        if "$COMPACT_BIN" "$SESSION_DIR" --config "$CONFIG" --reason overflow; then
+        if "$COMPACT_BIN" "$SESSION_DIR" --config "$CONFIG" --reason overflow > /dev/null; then
           # The re-run: the re-projection projects through the new
           # boundary. The auto-continue: the interrupted turn
           # resumes in the same session.
-          "$ASSEMBLE_BIN" --session "$SESSION_DIR" --config "$CONFIG" > "$WORKDIR/model-request.json" || exit 1
+          "$ASSEMBLE_BIN" "${ASSEMBLE_ARGS[@]}" > "$WORKDIR/model-request.json" || exit 1
           continue
         fi
       fi
@@ -360,7 +376,7 @@ while true; do
   MEASURED_IN=$(jq -r '.usage.input_tokens // 0' "$WORKDIR/model-output.json")
   if [[ -n "$REQ_MODEL" && "$REQ_MODEL" == "$GUARD_MODEL" && "$MEASURED_IN" =~ ^[0-9]+$ && "$MEASURED_IN" -ge "$INPUT_BUDGET" ]]; then
     if [[ "$COMPACT_ENABLED" == "true" ]]; then
-      "$COMPACT_BIN" "$SESSION_DIR" --config "$CONFIG" --reason overflow || true
+      "$COMPACT_BIN" "$SESSION_DIR" --config "$CONFIG" --reason overflow > /dev/null || true
     else
       run_last_resort_compaction overflow || true
     fi
@@ -394,18 +410,18 @@ while true; do
       # Log the truncated group before the retry.
       "$BIN_DIR/log" --session "$SESSION_DIR" --schemas "$SCHEMA_DIR" < "$WORKDIR/parsed.jsonl" || exit 1
       if [[ "$COMPACT_ENABLED" == "true" ]]; then
-        "$COMPACT_BIN" "$SESSION_DIR" --config "$CONFIG" --reason overflow --strip-last-assistant || true
+        "$COMPACT_BIN" "$SESSION_DIR" --config "$CONFIG" --reason overflow --strip-last-assistant > /dev/null || true
       else
         run_last_resort_compaction overflow || true
       fi
-      "$ASSEMBLE_BIN" --session "$SESSION_DIR" --config "$CONFIG" > "$WORKDIR/model-request.json" || exit 1
+      "$ASSEMBLE_BIN" "${ASSEMBLE_ARGS[@]}" > "$WORKDIR/model-request.json" || exit 1
       continue
     fi
     # The second length stop: the last-resort compaction, then one
     # more call. A third failure stops the loop.
     LAST_RESORT=1
     run_last_resort_compaction overflow || true
-    "$ASSEMBLE_BIN" --session "$SESSION_DIR" --config "$CONFIG" > "$WORKDIR/model-request.json" || exit 1
+    "$ASSEMBLE_BIN" "${ASSEMBLE_ARGS[@]}" > "$WORKDIR/model-request.json" || exit 1
     continue
   fi
 

@@ -6,6 +6,7 @@
     "v": { "type": "integer", "const": 1 },
     "type": { "type": "string", "const": "user_message" },
     "ts": { "type": "string", "format": "date-time" },
-    "content": { "type": "string" }
+    "content": { "type": "string" },
+    "queue": { "type": "string", "enum": ["steer", "follow"] }
   }
 }
