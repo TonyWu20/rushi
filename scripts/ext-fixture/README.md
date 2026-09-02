@@ -5,9 +5,10 @@ Bash extension fixtures for the PTY smoke test
 layer holding a single extension entry (`ext.toml` plus the script
 the manifest runs).
 
-| Case             | Fixture          | What it proves                                   |
-| ---------------- | ---------------- | ------------------------------------------------ |
+| Case              | Fixture            | What it proves                                   |
+| ---------------- | ------------------ | ------------------------------------------------ |
 | ext-stub-alive   | `stub/`          | a status extension owns the status row           |
+| ext-frame-commandline | `frame/`    | the search prompt shows in the box title even when a frame extension labels the frame; the label returns after the search |
 | ext-dying-hint   | `dying/`         | restart budget 1s/2s/4s, then the dead hint      |
 | ext-badjsonl     | `badjsonl/`      | not-JSON lines and shape-invalid JSON payloads: per-op G5 fallbacks, no crash |
 | ext-append-reject| `append-reject/` | whitelist reject flash, whitelisted append lands |

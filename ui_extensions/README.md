@@ -13,7 +13,7 @@ tests).
 | Entry | Language | Capability | What it proves |
 | --- | --- | --- | --- |
 | `statusline/` | bash | `status` | tick-driven powerline footer: rounded pills with Nerd Font glyphs (U+E0B6 caps, U+E0B4 arrows and end cap), Catppuccin Macchiato span colors; live dir, git (TTL 3 s), model, cumulative usage from the log (numbers shorten to k/M/B); shared-UI-state `ext_status` values are not listed (2026-09-02): host presentation, not footer content; line 1 is dir, git, model, line 2 is the stats pill alone, one line on wide terminals |
-| `tool_result/` | bash | `render` | the kind owner for `tool_result`; styled header plus the full body |
+| `tool_result/` | bash | `render` | moved to `ui_extensions-demos/tool_result/` (the 2026-09-03 user report: the ext reply replaced the built-in box, and the fold key had no effect on the read and edit results). The demo: a styled header plus the body in one muted tone; a body that is a complete JSON document gets JSON syntax highlighting (2026-09-02: stop the gray abuse, docs/tui-color-tones.md section 4; the no-truncation rule rescopes to message content only, docs/tui-tool-result-truncation.md section 4 — the built-in render folds tool bodies, this reply protocol does not yet). Opt in with an `[ext] dir` pointing at a layer that carries it |
 | `notify/` | bash | `notify` | bell and OSC for finished turns, tmux client-tty fallback, burst suppression on history resend |
 | `mermaid/` | Rust | `transform` | `fence:mermaid` code blocks rendered as Unicode art by a Rust binary (stage 3) |
 

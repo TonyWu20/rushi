@@ -1,6 +1,6 @@
 # The reference tool_result renderer, Rust port
 # (ui-extension-plan stage 4). The bash reference is
-# ui_extensions/tool_result/.
+# ui_extensions-demos/tool_result/.
 #
 # Build: `cargo build` in this directory (a standalone cargo
 # package, not a member of the root workspace). Put

@@ -11,7 +11,7 @@ global entry.
 | Entry | Port of | Capability | What it proves |
 | --- | --- | --- | --- |
 | `statusline-rs/` | `ui_extensions/statusline/` | `status` | the same powerline footer on Rust: Nerd Font glyph pills with per-span hex colors, git TTL 3 s, cumulative usage from the log (numbers shorten to k/M/B); shared-UI-state `ext_status` values are not listed (2026-09-02): host presentation, not footer content; line 1 is dir, git, model, line 2 is the stats pill alone |
-| `tool_result-rs/` | `ui_extensions/tool_result/` | `render` | the same kind owner on Rust: header plus the full body, body precedence of docs/tui.md 13.1 |
+| `tool_result-rs/` | `ui_extensions-demos/tool_result/` | `render` | the same kind owner on Rust: header plus the full body, body precedence of docs/tui.md 13.1 |
 | `notify-rs/` | `ui_extensions/notify/` | `notify` | the same bell and OSC on Rust: finished turns, burst suppression at start, tmux client-tty fallback |
 
 Each entry builds its own binary. Put the binaries on `PATH` so

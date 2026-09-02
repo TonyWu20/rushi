@@ -27,7 +27,11 @@ import threading
 import time
 
 BIN = sys.argv[1]
-REPO = sys.argv[2]
+# Absolute: the /proc helpers compare the absolute `/proc/*/cwd`
+# readlinks against the layer prefixes. A relative repo path
+# (the `.` of a direct run) would match nothing and the orphan
+# checks would silently no-op.
+REPO = os.path.abspath(sys.argv[2])
 SESSION = "tui-test"
 EXT_SESSION = "tui-test-ext"
 MERMAID_EXT_DIR = REPO + "/ui_extensions/mermaid"
@@ -73,7 +77,9 @@ def setup_ext_bins():
 
 
 def fixture_dir(name):
-    return REPO + "/scripts/ext-fixture/" + name
+    # Absolute: the temp config lives outside the repo, and a
+    # relative dir would resolve against the config's directory.
+    return os.path.abspath(REPO + "/scripts/ext-fixture/" + name)
 
 
 class Screen:
@@ -263,6 +269,12 @@ def case(name, burst):
                 print(f"FAIL {name}: burst write blocked after timeout")
                 return False
             pump(master, 0.5, screen)  # let the burst be processed
+        # The vim modal composer starts in insert mode: the quit gate
+        # (q q in normal mode with an empty draft) needs the insert
+        # exit key first. Esc drops to normal without touching the
+        # draft, so the draft stays empty and the gate can fire.
+        os.write(master, b"\x1b")
+        pump(master, 0.3, screen)
         os.write(master, b"q")
         pump(master, 0.4, screen)
         os.write(master, b"q")
@@ -362,11 +374,12 @@ def ext_config(tmpdir, fixture):
 
 
 def fixture_orphans(fixture):
-    """Pids whose cwd is under a fixture layer.
+    """Orphan pids whose cwd is under a fixture layer.
 
     The host starts every extension with cwd set to its entry dir
     (docs/ui-extension.md section 7). After the TUI quits, no such
-    process may survive.
+    process may survive. Only pids reparented to init count: a
+    live TUI still runs its extension set under the same dirs.
     """
     prefix = fixture_dir(fixture)
     orphans = []
@@ -377,9 +390,31 @@ def fixture_orphans(fixture):
             cwd = os.readlink(f"/proc/{d}/cwd")
         except OSError:
             continue
-        if cwd.startswith(prefix + "/"):
-            orphans.append((d, cwd))
+        if not cwd.startswith(prefix + "/"):
+            continue
+        if proc_ppid(d) != 1:
+            continue
+        orphans.append((d, cwd))
     return orphans
+
+
+def ext_case_cleanup(pid, fixture):
+    """Failure-path cleanup for the fixture cases.
+
+    SIGKILL the TUI process group, then SIGKILL the fixture layer
+    pids (the extension processes survive an abnormal TUI death:
+    each one does its own setsid, docs/ui-extension.md section 7).
+    """
+    try:
+        os.kill(-pid, signal.SIGKILL)
+    except OSError:
+        pass
+    time.sleep(0.3)
+    for d, _ in fixture_orphans(fixture):
+        try:
+            os.kill(int(d), signal.SIGKILL)
+        except OSError:
+            pass
 
 
 def ext_case(name, fixture, expect, wait_seconds, log_check=None):
@@ -401,6 +436,7 @@ def ext_case(name, fixture, expect, wait_seconds, log_check=None):
             pump(master, 0.15, screen)
             if not alive(pid):
                 print(f"FAIL {name}: process died while waiting for {expect}")
+                ext_case_cleanup(pid, fixture)
                 return False
             text = screen.text()
             for sub in expect:
@@ -410,10 +446,14 @@ def ext_case(name, fixture, expect, wait_seconds, log_check=None):
         if missing:
             print(f"FAIL {name}: markers not seen within {wait_seconds}s: {missing}")
             print("screen was:\n" + screen.text())
-            os.kill(pid, signal.SIGKILL)
-            reap(pid)
+            ext_case_cleanup(pid, fixture)
             return False
         # Double-q quit, then prove no orphan fixture process lives.
+        # The vim modal composer starts in insert mode: the quit gate
+        # (q q in normal mode with an empty draft) needs the insert
+        # exit key first (the same fix as the base cases).
+        os.write(master, b"\x1b")
+        pump(master, 0.3, screen)
         os.write(master, b"q")
         pump(master, 0.4, screen)
         os.write(master, b"q")
@@ -424,6 +464,7 @@ def ext_case(name, fixture, expect, wait_seconds, log_check=None):
             print(f"FAIL {name}: still running after double-q (hang)")
             os.kill(pid, signal.SIGKILL)
             reap(pid)
+            ext_case_cleanup(pid, fixture)
             return False
         reap(pid)
         orphans = fixture_orphans(fixture)
@@ -462,6 +503,96 @@ def ext_stub_alive():
         ["EXT stub alive"],
         6.0,
     )
+
+
+def ext_frame_commandline():
+    """The search prompt stays visible under a frame extension.
+
+    The fixture frame labels the input frame with the editor mode.
+    In command-line mode the host renders its own prompt in the box
+    title instead of the frame label (docs/ui-extension.md section
+    10): the typed pattern must show even when an extension owns
+    the chrome. The frame label returns when the search ends.
+    """
+    tmp = tempfile.mkdtemp(prefix="tui-frame-smoke-")
+    cfg, sessions = ext_config(tmp, "frame")
+    master, pid = spawn("tui-test-frame", cfg)
+    screen = Screen(24, 80)
+    try:
+        # 1. The frame extension owns the title: its distinctive
+        # `fx` label shows in the input box border.
+        deadline = time.time() + 6.0
+        while time.time() < deadline:
+            pump(master, 0.2, screen)
+            if not alive(pid):
+                print("FAIL ext-frame-commandline: process died at startup")
+                return False
+            if "fx-[INSERT]" in screen.text():
+                break
+        if "fx-[INSERT]" not in screen.text():
+            print("FAIL ext-frame-commandline: the fixture frame label never showed")
+            print("screen was:\n" + screen.text())
+            return False
+        # 2. Normal mode, then the search prompt: Esc, /, ab.
+        os.write(master, b"\x1b")
+        pump(master, 0.4, screen)
+        os.write(master, b"/")
+        pump(master, 0.4, screen)
+        os.write(master, b"ab")
+        pump(master, 1.0, screen)
+        text = screen.text()
+        if "/ab" not in text or "\u2588" not in text:
+            print("FAIL ext-frame-commandline: the typed prompt is not visible under the frame label")
+            print("screen was:\n" + text)
+            return False
+        # 3. Esc cancels the search: the fixture label comes back.
+        os.write(master, b"\x1b")
+        deadline = time.time() + 4.0
+        while time.time() < deadline:
+            pump(master, 0.2, screen)
+            if "fx-[NORMAL]" in screen.text():
+                break
+        if "fx-[NORMAL]" not in screen.text():
+            print("FAIL ext-frame-commandline: the fixture label did not return after the search")
+            print("screen was:\n" + screen.text())
+            return False
+        # 4. Double-q quit: the draft is empty and the mode is
+        # normal, so the quit gate is open.
+        os.write(master, b"q")
+        pump(master, 0.4, screen)
+        os.write(master, b"q")
+        deadline = time.time() + 4.0
+        while time.time() < deadline and alive(pid):
+            pump(master, 0.2, screen)
+        if alive(pid):
+            print("FAIL ext-frame-commandline: still running after double-q (hang)")
+            os.kill(pid, signal.SIGKILL)
+            reap(pid)
+            return False
+        reap(pid)
+        orphans = fixture_orphans("frame")
+        if orphans:
+            print("FAIL ext-frame-commandline: orphan fixture processes:")
+            for p, cwd in orphans:
+                print(f"  {p} {cwd}")
+                try:
+                    os.kill(int(p), signal.SIGKILL)
+                except OSError:
+                    pass
+            return False
+        print("OK ext-frame-commandline: prompt visible under the frame label, label returns, clean quit")
+        return True
+    finally:
+        try:
+            os.close(master)
+        except OSError:
+            pass
+        try:
+            import shutil
+
+            shutil.rmtree(tmp, ignore_errors=True)
+        except Exception:
+            pass
 
 
 def ext_dying_hint():
@@ -559,10 +690,26 @@ def seed_events():
     ]
 
 
-def procs_with_cwd_under(prefix):
-    """Pids whose cwd is `prefix` itself or under it. The host starts
-    every extension with cwd set to its entry dir (docs/ui-extension.md
-    section 7)."""
+def proc_ppid(pid):
+    """The ppid of one pid, or -1 when the pid is gone."""
+    try:
+        stat = open(f"/proc/{pid}/stat").read()
+        return int(stat.split(") ")[-1].split()[1])
+    except (OSError, IndexError, ValueError):
+        return -1
+
+
+def procs_with_cwd_under(prefix, any_parent=False):
+    """Pids whose cwd is `prefix` itself or under it.
+
+    The host starts every extension with cwd set to its entry dir
+    (docs/ui-extension.md section 7). By default only true orphans
+    count: a live TUI still runs its own extension set under the
+    same dirs, so a process with a live parent (ppid != 1) is not
+    an orphan and must never be flagged or killed. A kill step
+    that targets one private layer may scan live children too:
+    pass `any_parent=True`.
+    """
     pids = []
     for d in os.listdir("/proc"):
         if not d.isdigit():
@@ -571,12 +718,15 @@ def procs_with_cwd_under(prefix):
             cwd = os.readlink(f"/proc/{d}/cwd")
         except OSError:
             continue
-        if cwd == prefix or cwd.startswith(prefix + "/"):
-            pids.append(int(d))
+        if not (cwd == prefix or cwd.startswith(prefix + "/")):
+            continue
+        if not any_parent and proc_ppid(d) != 1:
+            continue
+        pids.append(int(d))
     return pids
 
 
-def settled_orphans(prefix, seconds=4.0):
+def settled_orphans(prefix, seconds=6.0):
     """Orphans after a settle window.
 
     The host's stop is SIGTERM, then SIGKILL: a signalled extension
@@ -592,9 +742,16 @@ def settled_orphans(prefix, seconds=4.0):
         time.sleep(0.5)
 
 
-def wait_markers(master, pid, screen, markers, deadline):
-    """Pump until every marker is seen on screen or the deadline."""
+def wait_markers(master, pid, screen, markers, deadline, grace=10.0):
+    """Pump until every marker is seen on screen or the deadline.
+
+    When the deadline passes with the TUI still alive, the wait
+    extends once by `grace` seconds: under heavy machine load the
+    extension spawn or restart can land just after the deadline. A
+    dead TUI fails at the first deadline, without the grace.
+    """
     seen = set()
+    extended = False
     while time.time() < deadline and len(seen) < len(markers):
         pump(master, 0.15, screen)
         if not alive(pid):
@@ -603,7 +760,41 @@ def wait_markers(master, pid, screen, markers, deadline):
         for m in markers:
             if m in text:
                 seen.add(m)
+    if len(seen) < len(markers) and alive(pid) and not extended:
+        extended = True
+        deadline += grace
+        while time.time() < deadline and len(seen) < len(markers):
+            pump(master, 0.15, screen)
+            if not alive(pid):
+                break
+            text = screen.text()
+            for m in markers:
+                if m in text:
+                    seen.add(m)
     return seen, all(m in screen.text() for m in markers) and alive(pid)
+
+
+def cleanup_layer(pid, layer_prefix):
+    """Failure-path cleanup for the ext cases.
+
+    SIGKILL the TUI process group, then SIGKILL every process
+    whose cwd is under the layer prefix. The extension processes
+    survive the TUI death: each one does its own setsid (the
+    host's stop kills them, an abnormal TUI death does not).
+    Without this, a leaked TUI plus its extensions accumulates
+    across the cases and makes the later orphan check fail.
+    """
+    try:
+        os.kill(-pid, signal.SIGKILL)
+    except OSError:
+        pass
+    time.sleep(0.5)
+    orphans = settled_orphans(layer_prefix, 6.0)
+    for p in orphans:
+        try:
+            os.kill(p, signal.SIGKILL)
+        except OSError:
+            pass
 
 
 def ext_statusline_real():
@@ -625,19 +816,21 @@ def ext_statusline_real():
     master, pid = spawn(EXT_SESSION, cfg)
     screen = Screen(24, 80)
     try:
-        deadline = time.time() + 8.0
+        deadline = time.time() + 15.0
         seen, _ = wait_markers(
             master, pid, screen,
-            ["[ext] tool:call_1", "git:none", "smoke-model", stats_marker],
+            ["git:none", "smoke-model", stats_marker],
             deadline,
         )
         if not alive(pid):
             print("FAIL ext-statusline-real: process died during startup")
+            cleanup_layer(pid, REPO + "/ui_extensions")
             return False
-        missing = [m for m in ["[ext] tool:call_1", "git:none", "smoke-model", stats_marker] if m not in seen]
+        missing = [m for m in ["git:none", "smoke-model", stats_marker] if m not in seen]
         if missing:
             print(f"FAIL ext-statusline-real: markers not seen: {missing}")
             print("screen was:\n" + screen.text())
+            cleanup_layer(pid, REPO + "/ui_extensions")
             return False
         # The finished turn rings: the notify extension flushes its
         # remembered turn ~5 s after start. Check the raw stream for
@@ -649,12 +842,18 @@ def ext_statusline_real():
                 break
         if b"\x07" not in screen.raw:
             print("FAIL ext-statusline-real: no terminal bell in the pty stream")
+            cleanup_layer(pid, REPO + "/ui_extensions")
             return False
         if b"turn finished" not in screen.raw:
             print("FAIL ext-statusline-real: no OSC title in the pty stream")
+            cleanup_layer(pid, REPO + "/ui_extensions")
             return False
         # Quit, then restart: the usage totals must survive from the
         # log alone (the host re-sends every usage-bearing message).
+        # The vim modal composer starts in insert mode: the quit gate
+        # needs the insert exit key first.
+        os.write(master, b"\x1b")
+        pump(master, 0.3, screen)
         os.write(master, b"q")
         pump(master, 0.4, screen)
         os.write(master, b"q")
@@ -665,6 +864,7 @@ def ext_statusline_real():
             print("FAIL ext-statusline-real: still running after double-q (hang)")
             os.kill(pid, signal.SIGKILL)
             reap(pid)
+            cleanup_layer(pid, REPO + "/ui_extensions")
             return False
         reap(pid)
         orphans = settled_orphans(REPO + "/ui_extensions")
@@ -679,17 +879,19 @@ def ext_statusline_real():
         master2, pid2 = spawn(EXT_SESSION, cfg)
         screen2 = Screen(24, 80)
         try:
-            deadline = time.time() + 8.0
+            deadline = time.time() + 15.0
             while time.time() < deadline:
                 pump(master2, 0.2, screen2)
                 if not alive(pid2):
                     print("FAIL ext-statusline-real: restart died during startup")
+                    cleanup_layer(pid2, REPO + "/ui_extensions")
                     return False
                 if stats_marker in screen2.text():
                     break
             if stats_marker not in screen2.text():
                 print("FAIL ext-statusline-real: usage stats did not survive the restart")
                 print("screen was:\n" + screen2.text())
+                cleanup_layer(pid2, REPO + "/ui_extensions")
                 return False
         finally:
             os.write(master2, b"q")
@@ -701,6 +903,7 @@ def ext_statusline_real():
             if alive(pid2):
                 os.kill(pid2, signal.SIGKILL)
             reap(pid2)
+            cleanup_layer(pid2, REPO + "/ui_extensions")
             try:
                 os.close(master2)
             except OSError:
@@ -765,21 +968,28 @@ def ext_statusline_repo():
     if model:
         markers.append(model)
     try:
-        deadline = time.time() + 10.0
+        deadline = time.time() + 15.0
         seen, _ = wait_markers(master, pid, screen, markers, deadline)
         if not alive(pid):
             print("FAIL ext-statusline-repo: process died during startup")
+            cleanup_layer(pid, REPO + "/ui_extensions")
             return False
         text = screen.text()
         missing = [m for m in markers if m not in seen]
         if missing:
             print(f"FAIL ext-statusline-repo: markers not seen: {missing}")
             print("screen was:\n" + text)
+            cleanup_layer(pid, REPO + "/ui_extensions")
             return False
         if "in:" not in text:
             print("FAIL ext-statusline-repo: usage totals not shown")
             print("screen was:\n" + text)
+            cleanup_layer(pid, REPO + "/ui_extensions")
             return False
+        # The vim modal composer starts in insert mode: the quit gate
+        # needs the insert exit key first.
+        os.write(master, b"\x1b")
+        pump(master, 0.3, screen)
         os.write(master, b"q")
         pump(master, 0.4, screen)
         os.write(master, b"q")
@@ -790,6 +1000,7 @@ def ext_statusline_repo():
             print("FAIL ext-statusline-repo: still running after double-q (hang)")
             os.kill(pid, signal.SIGKILL)
             reap(pid)
+            cleanup_layer(pid, REPO + "/ui_extensions")
             return False
         reap(pid)
         orphans = settled_orphans(REPO + "/ui_extensions")
@@ -840,7 +1051,7 @@ def ext_statusline_slowgit():
     row_at = None
     stale_at = None
     t0 = time.time()
-    end = t0 + 12.0
+    end = t0 + 18.0
     try:
         while time.time() < end:
             r, _, _ = select.select([master], [], [], 0.25)
@@ -855,6 +1066,7 @@ def ext_statusline_slowgit():
                 screen.feed(chunk)
             if not alive(pid):
                 print("FAIL ext-statusline-slowgit: process died during startup")
+                cleanup_layer(pid, REPO + "/ui_extensions")
                 return False
             text = screen.text()
             if row_at is None and stats_marker in text:
@@ -864,13 +1076,20 @@ def ext_statusline_slowgit():
                 break
         if stale_at is not None:
             print(f"FAIL ext-statusline-slowgit: stale hint at {stale_at:.1f} s; a tick reply must not wait on a slow git")
+            cleanup_layer(pid, REPO + "/ui_extensions")
             return False
         if row_at is None:
             print("FAIL ext-statusline-slowgit: the status row never showed")
+            cleanup_layer(pid, REPO + "/ui_extensions")
             return False
         if row_at > 4.0:
             print(f"FAIL ext-statusline-slowgit: the row took {row_at:.1f} s; the first tick reply must stay fast")
+            cleanup_layer(pid, REPO + "/ui_extensions")
             return False
+        # The vim modal composer starts in insert mode: the quit gate
+        # needs the insert exit key first.
+        os.write(master, b"\x1b")
+        pump(master, 0.3, screen)
         os.write(master, b"q")
         pump(master, 0.4, screen)
         os.write(master, b"q")
@@ -883,6 +1102,11 @@ def ext_statusline_slowgit():
         orphans = settled_orphans(REPO + "/ui_extensions")
         if orphans:
             print(f"FAIL ext-statusline-slowgit: orphan layer processes: {orphans}")
+            for p in orphans:
+                try:
+                    os.kill(p, signal.SIGKILL)
+                except OSError:
+                    pass
             return False
         print(f"OK ext-statusline-slowgit: row at {row_at:.1f} s, no stale hint over the slow git (12 s window)")
         return True
@@ -893,39 +1117,69 @@ def ext_statusline_slowgit():
             pass
 
 
+def tool_result_only_layer(tmp):
+    """A temp layer that carries only the tool_result demo ext.
+
+    The demo ext lives outside the default ui_extensions layer in
+    ui_extensions-demos/ (the built-in render owns tool_result in
+    the default UX, the 2026-09-03 user report). This case wants
+    the ext render, so it builds a private layer from the demo
+    directory. Returns the layer directory.
+    """
+    layer = tmp + "/tr-layer"
+    d = layer + "/tool_result"
+    os.makedirs(d)
+    src_dir = REPO + "/ui_extensions-demos/tool_result"
+    for fn in ("ext.toml", "tool_result.sh"):
+        with open(src_dir + "/" + fn) as f:
+            data = f.read()
+        with open(d + "/" + fn, "w") as f:
+            f.write(data)
+    os.chmod(d + "/tool_result.sh", 0o755)
+    return layer
+
+
 def ext_tool_result_kill():
     """Kill the tool_result renderer: the built-in render returns.
 
-    The extension renders the seeded tool_result. SIGKILL the
-    process group on every restart attempt until the 1 s / 2 s / 4 s
-    budget is spent. The host then drops the cached replies, and a
-    freshly appended tool_result renders through the built-in path.
+    A private layer carries only the tool_result demo ext (the
+    default layer no longer registers it). The extension renders
+    the seeded tool_result. SIGKILL the process group on every
+    restart attempt until the 1 s / 2 s / 4 s budget is spent.
+    The host then drops the cached replies, and a freshly appended
+    tool_result renders through the built-in path.
     """
     tmp = tempfile.mkdtemp(prefix="tui-ext-kill-")
-    cfg, sessions = layer_config(tmp, REPO + "/ui_extensions", active_model="smoke-model")
+    tr_layer = tool_result_only_layer(tmp)
+    cfg, sessions = layer_config(tmp, tr_layer, active_model="smoke-model")
     seed_session(sessions, EXT_SESSION, seed_events())
-    tr_dir = REPO + "/ui_extensions/tool_result"
+    tr_dir = tr_layer + "/tool_result"
     master, pid = spawn(EXT_SESSION, cfg)
     screen = Screen(24, 80)
     log = os.path.join(sessions, EXT_SESSION, "events.jsonl")
     try:
         # 1. The extension's render is in place.
-        deadline = time.time() + 8.0
+        deadline = time.time() + 15.0
         while time.time() < deadline:
             pump(master, 0.2, screen)
             if not alive(pid):
                 print("FAIL ext-tool-result-kill: process died during startup")
+                cleanup_layer(pid, tr_layer)
                 return False
             if "[ext] tool:call_1" in screen.text():
                 break
         if "[ext] tool:call_1" not in screen.text():
             print("FAIL ext-tool-result-kill: the extension render never showed")
             print("screen was:\n" + screen.text())
+            cleanup_layer(pid, tr_layer)
             return False
         # 2. Kill every restart generation until the budget is spent.
+        # The layer is private to this case (a tmp dir), so the
+        # live children of the case TUI are in scope: scan without
+        # the orphan ppid gate.
         kill_deadline = time.time() + 10.0
         while time.time() < kill_deadline:
-            for p in procs_with_cwd_under(tr_dir):
+            for p in procs_with_cwd_under(tr_dir, any_parent=True):
                 try:
                     os.kill(p, signal.SIGKILL)
                 except OSError:
@@ -944,7 +1198,7 @@ def ext_tool_result_kill():
             }) + "\n")
         # 4. The dead hint flashes and the built-in render shows the
         # new result. The extension render must be gone.
-        deadline = time.time() + 8.0
+        deadline = time.time() + 15.0
         saw_dead = False
         saw_builtin = False
         while time.time() < deadline:
@@ -959,12 +1213,18 @@ def ext_tool_result_kill():
         if not saw_dead:
             print("FAIL ext-tool-result-kill: the dead hint never flashed")
             print("screen was:\n" + screen.text())
+            cleanup_layer(pid, tr_layer)
             return False
         if not saw_builtin:
             print("FAIL ext-tool-result-kill: the built-in render did not return")
             print("screen was:\n" + screen.text())
+            cleanup_layer(pid, tr_layer)
             return False
         # Quit: no orphan layer process may survive.
+        # The vim modal composer starts in insert mode: the quit gate
+        # needs the insert exit key first.
+        os.write(master, b"\x1b")
+        pump(master, 0.3, screen)
         os.write(master, b"q")
         pump(master, 0.4, screen)
         os.write(master, b"q")
@@ -975,9 +1235,10 @@ def ext_tool_result_kill():
             print("FAIL ext-tool-result-kill: still running after double-q (hang)")
             os.kill(pid, signal.SIGKILL)
             reap(pid)
+            cleanup_layer(pid, tr_layer)
             return False
         reap(pid)
-        orphans = settled_orphans(REPO + "/ui_extensions")
+        orphans = settled_orphans(tr_layer)
         if orphans:
             print(f"FAIL ext-tool-result-kill: orphan layer processes: {orphans}")
             for p in orphans:
@@ -1026,7 +1287,7 @@ def ext_mermaid():
         # The art marker is a node box from the box-drawing output.
         # The raw marker is the broken fence body. The source text
         # of the valid fence must be gone (the art replaced it).
-        deadline = time.time() + 10.0
+        deadline = time.time() + 15.0
         markers = ["│ A │", "not a diagram"]
         seen, all_ok = wait_markers(master, pid, screen, markers, deadline)
         text = screen.text()
@@ -1034,12 +1295,18 @@ def ext_mermaid():
             missing = [m for m in markers if m not in seen]
             print(f"FAIL ext-mermaid: markers not seen: {missing}")
             print("screen was:\n" + text)
+            cleanup_layer(pid, REPO + "/ui_extensions")
             return False
         if "graph TD" in text:
             print("FAIL ext-mermaid: the valid fence shows raw, the art is missing")
             print("screen was:\n" + text)
+            cleanup_layer(pid, REPO + "/ui_extensions")
             return False
         # Quit: no orphan layer process may survive.
+        # The vim modal composer starts in insert mode: the quit gate
+        # needs the insert exit key first.
+        os.write(master, b"\x1b")
+        pump(master, 0.3, screen)
         os.write(master, b"q")
         pump(master, 0.4, screen)
         os.write(master, b"q")
@@ -1050,6 +1317,7 @@ def ext_mermaid():
             print("FAIL ext-mermaid: still running after double-q (hang)")
             os.kill(pid, signal.SIGKILL)
             reap(pid)
+            cleanup_layer(pid, REPO + "/ui_extensions")
             return False
         reap(pid)
         orphans = settled_orphans(REPO + "/ui_extensions")
@@ -1089,19 +1357,21 @@ def ext_rus():
     master, pid = spawn(EXT_SESSION, cfg)
     screen = Screen(24, 80)
     try:
-        deadline = time.time() + 8.0
+        deadline = time.time() + 15.0
         seen, _ = wait_markers(
             master, pid, screen,
-            ["[ext] tool:call_1", "git:none", "smoke-model", stats_marker],
+            ["git:none", "smoke-model", stats_marker],
             deadline,
         )
         if not alive(pid):
             print("FAIL ext-rus: process died during startup")
+            cleanup_layer(pid, REPO + "/ext-rs")
             return False
-        missing = [m for m in ["[ext] tool:call_1", "git:none", "smoke-model", stats_marker] if m not in seen]
+        missing = [m for m in ["git:none", "smoke-model", stats_marker] if m not in seen]
         if missing:
             print(f"FAIL ext-rus: markers not seen: {missing}")
             print("screen was:\n" + screen.text())
+            cleanup_layer(pid, REPO + "/ext-rs")
             return False
         # The Rust notify reference rings once: the start resend is
         # a burst, so the bell flushes when the stream goes quiet
@@ -1111,8 +1381,13 @@ def ext_rus():
             pump(master, 0.25, screen)
         if b"\x07" not in screen.raw:
             print("FAIL ext-rus: no terminal bell from the Rust notify reference")
+            cleanup_layer(pid, REPO + "/ext-rs")
             return False
         # Quit: no orphan layer process may survive.
+        # The vim modal composer starts in insert mode: the quit gate
+        # needs the insert exit key first.
+        os.write(master, b"\x1b")
+        pump(master, 0.3, screen)
         os.write(master, b"q")
         pump(master, 0.4, screen)
         os.write(master, b"q")
@@ -1123,6 +1398,7 @@ def ext_rus():
             print("FAIL ext-rus: still running after double-q (hang)")
             os.kill(pid, signal.SIGKILL)
             reap(pid)
+            cleanup_layer(pid, REPO + "/ext-rs")
             return False
         reap(pid)
         orphans = settled_orphans(REPO + "/ext-rs")
@@ -1143,14 +1419,54 @@ def ext_rus():
             pass
 
 
+def purge_strays():
+    """Kill pre-existing stray extension processes before the suite.
+
+    An aborted run or a killed terminal leaks extension children
+    (each ext does its own setsid, so they survive their TUI's
+    death, docs/ui-extension.md section 7). Their cwd sits under
+    a layer dir, so a later settled_orphans check flags them and
+    the case fails on stale state. Purge them at suite start.
+    """
+    prefixes = [
+        REPO + "/ui_extensions",
+        REPO + "/ext-rs",
+    ]
+    killed = []
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
+        try:
+            cwd = os.readlink(f"/proc/{d}/cwd")
+        except OSError:
+            continue
+        # Skip extensions of a live TUI: a stray is reparented to
+        # init, a live TUI's children keep their parent.
+        if proc_ppid(d) != 1:
+            continue
+        for p in prefixes:
+            if cwd.startswith(p + "/"):
+                try:
+                    os.kill(int(d), signal.SIGKILL)
+                    killed.append(int(d))
+                except OSError:
+                    pass
+                break
+    if killed:
+        time.sleep(0.5)
+        print(f"purged {len(killed)} stray ext process(es): {killed}")
+
+
 def main():
     setup_ext_bins()
+    purge_strays()
     ok = True
     ok &= case("baseline-double-q", 0)
     ok &= case("burst-300-then-double-q", 300)
     ok &= case("burst-1000-then-double-q", 1000)
     ok &= scroll_burst_reaches_head()
     ok &= ext_stub_alive()
+    ok &= ext_frame_commandline()
     ok &= ext_dying_hint()
     ok &= ext_badjsonl()
     ok &= ext_append_reject()

@@ -1,0 +1,16 @@
+# A frame extension fixture for the PTY smoke test
+# (scripts/tui-pty-smoke.py case ext-frame-commandline).
+#
+# Like the reference `frame` extension (ui_extensions/frame), it
+# labels the input frame with the editor mode the host passes in
+# each `frame` op. In command-line mode the host renders its own
+# search prompt in the title, so this label hides behind the prompt
+# and reappears when the search ends (docs/ui-extension.md section
+# 10: the extension owns the chrome; the host keeps its modal-state
+# render).
+[ext]
+command = "bash"
+args = ["frame.sh"]
+caps = ["frame"]
+tick_ms = 500
+protocol_v = 1
