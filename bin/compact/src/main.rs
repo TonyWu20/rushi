@@ -13,6 +13,7 @@
 //! notes/itches.md.
 
 use std::collections::HashSet;
+use bon::builder;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -236,7 +237,7 @@ fn decide_trigger(inp: &TriggerInput) -> Decision {
     if !inp.enabled && !inp.force && !inp.overflow {
         return Decision::Noop("the feature is disabled".to_string());
     }
-    if inp.cooldown && inp.force == false && inp.overflow == false {
+    if inp.cooldown && !inp.force && !inp.overflow {
         if let Some(failed) = inp.failed_user_seq {
             if inp.last_user_seq <= failed {
                 return Decision::Noop(format!(
@@ -596,23 +597,19 @@ fn main() {
     // The boundary: the last parseable `compaction_summary`.
     let boundary: Option<Boundary> = events
         .iter()
-        .filter_map(|e| parse_boundary(e))
-        .last();
+        .filter_map(parse_boundary)
+        .next_back();
 
     // The cooldown anchor: the `last_user_seq` of the last
     // `compaction_failed` marker.
     let failed_user_seq: Option<usize> = events
-        .iter()
-        .filter(|e| e.value.get("type").and_then(|t| t.as_str()) == Some("compaction_failed"))
-        .last()
+        .iter().rfind(|e| e.value.get("type").and_then(|t| t.as_str()) == Some("compaction_failed"))
         .and_then(|e| e.value.get("last_user_seq").and_then(|s| s.as_u64()))
         .map(|s| s as usize);
 
     // The user messages: the last one anchors the cooldown.
     let last_user_seq: usize = events
-        .iter()
-        .filter(|e| e.value.get("type").and_then(|t| t.as_str()) == Some("user_message"))
-        .last()
+        .iter().rfind(|e| e.value.get("type").and_then(|t| t.as_str()) == Some("user_message"))
         .map(|e| e.seq)
         .unwrap_or(0);
 
@@ -741,22 +738,26 @@ fn main() {
             predicted,
         } => {
             let _ = predicted;
-            run_compaction(
-                &args,
-                &schemas_dir,
-                &kept_events,
-                &boundary,
-                last_measurement,
-                overflow,
-                last_user_seq,
-                trim_engaged,
-                state,
-            )
+            let builder = run_compaction()
+                .args(&args)
+                .schemas_dir(&schemas_dir)
+                .kept_events(&kept_events)
+                .boundary(&boundary)
+                .tokens_before(last_measurement)
+                .overflow(overflow)
+                .last_user_seq(last_user_seq)
+                .trim_engaged(trim_engaged);
+            if let Some(s) = state {
+                builder.state(s).call()
+            } else {
+                builder.call()
+            }
         }
     }
 }
 
 /// The compact run: the cut, the summary call, the marker appends.
+#[builder]
 fn run_compaction(
     args: &Args,
     schemas_dir: &Path,
@@ -832,7 +833,7 @@ fn run_compaction(
         "tokens_before": tokens_before,
     });
     let log_bin = resolve_bin(&args.log, "LOG_BIN", "log");
-    if let Err(e) = append_event(&log_bin, &args.session, &schemas_dir, &started) {
+    if let Err(e) = append_event(&log_bin, &args.session, schemas_dir, &started) {
         eprintln!("compact: append compaction_started failed: {e}");
     }
 
@@ -852,12 +853,12 @@ fn run_compaction(
         cmd.arg("--drop-last-assistant");
     }
     let out = cmd.output().unwrap_or_else(|e| {
-        fail_and_exit(args, &schemas_dir, overflow, last_user_seq, "the assemble call failed", &e.to_string());
+        fail_and_exit(args, schemas_dir, overflow, last_user_seq, "the assemble call failed", &e.to_string());
     });
     if !out.status.success() {
         fail_and_exit(
             args,
-            &schemas_dir,
+            schemas_dir,
             overflow,
             last_user_seq,
             "the assemble call failed",
@@ -868,7 +869,7 @@ fn run_compaction(
         Ok(v) => v,
         Err(e) => fail_and_exit(
             args,
-            &schemas_dir,
+            schemas_dir,
             overflow,
             last_user_seq,
             "the assemble output is not a request",
@@ -956,7 +957,7 @@ fn run_compaction(
 
     let summary = match summary {
         Some(s) => s,
-        None => fail_and_exit(args, &schemas_dir, overflow, last_user_seq, "both summary attempts failed", &last_err),
+        None => fail_and_exit(args, schemas_dir, overflow, last_user_seq, "both summary attempts failed", &last_err),
     };
 
     // The file ops: merge with the previous boundary's lists, not
@@ -991,7 +992,7 @@ fn run_compaction(
     if first_kept_seq < 1 {
         fail_and_exit(
             args,
-            &schemas_dir,
+            schemas_dir,
             overflow,
             last_user_seq,
             "the first_kept_seq is below 1",
@@ -1019,7 +1020,7 @@ fn run_compaction(
     if let Some(u) = summary_usage {
         done["usage"] = u;
     }
-    if let Err(e) = append_event(&log_bin, &args.session, &schemas_dir, &done) {
+    if let Err(e) = append_event(&log_bin, &args.session, schemas_dir, &done) {
         eprintln!("compact: append compaction_summary failed: {e}");
     }
 
@@ -1056,7 +1057,7 @@ fn fail_and_exit(
         "detail": detail,
     });
     let log_bin = resolve_bin(&args.log, "LOG_BIN", "log");
-    if let Err(e) = append_event(&log_bin, &args.session, &schemas_dir, &failed) {
+    if let Err(e) = append_event(&log_bin, &args.session, schemas_dir, &failed) {
         eprintln!("compact: append compaction_failed failed: {e}");
     }
     eprintln!("compact: {short}: {detail}");
@@ -1120,7 +1121,7 @@ fn resolve_budget(config: &toml::Value) -> u64 {
         .unwrap_or(4096) as u64;
     let window = val_int(mdl, "context_tokens").unwrap_or(131072) as u64;
     let window_input = window.saturating_sub(max_out);
-    let budget = val_int(&config.get("limits").unwrap_or(&empty), "context_budget_tokens")
+    let budget = val_int(config.get("limits").unwrap_or(&empty), "context_budget_tokens")
         .map(|v| (v.max(1)) as u64)
         .unwrap_or(window_input)
         .min(window_input.max(1));

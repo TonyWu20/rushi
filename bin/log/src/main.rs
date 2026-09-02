@@ -272,8 +272,7 @@ mod tests {
     fn marker_schemas_cover_the_three_compaction_types() {
         let names: Vec<&str> = schema_files()
             .iter()
-            .filter(|s| s.contains("compaction"))
-            .map(|s| *s)
+            .filter(|s| s.contains("compaction")).copied()
             .collect();
         assert_eq!(
             names,
@@ -295,8 +294,7 @@ mod tests {
     #[test]
     fn marker_events_validate_against_their_schemas() {
         let dir = repo_schema_dir();
-        let schemas =
-            schemas_with(&schema_files().iter().map(|s| *s).collect::<Vec<_>>(), &dir);
+        let schemas = schemas_with(&schema_files().to_vec(), &dir);
         let events = [
             r#"{"v":1,"type":"compaction_started","ts":"t","reason":"threshold","tokens_before":212000}"#,
             r#"{"v":1,"type":"compaction_failed","ts":"t","reason":"overflow","detail":"the summary call stopped with error","last_user_seq":7}"#,

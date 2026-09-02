@@ -36,6 +36,7 @@ not built).
 | `auto-compact-plan-audit.md`                  | Review              | 2026-09-02   | Second audit: re-derives each accepted cut and safety argument from the code, not the plan wording                                                        |
 | `auto-compact-plan-audit-2.md`                | Review              | 2026-09-02   | Third audit: B1-B6, all accepted. The fixes land in the plan sections 4-7                                                                                 |
 | `refinement-policy.md`                        | Active              | 2026-08-21   | Rules for changing the harness: evidence bar, trigger thresholds, not-yet list                                                                             |
+| `coding-conventions.md`                       | Active              | 2026-09-03   | Standing code rules for the Rust in this repo: the `bon` builder for any function with 8+ parameters, its `Option` and lifetime rules, the `#[allow]` ban on `too_many_arguments` |
 | `SPEC_CONTRACT_TESTS.md`                      | Active              | 2026-08-21   | Two-agent method: spec vs contract split, meaning test, mutation gate                                                                                      |
 | `spec-review-criteria.md`                     | Active              | 2026-08-26   | Consolidated review checklist for any new spec document                                                                                                    |
 | `loop-and-edit-tool.md`                       | Implemented         | 2026-08-24   | Deep spec: loop driver, model adapter, read/write/edit tools                                                                                               |
@@ -87,11 +88,12 @@ Status legend:
 1. This file (`INDEX.md`).
 2. `architecture.md` — the shape of the system and where each binary sits.
 3. `refinement-policy.md` — the rules for any change you propose.
-4. The spec for the feature you are working on (see the status
+4. `coding-conventions.md` — the standing code rules for the Rust.
+5. The spec for the feature you are working on (see the status
    column). UI extension work reads `ui-extension.md` with
    `ui-extension-plan.md`.
-5. `spec-review-criteria.md` — check your spec against these before implementing.
-6. `SPEC_CONTRACT_TESTS.md` — how to split the implementer and tester roles.
+6. `spec-review-criteria.md` — check your spec against these before implementing.
+7. `SPEC_CONTRACT_TESTS.md` — how to split the implementer and tester roles.
 
 ## Maintenance rules
 

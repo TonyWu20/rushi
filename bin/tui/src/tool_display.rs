@@ -29,6 +29,7 @@
 //! event value, the config state, and the pane width. It returns
 //! styled segments. No I/O, no decision logic.
 
+use bon::builder;
 use ratatui::style::{Color, Modifier, Style};
 
 /// The tool-result presets of the port (docs/tui-tool-display-port.md
@@ -214,6 +215,7 @@ pub type BodyRow = Vec<(Style, String)>;
 /// The body is the tool-specific compact output
 /// (docs/tui-tool-result-truncation.md section 1: the content
 /// layer). The fold state owns how many lines of it show.
+#[builder]
 pub fn body_rows(
     tool: &str,
     value: &serde_json::Value,
@@ -233,15 +235,45 @@ pub fn body_rows(
     let code = Style::default().fg(palette.color(crate::color::Role::Code));
     match tool {
         "read" => read_body(value, cfg, &out, &hint, &code, expanded, width),
-        "write" => write_body(
-            value, call_args, cfg, &out, &hint, &success, &code, expanded, width,
-        ),
-        "edit" => edit_body(
-            value, cfg, &out, &hint, &success, &error, &code, expanded, width,
-        ),
-        "bash" => bash_body(
-            value, cfg, palette, &out, &hint, &error, &code, err, expanded, width,
-        ),
+        "write" => {
+            let builder = write_body()
+                .value(value)
+                .cfg(cfg)
+                .out(&out)
+                .hint(&hint)
+                .success(&success)
+                .code(&code)
+                .expanded(expanded)
+                .width(width);
+            if let Some(ca) = call_args {
+                builder.call_args(ca).call()
+            } else {
+                builder.call()
+            }
+        }
+        "edit" => edit_body()
+            .value(value)
+            .cfg(cfg)
+            .out(&out)
+            .hint(&hint)
+            .success(&success)
+            .error(&error)
+            .code(&code)
+            .expanded(expanded)
+            .width(width)
+            .call(),
+        "bash" => bash_body()
+            .value(value)
+            .cfg(cfg)
+            .palette(palette)
+            .out(&out)
+            .hint(&hint)
+            .error(&error)
+            .code(&code)
+            .err(err)
+            .expanded(expanded)
+            .width(width)
+            .call(),
         "list" => search_body(value, cfg, &out, &hint, &code, expanded, width),
         _ => generic_body(value, cfg, &out, &hint, &code, expanded, width),
     }
@@ -299,7 +331,7 @@ fn fold_hint(
     hint: &Style,
     width: usize,
 ) -> Option<(Style, String)> {
-    if remaining <= 0 {
+    if remaining == 0 {
         return None;
     }
     let unit = if remaining == 1 { "line" } else { "lines" };
@@ -316,7 +348,7 @@ fn fold_hint(
     } else {
         full
     };
-    Some((hint.clone(), text))
+    Some((*hint, text))
 }
 
 /// The body rows of a `Read` result (the truncation request of
@@ -341,11 +373,11 @@ fn read_body(
     let mut rows: Vec<BodyRow> = Vec::new();
     match body_plan(cfg.read_mode, expanded) {
         BodyPlan::NoBody => {
-            rows.push(vec![(hint.clone(), format!("↳ {count} lines hidden"))]);
+            rows.push(vec![(*hint, format!("↳ {count} lines hidden"))]);
         }
         BodyPlan::SummaryLine => {
             let n = if count == 1 { "1 line" } else { "lines" };
-            rows.push(vec![(hint.clone(), format!("↳ {count} {n}"))]);
+            rows.push(vec![(*hint, format!("↳ {count} {n}"))]);
         }
         BodyPlan::Lines => {
             let cap = if expanded {
@@ -355,7 +387,7 @@ fn read_body(
             };
             let remaining = lines.len().saturating_sub(cap);
             for l in lines.iter().take(cap) {
-                rows.push(vec![(code.clone(), l.to_string())]);
+                rows.push(vec![(*code, l.to_string())]);
             }
             if let Some(h) = fold_hint(remaining, expanded, hint, width) {
                 rows.push(vec![h]);
@@ -373,6 +405,7 @@ fn read_body(
 /// arguments through `call_args`). The diff shows the new content
 /// as added lines, collapsed to `diff_collapsed_lines`. The summary
 /// row names the size, like the reference write summary.
+#[builder]
 fn write_body(
     value: &serde_json::Value,
     call_args: Option<&serde_json::Value>,
@@ -399,7 +432,7 @@ fn write_body(
     // The write summary: the line count and the byte size, inline,
     // like the reference write summary (the adaptive write diff).
     rows.push(vec![(
-        hint.clone(),
+        *hint,
         format!(
             "↳ {} {} lines, {} bytes",
             match operation {
@@ -411,7 +444,7 @@ fn write_body(
         ),
     )]);
     if !path.is_empty() {
-        rows.push(vec![(out.clone(), path.to_string())]);
+        rows.push(vec![(*out, path.to_string())]);
     }
     if !content_lines.is_empty() {
         let cap = if expanded {
@@ -421,7 +454,7 @@ fn write_body(
         };
         let remaining = content_lines.len().saturating_sub(cap);
         for l in content_lines.iter().take(cap) {
-            rows.push(vec![(success.clone(), format!("+ {l}"))]);
+            rows.push(vec![(*success, format!("+ {l}"))]);
         }
         if let Some(h) = fold_hint(remaining, expanded, hint, width) {
             rows.push(vec![h]);
@@ -437,6 +470,7 @@ fn write_body(
 /// layout colors the removed lines in the error role and the added
 /// lines in the success role; the split layout shows the two sides
 /// in one wide row. Collapsed to `diff_collapsed_lines`.
+#[builder]
 fn edit_body(
     value: &serde_json::Value,
     cfg: &ToolDisplay,
@@ -469,14 +503,14 @@ fn edit_body(
     // The diff stats row, like the reference diff presentation:
     // `↳ diff +A -R` (the added and removed line counts).
     rows.push(vec![(
-        hint.clone(),
+        *hint,
         format!("↳ diff +{} -{}", after.len(), before.len()),
     )]);
     if !path.is_empty() {
-        rows.push(vec![(out.clone(), path.to_string())]);
+        rows.push(vec![(*out, path.to_string())]);
     }
     if replace_all {
-        rows.push(vec![(hint.clone(), "replace_all".to_string())]);
+        rows.push(vec![(*hint, "replace_all".to_string())]);
     }
     let cap = if expanded {
         cfg.expanded_preview_max_lines
@@ -508,21 +542,21 @@ fn edit_body(
                     format!("+ {a}")
                 };
                 let b_style = if b.is_empty() {
-                    out.clone()
+                    *out
                 } else {
-                    error.clone()
+                    *error
                 };
                 let a_style = if a.is_empty() {
-                    out.clone()
+                    *out
                 } else {
-                    success.clone()
+                    *success
                 };
                 // One split row: the left pane, the divider column,
                 // the right pane. Each pane clamps to its half of
                 // the width (the narrow-pane width clamp of the port).
                 rows.push(vec![
                     (b_style, clamp_col(b_txt, pane)),
-                    (out.clone(), "│".to_string()),
+                    (*out, "│".to_string()),
                     (a_style, clamp_col(a_txt, pane)),
                 ]);
                 shown += 1;
@@ -539,14 +573,14 @@ fn edit_body(
                 if shown >= cap {
                     break;
                 }
-                rows.push(vec![(error.clone(), format!("- {l}"))]);
+                rows.push(vec![(*error, format!("- {l}"))]);
                 shown += 1;
             }
             for l in after.iter() {
                 if shown >= cap {
                     break;
                 }
-                rows.push(vec![(success.clone(), format!("+ {l}"))]);
+                rows.push(vec![(*success, format!("+ {l}"))]);
                 shown += 1;
             }
             let remaining = total.saturating_sub(shown);
@@ -565,6 +599,7 @@ fn edit_body(
 /// the exit line), collapsed to `bash_collapsed_lines` (10).
 /// `Hidden` shows no body; `Summary` one line-count line;
 /// `Preview` the first lines.
+#[builder]
 fn bash_body(
     value: &serde_json::Value,
     cfg: &ToolDisplay,
@@ -585,13 +620,13 @@ fn bash_body(
     let mut rows: Vec<BodyRow> = Vec::new();
     match body_plan(cfg.bash_mode, expanded) {
         BodyPlan::NoBody => {
-            rows.push(vec![(hint.clone(), "↳ output hidden".to_string())]);
+            rows.push(vec![(*hint, "↳ output hidden".to_string())]);
         }
         BodyPlan::SummaryLine => {
             let n = if out_count == 1 { "1 line" } else { "lines" };
-            rows.push(vec![(hint.clone(), format!("↳ {out_count} {n} returned"))]);
+            rows.push(vec![(*hint, format!("↳ {out_count} {n} returned"))]);
             if err {
-                rows.push(vec![(error.clone(), "↳ command failed".to_string())]);
+                rows.push(vec![(*error, "↳ command failed".to_string())]);
             }
         }
         BodyPlan::Lines => {
@@ -602,7 +637,7 @@ fn bash_body(
             };
             let remaining = lines.len().saturating_sub(cap);
             for (i, l) in lines.iter().enumerate().take(cap) {
-                let st = if err { error.clone() } else { code.clone() };
+                let st = if err { *error } else { *code };
                 if i == 0 {
                     // The command line: the bash result text opens
                     // with the `$ <command>` line. On a narrow pane
@@ -610,7 +645,7 @@ fn bash_body(
                     // line (the user request of the 2026-09-04
                     // pass). The wrapped pieces keep the line style.
                     for piece in wrap_hard_line(l, width) {
-                        rows.push(vec![(st.clone(), piece)]);
+                        rows.push(vec![(st, piece)]);
                     }
                 } else {
                     rows.push(vec![(st, l.to_string())]);
@@ -649,11 +684,11 @@ fn search_body(
     let mut rows: Vec<BodyRow> = Vec::new();
     match search_body_plan(cfg.search_mode, expanded) {
         BodyPlan::NoBody => {
-            rows.push(vec![(hint.clone(), format!("↳ {count} entries hidden"))]);
+            rows.push(vec![(*hint, format!("↳ {count} entries hidden"))]);
         }
         BodyPlan::SummaryLine => {
             let n = if count == 1 { "1 entry" } else { "entries" };
-            rows.push(vec![(hint.clone(), format!("↳ {count} {n}"))]);
+            rows.push(vec![(*hint, format!("↳ {count} {n}"))]);
         }
         BodyPlan::Lines => {
             let cap = if expanded {
@@ -663,7 +698,7 @@ fn search_body(
             };
             let remaining = lines.len().saturating_sub(cap);
             for l in lines.iter().take(cap) {
-                rows.push(vec![(code.clone(), l.to_string())]);
+                rows.push(vec![(*code, l.to_string())]);
             }
             if let Some(h) = fold_hint(remaining, expanded, hint, width) {
                 rows.push(vec![h]);
@@ -698,7 +733,7 @@ fn generic_body(
     };
     let remaining = lines.len().saturating_sub(cap);
     for l in lines.iter().take(cap) {
-        rows.push(vec![(code.clone(), l.to_string())]);
+        rows.push(vec![(*code, l.to_string())]);
     }
     if let Some(h) = fold_hint(remaining, expanded, hint, width) {
         rows.push(vec![h]);
@@ -862,14 +897,13 @@ pub fn box_rows(
     let title_style = title_style
         .cloned()
         .map(|s| s.bg(bg))
-        .unwrap_or(border.clone());
+        .unwrap_or(border);
     let top: Vec<(Style, String)> = vec![
-        (border.clone(), "┌ ".to_string()),
+        (border, "┌ ".to_string()),
         (title_style, title_text.clone()),
         (
-            border.clone(),
-            std::iter::repeat('─')
-                .take(pad_run)
+            border,
+            std::iter::repeat_n('─', pad_run)
                 .chain(std::iter::once('┐'))
                 .collect(),
         ),
@@ -886,11 +920,11 @@ pub fn box_rows(
     // 2026-09-03 user directive).
     for row in body {
         let mut cells: Vec<(Style, String)> = Vec::new();
-        cells.push((border.clone(), "│".to_string()));
+        cells.push((border, "│".to_string()));
         let mut used = 0usize;
         let n = row.len();
         for (idx, (st, text)) in row.iter().enumerate() {
-            let st = st.clone().bg(bg);
+            let st = (*st).bg(bg);
             let is_last = idx + 1 == n;
             // One leading space plus the segment text, clamped to
             // the inner columns still free.
@@ -922,11 +956,11 @@ pub fn box_rows(
         if row.is_empty() {
             cells.push((Style::default().bg(bg), " ".repeat(inner_w)));
         }
-        cells.push((border.clone(), "│".to_string()));
+        cells.push((border, "│".to_string()));
         out.push(cells);
     }
     let bottom: String = std::iter::once('└')
-        .chain(std::iter::repeat('─').take(inner_w))
+        .chain(std::iter::repeat_n('─', inner_w))
         .chain(std::iter::once('┘'))
         .collect();
     out.push(vec![(border, bottom)]);
@@ -1015,7 +1049,15 @@ mod tests {
         let mut cfg = ToolDisplay::preset(Preset::Balanced);
         cfg.read_mode = OutputMode::Summary;
         let value = serde_json::json!({"text": "a\nb\nc", "total_lines": 342});
-        let rows = body_rows("read", &value, None, false, &cfg, &p, false, 80);
+        let rows = body_rows()
+            .tool("read")
+            .value(&value)
+            .err(false)
+            .cfg(&cfg)
+            .palette(&p)
+            .expanded(false)
+            .width(80)
+            .call();
         let texts = rows_text(&rows);
         assert!(texts.iter().any(|t| t.contains("342 lines")), "{texts:?}");
     }
@@ -1029,7 +1071,15 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let value = serde_json::json!({"text": text, "total_lines": 50});
-        let rows = body_rows("read", &value, None, false, &cfg, &p, false, 80);
+        let rows = body_rows()
+            .tool("read")
+            .value(&value)
+            .err(false)
+            .cfg(&cfg)
+            .palette(&p)
+            .expanded(false)
+            .width(80)
+            .call();
         // The hidden mode of opencode: no preview lines, a hint.
         let texts = rows_text(&rows);
         assert!(
@@ -1042,7 +1092,15 @@ mod tests {
             read_mode: OutputMode::Preview,
             ..cfg
         };
-        let rows = body_rows("read", &value, None, false, &cfg, &p, false, 80);
+        let rows = body_rows()
+            .tool("read")
+            .value(&value)
+            .err(false)
+            .cfg(&cfg)
+            .palette(&p)
+            .expanded(false)
+            .width(80)
+            .call();
         let shown = rows_text(&rows);
         assert_eq!(
             shown.iter().filter(|l| l.starts_with("line ")).count(),
@@ -1054,7 +1112,15 @@ mod tests {
             "the fold hint states the remainder: {shown:?}"
         );
         // The expanded state shows up to the cap, no hint.
-        let rows = body_rows("read", &value, None, false, &cfg, &p, true, 80);
+        let rows = body_rows()
+            .tool("read")
+            .value(&value)
+            .err(false)
+            .cfg(&cfg)
+            .palette(&p)
+            .expanded(true)
+            .width(80)
+            .call();
         let shown = rows_text(&rows);
         assert_eq!(
             shown.iter().filter(|l| l.starts_with("line ")).count(),
@@ -1075,7 +1141,15 @@ mod tests {
             "after": "new one\nnew two\nnew three",
             "replace_all": false
         });
-        let rows = body_rows("edit", &value, None, false, &cfg, &p, false, 80);
+        let rows = body_rows()
+            .tool("edit")
+            .value(&value)
+            .err(false)
+            .cfg(&cfg)
+            .palette(&p)
+            .expanded(false)
+            .width(80)
+            .call();
         let texts = rows_text(&rows);
         // The stats line, like the reference diff presentation.
         assert!(
@@ -1097,7 +1171,16 @@ mod tests {
             "bytes": 5
         });
         let args = serde_json::json!({"file_path": "f", "content": "abc\ndef\n"});
-        let rows = body_rows("write", &value, Some(&args), false, &cfg, &p, false, 80);
+        let rows = body_rows()
+            .tool("write")
+            .value(&value)
+            .call_args(&args)
+            .err(false)
+            .cfg(&cfg)
+            .palette(&p)
+            .expanded(false)
+            .width(80)
+            .call();
         let texts = rows_text(&rows);
         assert!(
             texts.iter().any(|t| t.contains("2 lines, 5 bytes")),
@@ -1126,7 +1209,15 @@ mod tests {
             "timed_out": false,
             "truncated": false
         });
-        let rows = body_rows("bash", &value, None, false, &cfg, &p, false, 80);
+        let rows = body_rows()
+            .tool("bash")
+            .value(&value)
+            .err(false)
+            .cfg(&cfg)
+            .palette(&p)
+            .expanded(false)
+            .width(80)
+            .call();
         let texts = rows_text(&rows);
         // The first line is the command line; the preview holds the
         // next 9 of the 10 collapsed lines.
@@ -1148,7 +1239,15 @@ mod tests {
         cfg.search_mode = SearchMode::Count;
         let value =
             serde_json::json!({"text": "a\nb\nc\nd", "path": "d", "type": "directory", "count": 4});
-        let rows = body_rows("list", &value, None, false, &cfg, &p, false, 80);
+        let rows = body_rows()
+            .tool("list")
+            .value(&value)
+            .err(false)
+            .cfg(&cfg)
+            .palette(&p)
+            .expanded(false)
+            .width(80)
+            .call();
         let texts = rows_text(&rows);
         assert!(
             texts.iter().any(|t| t.contains("4 entries")),
@@ -1167,12 +1266,28 @@ mod tests {
         // read hidden by default in opencode: collapsed shows the
         // hint, expanded shows the body lines.
         let value = serde_json::json!({"text": "a\nb\nc\nd", "total_lines": 4});
-        let collapsed = rows_text(&body_rows("read", &value, None, false, &cfg, &p, false, 80));
+        let collapsed = rows_text(&body_rows()
+            .tool("read")
+            .value(&value)
+            .err(false)
+            .cfg(&cfg)
+            .palette(&p)
+            .expanded(false)
+            .width(80)
+            .call());
         assert!(
             collapsed.iter().any(|l| l.contains("4 lines hidden")),
             "collapsed hidden mode keeps the hint: {collapsed:?}"
         );
-        let expanded = rows_text(&body_rows("read", &value, None, false, &cfg, &p, true, 80));
+        let expanded = rows_text(&body_rows()
+            .tool("read")
+            .value(&value)
+            .err(false)
+            .cfg(&cfg)
+            .palette(&p)
+            .expanded(true)
+            .width(80)
+            .call());
         assert_eq!(
             expanded
                 .iter()
@@ -1186,16 +1301,28 @@ mod tests {
         bcfg.bash_mode = OutputMode::Summary;
         let bvalue =
             serde_json::json!({"text": "$ ls\nf1\nf2", "exit_code": 0, "stdout": "f1\nf2\n"});
-        let collapsed = rows_text(&body_rows(
-            "bash", &bvalue, None, false, &bcfg, &p, false, 80,
-        ));
+        let collapsed = rows_text(&body_rows()
+            .tool("bash")
+            .value(&bvalue)
+            .err(false)
+            .cfg(&bcfg)
+            .palette(&p)
+            .expanded(false)
+            .width(80)
+            .call());
         assert!(
             collapsed.iter().any(|l| l.contains("2 lines returned")),
             "collapsed summary mode keeps the count: {collapsed:?}"
         );
-        let expanded = rows_text(&body_rows(
-            "bash", &bvalue, None, false, &bcfg, &p, true, 80,
-        ));
+        let expanded = rows_text(&body_rows()
+            .tool("bash")
+            .value(&bvalue)
+            .err(false)
+            .cfg(&bcfg)
+            .palette(&p)
+            .expanded(true)
+            .width(80)
+            .call());
         assert!(
             expanded.iter().any(|l| l == "f1"),
             "expanded summary mode shows the body lines: {expanded:?}"
@@ -1205,9 +1332,15 @@ mod tests {
         scfg.search_mode = SearchMode::Count;
         let svalue =
             serde_json::json!({"text": "f1\nf2", "path": "d", "type": "directory", "count": 2});
-        let expanded = rows_text(&body_rows(
-            "list", &svalue, None, false, &scfg, &p, true, 80,
-        ));
+        let expanded = rows_text(&body_rows()
+            .tool("list")
+            .value(&svalue)
+            .err(false)
+            .cfg(&scfg)
+            .palette(&p)
+            .expanded(true)
+            .width(80)
+            .call());
         assert!(
             expanded.iter().any(|l| l == "f1"),
             "expanded count mode shows the listing: {expanded:?}"
@@ -1224,7 +1357,15 @@ mod tests {
         let value = serde_json::json!({"before": "a\nb\nc", "after": "a\nx\ny"});
         let mut split = ToolDisplay::preset(Preset::OpenCode);
         split.diff_view = DiffView::Split;
-        let rows = body_rows("edit", &value, None, false, &split, &p, false, 120);
+        let rows = body_rows()
+            .tool("edit")
+            .value(&value)
+            .err(false)
+            .cfg(&split)
+            .palette(&p)
+            .expanded(false)
+            .width(120)
+            .call();
         let boxed = box_rows("tool:edit  ok", &rows, 120, &p, None);
         for r in &boxed {
             let w: usize = r.iter().map(|(_, t)| t.chars().count()).sum();
@@ -1233,7 +1374,15 @@ mod tests {
         // The narrow pane: the auto layout switches to unified, the
         // rows stay single-segment, nothing wraps.
         let cfg = ToolDisplay::preset(Preset::OpenCode);
-        let rows = body_rows("edit", &value, None, false, &cfg, &p, false, 60);
+        let rows = body_rows()
+            .tool("edit")
+            .value(&value)
+            .err(false)
+            .cfg(&cfg)
+            .palette(&p)
+            .expanded(false)
+            .width(60)
+            .call();
         let boxed = box_rows("tool:edit  ok", &rows, 60, &p, None);
         for r in &boxed {
             let w: usize = r.iter().map(|(_, t)| t.chars().count()).sum();
@@ -1276,12 +1425,28 @@ mod tests {
             "exit_code": 0, "stdout": "", "stderr": "",
         });
         // A wide pane: the command fits, one row.
-        let wide = body_rows("bash", &value, None, false, &cfg, &p, false, 120);
+        let wide = body_rows()
+            .tool("bash")
+            .value(&value)
+            .err(false)
+            .cfg(&cfg)
+            .palette(&p)
+            .expanded(false)
+            .width(120)
+            .call();
         assert_eq!(wide.len(), 3, "command plus two lines: {wide:?}");
         assert_eq!(row_text(&wide[0]), format!("$ {cmd}"));
         // A narrow pane: the command wraps to several rows; the
         // output rows stay single.
-        let narrow = body_rows("bash", &value, None, false, &cfg, &p, false, 24);
+        let narrow = body_rows()
+            .tool("bash")
+            .value(&value)
+            .err(false)
+            .cfg(&cfg)
+            .palette(&p)
+            .expanded(false)
+            .width(24)
+            .call();
         let head: Vec<String> = narrow.iter().take(4).map(row_text).collect();
         let joined: String = head.join("\n");
         assert!(

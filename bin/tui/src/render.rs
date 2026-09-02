@@ -20,6 +20,7 @@
 //! the input area is not hardwired into the TUI; an external process
 //! owns its frame through the `frame_spec` reply, never its content).
 
+use bon::builder;
 use ratatui::layout::Constraint;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -184,15 +185,16 @@ pub struct RenderState<'a> {
     pub thinking_expanded: bool,
 }
 
-fn event_lines(
-    e: &Event,
+#[builder]
+fn event_lines<'a>(
+    e: &'a Event,
     pending: bool,
-    call_details: &HashMap<String, (String, serde_json::Value)>,
-    result_ids: &std::collections::HashSet<String>,
+    call_details: &'a HashMap<String, (String, serde_json::Value)>,
+    result_ids: &'a std::collections::HashSet<String>,
     width: usize,
     event_id: u64,
-    ext: Option<&crate::ext::ExtHost>,
-    state: &RenderState,
+    ext: Option<&'a crate::ext::ExtHost>,
+    state: &'a RenderState<'a>,
     loop_running: bool,
     compaction_last_open: bool,
 ) -> Vec<Line<'static>> {
@@ -261,7 +263,7 @@ fn event_lines(
                     if state.thinking_expanded {
                         let header = vec![Span::styled(
                             format!("{LABEL}thinking"),
-                            thinking_style.clone(),
+                            thinking_style,
                         )];
                         out.push(Line::from(header));
                         let wrapped = wrap_thinking(&text, wrap_w, palette, thinking_style);
@@ -380,24 +382,24 @@ fn event_lines(
             // instead of leaving dead columns (the 2026-09-03 user
             // directive: truncate, never wrap).
             let body_w = width.saturating_sub(3);
-            let mut body = crate::tool_display::body_rows(
-                &name,
-                value_ref,
-                Some(&args),
-                err,
-                state.tool_display,
-                palette,
-                state.tool_expanded,
-                body_w,
-            );
+            let mut body = crate::tool_display::body_rows()
+                .tool(&name)
+                .value(value_ref)
+                .call_args(&args)
+                .err(err)
+                .cfg(state.tool_display)
+                .palette(palette)
+                .expanded(state.tool_expanded)
+                .width(body_w)
+                .call();
             // The JSON-document body (docs/tui-color-tones.md): a
             // read result whose content is a complete JSON document,
             // or an unknown tool whose result is JSON, keeps the
             // JSON token colors instead of the plain code tone.
             let body_text = value_ref.get("text").and_then(|v| v.as_str()).unwrap_or("");
             let known = matches!(name.as_str(), "read" | "write" | "edit" | "bash" | "list");
-            if name == "read" || !known {
-                if highlight::looks_like_json(&body_text) {
+            if (name == "read" || !known)
+                && highlight::looks_like_json(body_text) {
                     body = crate::tool_display::json_body_rows(
                         &name,
                         value_ref,
@@ -407,7 +409,6 @@ fn event_lines(
                         body_w,
                     );
                 }
-            }
             let title = format!("tool:{name}  {status}");
             let title_style = if err { Some(status_style) } else { None };
             let rows =
@@ -535,7 +536,7 @@ fn event_lines(
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD)
             } else {
-                dim.clone()
+                dim
             };
             let text = if compaction_last_open && !loop_running {
                 format!("{LABEL}compacting (interrupted)")
@@ -677,7 +678,7 @@ fn wrap_thinking(
                     .map(|(s, t)| {
                         // The cell text takes the thinking tone; the
                         // border runs keep the hint style.
-                        let s = if s == border_style { s } else { style.clone() };
+                        let s = if s == border_style { s } else { style };
                         Span::styled(t, s)
                     })
                     .collect();
@@ -691,7 +692,7 @@ fn wrap_thinking(
             out.push(Line::default());
             continue;
         }
-        out.extend(wrap_styled(vec![(style.clone(), line.to_string())], wrap_w));
+        out.extend(wrap_styled(vec![(style, line.to_string())], wrap_w));
     }
     out
 }
@@ -1242,7 +1243,7 @@ fn render_message_content(
                             }
                             Part::Latex { idx, raw, text } => {
                                 let req = host.request_span(
-                                    event_id, *idx, "inline:latex", *text, wrap_w,
+                                    event_id, *idx, "inline:latex", text, wrap_w,
                                 );
                                 let replaced = req
                                     .and_then(|_| host.span_lines(event_id, *idx))
@@ -1621,32 +1622,42 @@ pub fn build_transcript_lines(
                 Some(lines) => ext_lines_guttered(&lines, width),
                 // No valid reply for this event: the built-in render
                 // is the fallback.
-                None => event_lines(
-                    e,
-                    pending,
-                    &details,
-                    &result_ids,
-                    width.max(GUTTER + 8),
-                    event_id,
-                    ext,
-                    &state,
-                    running,
-                    last_open.get(i).copied().unwrap_or(false),
-                ),
+                None => {
+                    let builder = event_lines()
+                        .e(e)
+                        .pending(pending)
+                        .call_details(&details)
+                        .result_ids(&result_ids)
+                        .width(width.max(GUTTER + 8))
+                        .event_id(event_id)
+                        .state(&state)
+                        .loop_running(running)
+                        .compaction_last_open(
+                            last_open.get(i).copied().unwrap_or(false),
+                        );
+                    if let Some(h) = ext {
+                        builder.ext(h).call()
+                    } else {
+                        builder.call()
+                    }
+                }
             }
         } else {
-            event_lines(
-                e,
-                pending,
-                &details,
-                &result_ids,
-                width.max(GUTTER + 8),
-                event_id,
-                ext,
-                &state,
-                running,
-                last_open.get(i).copied().unwrap_or(false),
-            )
+            let builder = event_lines()
+                .e(e)
+                .pending(pending)
+                .call_details(&details)
+                .result_ids(&result_ids)
+                .width(width.max(GUTTER + 8))
+                .event_id(event_id)
+                .state(&state)
+                .loop_running(running)
+                .compaction_last_open(last_open.get(i).copied().unwrap_or(false));
+            if let Some(h) = ext {
+                builder.ext(h).call()
+            } else {
+                builder.call()
+            }
         };
         all.extend(segs);
     }
@@ -3720,7 +3731,7 @@ mod cursor_span_tests {
     use super::cursor_line_spans;
     use super::thinking_text;
     use super::wrap_thinking;
-    use ratatui::style::{Color, Modifier};
+    use ratatui::style::Modifier;
     use ratatui::text::Span;
     use serde_json::json;
 
@@ -3800,7 +3811,7 @@ mod cursor_span_tests {
         let palette = crate::color::Palette::builtin(crate::color::Level::Rgb);
         let style = palette.style(crate::color::Role::Thinking, Modifier::empty());
         let text = "preamble\n| Level | Border |\n|---|---|\n| 0 | gray |\n| 1 | blue |\nafter";
-        let lines = wrap_thinking(text, 60, &palette, style.clone());
+        let lines = wrap_thinking(text, 60, &palette, style);
         let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
         let joined = text.join("\n");
         assert!(joined.contains('┌'), "the grid border: {joined:?}");

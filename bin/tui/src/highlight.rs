@@ -188,7 +188,7 @@ pub fn md_line(line: &str, fence: &mut bool, palette: &Palette) -> Vec<Seg> {
 fn fence_line_p(t: &str, palette: &Palette) -> Vec<Seg> {
     let delim = if t.starts_with("```") { "```" } else { "~~~" };
     let style = palette.style(Role::Fence, Modifier::DIM);
-    let mut out = vec![(style.clone(), delim.to_string())];
+    let mut out = vec![(style, delim.to_string())];
     let rest = t[delim.len()..].trim_start();
     if !rest.is_empty() {
         out.push((style, rest.to_string()));
@@ -259,7 +259,7 @@ pub fn looks_like_json(text: &str) -> bool {
 
 /// The JSON token walk: one hard line as styled segments,
 /// the colors lowered through the palette roles. The same token split as
-
+///
 /// colors lowered through the palette roles. Used when the result
 /// body of a read or unknown tool is a JSON document (docs/tui-
 /// color-tones.md: the JSON tokens keep their colors).
@@ -466,21 +466,20 @@ pub fn table_grid(rows: &[String], width: usize, palette: &Palette) -> Vec<Vec<(
     for (ri, row) in cells_rows.iter().enumerate() {
         let is_header = header_index == Some(ri);
         let mut cells_out: Vec<(Style, String)> = Vec::new();
-        cells_out.push((border.clone(), "│".to_string()));
-        for c in 0..ncols {
+        cells_out.push((border, "│".to_string()));
+        for (c, &w) in widths.iter().enumerate().take(ncols) {
             let cell = row.get(c).cloned().unwrap_or_default();
             // Pad to the column width: every row's verticals must land
             // on the same columns as the border rows (a shorter cell
             // renders at the column's full width, left-aligned).
-            let w = widths[c];
             let text = format!(" {:<w$} ", clamp(&cell, w));
             let st = if is_header { &header_style } else { &plain };
-            cells_out.push((st.clone(), text));
+            cells_out.push((*st, text));
             if c + 1 < ncols {
-                cells_out.push((border.clone(), "│".to_string()));
+                cells_out.push((border, "│".to_string()));
             }
         }
-        cells_out.push((border.clone(), "│".to_string()));
+        cells_out.push((border, "│".to_string()));
         out.push(cells_out);
         if ri + 1 < cells_rows.len() {
             out.push(grid_border('├', '┤', '┼', '─', &widths, &border));
@@ -502,17 +501,17 @@ fn grid_border(
     style: &Style,
 ) -> Vec<(Style, String)> {
     let mut out: Vec<(Style, String)> = Vec::new();
-    out.push((style.clone(), left.to_string()));
+    out.push((*style, left.to_string()));
     for (i, w) in widths.iter().enumerate() {
         out.push((
-            style.clone(),
-            std::iter::repeat(run).take(w + 2).collect::<String>(),
+            *style,
+            std::iter::repeat_n(run, w + 2).collect::<String>(),
         ));
         if i + 1 < widths.len() {
-            out.push((style.clone(), join.to_string()));
+            out.push((*style, join.to_string()));
         }
     }
-    out.push((style.clone(), right.to_string()));
+    out.push((*style, right.to_string()));
     out
 }
 

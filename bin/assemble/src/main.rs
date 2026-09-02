@@ -1,6 +1,7 @@
 #![deny(clippy::todo, clippy::unimplemented, clippy::unreachable)]
 
 use clap::Parser;
+use bon::builder;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -252,6 +253,7 @@ enum RequestForm {
 /// handoff. The drop count and the keep window never move back.
 ///
 /// The second return is the state to persist. None persists nothing.
+#[builder]
 fn decide_form(
     n_events: usize,
     budget_tokens: usize,
@@ -1431,7 +1433,6 @@ fn main() {
             .iter()
             .zip(event_seqs.iter())
             .filter(|(_, s)| **s >= b.first_kept_seq)
-            .map(|(e, s)| (e, s))
             .unzip(),
         None => (events.iter().collect(), event_seqs),
     };
@@ -1463,16 +1464,21 @@ fn main() {
         if args.drop_last_assistant {
             old_region = drop_last_assistant_group(&old_region);
         }
-        let request = summary_input_request(
-            &old_region,
-            &boundary,
-            &model_settings.model_id,
-            compact_summary_max_tokens.min(model_settings.max_output_tokens),
-            compact_reasoning_effort.as_deref(),
-            &base_caps,
-            budget_tokens,
-            &ptrs,
-        );
+        let builder = summary_input_request()
+            .old(&old_region)
+            .prev(&boundary)
+            .model(&model_settings.model_id)
+            .max_out_cap(compact_summary_max_tokens.min(model_settings.max_output_tokens))
+            .caps(&base_caps)
+            .input_budget(budget_tokens)
+            .ptrs(&ptrs);
+        // The optional request-level effort: the session effort stands
+        // when the config leaves it unset.
+        let request = if let Some(e) = compact_reasoning_effort.as_deref() {
+            builder.effort(e).call()
+        } else {
+            builder.call()
+        };
         println!("{}", request);
         return;
     }
@@ -1535,16 +1541,19 @@ fn main() {
         }
     };
 
-    let (form, persist) = decide_form(
-        n,
-        budget_tokens,
-        &measurements,
-        state,
-        base_caps,
-        compact_keep_events,
-        max_drops,
-        boundary_seq,
-    );
+    let builder = decide_form()
+        .n_events(n)
+        .budget_tokens(budget_tokens)
+        .measurements(&measurements)
+        .base_caps(base_caps)
+        .keep_events(compact_keep_events)
+        .max_drops(max_drops)
+        .boundary_seq(boundary_seq);
+    let (form, persist) = if let Some(s) = state {
+        builder.state(s).call()
+    } else {
+        builder.call()
+    };
     if let Some(s) = persist {
         write_compact_state(session_dir, &s);
     }
@@ -1647,6 +1656,7 @@ fn chrono_utc_now() -> String {
 /// tools: the summary is plain text. The drop search bounds the old
 /// region at the input budget: the smallest drop count that fits, or
 /// the search max when none fits (the handoff invariant).
+#[builder]
 fn summary_input_request(
     old: &[&Ev],
     prev: &Option<Boundary>,
@@ -2434,19 +2444,22 @@ not json at all
                 .map(|j| (j, 100_000 + 4_000 * j))
                 .filter(|(idx, _)| *idx < n)
                 .collect();
-            let (form, persist) = decide_form(
-                n,
-                50_000,
-                &meas,
-                state,
-                Caps {
+            let builder = decide_form()
+                .n_events(n)
+                .budget_tokens(50_000)
+                .measurements(&meas)
+                .base_caps(Caps {
                     result: 500,
                     text: 100,
-                },
-                24,
-                100,
-            0,
-            );
+                })
+                .keep_events(24)
+                .max_drops(100)
+                .boundary_seq(0);
+            let (form, persist) = if let Some(s) = state {
+                builder.state(s).call()
+            } else {
+                builder.call()
+            };
             state = persist;
             match form {
                 RequestForm::Compact {
@@ -2490,19 +2503,19 @@ not json at all
         };
         // No compact measurement yet: the blind crawl drops one
         // group per run.
-        let (form, _persist) = decide_form(
-            10,
-            50_000,
-            &[],
-            Some(s0),
-            Caps {
+        let (form, _persist) = decide_form()
+            .n_events(10)
+            .budget_tokens(50_000)
+            .measurements(&[])
+            .state(s0)
+            .base_caps(Caps {
                 result: 500,
                 text: 100,
-            },
-            24,
-            100,
-        0,
-        );
+            })
+            .keep_events(24)
+            .max_drops(100)
+            .boundary_seq(0)
+            .call();
         assert_eq!(
             form,
             RequestForm::Compact {
@@ -2527,19 +2540,19 @@ not json at all
                     boundary_seq: 0,
         };
         let meas: Vec<(usize, usize)> = vec![(5, 60_000), (9, 59_500)];
-        let (form, _persist) = decide_form(
-            10,
-            50_000,
-            &meas,
-            Some(s1),
-            Caps {
+        let (form, _persist) = decide_form()
+            .n_events(10)
+            .budget_tokens(50_000)
+            .measurements(&meas)
+            .state(s1)
+            .base_caps(Caps {
                 result: 500,
                 text: 100,
-            },
-            24,
-            100,
-        0,
-        );
+            })
+            .keep_events(24)
+            .max_drops(100)
+            .boundary_seq(0)
+            .call();
         match form {
             RequestForm::Compact { drops, .. } => {
                 assert_eq!(drops, 20, "the measured jump: one trial plus nineteen");
@@ -2640,19 +2653,19 @@ not json at all
             boundary_seq: 0,
         };
         let meas: Vec<(usize, usize)> = vec![(4, 90_000)];
-        let (form, _persist) = decide_form(
-            5,
-            50_000,
-            &meas,
-            Some(s),
-            Caps {
+        let (form, _persist) = decide_form()
+            .n_events(5)
+            .budget_tokens(50_000)
+            .measurements(&meas)
+            .state(s)
+            .base_caps(Caps {
                 result: 500,
                 text: 100,
-            },
-            24,
-            5,
-        0,
-        );
+            })
+            .keep_events(24)
+            .max_drops(5)
+            .boundary_seq(0)
+            .call();
         assert!(
             matches!(&form, RequestForm::Exhausted { .. }),
             "the max drop count with an over-budget estimate is the handoff"
@@ -2703,37 +2716,35 @@ not json at all
         let m: Vec<(usize, usize)> = vec![(0, 10_000), (2, 12_000)];
         assert!(
             matches!(
-                decide_form(
-                    2,
-                    30_000,
-                    &m,
-                    None,
-                    Caps {
+                decide_form()
+                    .n_events(2)
+                    .budget_tokens(30_000)
+                    .measurements(&m)
+                    .base_caps(Caps {
                         result: 500,
                         text: 100
-                    },
-                    24,
-                    100,
-                    0,
-                )
-                .0,
+                    })
+                    .keep_events(24)
+                    .max_drops(100)
+                    .boundary_seq(0)
+                    .call()
+                    .0,
                 RequestForm::Full
             ),
             "the estimate fits: the full log"
         );
-        let (form, persist) = decide_form(
-            3,
-            10_000,
-            &m,
-            None,
-            Caps {
+        let (form, persist) = decide_form()
+            .n_events(3)
+            .budget_tokens(10_000)
+            .measurements(&m)
+            .base_caps(Caps {
                 result: 500,
                 text: 100,
-            },
-            24,
-            100,
-        0,
-        );
+            })
+            .keep_events(24)
+            .max_drops(100)
+            .boundary_seq(0)
+            .call();
         assert!(
             matches!(
                 &form,
@@ -2893,27 +2904,24 @@ not json at all
     /// auto-compact-plan.md section 4.2).
     #[test]
     fn summary_input_request_carries_the_compaction_prompt() {
-        let events = vec![
-            Ev::User {
+        let events = [Ev::User {
                 text: "the task".to_string(),
             },
             ev_asst("step one"),
-            ev_res("1", "ok"),
-        ];
+            ev_res("1", "ok")];
         let refs: Vec<&Ev> = events.iter().collect();
-        let req: serde_json::Value = summary_input_request(
-            &refs,
-            &None,
-            "m",
-            2048,
-            None,
-            &Caps {
+        let req: serde_json::Value = summary_input_request()
+            .old(&refs)
+            .prev(&None)
+            .model("m")
+            .max_out_cap(2048)
+            .caps(&Caps {
                 result: 500,
                 text: 100,
-            },
-            1_000_000,
-            &test_ptrs(),
-        );
+            })
+            .input_budget(1_000_000)
+            .ptrs(&test_ptrs())
+            .call();
         assert_eq!(req["model"], "m");
         assert_eq!(req["tools"], serde_json::json!([]));
         assert_eq!(req["max_output_tokens"], 2048);
@@ -2936,7 +2944,7 @@ not json at all
     /// file-op lists: the lists merge, not re-extract.
     #[test]
     fn summary_input_update_prompt_carries_the_previous_summary() {
-        let events = vec![ev_asst("new step"), ev_res("2", "ok")];
+        let events = [ev_asst("new step"), ev_res("2", "ok")];
         let refs: Vec<&Ev> = events.iter().collect();
         let boundary = Boundary {
             seq: 9,
@@ -2945,19 +2953,19 @@ not json at all
             read_files: vec!["a.txt".to_string()],
             modified_files: vec!["b.rs".to_string()],
         };
-        let req: serde_json::Value = summary_input_request(
-            &refs,
-            &Some(boundary),
-            "m",
-            2048,
-            Some("low"),
-            &Caps {
+        let req: serde_json::Value = summary_input_request()
+            .old(&refs)
+            .prev(&Some(boundary))
+            .model("m")
+            .max_out_cap(2048)
+            .effort("low")
+            .caps(&Caps {
                 result: 500,
                 text: 100,
-            },
-            1_000_000,
-            &test_ptrs(),
-        );
+            })
+            .input_budget(1_000_000)
+            .ptrs(&test_ptrs())
+            .call();
         let inst = req["instructions"].as_str().unwrap();
         assert!(inst.contains("the previous summary"), "the previous summary rides in");
         assert!(inst.contains("- a.txt"), "the previous read list rides in");
@@ -2995,19 +3003,18 @@ not json at all
         }
         let refs: Vec<&Ev> = events.iter().collect();
         // A budget that only the dropped form can meet.
-        let req: serde_json::Value = summary_input_request(
-            &refs,
-            &None,
-            "m",
-            2048,
-            None,
-            &Caps {
+        let req: serde_json::Value = summary_input_request()
+            .old(&refs)
+            .prev(&None)
+            .model("m")
+            .max_out_cap(2048)
+            .caps(&Caps {
                 result: 500,
                 text: 100,
-            },
-            6000,
-            &test_ptrs(),
-        );
+            })
+            .input_budget(6000)
+            .ptrs(&test_ptrs())
+            .call();
         // The invariant: the input fits the input budget at the drop
         // cap. The chars/4 estimate of the serialized request holds.
         let chars = serde_json::to_string(&req["input"].as_array().unwrap())
@@ -3029,19 +3036,18 @@ not json at all
     /// item alone, no events.
     #[test]
     fn summary_input_empty_region_is_the_ask_alone() {
-        let req: serde_json::Value = summary_input_request(
-            &[],
-            &None,
-            "m",
-            2048,
-            None,
-            &Caps {
+        let req: serde_json::Value = summary_input_request()
+            .old(&[])
+            .prev(&None)
+            .model("m")
+            .max_out_cap(2048)
+            .caps(&Caps {
                 result: 500,
                 text: 100,
-            },
-            1_000_000,
-            &test_ptrs(),
-        );
+            })
+            .input_budget(1_000_000)
+            .ptrs(&test_ptrs())
+            .call();
         let input = req["input"].as_array().unwrap();
         assert_eq!(input.len(), 1, "only the summary ask");
         assert_eq!(input[0]["content"], COMPACT_ASK_FIRST);

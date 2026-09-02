@@ -26,6 +26,7 @@
 use crate::config::TuiConfig;
 use crate::event::{Event, EventKind};
 use ratatui::style::{Color, Modifier, Style};
+use bon::builder;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -1008,7 +1009,16 @@ impl ExtHost {
                     std::thread::Builder::new()
                         .name(format!("tui-ext-mon-{}", m.name))
                         .spawn(move || {
-                            monitor_thread(mon_slot, mon_inner, stop, delays, m2, cfg_path, i, gen)
+                            monitor_thread()
+                                .slot(mon_slot)
+                                .inner(mon_inner)
+                                .stop(stop)
+                                .delays(delays)
+                                .manifest(m2)
+                                .config_path(cfg_path)
+                                .idx(i)
+                                .first(gen)
+                                .call()
                         })
                         .ok();
                 }
@@ -1989,7 +1999,7 @@ fn spawn_gen(
 
 /// The monitor thread: wait, restart with the backoff budget, then
 /// dead. The stop flag ends the loop without a restart.
-#[allow(clippy::too_many_arguments)]
+#[builder]
 fn monitor_thread(
     slot: Arc<SlotShared>,
     inner: Arc<HostInner>,

@@ -16,3 +16,6 @@ members = [
     "tools/bash",
     "bin/tui",
 ]
+
+[workspace.dependencies]
+bon = "3"

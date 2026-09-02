@@ -189,7 +189,7 @@ fn cycle_reasoning_effort(config_path: &std::path::Path, active: &str) -> Result
     let current = resolve_reasoning_effort(&text, active);
     let pos = EFFORT_ORDER
         .iter()
-        .position(|e| e.to_ascii_lowercase() == current.to_ascii_lowercase())
+        .position(|e| e.eq_ignore_ascii_case(&current))
         .unwrap_or(3); // the default `medium` index
     let next = EFFORT_ORDER[(pos + 1) % EFFORT_ORDER.len()];
 
@@ -301,7 +301,7 @@ fn main() {
     app.set_palette(palette);
     // The tool-result display config (docs/tui-tool-display-port.md
     // section 2, the config part): the `[tui] tool_display` table.
-    app.set_tool_display(cfg.tool_display.clone());
+    app.set_tool_display(cfg.tool_display);
     let host = ext::ExtHost::new(&disc, &cfg);
 
     for item in host.start() {
