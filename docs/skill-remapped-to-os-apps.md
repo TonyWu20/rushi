@@ -199,7 +199,7 @@ The full triage of `scratch/`:
 |---|---|---|
 | `capture_tui.py`, `capture-thinking-border.py`, `thinking-cfg.toml` | ad-hoc PTY / border capture | superseded by the `tui-capture` application → delete |
 | `band_match.py`, `timestamp_compare.py`, `timestamp_analysis.py` | one-off model-timing analyses | done their job; findings live in `docs/` → delete (or keep one note) |
-| `ctest/` | compact-tool conformance fixtures | a tool's fixtures live with the tool → deleted here (the tool is uncommitted) |
+| `ctest/` | hand-built compact-e2e fixtures | the committed `compact-e2e.sh` **self-generates** its fixtures into `scratch/e2e-compact/`, so `ctest/` was never wired in → stale, delete |
 | `replay/`, `replay2/` | generated replay-session data | generated output → delete |
 | `color-capture-raw.bin` | raw capture output | an output, not source → delete |
 | `verify-reattach.py` | FT-003 reattach feature test | belongs with the reattach feature, not scratch → move |
@@ -216,4 +216,8 @@ fenced by `.gitignore` instead of committed. The black hole empties;
 _Status as of this writing: `ctest/`, `replay/`, `replay2/` removed;
 `refs/pi-vim` gitignored. The redundant capture scripts, the one-off
 analyses, and the stale/junk entries above are still pending the
-human's call._
+human's call. `ctest/`'s removal is verified safe: `bin/compact` is
+now committed, and its `scripts/compact-e2e.sh` self-generates
+fixtures into `scratch/e2e-compact/` — no committed test references
+`ctest/` or `replay/`, and the `threshold` scenario still passes
+(7/7) after the removal._
