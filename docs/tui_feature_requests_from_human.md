@@ -20,19 +20,27 @@ the linked doc.
 - [ ] Truncate `Read` and `Write` tool results. Show `Edit`
       results as a diff. Detail: `docs/tui-tool-result-truncation.md`.
 - [ ] Stop the abuse of one gray text color across the UI.
-      Show `Read` content with syntax highlighting. Detail:
+      Show `Read` content with syntax highlighting. Shipped so
+      far: the built-in palette drops the single gray; three
+      capability-aware tones plus the `[tui] color` level
+      override (commit f652b89). The reference renderer and the
+      `Read` highlighting stay open. Detail:
       `docs/tui-color-tones.md`.
 - [x] The statusline extension should draw a powerline footer.
       Detail: `docs/tui-statusline-powerline.md`.
 - [ ] Display and control the model's thinking (reasoning)
-      block. Detail: `docs/tui-thinking-block.md`.
+      block. Shipped so far: the capture into the log (commit
+      61cde02). The render, the toggle, and the effort control
+      stay open. Detail: `docs/tui-thinking-block.md`.
 - [x] Fix the transient `[malformed log line]` flash on live
       loops. Detail: `docs/tui-malformed-line-flash.md`.
 
 ## New requests (2026-08-31)
 
-- [ ] Show user messages that wait for the busy loop. Render
-      them like `pi`'s `steering` and `follow-ups`. Detail:
+- [x] Show user messages that wait for the busy loop. Render
+      them like `pi`'s `steering` and `follow-ups`. Shipped:
+      stage 1, the TUI steering block (commit fc51f71). Stage
+      2, the loop-side split, stays open. Detail:
       `docs/tui-pending-user-messages.md`.
 - [ ] Show thinking content behind a toggle, like `pi`.
       Detail: `docs/tui-thinking-block.md`.
@@ -47,6 +55,12 @@ the linked doc.
 - [ ] Full port of `pi-tool-display` for the tool result style:
       the lighter box, the fold/expand control. Detail:
       `docs/tui-tool-display-port.md`.
+- [ ] Render the markdown in user and assistant messages
+      without the syntax markers. `|` tables draw as proper
+      grid tables. Detail: `docs/tui-markdown-render.md`.
+- [ ] The TUI colors accept a custom scheme. Use `catppuccin
+      macchiato` as the first internal color scheme. Detail:
+      `docs/tui-color-scheme.md`.
 
 ## Pending corrections (2026-08-29)
 
