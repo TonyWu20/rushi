@@ -97,15 +97,19 @@ heart of this design.
   overflow, silent overflow, a truncation stop, or a recoverable
   length stop. It carries `kind`, `stop_reason`, `detail`, `usage`,
   the `input_budget`, the `context_tokens`, and a `can_recover`
-  boolean. Decisions: `stay_compact`, `handoff`, `stop`.
-  This is the swappable point. The in-place and handoff strategies are
-  two different answers to this one window.
+  boolean. Decisions: `stay_compact`, `stop`.
+  This is the swappable point. The default answer is in-session
+  shadow compact (`stay_compact`): the compact step produces a
+  handoff document that shadows the old log region, and the session
+  continues in place. The `handoff` decision value is reserved for
+  future strategies. No second strategy ships in Phase 2.
 - `exhausted.handle` — fires when `assemble` returns the
-  `context_exhausted` form. That is the point where even the
-  last-resort compact cannot fit. It carries `input_budget`,
+  `context_exhausted` form (the assembled context exceeds the input
+  budget). It carries `input_budget`,
   `context_tokens`, and the last `compact` status. Decisions:
-  `handoff` or `stop`. The owner's terminal strategy answers
-  `handoff`. The in-session strategy answers `stop`.
+  `stay_compact` or `stop`. The default answer is `stay_compact`:
+  the loop runs one in-session shadow compact and retries. The
+  `handoff` decision value is reserved for future strategies.
 
 ### 3.5 Tool scope (per `route` batch)
 
@@ -152,12 +156,11 @@ timeout_ms = 30000
 
 [[hooks.on]]
 window  = "exhausted.handle"
-command = "harness-hook-handoff"
-args    = ["--strategy", "handoff"]
+command = "harness-hook-compact"
 
 [[hooks.on]]
 window  = "overflow.resolve"
-command = "harness-hook-overflow"
+command = "harness-hook-compact"
 args    = []
 ```
 
@@ -215,9 +218,10 @@ vocabulary. The application owns its own logic.
 Window firings and decisions log as `ext_status` markers:
 `id = "hook.<window>"`, `value = "<decision>"`. No new event type.
 No `v` bump. The log stays the source of truth and the TUI reattach
-channel. The `context_exhausted` marker still carries `new_session`
-(the existing schema). The TUI reattaches on that marker, as
-`docs/handoff-strategy.md` section 4.1 already designs.
+channel. The `context_exhausted` marker is part of the existing
+schema. In Phase 2 the in-session shadow compact does not create a
+new session, so the TUI stays on the same session dir and re-tails
+the same `events.jsonl`.
 
 ### 4.5 Self-documentation and cache
 
@@ -230,58 +234,45 @@ A hook that mutates prompt content runs at `model.before`. The
 harness records a `hook_applied` marker so the cache-break is
 visible. The prompt prefix stays byte-stable for every other window.
 
-## 5. The two overflow strategies as plug-ins
+## 5. The overflow strategy as a plug-in
 
-The in-place and handoff strategies are two registrations on the
-same windows. The loop does not know which is live. It fires the
-window and applies the decision.
+The loop ships one overflow strategy: in-session shadow compact.
+The strategy is registered through the lifecycle window, so a
+future user can register a different hook to handle the same
+window. The loop fires the window and applies the decision; it does
+not hard-code a strategy name.
 
-### 5.1 In-place compact + resume (the default, correction 63)
+### 5.1 In-session shadow compact (the only shipped strategy)
 
-No hook registers on `overflow.resolve` or `exhausted.handle`. The
-window defaults are:
+No hook registers on `overflow.resolve` or `exhausted.handle`.
+The window defaults are:
 
 - `overflow.resolve` default is `stay_compact`.
-- `exhausted.handle` default is `stop`.
+- `exhausted.handle` default is `stay_compact`.
 
-This is today's `step.sh` behavior, byte-compatible. The
-`compact-e2e.sh` suite stays green with no hooks registered. This is
-the out-of-the-box path.
+This is the out-of-the-box path. The loop runs an in-session
+shadow compact: it appends the handoff-instruction prompt to the
+current context, the model writes a structured handoff document,
+the loop saves it to `sessions/<n>/handoff.md`, shadows the old log
+region, and the next request is built as `system + tools +
+handoff doc + new content`. The log stays append-only; shadowed
+events remain in `events.jsonl` and the model can read them via
+`read` or `bash`. No new session is created.
 
-### 5.2 Handoff + auto-start new session (the owner's terminal strategy)
+The `compact_strategy` config key (value `compact`) and the window
+decision vocabulary (`stay_compact`, `handoff`, `stop`) are seams
+for future strategies. No second strategy ships in Phase 2.
 
-Two hooks register on the two windows:
+### 5.2 The handoff document, not a strategy
 
-- On `overflow.resolve`: when `can_recover` is false, return
-  `{"decision": "handoff"}`.
-- On `exhausted.handle`: run the summary call, seed the new session
-  through the harness `SessionStore` port, write `handoff.md` to both
-  dirs, append the `context_exhausted` marker with `new_session`,
-  and return `{"decision": "handoff", "payload": {"new_session":
-  "<name>"}}`.
-
-The loop then executes the mechanical half of the handoff. It
-releases the old lock, takes the new lock, rebinds `session`, and
-continues. That mechanical half is the `SessionStore` port and the
-lock swap. It stays in the loop because it is I/O and it owns the
-lock. The hook supplies the *decision* and the *seed content*. The
-split is clean: the harness owns the fs and the lock, the hook owns
-the choice and the summary.
-
-The swap between the two strategies is a config change plus a recompile
-of the hook binary. The loop code does not change. That is the
-drop-in the audit said was missing. It is now present because the
-blocking points are windows, not branches.
+The handoff document is the artifact the compact step produces. It
+is not a separate strategy. There is no escalation path and no new
+session. The `handoff` decision value remains in the window
+vocabulary as a reserved seam for future user strategies. No
+second strategy ships in Phase 2.
 
 ### 5.3 What each blocking point in the audit maps to
 
-- "Create and seed the new session dir" is the `exhausted.handle`
-  hook plus the `SessionStore` port. The fs write stays in the
-  harness. The hook supplies the seed.
-- "Rebind the loop to the new session mid-run" is the loop's own
-  action on the `handoff` decision, released through the lock port.
-- "TUI follows the new session automatically" is the TUI reading the
-  `context_exhausted` marker's `new_session`. No TUI loop change.
 - "The `CompactStatus` names only in-session outcomes" is fixed by
   the richer `compact.after` envelope and by moving the choice to
   `overflow.resolve`.
@@ -389,10 +380,10 @@ authorizes.
   The `Exhausted` form fires `exhausted.handle` and applies its
   decision. The compact path fires `compact.before` and
   `compact.after` around each `compact` spawn.
-- **Section 4.6 (the lock):** the invariant is now per-session. The
-  loop can release one lock and take another at the `handoff`
-  decision. That is the rebind. The TUI probe reads the released lock
-  as free and the new lock as held.
+- **Section 4.6 (the lock):** the lock holds for the process life.
+  The in-session shadow compact does not release or reacquire the
+  lock. No rebind. The TUI probe sees the same lock held for the
+  full run.
 - **Section 4.3 step 7 (route):** fire `tool.before` before the
   route call. On `block`, synthesize `tool_result` events with the
   reason. On `approve`, append `approval_request` and wait in
@@ -404,16 +395,16 @@ authorizes.
   `awaiting_approval` row.
 - **Section 8 (conformance):** add two rows. One registers the
   in-place hooks and asserts byte-identical `events.jsonl` against
-  the no-hooks default. One registers the handoff hooks on a fixture
-  that exhausts and asserts one new session dir, `handoff.md` in
-  both dirs, the seed event, the marker with `new_session`, the
-  rebind, and the old log untouched.
+  the no-hooks default. One asserts the shadow-compact flow: a
+  fixture that exhausts with the default `compact_strategy` produces
+  one `compaction_summary` event, one `handoff.md` in the session
+  dir, the shadowed range logged, and the next `assemble` skips
+  shadowed events.
 - **Section 9 (non-goals):** add "no in-process hook ABI, no
   matcher DSL, no daemon" to the named non-goals.
 - **Section 10 (stages):** the hook dispatcher lands in stage 2 with
-  the `awaiting_model` branch. The two strategy hooks (in-place
-  default and handoff) land in stage 3 with the entry points. Each
-  keeps its own gate.
+  the `awaiting_model` branch. The shadow-compact hook lands in
+  stage 3 with the entry points. It keeps its own gate.
 
 ## 10. Reconciliation with the two prior docs
 
@@ -422,16 +413,15 @@ port with a `TerminalAction` enum. That port is the right shape for
 the *terminal* action only. It is too coarse. The window design
 replaces it with two windows (`overflow.resolve`,
 `exhausted.handle`) and the `SessionStore` port behind them. The
-handoff doc's sections 3 and 4 (the doc format, the storage in both
-dirs, the terminal flow) still hold. They are now the *behavior* of
-the handoff hook, not a loop branch. Section 5 of that doc, which
-lists the plan edits, is superseded by section 9 of this document.
+handoff doc's section 3 (the doc format) still holds as the format
+for the in-session `handoff.md` artifact. Section 9 of this document
+is authoritative for the Phase 2 plan edits.
 
 `docs/phase-2-plan-audit.md` section 2.3 answered "the swap touches
 four modules, that is clumsy." That is true for a monolithic
 `ContextStrategy` port. It is not true for the window design. The
 swap now touches the generic dispatcher (written once), the window
-definitions, and two hook binaries. It does not touch the loop's
+definitions, and the strategy hook. It does not touch the loop's
 core branch structure beyond firing the windows. The audit's
 recommendation to add `ContextStrategy` and `SessionStore` ports is
 superseded by the window + dispatcher + `SessionStore` design.
@@ -450,10 +440,11 @@ points, not just the terminal action.
 - With no hooks registered, the loop is byte-identical to today's
   `step.sh` on the `compact-e2e.sh` fixtures. The in-place strategy
   is the default and the conformance suite stays green.
-- With the handoff hooks registered on a fixture that exhausts, the
-  conformance row in section 9 section 8 passes: one new dir,
-  `handoff.md` in both dirs, the marker, the rebind, the old log
-  untouched.
+- With the shadow-compact hook registered on a fixture that
+  exhausts, the conformance row in section 8 passes: one
+  `compaction_summary` event, one `handoff.md` in the session dir,
+  the shadowed range logged, the next `assemble` skips shadowed
+  events, and no new session dir.
 - A hook that exits with an unexpected code logs a
   `hook.<window>.error` marker and the loop applies the window
   default. No wedge. No hang. No new event type.

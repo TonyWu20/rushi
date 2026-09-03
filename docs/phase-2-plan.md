@@ -102,7 +102,7 @@ harness step SESSION  [--config PATH]
 | `[model."NAME"].context_tokens` | the model window (default 131072 when absent) |
 | `[limits].context_budget_tokens` | the input budget (the clamp math is in `assemble`) |
 | `[limits].compact_enabled` | the kill switch (default true when absent) |
-| `[limits].compact_strategy` | the terminal context strategy: `handoff` (default) or `compact` (in-session last-resort; `docs/handoff-strategy.md`) |
+| `[limits].compact_strategy` | context-overflow strategy. The only shipped value is `compact` (in-session shadow compact: the compact step asks the model to write a handoff document, shadow the old log region with that document, and continue in the same session; `docs/deepseek-harness-compaction-research.md`). The key is a seam for future strategies. |
 | `[limits].approval_timeout_s` | the `awaiting_approval` wait bound. Absent: the loop waits for the answer without limit. Set: on timeout the loop synthesizes a deny `tool_result` and continues (4.8) |
 | `[hooks]` | lifecycle hook registration: `timeout_ms` and the ordered `on` list (see `docs/loop-lifecycle-hooks.md`) |
 
@@ -110,9 +110,10 @@ Three new keys: `compact_strategy`, `approval_timeout_s`, and
 `[hooks]`. The loop reads these once per step. The awk scrapes
 go away. The `assemble` and `compact` binaries read the remaining
 `[limits]` compact knobs (`compact_reserve_tokens`,
-`compact_keep_tokens`, `compact_summary_max_tokens`,
-`compact_reasoning_effort`) through `--config`. The loop passes
-the config path and parses none of them.
+`compact_keep_tokens`, `compact_reasoning_effort`) through
+`--config`. The loop passes the config path and parses none of them.
+No `compact_summary_max_tokens` cap: the handoff doc length is
+model-determined, bounded only by the model's own `max_output_tokens`.
 
 ### 3.3 Stage runner seam (future-proof, subprocess now)
 
@@ -178,10 +179,9 @@ appends no cancel line).
 | `sessions/<n>/events.jsonl` | every writer, through `LogLine` | claim, TUI tailer, humans |
 | `sessions/<n>/tools.jsonl` | `route` (via `--tool-log`, unchanged) | humans, the TUI later |
 | `sessions/<n>/cwd` | `bin/user` (unchanged) | `route --cwd` |
-| `sessions/<n>/compact.json` | `assemble` (unchanged) | `compact`, `assemble` |
 | `sessions/<n>/.loop.lock` | `harness run` holds the flock | `harness run`, the TUI probe |
 | `sessions/<n>/loop.pid` | `harness run` (own pid, after the lock) | the TUI probe and stop |
-| `sessions/<n>/handoff.md` | `harness` on a handoff (both the old and the new session dir) | the next agent, `read` tool, humans |
+| `sessions/<n>/handoff.md` | `harness` on compact (saved in the same session dir) | the model, `read` tool, humans |
 
 The three new artifacts are files, not events. Old sessions replay
 unchanged. The TUI tailer watches `events.jsonl` only, so the new
@@ -234,39 +234,52 @@ gains a config key: the limits are named constants in the binary.
    Call `model --describe` once per step and reuse the result for
    the active model, the guard model id, and the thinking level
    (today: three calls. Parity of source, fewer spawns).
-3. No proactive threshold cut. The loop does not trim on a predicted
-   budget. It keeps the full window until the model says it is full.
-   Compact fires only reactively, from the response: an overflow
-   `error`, a silent overflow, or a `length` stop (all in step 6).
-   This matches pi. The `compact_enabled` switch still gates the
-   reactive overflow compact.
+3. Proactive threshold check (pi-style, stateless). Before each
+   model call, the loop computes the current context size:
+   the last measured `usage.input_tokens` from the log plus a
+   chars/4 estimate of trailing messages after that usage.
+   This matches pi's `estimateContextTokens`. If the total
+   exceeds the trigger level (`budget - reserve`), the loop
+   compacts before sending the request. The check is stateless:
+   no `compact.json` file, no `trim_engaged` latch, no keep-
+   halving or group-drop levers. After a compaction, the
+   boundary advances and the next check starts fresh. A post-
+   compact sanity check compares the projected post-compact size
+   to the trigger level; if the keep window plus summary still
+   exceeds the trigger, the loop logs a warning instead of
+   compacting again. The `compact_enabled` switch gates both the
+   proactive check and the reactive overflow compact in step 6.
 4. `assemble` into the work file. An `error` form: append it to the
    log and stop the step (exit 0. The `error` event idles the
    claim).
 5. The `context_exhausted` form: fire the `exhausted.handle`
    lifecycle window (`docs/loop-lifecycle-hooks.md` §3.4). The
-   harness dispatches registered hooks for this window. Two built-in
-   strategies are available as hook registrations:
-   - **handoff** (default, `docs/handoff-strategy.md` §4): a
-     registered hook runs the summary call, seeds a new session
-     `<base>_h<N>` with the handoff doc and the log index, and
-     returns `{"decision":"handoff","new_session":"<name>"}`. The
-     loop then writes the `context_exhausted` marker, releases the old
-     lock, acquires the new lock, rebinds, and continues.
-   - **compact** (correction 63): a hook (or the built-in default)
-     runs `compact --force`, re-projects through `assemble`, and
-     returns `{"decision":"stay_compact"}`. On failure the
-     built-in unwraps the embedded compact-candidate request.
-   `harness step` follows the same branch. A step cut mid-handoff
-   recovers on the next start through `claim` and the
+   only shipped strategy is in-session shadow compact
+   (`docs/deepseek-harness-compaction-research.md`):
+   - The compact step appends a handoff-instruction prompt to the
+     current context. The model writes a structured handoff document
+     covering goals, state, open questions, and next steps.
+   - The loop saves that document to `sessions/<n>/handoff.md`.
+   - It then appends a `compaction_summary` event with
+     `first_kept_seq`. The next `assemble` builds the request as:
+     fixed system + tools + the handoff doc content + the
+     post-boundary events.
+   - Shadowed events stay in `events.jsonl`. The model can re-read
+     them via `read` or `bash` at any time. The session continues
+     in place. No new session is created.
+   The `compact_strategy` config key (only value: `compact`) is
+   a seam for future strategies. No second strategy ships in
+   Phase 2. `harness step` follows the same branch. A step cut
+   mid-compact recovers on the next start through `claim` and the
    `context_exhausted` marker (G2).
 
    The `overflow.resolve` window (same doc §3.4) fires on any
    overflow/silent/length-stop classification inside the retry loop
-   (step 6 below). The default decision is `stay_compact`. A
-   registered hook can return `handoff` to short-circuit to the
-   terminal path. See `docs/loop-lifecycle-hooks.md` for the full
-   window list and decision vocabulary.
+   (step 6 below). The default decision is `stay_compact`: the loop
+   runs one in-session shadow compact and retries. The window is
+   the seam for future custom strategies. See
+   `docs/loop-lifecycle-hooks.md` for the full window list and
+   decision vocabulary.
 6. The model call, in the retry loop, with the exact current rules:
    - Binary crash or API failure: 2 retries, 3 s between. Then a
      terminal `error` event and a stop.
@@ -344,26 +357,20 @@ module. Rules port verbatim:
 ### 4.6 The session lock
 
 `harness run` acquires an exclusive `flock` on
-`sessions/<n>/.loop.lock` before any work. The lock holds per
-session, not for the process life. On a handoff rebind (the
-`exhausted.handle` or `overflow.resolve` window returning
-`decision: "handoff"`), the loop releases the old lock, acquires the
-new session's lock, and continues. The process life can span
-multiple locks; each session's lock dies with its session binding.
-No stale-lock cleanup exists, and none is needed: a dead holder
-releases the lock.
+`sessions/<n>/.loop.lock` before any work. The lock holds for the
+process life, not just a step. One session owns the lock for the
+whole run. No stale-lock cleanup exists, and none is needed: a dead
+holder releases the lock.
 
 - Contested lock: exit 1. The message names the live loop pid read
   from `loop.pid`.
 - After the lock: write `loop.pid` with the harness pid (the
   process-group leader when the TUI starts it through `setsid`).
-  On rebind the loop overwrites `loop.pid` with the new session's
-  lock path.
 - The harness does not delete `loop.pid` on exit. A stale pid plus
   a free lock reads as not-running to the probe (5.2).
-- The TUI probe sees the released old lock as free and the new lock
-  as held. It re-tails the new session's `events.jsonl` on the
-  `context_exhausted` marker. No TUI loop change is required.
+- The TUI probe sees the released lock as free on exit. No
+  re-tail is needed: the session continues in place. No TUI loop
+  change is required.
 
 ### 4.7 Signals and cancellation
 
@@ -480,7 +487,7 @@ line. It carries the session name and the id of the last
   that text. The next iteration's `step` drains it as a new turn.
   The loop does not stop. This is the `pi-goal` continuation
   pattern: a hook that holds the goal state (in a session-dir
-  file, like `compact.json`) inspects the last assistant message
+  file, like `goal.json`) inspects the last assistant message
   for the `goal_complete` tool call. If the goal is not complete,
   it returns `continue` with a continuation prompt that tells the
   model to keep working.
@@ -605,11 +612,21 @@ Crate boundary rules (guardrail §7 stays intact):
   sessions, replay tests over them) is untouched. The utility
   crate does not count against it.
 - `logline` and `event_validation` do file and JSON work.
-  `compact_math` is pure: it consumes token counts as inputs
-  (measured from the model server, or a one-token probe). It
-  owns no char-based estimator (the user policy). The pure
-  module is the Phase 3 extraction candidate that lands in an
-  I/O-free `core`.
+  `compact_math` is pure. The trigger decision consumes only
+  measured `usage.input_tokens` from the log, plus a chars/4
+  estimate of trailing messages after the last usage (matching
+  pi's `estimateContextTokens`). The backward cut walk keeps a
+  local chars/4 per-event sizing heuristic (pi's
+  `estimateTokens`); the trigger itself never uses char-based
+  math. The shadow projection uses the cut walk to determine
+  `first_kept_seq`; the compact step then asks the model to write
+  a handoff document for the shadowed region. The loop saves the
+  document to `sessions/<n>/handoff.md` and the next `assemble`
+  builds the request as: fixed system + tools + handoff doc
+  content + post-boundary events. Shadowed events remain in
+  `events.jsonl`; the model can re-read them via `read` or `bash`.
+  The module owns no persistent state file. It is the Phase 3
+  extraction candidate that lands in an I/O-free `core`.
 
 Migration gate (stage 0 acceptance): every caller's behavior is
 byte-identical. The full `cargo test`, `compact-e2e.sh` (12/12),
@@ -651,7 +668,7 @@ output. The tables pin the observable behavior.
 | classifier exclusion | `"ThrottlingException: Too many tokens"` | not overflow (the exclusion wins over a pattern match) |
 | empty detail | `stop_reason=error`, no detail | the transport path, no compact |
 | reactive overflow compact | an overflow `error` stop with a matching classifier detail | one `compact --reason overflow` marker pair, one re-run |
-| handoff (strategy) | a `context_exhausted` form with `compact_strategy = handoff` | one new session dir, `handoff.md` in both dirs, the seed event, the marker on the old log, the rebind, the old log untouched |
+| shadow compact | a `context_exhausted` form with `compact_strategy = compact` | one `compaction_summary` event, one `handoff.md` in the session dir, the shadowed range logged, the next `assemble` skips shadowed events, no new session dir |
 | last-resort failure | a failed summary call twice | a terminal `error` event, the loop stops in the session |
 | length-stop strip | a `length` stop below max output | the truncated group in the log, `--strip-last-assistant` on the compact, one re-run |
 | `model_thinking` gate | two consecutive steps, same level | one `model_thinking` event total |
@@ -696,7 +713,7 @@ YAGNI guard):
   `awaiting_approval` claim state. The general policy engine
   (per-tool config, matcher DSL, multiple evaluators) is Phase 3
   core work (readiness R8, left open).
-- No new event type, no `v` bump. Two new config keys: `[limits].compact_strategy` (default `handoff`) and `[hooks]` (window registration, `docs/loop-lifecycle-hooks.md` §4.1).
+- No new event type, no `v` bump. Two new config keys: `[limits].compact_strategy` (default `compact`: in-session shadow compact. The key is a seam for future strategies.) and `[hooks]` (window registration, `docs/loop-lifecycle-hooks.md` §4.1).
 - No harness daemon, no socket API. The single authoritative
   process shape is the one `architecture.md` §8 names for a future
   `jsonrpsee` layer. It wraps this state machine. Nothing here
@@ -717,24 +734,37 @@ Build `crates/common` with the four modules. Migrate `log`,
 `user`, `route`, `tui`, `assemble`, `compact`. The local copies
 and the hardcoded schema list go.
 
-Also clean the char-based token math that moves with it. The
-`est_tokens` char/4 estimator in `bin/compact` and its mirror in
-`bin/assemble` are character-count estimates. The user policy
-counts real tokens instead of estimating them (see
-docs/phase-2-crate-research.md §2.4 and §3.3):
+Replace the Phase 1 token-math and sticky state. The `est_tokens`
+char/4 estimator in `bin/compact` and its mirror in `bin/assemble`,
+and the `compact.json` state file (`trim_engaged` latch, `last_tokens`)
+are removed. The Phase 1 sticky state re-fired the compact on every
+step once engaged, causing the repeated-compaction cascade in
+`tui-picker-follow-up`.
 
-- `compact_math` in `harness-common` stays pure: it takes
-  token counts as inputs and owns no char estimator.
-- The measured count comes from the model server's
-  `usage.input_tokens`. `bin/model` already emits that field,
-  and `compact.json` already stores it as `last_tokens`.
-- The harness obtains the projected candidate count with a
-  one-token probe: assemble the candidate, set the output
-  budget to 1, call `model`, read `usage.input_tokens`.
-- This part is not byte-identical (the compact candidate can
-  change). Gate it with the compact trigger-timing e2e tests.
-  The section 6 byte-identity gate still covers the module
-  moves themselves.
+- `compact_math` in `harness-common` stays pure. The trigger
+  decision uses only measured `usage.input_tokens` from the log
+  plus a chars/4 estimate of trailing messages, matching pi's
+  `estimateContextTokens`. The cut-point walk keeps a local
+  chars/4 per-event sizing heuristic (pi's `estimateTokens`);
+  the trigger never uses char-based math.
+- No `compact.json` state file. No `trim_engaged` latch. No
+  keep-halving or group-drop levers.
+- The compact step appends a handoff-instruction prompt to the
+  current context. The model writes a structured handoff document
+  covering goals, state, open questions, and next steps. The loop
+  saves it to `sessions/<n>/handoff.md` and appends a
+  `compaction_summary` event with `first_kept_seq`. The next
+  `assemble` builds the request as: fixed system + tools + handoff
+  doc content + post-boundary events. Shadowed events remain in
+  `events.jsonl`; the model can re-read them via `read` or `bash`.
+  No new session is created.
+- Post-compact sanity check: after writing the summary, compare
+  the projected post-compact size to the trigger level. If it
+  still meets or exceeds the trigger, log a warning and skip the
+  next compaction instead of looping.
+- This part is not byte-identical (the trigger timing changes).
+  Gate it with the compact trigger-timing e2e tests. The
+  section 6 byte-identity gate covers the module moves.
 
 Gate: section 6 migration gate, plus the TUI probe tests
 (`port_file` suite) against the shared validator.
@@ -767,12 +797,13 @@ firing order is pinned by the hook-marker assertion (each
 window fires after. The block and approve decision rows of §8
 pass.
 
-Add the handoff row of section 8: a fixture that exhausts with
-`compact_strategy = "handoff"` and the handoff hook registered
-produces the seeded session, the `handoff.md` in both dirs, the
-marker, and the rebind. Gate: one live handoff cycle against the
-SGLang server (the trigger fires, the new session starts, the
-old log is untouched).
+Add the shadow-compact row of section 8: a fixture that exhausts
+with the default `compact_strategy` produces one `compaction_summary`
+event, one `handoff.md` in the session dir, the shadowed range
+logged, and the next `assemble` skips the shadowed events.
+Gate: one live compact cycle against the SGLang server (the trigger
+fires, the shadowed region is recorded, the next assemble skips it,
+the old log is untouched).
 
 ### Stage 3 — the entry points and hooks
 
@@ -781,13 +812,13 @@ old log is untouched).
 TUI stops writing `loop.pid` and the probe takes the lock first
 (5.2).
 
-Ship the `hooks` module and the two built-in strategy hooks:
-`harness-hook-compact` (in-place, default) and
-`harness-hook-handoff` (seed + marker + rebind). Register them
-in `[hooks]` of `config.toml`. The handoff hook calls the
-`SessionStore` port for the fs work; it returns the decision
-envelope to the dispatcher. Gate: the conformance row in §8
-passes with the handoff hook registered.
+Ship the `hooks` module and the shadow-compact hook:
+`harness-hook-compact`. It runs the in-session shadow compact
+(the compact step produces the handoff document; the loop saves it
+and shadows the old region). Register it in `[hooks]` of
+`config.toml`. The hook calls the `SessionStore` port for the fs
+work; it returns the decision envelope to the dispatcher. Gate:
+the conformance row in §8 passes with the hook registered.
 
 Ship the approval round-trip (4.8): the two schema files
 (`approval_request.json`, `approval.json`) in
