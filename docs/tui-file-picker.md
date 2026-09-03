@@ -1,6 +1,6 @@
 # TUI file picker (`@`) and the completion window
 
-Status: Spec, not yet built. The request lives in
+Status: Implemented 2026-09-03 (day-0 scope). The request lives in
 `docs/tui_feature_requests_from_human.md` (the 2026-09-08 item).
 Library research lives in `docs/tui-file-picker-research.md`.
 Sections 4 to 8 are the design and the build plan. Section 6 names

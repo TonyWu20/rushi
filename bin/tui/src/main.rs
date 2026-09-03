@@ -15,6 +15,7 @@ mod editor;
 mod event;
 mod ext;
 mod highlight;
+mod picker;
 mod port;
 mod port_file;
 mod render;
@@ -89,6 +90,7 @@ fn key_input(k: &cevent::KeyEvent) -> Option<Key> {
             cevent::KeyCode::Char('x') => Some(Key::CtrlX),
             cevent::KeyCode::Char('f') => Some(Key::CtrlF),
             cevent::KeyCode::Char('l') => Some(Key::CtrlL),
+            cevent::KeyCode::Char('p') => Some(Key::CtrlP),
             cevent::KeyCode::Char('q') => Some(Key::Quit),
             cevent::KeyCode::Char('r') => Some(Key::CtrlR),
             cevent::KeyCode::Char('u') => Some(Key::CtrlU),

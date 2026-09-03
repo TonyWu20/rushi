@@ -145,7 +145,7 @@ the linked doc.
 
 ## New requests (2026-09-08)
 
-- [ ] A file picker on the `@` trigger. The user types `@` in
+- [x] A file picker on the `@` trigger. The user types `@` in
       the input box. A candidate file list opens. It re-ranks as
       the user types. The picked path inserts into the draft.
       Fuzzy search is on from day 0. The candidate window is a
@@ -155,7 +155,8 @@ the linked doc.
       pane or shell session. The float adapts to the terminal width:
       the preview sits on the right in a wide terminal and on the
       bottom in a narrow one. Spec and layout decision committed
-      (`docs/tui-file-picker.md`, commit 5b6ac59). Implementation
-      pending. Detail:
+      (`docs/tui-file-picker.md`, commit 5b6ac59). Implemented
+      2026-09-03: the day-0 scope ships in `bin/tui/src/picker/`
+      plus the `@` trigger in `app.rs`. Detail:
       `docs/tui-file-picker.md`. Library research:
       `docs/tui-file-picker-research.md`.

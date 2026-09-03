@@ -27,10 +27,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph};
 use ratatui::Frame;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::app::App;
 use crate::event::{Event, EventKind};
 use crate::highlight;
+use crate::picker::preview::Previewer;
 
 /// Map the frame spec's border choice to a ratatui border type. The
 /// default (a `None` border on the spec) is the rounded corners.
@@ -2630,6 +2632,52 @@ pub fn draw(
             height: 1,
         };
         f.render_widget(Paragraph::new(l.clone()), sub);
+    }
+
+    // The @ picker float (docs/tui-file-picker.md). Drawn last so it
+    // overlays the transcript and input rows. The picker and the
+    // browse overlay never coexist (section 5.3).
+    let picker_open = app.picker_ref().open;
+    if picker_open {
+        let snap: Arc<crate::picker::fuzzy::Snapshot> = app
+            .picker_matcher_ref()
+            .as_ref()
+            .map(|m| m.snapshot())
+            .unwrap_or_else(|| {
+                Arc::new(crate::picker::fuzzy::Snapshot {
+                    items: Vec::new(),
+                    query: String::new(),
+                    settled: false,
+                })
+            });
+        let previewer = crate::picker::preview::FilePreviewer::new(50);
+        let show_preview = previewer.enabled()
+            && app.picker_ref().preview_visible(
+                snap.items.len(),
+                crate::picker::render::PREVIEW_CUTOFF,
+            );
+        let layout = crate::picker::render::compute_float_layout(f.area(), show_preview);
+
+        // Keep the visible window in sync with the pane height so
+        // j/k paging stays within the rendered list area (the list
+        // block's two border rows are not visible content).
+        let rows = layout.list.height.saturating_sub(2).max(1) as usize;
+        app.picker().visible = rows;
+
+        let hints = "enter ok · esc keep · j/k move · ctrl-p preview";
+        // Clone the palette so the mutable picker borrow below does not
+        // overlap an immutable borrow of the same app.
+        let palette = app.palette().clone();
+        crate::picker::render::render_picker()
+            .f(f)
+            .state(app.picker())
+            .snapshot(&snap)
+            .layout(&layout)
+            .previewer(&previewer)
+            .hints(hints)
+            .palette(&palette)
+            .cursor(cursor)
+            .call();
     }
 }
 

@@ -391,6 +391,46 @@ impl Editor {
         *self = Self::new();
     }
 
+    /// The `@` token info on the cursor line, when the editor is in
+    /// insert mode and an `@` sits at a word boundary before the
+    /// cursor. Returns the `@` column and the query text between the
+    /// `@` and the cursor (docs/tui-file-picker.md section 5).
+    pub fn at_token_info(&self) -> Option<(usize, String)> {
+        if self.mode != Mode::Insert {
+            return None;
+        }
+        let line = self.lines.get(self.row)?;
+        let chars: Vec<char> = line.chars().collect();
+        let col = self.col.min(chars.len());
+        // Find the nearest `@` at or before the cursor (the last
+        // `@` on the line up to the caret).
+        let at_pos = chars[..col].iter().rposition(|&c| c == '@')?;
+        // The `@` must be at a word boundary: start of line or the
+        // preceding char is not a word char.
+        if at_pos > 0 {
+            let prev = chars[at_pos - 1];
+            if is_word_char(prev) {
+                return None;
+            }
+        }
+        let query: String = chars[at_pos + 1..col].iter().collect();
+        Some((at_pos, query))
+    }
+
+    /// Replace the `@` token starting at `at_col` with `value`, and
+    /// place the cursor just past the replacement. Pushes an undo
+    /// snapshot first (docs/tui-file-picker.md section 5).
+    pub fn replace_at_token(&mut self, at_col: usize, value: &str) {
+        let line = self.lines[self.row].clone();
+        let chars: Vec<char> = line.chars().collect();
+        let cursor_col = self.col.min(chars.len());
+        let prefix: String = chars[..at_col].iter().collect();
+        let suffix: String = chars[cursor_col..].iter().collect();
+        self.push_undo();
+        self.lines[self.row] = format!("{prefix}{value}{suffix}");
+        self.col = at_col + value.chars().count();
+    }
+
     /// The number of lines the text currently holds (at least 1).
     /// Test-only accessor: no production caller.
     #[cfg(test)]
@@ -5108,5 +5148,89 @@ mod tests {
         let at = norm("aaaa bbbb cccc\ndddd", 0, 14, &[]);
         assert_eq!(at.cursor(), (0, 14));
         assert_eq!(at.cursor_display(8), (1, 6));
+    }
+
+    // ── `@` token detection (docs/tui-file-picker.md section 5) ────
+
+    /// Insert-mode editor with the cursor at the end of the line.
+    fn ed_at_end(text: &str) -> Editor {
+        let mut e = ed(text);
+        e.col = e.lines[e.row].len();
+        e
+    }
+
+    #[test]
+    fn at_token_at_word_start_is_detected() {
+        // "hello @src/m" — the `@` at col 6 follows a space, so it is
+        // at a word boundary. The query is the text up to the caret.
+        let e = ed_at_end("hello @src/m");
+        assert_eq!(e.at_token_info(), Some((6, "src/m".into())));
+    }
+
+    #[test]
+    fn at_token_at_line_start_is_detected() {
+        let e = ed_at_end("@file.txt");
+        assert_eq!(e.at_token_info(), Some((0, "file.txt".into())));
+    }
+
+    #[test]
+    fn at_token_inside_a_word_is_not_a_token() {
+        // The `@` at col 3 follows a word char, so it is not at a
+        // word boundary: no token.
+        let e = ed_at_end("foo@bar");
+        assert_eq!(e.at_token_info(), None);
+    }
+
+    #[test]
+    fn at_token_needs_insert_mode() {
+        let mut e = ed_at_end("@src/main.rs");
+        e.mode = Mode::Normal;
+        assert_eq!(e.at_token_info(), None);
+    }
+
+    #[test]
+    fn at_token_query_is_the_text_between_at_and_caret() {
+        // The caret mid-token: the query stops at the caret, not the
+        // end of the line. "abc @src/": the @ is at col 4, the caret
+        // at col 8 sits just past "src".
+        let mut e = ed("abc @src/xyz tail");
+        e.col = 8;
+        assert_eq!(e.at_token_info(), Some((4, "src".into())));
+    }
+
+    #[test]
+    fn at_token_finds_last_at_before_caret() {
+        // Two tokens on the line: the nearest one to the caret wins.
+        let mut e = ed("@a @b");
+        e.col = 5; // caret past the second token
+        assert_eq!(e.at_token_info(), Some((3, "b".into())));
+        // The caret just past the first token: the first token wins.
+        e.col = 2;
+        assert_eq!(e.at_token_info(), Some((0, "a".into())));
+    }
+
+    #[test]
+    fn replace_at_token_swaps_in_the_value() {
+        let mut e = ed_at_end("hello @src/m");
+        e.replace_at_token(6, "docs/guide.md");
+        assert_eq!(e.lines[e.row], "hello docs/guide.md");
+        assert_eq!(e.col, 6 + "docs/guide.md".len(), "caret past the path");
+    }
+
+    #[test]
+    fn replace_at_token_keeps_text_after_caret() {
+        let mut e = ed("@a and more");
+        e.col = 2; // caret just past the token "a"
+        e.replace_at_token(0, "src/main.rs");
+        assert_eq!(e.lines[0], "src/main.rs and more");
+        assert_eq!(e.col, "src/main.rs".len());
+    }
+
+    #[test]
+    fn replace_at_token_pushes_undo() {
+        let mut e = ed_at_end("@x");
+        let before = e.undo_stack.len();
+        e.replace_at_token(0, "path/y.md");
+        assert_eq!(e.undo_stack.len(), before + 1, "the swap is undoable");
     }
 }

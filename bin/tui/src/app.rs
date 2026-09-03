@@ -50,6 +50,9 @@ pub enum Key {
     /// inserts a hard newline; in normal mode it is the `j` motion.
     /// `Enter` sends the draft (docs/tui.md section 7).
     CtrlJ,
+    /// The picker preview-pane toggle (docs/tui-file-picker.md
+    /// section 4.4).
+    CtrlP,
     Esc,
     Quit,
     Left,
@@ -234,6 +237,14 @@ pub struct App {
     /// The input queue toggle (Ctrl+F, docs/tui-pending-user-messages.md
     /// stage 2). `true`: the next draft sends to the follow queue.
     follow_queue: bool,
+    /// The `@` file-picker state machine (docs/tui-file-picker.md
+    /// section 4.3). `open` is `true` while the floating window is
+    /// visible.
+    picker: crate::picker::state::PickerState,
+    /// The background frizbee ranker for the picker. `None` while the
+    /// picker is closed. Spawned when the picker opens, dropped when
+    /// it closes.
+    picker_matcher: Option<crate::picker::fuzzy::PickerMatcher>,
     /// Latest `ext_status` values, id to value, for the active
     /// session. Maintained incrementally: `set_active` builds it
     /// and each appended watch event updates it. A tick reads this
@@ -376,6 +387,8 @@ impl App {
             thinking_shown: true,
             thinking_expanded: true,
             follow_queue: false,
+            picker: crate::picker::state::PickerState::new(),
+            picker_matcher: None,
         }
     }
 
@@ -793,6 +806,101 @@ impl App {
         }
     }
 
+    // ── @ file picker (docs/tui-file-picker.md) ─────────────────
+
+    /// The picker state machine, read-only.
+    pub fn picker_ref(&self) -> &crate::picker::state::PickerState {
+        &self.picker
+    }
+
+    /// The picker state machine, mutable. The renderer reads it; the
+    /// key handler mutates it through the public method on the state.
+    pub fn picker(&mut self) -> &mut crate::picker::state::PickerState {
+        &mut self.picker
+    }
+
+    /// The background ranker, for the renderer to read the latest
+    /// snapshot without blocking.
+    pub fn picker_matcher_ref(&self) -> &Option<crate::picker::fuzzy::PickerMatcher> {
+        &self.picker_matcher
+    }
+
+    /// Open the picker: spawn the matcher with the file list, open
+    /// the state, and push the initial query.
+    fn open_picker(&mut self) {
+        if self.picker.open {
+            return;
+        }
+        let cwd = std::env::current_dir().unwrap_or_default();
+        // Source is consumed through the `ItemSource` trait seam so
+        // later sources (symbols, git files) plug in without touching
+        // this code (docs/tui-file-picker.md section 4.5).
+        let source: Box<dyn crate::picker::items::ItemSource> =
+            Box::new(crate::picker::items::FileItemSource::new(cwd));
+        let items = source.items();
+        let matcher = crate::picker::fuzzy::PickerMatcher::new(items);
+        // Seed the query from the editor's `@` token if present.
+        let query = self
+            .editor()
+            .at_token_info()
+            .map(|(_, q)| q)
+            .unwrap_or_default();
+        self.picker.open(&query, 10);
+        if !query.is_empty() {
+            matcher.query(&query);
+        }
+        self.picker_matcher = Some(matcher);
+    }
+
+    /// Keep the picker in sync with the editor `@query` token:
+    /// - no token and picker closed: do nothing;
+    /// - token present and picker closed: open the picker seeded with the
+    ///   token text, then push the query to the background matcher;
+    /// - token present and picker open: refresh the query in the matcher;
+    /// - token gone and picker open: close the picker (the draft keeps the
+    ///   text as typed; nothing is replaced).
+    fn sync_picker(&mut self) {
+        let token = self.editor().at_token_info().map(|(_, q)| q);
+        match token {
+            Some(_) if !self.picker.open => {
+                // open_picker seeds the matcher with the current token text.
+                self.open_picker();
+            }
+            Some(q) => {
+                self.picker.query = q.clone();
+                if let Some(m) = &self.picker_matcher {
+                    m.query(&q);
+                }
+            }
+            None => {
+                if self.picker.open {
+                    self.picker.close();
+                    self.picker_matcher = None;
+                }
+            }
+        }
+    }
+
+    /// Commit the picker: replace the `@query` token with the chosen
+    /// item's value, or leave the raw `@query` text when there are no
+    /// results (`sel` is `None`). The caller already closed the state;
+    /// this drops the matcher. The caret stays at the path end.
+    fn commit_picker(&mut self, sel: Option<usize>) {
+        if let Some(idx) = sel {
+            if let Some(m) = &self.picker_matcher {
+                let snap = m.snapshot();
+                if let Some(item) = snap.items.get(idx) {
+                    if let Some((at_col, _)) = self.editor().at_token_info() {
+                        self.editor()
+                            .replace_at_token(at_col, &item.value);
+                    }
+                }
+            }
+        }
+        // Zero results: the draft keeps the raw `@query` text.
+        self.picker_matcher = None;
+    }
+
     // ── draft / editor ──────────────────────────────────────────
 
     /// The message editor: multi-line textarea plus the vim modal
@@ -1165,6 +1273,75 @@ impl App {
                 }
             }
         }
+        // The `@` picker overlay owns its key table while open
+        // (docs/tui-file-picker.md section 5). The host roles fall
+        // through: Ctrl+C, Ctrl+R, and Tab.
+        if self.picker.open {
+            let count = self.picker_matcher.as_ref()
+                .map(|m| m.snapshot().items.len())
+                .unwrap_or(0);
+            match key {
+                // Backspace and printable chars edit the draft: the
+                // editor owns the text, and the picker re-syncs its
+                // query from the `@` token.
+                Key::Backspace => {
+                    if let Some(h) = self.editor().press(Key::Backspace) {
+                        self.flash(h);
+                    }
+                    self.sync_picker();
+                    return Vec::new();
+                }
+                Key::Char('j') | Key::Char('k') => {
+                    let _ = self.picker.press(
+                        &key,
+                        count,
+                        crate::picker::render::PREVIEW_PAGE,
+                        crate::picker::render::PREVIEW_CUTOFF,
+                    );
+                    return Vec::new();
+                }
+                Key::Char(c) => {
+                    if let Some(h) = self.editor().press(Key::Char(c)) {
+                        self.flash(h);
+                    }
+                    self.sync_picker();
+                    return Vec::new();
+                }
+                // Host keys pass through even while the picker is open.
+                Key::Quit | Key::CtrlC | Key::CtrlR | Key::Tab
+                | Key::BackTab => {}
+                // Esc, Enter, arrows, paging, preview keys: the state
+                // machine decides (docs/tui-file-picker.md section 5).
+                _ => {
+                    match self.picker.press(
+                        &key,
+                        count,
+                        crate::picker::render::PREVIEW_PAGE,
+                        crate::picker::render::PREVIEW_CUTOFF,
+                    ) {
+                        crate::picker::state::PickAction::Commit(sel) => {
+                            self.commit_picker(sel);
+                        }
+                        crate::picker::state::PickAction::Closed => {
+                            self.picker_matcher = None;
+                            self.flash("picker closed — draft kept");
+                        }
+                        crate::picker::state::PickAction::Query => {
+                            // Re-rank after an in-state query edit.
+                            if let Some(m) = &self.picker_matcher {
+                                m.query(&self.picker.query);
+                            }
+                        }
+                        crate::picker::state::PickAction::Move
+                        | crate::picker::state::PickAction::ScrollPreview
+                        | crate::picker::state::PickAction::TogglePreview
+                        | crate::picker::state::PickAction::Nothing => {}
+                    }
+                    return Vec::new();
+                }
+            }
+            // Ctrl+C, Ctrl+R, and Tab fall through to the normal handler.
+        }
         // The name input swallows editing keys while it is active.
         // Other keys (q, Ctrl+R, Tab, ...) fall through unchanged.
         if self.pending_name.is_some() {
@@ -1300,6 +1477,7 @@ impl App {
                 if let Some(h) = self.editor().press(key) {
                     self.flash(h);
                 }
+                self.sync_picker();
                 Vec::new()
             }
             Key::CtrlR => {
@@ -1424,6 +1602,13 @@ impl App {
                 // writes the active model's config entry.
                 vec![Action::CycleEffort]
             }
+            Key::CtrlP => {
+                // Preview pane toggle for the @ picker
+                // (docs/tui-file-picker.md section 4.4).
+                // No-op when the picker is closed.
+                let _ = self.picker.toggle_preview(0, crate::picker::render::PREVIEW_CUTOFF);
+                Vec::new()
+            }
             Key::Wheel(delta) => {
                 // Wheel up scrolls back in history; wheel down chases
                 // the tail.
@@ -1504,6 +1689,9 @@ impl App {
                 if let Some(h) = self.editor().press(Key::Char(c)) {
                     self.flash(h);
                 }
+                // Sync the picker after any editor mutation so the
+                // `@query` text stays in step with the draft.
+                self.sync_picker();
                 Vec::new()
             }
         }
@@ -2839,5 +3027,70 @@ mod tests {
         assert!(!app.browse_ref().active(), "the browse state resets");
         assert_eq!(app.scroll(), 0, "the scroll resets with it");
         assert!(app.ss_arm.is_none(), "the arm resets with it");
+    }
+
+    // ── @ picker (docs/tui-file-picker.md) ─────────────────────
+
+    #[test]
+    fn picker_opens_when_typing_at_in_insert_mode() {
+        let mut app = app_with(vec![], "s1");
+        assert!(!app.picker_ref().open);
+        app.press(Key::Char('@'));
+        assert!(
+            app.picker_ref().open,
+            "typing @ in insert mode should open the picker"
+        );
+    }
+
+    #[test]
+    fn picker_esc_closes_and_keeps_draft() {
+        let mut app = app_with(vec![], "s1");
+        app.press(Key::Char('@'));
+        assert!(app.picker_ref().open);
+        app.press(Key::Esc);
+        assert!(!app.picker_ref().open, "Esc closes the picker");
+        assert_eq!(app.draft(), "@", "the draft keeps the @ token");
+    }
+
+    #[test]
+    fn picker_enter_commits_selection() {
+        let mut app = app_with(vec![], "s1");
+        app.press(Key::Char('@'));
+        assert!(app.picker_ref().open);
+        let item_count = app
+            .picker_matcher_ref()
+            .as_ref()
+            .map(|m| m.snapshot().items.len())
+            .unwrap_or(0);
+        app.press(Key::Enter);
+        assert!(!app.picker_ref().open, "Enter closes the picker");
+        if item_count > 0 {
+            assert!(
+                !app.draft().contains('@'),
+                "the @ token is replaced with the selected path"
+            );
+        } else {
+            assert_eq!(app.draft(), "@", "zero results: raw @query text kept");
+        }
+    }
+
+    #[test]
+    fn picker_j_k_moves_cursor() {
+        let mut app = app_with(vec![], "s1");
+        app.press(Key::Char('@'));
+        assert!(app.picker_ref().open);
+        app.press(Key::Char('j'));
+        app.press(Key::Char('j'));
+        assert_eq!(
+            app.picker_ref().cursor(),
+            2,
+            "j moves the cursor down two positions"
+        );
+        app.press(Key::Char('k'));
+        assert_eq!(
+            app.picker_ref().cursor(),
+            1,
+            "k moves the cursor up one position"
+        );
     }
 }
