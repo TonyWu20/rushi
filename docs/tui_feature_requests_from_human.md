@@ -124,3 +124,21 @@ the linked doc.
       gutter, the counts, the `:N` goto, and the stage-2 regex
       search with the highlight and the `N` view restore. Detail:
       `docs/tui-conversation-browsing.md`.
+
+## New requests (2026-09-05, follow-up: select-and-yank)
+
+- [ ] Select-and-yank in the browse mode. The browse mode is
+      the natural fit for vim `Visual` mode: select text on
+      the rendered transcript and yank it to a register. The
+      yanked text is pasteable into the draft (`p` in the
+      editor) so the user can quote anything from the
+      conversation to ask the agent about it. The `y`
+      operator cooperates with the existing browse motions:
+      `yw` (word), `y$` (line end), `yG` (last line),
+      `<n>yy` (n lines), and the `i` / `a` text objects
+      (inside double quotes, single quotes, parentheses,
+      square brackets, braces, angle brackets). No new
+      dependency: the `vim_editor.rs` motion and text-object
+      primitives are reused. The register store is shared
+      between the editor and the browse overlay. Detail:
+      `docs/tui-conversation-browsing.md` (section 11).

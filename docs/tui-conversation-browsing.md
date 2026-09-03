@@ -314,6 +314,9 @@ redraws.
   the editor's `s` motion outside the gated state.
 - No bar or gutter in the input box, the statusline, or the
   extension panes.
+- No transcript editing or buffer-mutating operators
+  (`d` / `c` / `x` / `>` / `<`). Stage 3 adds the read-only
+  `y` operator and visual selection only (section 11).
 
 ## 6. Reference: the neovim on this machine
 
@@ -469,6 +472,12 @@ Stage 2 — the regex search (section 7.3): the `regex`
 dependency, the `/` `?` command line, `n` `N` `*` `#`,
 the match highlight, and the view restore.
 
+Stage 3 — select-and-yank (section 11): the visual
+selection, the `y` operator with the word / line-end /
+last-line / counted-line motions, the inside and around
+text objects, and the shared register store. No new
+dependency: the `vim_editor.rs` primitives are reused.
+
 ## 9. Conformance tests
 
 Unit tests live in `bin/tui/src/` (the repo convention:
@@ -518,15 +527,27 @@ Unit tests live in `bin/tui/src/` (the repo convention:
 Affected:
 
 - `bin/tui/src/app.rs` — the browse state, the `s` arm,
-  the scroll clamp, the gate check.
+  the scroll clamp, the gate check. Stage 3 adds the shared
+  register store lifted from `Editor` to `App`, referenced by
+  both `Browse` and `Editor` (section 11.3).
 - `bin/tui/src/main.rs` — the key routing: the `s` arm in
   the gated state, the browse key table, the `Ctrl+U/D`
   reroute while browse holds.
 - `bin/tui/src/render.rs` — the bar column, the gutter
-  column, the cursor-line highlight, the width math.
+  column, the cursor-line highlight, the width math. Stage 3
+  adds the visual-selection highlight.
 - `bin/tui/src/browse.rs` (new) — the browse state machine
-  and the key table; the stage 2 search state.
+  and the key table. The stage 2 search state. The stage 3
+  visual selection, the `y` operator, and the yank wiring
+  (section 11).
+- `bin/tui/src/vim_editor.rs` — the motion and text-object
+  primitives (`word_forward`, `line_end`, `go_to_last_line`,
+  `resolve_text_object`, `extract_text`, `yank_to_register`,
+  etc.) become `pub(crate)` so the browse module can reuse
+  them (section 11.5). The `registers` store moves from
+  `Editor` to `App` (section 11.3).
 - `bin/tui/Cargo.toml` — the `regex` dependency (stage 2).
+  No new dependency in stage 3.
 
 Unaffected: the loop, the schemas, the extension protocol,
 every binary but `tui`, the editor's mode handlers (the arm
@@ -538,3 +559,217 @@ conformance rows above. A live session shows the bar on
 scroll-back, the browse cursor and gutter, and `G` back to
 the live tail. The request items close with Shipped notes
 in `docs/tui_feature_requests_from_human.md`.
+
+## 11. Contract 3 — select-and-yank in browse mode
+
+Stage 3 of this feature (section 8). The request lives in
+`docs/tui_feature_requests_from_human.md` (the 2026-09-05
+follow-up item).
+
+### 11.1 The request
+
+The browse mode (section 4) already holds a cursor over the
+rendered transcript. The request adds vim's select and yank
+on top of it, with three points:
+
+- the browse mode is the natural fit for vim's `Visual`
+  mode: select text on the log, then yank it to a register.
+- the select-and-yank path is the quoting tool. Anything in
+  the conversation can be quoted into the draft to ask the
+  agent about it.
+- the yank operator cooperates with the existing browse
+  motions: `yw` (a word), `y$` (to the line end), `yG`
+  (to the last line), `<n>yy` (n lines), and the `i` /
+  `a` text objects: inside double quotes, single quotes,
+  parentheses, square brackets, and braces.
+
+### 11.2 The operator set is read-only
+
+- The transcript is read-only (section 5). Browse mode
+  never edits it.
+- `y` is the only operator that makes sense on a read-only
+  buffer. `d` / `c` / `x` / `>` / `<` mutate the buffer and
+  stay out of scope (section 11.7).
+- A yank writes to the register store. It changes no
+  transcript line.
+- The yanked text is the rendered transcript text (the
+  `transcript_lines` output of `bin/tui/src/render.rs`),
+  not the source event JSON. The deviation D1 of section
+  6.4 holds: the line unit is the wrapped visual line.
+
+### 11.3 The shared register store
+
+- The editor already owns the register set (the `registers`
+  field of `bin/tui/src/vim_editor.rs`, the pi-vim
+  `registers.ts` port). It stores a `RegContent` per
+  register: the text plus the linewise flag.
+- Stage 3 lifts that store to `App` and shares one store
+  between the `Editor` and the `Browse` state machine. The
+  editor's `paste` reads the store as today. The browse
+  yank writes into it.
+- The yank writes through the editor's `yank_to_register`
+  function. The merge semantics stay the vim ones: a yank
+  sets the unnamed `"` register and the `0` register. A
+  named `A-Z` prefix appends to the lowercase register.
+  `+` / `*` alias the system clipboard. `_` discards.
+- The register prefix works in browse mode, like the
+  editor: `"a y ...` yanks to register `a`. A bare `y`
+  uses the unnamed register.
+- The quoting path: enter browse, yank the span, `ss`
+  leaves browse, `p` in the editor pastes the yank into
+  the draft. The user then edits and sends it to the
+  agent.
+- No new persisted state. A session switch or a TUI restart
+  resets the registers with the rest of the browse state
+  (section 4.7), like the scroll reset today.
+
+### 11.4 The key table (the section 4.4 additions)
+
+Counts prefix the motions, like section 4.4: a count, then
+the key, capped at `99999`. A count of `0` is a no-op.
+`Esc`, the host keys, and the `q` / `Tab` rows keep their
+section 4.4 roles. Stage 3 adds the visual state and the
+`y` operator:
+
+| Key | Action |
+|---|---|
+| `v` | char-visual: the anchor sits at the cursor |
+| `V` | linewise visual: the anchor holds the cursor line |
+| a motion in visual (`j` `k` `h` `l` `w` `0` `^` `$` `G`) | extend the selection from the anchor to the motion target |
+| `y` in visual | yank the selection; leave visual; the cursor moves to the selection end |
+| `Esc` in visual | cancel the selection; the cursor returns to the anchor |
+| `y` | open the yank operator: a motion or a text object follows |
+| `yy` / `Y` / `<n>yy` | yank n whole lines (the linewise rule, like the editor) |
+| `yw` | yank to the end of the word under the cursor (the operator `w` rule: the `extend_w_eol` extension) |
+| `y$` | yank to the line end, inclusive |
+| `yG` | yank from the cursor line to the last line, linewise |
+| `y0` | yank from the cursor to the line start |
+| `y^` | yank from the cursor to the first non-blank char |
+| `yi"` / `ya"` | yank inside / around the double quotes |
+| `yi'` / `ya'` | yank inside / around the single quotes |
+| `yi(` / `ya(` | yank inside / around the parentheses |
+| `yi[` / `ya[` | yank inside / around the square brackets |
+| `yi{` / `ya{` | yank inside / around the braces |
+| `yi<` / `ya<` | yank inside / around the angle brackets |
+
+Notes:
+
+- the `a` (around) forms take the same object with the
+  enclosing delimiters included.
+- an operator-pending key is a motion: while `y` waits, the
+  `G` of `yG` and the `w` of `yw` act as motions, like the
+  editor's `pending_operator` rule. A bare `G` without a
+  pending operator keeps the section 4.4 role.
+- an unmatched text object is a no-op with a hint
+  (section 11.8). The operator clears.
+- the yank operator is not a change: no recording, no undo
+  stack (the browse mode has neither; the editor keeps its
+  own undo for the draft).
+- the status hint grows one clause: `browse: v select, y
+  yank, yy lines, yw word, ss leave`.
+
+### 11.5 The reuse plan
+
+The motion, text-object, and register logic already exists in
+`bin/tui/src/vim_editor.rs` (the pi-vim port). Every
+primitive is a pure function over `&[String]` lines and a
+`(usize, usize)` cursor. That is the browse `View` shape:
+the `texts` slice is `&[String]`, the cursor is `(line, col)`
+over the same lines.
+
+Reuse (the functions stay in `vim_editor.rs`, made
+`pub(crate)` for `browse.rs`):
+
+- motions: `word_forward`, `word_end`, `line_end`,
+  `line_start`, `first_nonblank_motion`, `char_left`,
+  `char_right`, `go_to_last_line`, `extend_w_eol`;
+- the range types and builders: `MotionResult`, `OpRange`,
+  `motion_to_range`, `text_object_to_range`, `extract_text`;
+- the text objects: `resolve_text_object` (the `i` / `a`
+  prefixes over `"`, `'`, `` ` ``, `(`/`)`, `[`/`]`,
+  `{`/`}`, `<`/`>`) and the `TextObjectFn` type;
+- the registers: `RegContent`, `yank_to_register`,
+  `get_register`, `is_valid_register`.
+
+Hand-roll in `browse.rs` (the browse-specific glue only):
+
+- the visual selection state: the anchor `(line, col)`, the
+  char / linewise flag, the extension on a motion, the
+  cancel on `Esc`;
+- the key rows of section 11.4: the `y` operator state, the
+  text-object pending prefix, the `v` / `V` entry;
+- the yank wiring: build the `OpRange`, run `extract_text`
+  over the view `texts`, write the shared register;
+- the store lift: the `registers` map moves to `App`; the
+  `Editor` and the `Browse` both operate on that one store.
+
+The complexity is bounded by the editor's operator
+machinery, which already carries it. Stage 3 adds no second
+copy of that logic. Porting more vim operators beyond this
+set is not justified: the request names exactly these
+motions and objects, and they are already built.
+
+### 11.6 The crate question
+
+The request asks whether an external Rust crate should carry
+the operator logic if this part grows. It does not:
+
+- the primitives exist in-tree (`bin/tui/src/vim_editor.rs`)
+  and are the source of truth for the editor's motions.
+  A crate copy would drift from that source of truth;
+- the surveyed external options do not fit. `hjkl-engine`
+  (the vim FSM and motion grammar, pre-1.0) targets an
+  interactive editing grammar. It would duplicate the
+  operator dispatch and add a heavy dependency for logic
+  that is already written. `vii` binds a live vim instance.
+  The full editors (OxideEdit, edtui, and the rest) are
+  applications, not reusable operator libraries;
+- decision: no new crate. `bin/tui/Cargo.toml` gains no
+  dependency in stage 3.
+
+### 11.7 What stage 3 does not do
+
+- no buffer-mutating operators (`d` / `c` / `x` / `>` /
+  `<`): the transcript is read-only (section 11.2);
+- no block visual (`Ctrl+V`), no multi-cursor, no `.`
+  repeat in the browse mode;
+- no `:g` / `:global` over the log;
+- no text object beyond the editor's set (`"` `'` `` ` ``
+  `()` `[]` `{}` `<>`);
+- no register persistence across a restart or a session
+  switch (section 5).
+
+### 11.8 Failure modes
+
+| Condition | Behavior |
+|---|---|
+| a text object with no closing delimiter | no range; the yank is a no-op; the hint names the object |
+| an empty visual selection (`v` then `Esc`) | no register write; the cursor returns to the anchor |
+| a linewise yank across lines | `extract_text` joins the lines with a newline (the editor rule) |
+| a wrapped visual line mid-word | the yank is over the rendered line; the object respects the rendered chars (deviation D1, section 6.4) |
+| the cursor on the last line, `yG` | the range is that line alone; one line is yanked |
+| a counted `yG` | the target clamps to the last line (the `G` rule, section 4.4) |
+| a linewise then a char yank to one register | the merge rule of `yank_to_register`: the join inserts a newline between linewise pieces |
+| an empty transcript | every yank is a no-op (the section 4.7 motion rows hold) |
+| a session switch or a restart | the registers reset with the browse state (section 4.7) |
+
+### 11.9 Conformance tests (the stage 3 rows)
+
+Unit tests live in `bin/tui/src/browse.rs` (the repo
+convention: `cargo test -p tui`). Every row is a check.
+
+| Test | Given | Expected |
+|---|---|---|
+| `yw` | the cursor mid-word on a line | the word text lands in the `"` register; the cursor moves to the word end |
+| `y$` | the cursor at col 2 | the text from col 2 to the line end lands in the register (inclusive) |
+| `yG` | the cursor on line 3 of 10 | the lines 3..10 land in the register, linewise |
+| `3yy` | the cursor on line 2 of 10 | the lines 2..4 land in the register, linewise |
+| `yi"` | the cursor inside a quoted span | the inside text lands in the register, without the quotes |
+| `ya(` | the cursor inside a paren span | the span plus the two parens lands in the register |
+| the visual yank | `v` `j` `j` `y` | the three lines land in the register (the linewise join) |
+| the visual cancel | `v` `j` `Esc` | no register write; the cursor is the anchor |
+| the register handoff | a browse yank; `ss`; `p` in the editor | the draft gains the yanked text |
+| the named register | `"a yw` | the word lands in register `a`, not the unnamed one |
+| the unmatched object | `yi[` with no `]` on the line | a no-op; the hint names the object; the operator clears |
+| the read-only gate | any yank in browse | the transcript lines are unchanged |
+| the mutation gate | the yank wiring is deleted | the handoff and the register rows fail |
