@@ -392,9 +392,16 @@ impl Editor {
     }
 
     /// The `@` token info on the cursor line, when the editor is in
-    /// insert mode and an `@` sits at a word boundary before the
-    /// cursor. Returns the `@` column and the query text between the
-    /// `@` and the cursor (docs/tui-file-picker.md section 5).
+    /// insert mode and an `@` sits at the start of the line (preceded
+    /// by nothing or only whitespace) before the cursor.  Returns the
+    /// `@` column and the query text between the `@` and the cursor.
+    ///
+    /// The picker only activates when the `@` is the first non-space
+    /// character on the line (docs/tui-file-picker.md section 5).
+    /// An `@` typed after word characters or path fragments (e.g.
+    /// `foo@bar`, `src/main.rs@`) is inert and does not open the
+    /// picker.
+    /// (docs/tui-file-picker.md section 5.)
     pub fn at_token_info(&self) -> Option<(usize, String)> {
         if self.mode != Mode::Insert {
             return None;

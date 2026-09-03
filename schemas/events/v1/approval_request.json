@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["v", "type", "ts", "id", "tool_call_id", "prompt"],
+  "properties": {
+    "v": { "type": "integer", "const": 1 },
+    "type": { "type": "string", "const": "approval_request" },
+    "ts": { "type": "string", "format": "date-time" },
+    "id": { "type": "string", "description": "unique approval request id" },
+    "tool_call_id": { "type": "string", "description": "the tool_call id this approval gates" },
+    "prompt": { "type": "string", "description": "human-readable prompt shown to the user" }
+  }
+}

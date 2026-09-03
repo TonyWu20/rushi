@@ -160,3 +160,17 @@ the linked doc.
       plus the `@` trigger in `app.rs`. Detail:
       `docs/tui-file-picker.md`. Library research:
       `docs/tui-file-picker-research.md`.
+- [x] Syntax-highlight the picker preview pane and share the
+      highlighter with tool-result rendering (follow-up flagged in
+      `docs/tui-file-picker.md` section 9: "Code highlight is a later
+      add"). Implemented 2026-09-08: `bin/tui/src/highlight.rs` now
+      exposes a reusable `CodeHighlighter` plus `language_from_path`
+      and a one-shot `highlight_text_lines` entry point. The picker
+      preview pane (`picker/preview.rs`) and the `Read` tool-result
+      body (`tool_display.rs` `read_body`) both drive it through the
+      shared `Palette`/`Role` system. Unknown languages and binary
+      files render plain. No new dependencies: a hand-rolled
+      per-language tokenizer. Tree-sitter was evaluated and deferred:
+      C-FFI grammar builds are disproportionate for a preview pane and
+      an inline tool-result body. Revisit if highlight quality
+      demands it.

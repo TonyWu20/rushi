@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The auto-compact e2e suite (docs/auto-compact-plan.md section 5).
-# It drives step.sh with a scriptable stub model binary and asserts
+# It drives `harness step` with a scriptable stub model binary and asserts
 # the marker shapes on the session event log.
 #
 # The stub model reads the request JSON from stdin. Summary calls
@@ -145,11 +145,10 @@ run_step() {
     export MODEL_BIN="$WORK/stub-model"
     export STUB_PLAN="$WORK/plan" STUB_STATE="$WORK/stub-n"
     export STUB_REQLOG="${STUB_REQLOG:-$WORK/reqlog}"
-    local step="$SCRIPT_DIR/step.sh"
     if [[ -n "${STEP_DEBUG:-}" ]]; then
-      "$step" session
+      "$BIN_DIR/harness" step session
     else
-      "$step" session 2>/dev/null
+      "$BIN_DIR/harness" step session 2>/dev/null
     fi
     true
   )
@@ -358,7 +357,7 @@ scenario_compact_failure() {
     cd "$WORK"
     export CONFIG="$WORK/config.toml" MODEL_BIN="$WORK/stub-model"
     export STUB_PLAN="$WORK/plan" STUB_STATE="$WORK/stub-n" STUB_SUMMARY_FAILS=1
-    "$SCRIPT_DIR/step.sh" session 2>/dev/null || true
+    "$BIN_DIR/harness" step session 2>/dev/null || true
   )
   assert_eq "$(count_events compaction_failed)" 1 "the compaction_failed marker"
   assert_eq "$(count_events compaction_summary)" 0 "no compaction_summary"
@@ -380,7 +379,7 @@ scenario_empty_summary() {
     cd "$WORK"
     export CONFIG="$WORK/config.toml" MODEL_BIN="$WORK/stub-model"
     export STUB_PLAN="$WORK/plan" STUB_STATE="$WORK/stub-n" STUB_SUMMARY_EMPTY=1
-    "$SCRIPT_DIR/step.sh" session 2>/dev/null || true
+    "$BIN_DIR/harness" step session 2>/dev/null || true
   )
   assert_eq "$(count_events compaction_failed)" 1 "the compaction_failed marker"
   assert_eq "$(count_events compaction_summary)" 0 "no compaction_summary"

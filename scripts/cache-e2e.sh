@@ -16,6 +16,7 @@ BIN_DIR="$(cd "$SCRIPT_DIR/../target/debug" && pwd)"
 TOOL_DIR="$(cd "$SCRIPT_DIR/../tools" && pwd)"
 SCHEMA_DIR="$(cd "$SCRIPT_DIR/../schemas/events/v1" && pwd)"
 CONFIG="$SCRIPT_DIR/../config.toml"
+export CONFIG
 
 SESSION="cache-test"
 SESSION_DIR="$SCRIPT_DIR/../sessions/$SESSION"
@@ -31,12 +32,12 @@ TS1=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 echo "{\"v\":1,\"type\":\"user_message\",\"ts\":\"$TS1\",\"content\":\"Read config.toml and tell me the model name.\"}" > "$SESSION_DIR/events.jsonl"
 
 # Run turn 1 (will call model API, parse, route, log)
-"$SCRIPT_DIR/step.sh" "$SESSION"
+"$BIN_DIR/harness" step "$SESSION"
 
 # The step publishes the loop phase as an ext_status marker
 # (docs/tui-model-wait-indicator.md). The session log must hold at
 # least one loop_phase event. This check is the mutation gate:
-# removing the emit helper from step.sh fails it.
+# removing the emit helper from the harness step fails it.
 if ! jq -e 'select(.type == "ext_status" and .id == "loop_phase")' "$SESSION_DIR/events.jsonl" > /dev/null; then
   echo "FAIL: no loop_phase marker in the session log." >&2
   exit 1
@@ -59,7 +60,7 @@ echo "{\"v\":1,\"type\":\"user_message\",\"ts\":\"$TS2\",\"content\":\"What was 
 TURN2_CACHED=0
 for i in 1 2 3 4 5; do
   echo "Retry $i..."
-  "$SCRIPT_DIR/step.sh" "$SESSION"
+  "$BIN_DIR/harness" step "$SESSION"
 
   # Check cached_tokens in turn 2
   TURN2_CACHED=$(jq -r 'select(.type == "assistant_message") | .usage.cached_tokens // 0' "$SESSION_DIR/events.jsonl" | tail -1)

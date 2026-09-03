@@ -873,23 +873,23 @@ impl App {
     /// - token gone and picker open: close the picker (the draft keeps the
     ///   text as typed; nothing is replaced).
     fn sync_picker(&mut self) {
-        let token = self.editor().at_token_info().map(|(_, q)| q);
+        let token = self.editor().at_token_info();
         match token {
             Some(_) if !self.picker.open => {
-                // open_picker seeds the matcher with the current token text.
+                // Open the picker seeded with the current token text.
                 self.open_picker();
             }
-            Some(q) => {
+            Some((_, q)) => {
                 self.picker.query = q.clone();
                 self.update_picker_ranker(&q);
             }
-            None => {
-                if self.picker.open {
-                    self.picker.close();
-                    self.picker_matcher = None;
-                    self.picker_source = None;
-                }
+            None if self.picker.open => {
+                // The `@` token was deleted; close the picker.
+                self.picker.close();
+                self.picker_matcher = None;
+                self.picker_source = None;
             }
+            _ => {}
         }
     }
 
@@ -918,22 +918,32 @@ impl App {
     }
 
     /// Commit the picker: replace the `@query` token with the chosen
-    /// item's value, or leave the raw `@query` text when there are no
-    /// results (`sel` is `None`). The caller already closed the state;
-    /// this drops the matcher. The caret stays at the path end.
+    /// item's value prefixed with `@` (the model sees `@path` as an
+    /// explicit file reference). Zero results: keep the `@` and query
+    /// text as-is in the draft — no stripping. The caller already
+    /// closed the state; this drops the matcher. The caret stays at
+    /// the replacement end.
     fn commit_picker(&mut self, sel: Option<usize>) {
-        if let Some(idx) = sel {
-            if let Some(m) = &self.picker_matcher {
-                let snap = m.snapshot();
-                if let Some(item) = snap.items.get(idx) {
-                    if let Some((at_col, _)) = self.editor().at_token_info() {
-                        self.editor()
-                            .replace_at_token(at_col, &item.value);
+        match sel {
+            Some(idx) => {
+                if let Some(m) = &self.picker_matcher {
+                    let snap = m.snapshot();
+                    if let Some(item) = snap.items.get(idx) {
+                        if let Some((at_col, _)) = self.editor().at_token_info() {
+                            // Keep the `@` so the model receives an
+                            // unambiguous file-reference marker.
+                            self.editor()
+                                .replace_at_token(at_col, &format!("@{}", item.value));
+                        }
                     }
                 }
             }
+            None => {
+                // Zero results: keep the `@` and query text as-is in
+                // the draft. The user can keep editing or delete the
+                // text manually.
+            }
         }
-        // Zero results: the draft keeps the raw `@query` text.
         self.picker_matcher = None;
     }
 
@@ -1360,7 +1370,13 @@ impl App {
                         }
                         crate::picker::state::PickAction::Closed => {
                             self.picker_matcher = None;
-                            self.flash("picker closed — draft kept");
+                            // Strip the `@` token from the draft so the
+                            // user can retype without leftover artifacts.
+                            if let Some((at_pos, _)) = self.editor().at_token_info() {
+                                self.editor().replace_at_token(at_pos, "");
+                            }
+                            self.picker.close();
+                            self.flash("picker closed — @ token stripped");
                         }
                         crate::picker::state::PickAction::Query => {
                             // Re-rank after an in-state query edit.
@@ -3079,13 +3095,17 @@ mod tests {
     }
 
     #[test]
-    fn picker_esc_closes_and_keeps_draft() {
+    fn picker_esc_closes_and_strips_at() {
         let mut app = app_with(vec![], "s1");
         app.press(Key::Char('@'));
         assert!(app.picker_ref().open);
         app.press(Key::Esc);
         assert!(!app.picker_ref().open, "Esc closes the picker");
-        assert_eq!(app.draft(), "@", "the draft keeps the @ token");
+        assert_eq!(
+            app.draft(),
+            "",
+            "ESC strips the @ token; draft is empty"
+        );
     }
 
     #[test]
@@ -3102,11 +3122,12 @@ mod tests {
         assert!(!app.picker_ref().open, "Enter closes the picker");
         if item_count > 0 {
             assert!(
-                !app.draft().contains('@'),
-                "the @ token is replaced with the selected path"
+                app.draft().starts_with('@'),
+                "the @ marker is preserved before the selected path: draft={}",
+                app.draft()
             );
         } else {
-            assert_eq!(app.draft(), "@", "zero results: raw @query text kept");
+            assert_eq!(app.draft(), "", "zero results: @ stripped, draft is empty");
         }
     }
 

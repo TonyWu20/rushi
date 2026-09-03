@@ -269,7 +269,17 @@ exercises the new surface.
 ## 9. Open items
 
 - Frecency store: where it lives and how it persists.
-- Preview depth: plain text on day 0. Code highlight is a later add.
+- Preview depth: plain text on day 0. Code highlight shipped as a
+  shared component 2026-09-08: `bin/tui/src/highlight.rs`
+  (`language_from_path`, `CodeHighlighter`, `highlight_text_lines`).
+  The picker preview pane (`picker/preview.rs`) and the transcript
+  `Read` tool-result body (`tool_display.rs` `read_body`) both drive
+  it. The language is detected from the file path; unknown types and
+  binary files stay plain. No new dependency: a hand-rolled
+  per-language tokenizer over the existing `Palette`/`Role` system.
+  Tree-sitter was considered and deferred: grammar build weight is
+  disproportionate for a preview pane and an inline tool-result
+  body. Revisit if highlight quality demands it.
 - The preview scroll reuses the visual mode when it lands. Until
   then the pane scrolls on `j`/`k` and `Ctrl+U`/`Ctrl+D`.
 - The multi-select and quickfix behavior from `telescope` is a later

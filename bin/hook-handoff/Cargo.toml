@@ -1,0 +1,11 @@
+[package]
+name = "hook-handoff"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "harness-hook-handoff"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1.0"

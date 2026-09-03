@@ -236,7 +236,15 @@ pub fn body_rows(
     let command = Style::default().fg(palette.color(crate::color::Role::ToolCommand));
     let code = Style::default().fg(palette.color(crate::color::Role::Code));
     match tool {
-        "read" => read_body(value, cfg, &out, &hint, &code, expanded, width),
+        "read" => read_body()
+            .value(value)
+            .cfg(cfg)
+            .hint(&hint)
+            .code(&code)
+            .palette(palette)
+            .expanded(expanded)
+            .width(width)
+            .call(),
         "write" => {
             let builder = write_body()
                 .value(value)
@@ -357,12 +365,28 @@ fn fold_hint(
 /// output: the line count, then the output-mode lines of the text.
 /// Collapsed, the preview shows `preview_lines` (8) lines of the
 /// text; expanded, up to the expanded cap.
+/// The read tool prefixes each content line with its 1-based file
+/// line number (`"12: "`). Split that prefix off so the syntax
+/// highlighter only sees file content. Lines without a digit-colon
+/// prefix (annotation lines like `(5 lines omitted)` or
+/// `(End of file ...)`) come back unsplit with a `None` number.
+fn split_line_number(line: &str) -> (Option<&str>, &str) {
+    match line.find(':') {
+        Some(pos) if pos > 0 && line[..pos].bytes().all(|b| b.is_ascii_digit()) => {
+            let rest = line[pos + 1..].strip_prefix(' ').unwrap_or(&line[pos + 1..]);
+            (Some(&line[..pos]), rest)
+        }
+        _ => (None, line),
+    }
+}
+
+#[builder]
 fn read_body(
     value: &serde_json::Value,
     cfg: &ToolDisplay,
-    out: &Style,
     hint: &Style,
     code: &Style,
+    palette: &crate::color::Palette,
     expanded: bool,
     width: usize,
 ) -> Vec<BodyRow> {
@@ -386,15 +410,42 @@ fn read_body(
                 cfg.preview_lines
             };
             let remaining = lines.len().saturating_sub(cap);
-            for l in lines.iter().take(cap) {
-                rows.push(vec![(*code, l.to_string())]);
+            // The shared syntax-highlight entry point: the language is
+            // detected from the read path in the result value; unknown
+            // types stay plain. This is the same engine the picker
+            // preview pane uses (docs/tui-file-picker.md section 9).
+            let path = value.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let lang = if path.is_empty() {
+                None
+            } else {
+                crate::highlight::language_from_path(path)
+            };
+            let mut hl = crate::highlight::CodeHighlighter::new();
+            for raw in lines.iter().take(cap) {
+                let (num, content) = split_line_number(raw);
+                let mut row: BodyRow = Vec::new();
+                if let Some(n) = num {
+                    row.push((*code, format!("{n}: ")));
+                }
+                if num.is_some() {
+                    for (st, s) in hl.line(content, lang, palette) {
+                        // Plain runs take the tool code tone; syntax
+                        // segments keep the palette syntax colors.
+                        let st = if st == Style::default() { *code } else { st };
+                        row.push((st, s));
+                    }
+                } else {
+                    // No line-number prefix: keep the legacy plain
+                    // rendering for annotation lines.
+                    row.push((*code, raw.to_string()));
+                }
+                rows.push(row);
             }
             if let Some(h) = fold_hint(remaining, expanded, hint, width) {
                 rows.push(vec![h]);
             }
         }
     }
-    let _ = out;
     rows
 }
 
@@ -1142,6 +1193,100 @@ mod tests {
             "the expanded state shows the body: {shown:?}"
         );
         assert!(!shown.iter().any(|l| l.contains("more lines")));
+    }
+
+    #[test]
+    fn read_preview_highlights_known_language() {
+        let p = crate::color::Palette::builtin(crate::color::Level::Rgb);
+        let cfg = ToolDisplay::preset(Preset::Balanced);
+        let cfg = ToolDisplay {
+            read_mode: OutputMode::Preview,
+            ..cfg
+        };
+        let text = "1: let x = 42; // note\n2: ";
+        let value = serde_json::json!({
+            "text": text,
+            "path": "/tmp/sample.rs",
+            "total_lines": 2,
+        });
+        let rows = body_rows()
+            .tool("read")
+            .value(&value)
+            .err(false)
+            .cfg(&cfg)
+            .palette(&p)
+            .expanded(false)
+            .width(80)
+            .call();
+        let shown = rows_text(&rows);
+        assert!(
+            shown.iter().any(|l| l.contains("let x = 42")),
+            "the first body row shows the rust line: {shown:?}"
+        );
+        // The keyword "let" gets the palette syntax-keyword color.
+        let kw = p.style(crate::color::Role::SyntaxKeyword, Modifier::empty());
+        let found_kw = rows.iter().any(|row| {
+            row.iter()
+                .any(|(st, t)| t == "let" && *st == kw)
+        });
+        assert!(found_kw, "the 'let' keyword is colored: {rows:?}");
+        // The number "42" gets the palette syntax-number color.
+        let num = p.style(crate::color::Role::SyntaxNumber, Modifier::empty());
+        let found_num = rows.iter().any(|row| {
+            row.iter()
+                .any(|(st, t)| t == "42" && *st == num)
+        });
+        assert!(found_num, "the literal 42 is colored: {rows:?}");
+        // The comment "// note" gets the palette syntax-comment color.
+        let cmt = p.style(crate::color::Role::SyntaxComment, Modifier::DIM);
+        let found_cmt = rows.iter().any(|row| {
+            row.iter()
+                .any(|(st, t)| t.contains("note") && *st == cmt)
+        });
+        assert!(found_cmt, "the comment is colored: {rows:?}");
+    }
+
+    #[test]
+    fn read_preview_no_path_stays_plain() {
+        let p = crate::color::Palette::builtin(crate::color::Level::Rgb);
+        let cfg = ToolDisplay::preset(Preset::Balanced);
+        let cfg = ToolDisplay {
+            read_mode: OutputMode::Preview,
+            ..cfg
+        };
+        let value = serde_json::json!({"text": "1: hello\n2: world"});
+        let rows = body_rows()
+            .tool("read")
+            .value(&value)
+            .err(false)
+            .cfg(&cfg)
+            .palette(&p)
+            .expanded(false)
+            .width(80)
+            .call();
+        let shown = rows_text(&rows);
+        assert!(
+            shown.iter().any(|l| l.contains("1: hello")),
+            "line 1 is shown: {shown:?}"
+        );
+        // Without a path there is no language, so every run stays in
+        // the code tone (no syntax colors applied).
+        let code = p.style(crate::color::Role::Code, Modifier::empty());
+        for row in &rows {
+            for (st, _) in row.iter() {
+                assert!(
+                    *st == code || *st == hint_style(&p),
+                    "unexpected style in plain read body: {st:?}"
+                );
+            }
+        }
+    }
+
+    /// The muted hint style, used by the plain-read assertion.
+    fn hint_style(p: &crate::color::Palette) -> Style {
+        Style::default()
+            .fg(p.color(crate::color::Role::Hint))
+            .add_modifier(Modifier::DIM)
     }
 
     #[test]
