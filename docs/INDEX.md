@@ -80,6 +80,7 @@ not built).
 | `ft-005-logline.md`                           | Implemented         | 2026-08-29   | Record for FT-005: motivation from the ruxe type-level-disjointness post, two-writer interleave analysis, LogLine capability design and tests             |
 | `skill-remapped-to-os-apps.md`                  | Proposal            | 2026-09-02   | Feature request: the OS + Applications split. Base distribution (kernel: loop core + base tools + growth machinery; default-swappable `tui` front-end, the WM tier). A tool registers by being on the agent-visible PATH and self-documents via `--help` (no `SKILL.md`; a procedure is a script). Discovery is an on-demand `tools --list` catalog (reads `tool.toml` `description`), never prompt content. First application is `tui-capture` |
 | `pi-extension-port-investigation.md`            | Investigation       | 2026-09-10   | Portability assessment of the `pi-config` extension set (pi-goal, rpiv-ask-user-question, pi-fff, agent-simple-english, no-find-grep, no-bare-python, pi-lynx, pi-terminal-browser, pi-automode) onto the harness: tool/hook/UI/loop mapping, difficulty verdict, blockers, and suggested order |
+| `deepseek-harness-compaction-research.md`       | Investigation       | 2026-09-04   | Cross-codebase research: how the dsh compaction system keeps the session log append-only while replacing surface ranges with summary checkpoints, and how the stable request prefix and prefix-aligned summarization call maximize KV cache prefix hits |
 
 Status legend:
 
@@ -93,6 +94,8 @@ Status legend:
   Do not treat as a current specification.
 - **Review** — a critique of another doc. It names findings and
   fixes. It is not a specification.
+- **Investigation** — a research doc that surveys an external codebase or
+  design space to inform a decision. Not a spec; not a review of a doc.
 - **Plan** — a staged work breakdown of an approved spec.
   Work the stages in order. Update the status as stages land.
 
