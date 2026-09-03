@@ -367,6 +367,367 @@ pub fn json_line_p(line: &str, palette: &Palette) -> Vec<Seg> {
     out
 }
 
+// ── generic code preview highlighting ────────────────────────────
+//
+// The picker preview pane (docs/tui-file-picker.md, section 9:
+// "Preview depth: plain text on day 0. Code highlight is a later
+// add.") colors file content by detected language: string and number
+// literals everywhere, line and block comments, and a small keyword
+// set per language family. JSON delegates to [`json_line_p`] and
+// markdown to [`md_line`]. Unknown files stay plain text.
+
+/// Detect the highlight language from a file path, by extension (and
+/// a few filename special cases). `None` means no known language:
+/// the preview shows plain text.
+pub fn language_from_path(path: &str) -> Option<&'static str> {
+    let p = std::path::Path::new(path);
+    let file_name = p.file_name().and_then(|f| f.to_str()).unwrap_or("");
+    let file_name_lc = file_name.to_ascii_lowercase();
+    if file_name_lc == "dockerfile" {
+        return Some("dockerfile");
+    }
+    if file_name_lc == "makefile" || file_name_lc == "gnumakefile" {
+        return Some("make");
+    }
+    let ext = p.extension()?.to_str()?.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "rs" => "rust",
+        "py" | "pyi" => "python",
+        "c" | "h" => "c",
+        "cpp" | "cc" | "cxx" | "hpp" | "hh" => "cpp",
+        "go" => "go",
+        "java" => "java",
+        "js" | "mjs" | "cjs" => "javascript",
+        "ts" | "tsx" | "jsx" => "typescript",
+        "sh" | "bash" | "zsh" | "ksh" | "fish" => "shell",
+        "json" => "json",
+        "md" | "markdown" | "mdx" => "markdown",
+        "yaml" | "yml" | "toml" | "ini" | "cfg" | "conf" | "env" | "properties" => "config",
+        "html" | "htm" | "xml" => "html",
+        "css" | "scss" | "sass" => "css",
+        "sql" => "sql",
+        "lua" => "lua",
+        "rb" | "rake" => "ruby",
+        "swift" => "swift",
+        "kt" | "kts" => "kotlin",
+        "scala" | "sc" => "scala",
+        "ex" | "exs" => "elixir",
+        "zig" => "zig",
+        "nim" => "nim",
+        "pl" | "pm" | "t" => "perl",
+        "r" | "R" => "r",
+        "m" | "mm" => "objc",
+        "vb" => "vb",
+        "mk" | "make" => "make",
+        _ => return None,
+    })
+}
+
+/// A stateful per-line code highlighter for the picker preview pane.
+///
+/// State (block-comment position, markdown fence) carries across
+/// lines, so one instance is created per file read and fed the
+/// lines in order.
+pub struct CodeHighlighter {
+    in_block_comment: bool,
+    md_fence: bool,
+}
+
+impl CodeHighlighter {
+    pub fn new() -> Self {
+        Self {
+            in_block_comment: false,
+            md_fence: false,
+        }
+    }
+
+    /// Highlight one hard line. `lang` is from
+    /// [`language_from_path`]; `None` (unknown file type) stays
+    /// plain text.
+    pub fn line(&mut self, line: &str, lang: Option<&str>, palette: &Palette) -> Vec<Seg> {
+        let lang = match lang {
+            Some(l) => l,
+            None => return vec![(Style::default(), line.to_string())],
+        };
+        match lang {
+            "json" => json_line_p(line, palette),
+            "markdown" => md_line(line, &mut self.md_fence, palette),
+            _ => self.code_line(line, lang, palette),
+        }
+    }
+
+    /// The generic code tokenizer: string literals, number literals,
+    /// line comments, `/* */` block comments, and a per-language
+    /// keyword set. Plain runs come out with the default style so
+    /// the caller's plain-base pass can paint them.
+    fn code_line(&mut self, line: &str, lang: &str, palette: &Palette) -> Vec<Seg> {
+        let style = |role: Role, mods: Modifier| palette.style(role, mods);
+        let cs: Vec<char> = line.chars().collect();
+        let n = cs.len();
+        let mut out: Vec<Seg> = Vec::new();
+        let mut plain = String::new();
+        let mut i = 0usize;
+
+        let kws = keywords_for(lang);
+        let lc_prefixes = line_comment_prefixes(lang);
+        let block_comment = has_block_comment(lang);
+
+        // Resume a block comment opened on a previous line.
+        if self.in_block_comment {
+            if let Some(close_pos) = line.find("*/") {
+                self.in_block_comment = false;
+                let end = close_pos + 2;
+                out.push((
+                    style(Role::SyntaxComment, Modifier::DIM),
+                    line[..end].to_string(),
+                ));
+                i = end;
+            } else {
+                return vec![(
+                    style(Role::SyntaxComment, Modifier::DIM),
+                    line.to_string(),
+                )];
+            }
+        }
+
+        let flush_plain = |out: &mut Vec<Seg>, plain: &mut String| {
+            if !plain.is_empty() {
+                out.push((Style::default(), std::mem::take(plain)));
+            }
+        };
+
+        while i < n {
+            let c = cs[i];
+
+            // String / char literal (quotes and backslash escapes).
+            if c == '"' || c == '\'' {
+                let quote = c;
+                let mut j = i + 1;
+                while j < n {
+                    if cs[j] == '\\' && j + 1 < n {
+                        j += 2;
+                        continue;
+                    }
+                    if cs[j] == quote {
+                        j += 1;
+                        break;
+                    }
+                    j += 1;
+                }
+                flush_plain(&mut out, &mut plain);
+                out.push((
+                    style(Role::SyntaxString, Modifier::empty()),
+                    seg(&cs, i, j),
+                ));
+                i = j;
+                continue;
+            }
+
+            // Line comment: everything to end of line.
+            if lc_prefixes.iter().any(|p| line[i..].starts_with(p)) {
+                flush_plain(&mut out, &mut plain);
+                out.push((
+                    style(Role::SyntaxComment, Modifier::DIM),
+                    line[i..].to_string(),
+                ));
+                return out;
+            }
+
+            // Block comment; may run past the end of this line.
+            if block_comment && line[i..].starts_with("/*") {
+                flush_plain(&mut out, &mut plain);
+                let rest = &line[i + 2..];
+                if let Some(close_pos) = rest.find("*/") {
+                    let end = i + 2 + close_pos + 2;
+                    out.push((
+                        style(Role::SyntaxComment, Modifier::DIM),
+                        seg(&cs, i, end),
+                    ));
+                    i = end;
+                } else {
+                    out.push((
+                        style(Role::SyntaxComment, Modifier::DIM),
+                        line[i..].to_string(),
+                    ));
+                    self.in_block_comment = true;
+                    return out;
+                }
+                continue;
+            }
+
+            // Number literal.
+            if c.is_ascii_digit() {
+                let mut j = i + 1;
+                while j < n
+                    && (cs[j].is_ascii_digit()
+                        || matches!(cs[j], '.' | 'x' | 'X' | 'o' | 'O' | 'b' | 'B' | 'e' | 'E' | '_' | 'f' | 'F' | 'a' | 'A' | 'c' | 'C' | 'd' | 'D'))
+                {
+                    j += 1;
+                }
+                flush_plain(&mut out, &mut plain);
+                out.push((
+                    style(Role::SyntaxNumber, Modifier::empty()),
+                    seg(&cs, i, j),
+                ));
+                i = j;
+                continue;
+            }
+
+            // Identifier / keyword.
+            if c.is_ascii_alphabetic() || c == '_' {
+                let mut j = i + 1;
+                while j < n && (cs[j].is_ascii_alphanumeric() || cs[j] == '_') {
+                    j += 1;
+                }
+                let word = &line[i..j];
+                if kws.contains(&word) {
+                    flush_plain(&mut out, &mut plain);
+                    out.push((
+                        style(Role::SyntaxKeyword, Modifier::empty()),
+                        word.to_string(),
+                    ));
+                    i = j;
+                    continue;
+                }
+            }
+
+            plain.push(c);
+            i += 1;
+        }
+        flush_plain(&mut out, &mut plain);
+        out
+    }
+}
+
+impl Default for CodeHighlighter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Line-comment prefixes per language (consumed to end of line).
+fn line_comment_prefixes(lang: &str) -> &'static [&'static str] {
+    match lang {
+        "c" | "cpp" | "rust" | "go" | "java" | "javascript" | "typescript"
+        | "swift" | "kotlin" | "scala" | "zig" => &["//"],
+        "python" | "ruby" | "shell" | "make" | "dockerfile" | "config" | "r" => &["#"],
+        "sql" | "lua" | "haskell" | "perl" => &["--"],
+        "nim" => &["#", ";"],
+        "html" | "xml" => &["<!--"],
+        _ => &[],
+    }
+}
+
+/// Languages with `/* ... */` block comments.
+fn has_block_comment(lang: &str) -> bool {
+    matches!(
+        lang,
+        "c" | "cpp" | "rust" | "go" | "java" | "javascript" | "typescript"
+            | "swift" | "kotlin" | "scala" | "css" | "zig"
+    )
+}
+
+/// A small keyword set per language family. Unlisted languages get
+/// the C-family list (the common case among supported code
+/// languages); the empty list means no keyword coloring.
+fn keywords_for(lang: &str) -> &'static [&'static str] {
+    const C_FAMILY: &[&str] = &[
+        "auto", "break", "case", "catch", "const", "continue", "default",
+        "delete", "do", "else", "enum", "extern", "false", "final",
+        "finally", "for", "goto", "if", "implements", "import", "in",
+        "interface", "new", "null", "override", "package", "private",
+        "protected", "public", "return", "static", "struct", "super",
+        "switch", "this", "throw", "true", "try", "typedef", "union",
+        "unsigned", "using", "virtual", "while",
+    ];
+    match lang {
+        "rust" => &[
+            "async", "await", "break", "const", "continue", "dyn", "else",
+            "enum", "false", "fn", "for", "if", "impl", "let", "loop",
+            "match", "mod", "move", "mut", "pub", "ref", "return", "self",
+            "static", "struct", "super", "trait", "true", "type", "use",
+            "where", "while",
+        ],
+        "python" => &[
+            "False", "True", "None", "and", "as", "assert", "async",
+            "await", "break", "class", "continue", "def", "del", "elif",
+            "else", "except", "finally", "for", "from", "global", "if",
+            "import", "in", "is", "lambda", "nonlocal", "not", "or",
+            "pass", "raise", "return", "while", "with", "yield",
+        ],
+        "go" => &[
+            "break", "case", "chan", "const", "continue", "defer", "else",
+            "fallthrough", "func", "go", "goto", "if", "import",
+            "interface", "map", "package", "range", "return", "select",
+            "struct", "switch", "type", "var", "true", "false", "nil",
+            "iota",
+        ],
+        "javascript" | "typescript" => &[
+            "async", "await", "break", "case", "catch", "class", "const",
+            "continue", "debugger", "default", "delete", "do", "else",
+            "export", "extends", "false", "finally", "for", "function",
+            "if", "import", "in", "instanceof", "interface", "let", "new",
+            "null", "of", "package", "private", "protected", "public",
+            "readonly", "return", "static", "super", "switch", "this",
+            "throw", "true", "try", "type", "typeof", "var", "void",
+            "while", "with", "yield",
+        ],
+        "shell" | "make" | "dockerfile" => &[
+            "if", "then", "else", "elif", "fi", "for", "while", "do",
+            "done", "case", "esac", "function", "return", "exit", "local",
+            "export", "declare", "set", "unset", "true", "false",
+            "FROM", "RUN", "CMD", "ENTRYPOINT", "COPY", "ADD", "WORKDIR",
+            "EXPOSE", "ENV", "ARG", "VOLUME", "USER", "ONBUILD", "all",
+            "include", "override", "ifdef", "ifndef", "ifeq", "ifneq",
+            "endif", "define", "endef",
+        ],
+        "sql" => &[
+            "SELECT", "FROM", "WHERE", "INSERT", "UPDATE", "DELETE",
+            "CREATE", "DROP", "ALTER", "TABLE", "JOIN", "LEFT", "RIGHT",
+            "INNER", "OUTER", "ON", "AS", "AND", "OR", "NOT", "NULL",
+            "IN", "IS", "BY", "ORDER", "GROUP", "HAVING", "LIMIT",
+            "UNION", "VALUES", "SET", "INTO",
+            "select", "from", "where", "insert", "update", "delete",
+            "create", "drop", "alter", "table", "join", "left", "right",
+            "inner", "outer", "on", "as", "and", "or", "not", "null",
+            "in", "is", "by", "order", "group", "having", "limit",
+            "union", "values", "set", "into",
+        ],
+        "ruby" => &[
+            "def", "end", "class", "module", "return", "if", "elsif",
+            "else", "unless", "while", "until", "do", "for", "case",
+            "when", "then", "begin", "rescue", "ensure", "raise", "yield",
+            "require", "require_relative", "include", "attr_accessor",
+            "true", "false", "nil", "self", "super", "new", "puts",
+            "print", "puts",
+        ],
+        "lua" => &[
+            "and", "break", "do", "else", "elseif", "end", "false", "for",
+            "function", "goto", "if", "in", "local", "nil", "not", "or",
+            "repeat", "return", "then", "true", "until", "while",
+        ],
+        "r" => &[
+            "function", "if", "else", "for", "while", "repeat", "break",
+            "next", "return", "NULL", "TRUE", "FALSE", "library", "require",
+            "in",
+        ],
+        "perl" => &[
+            "if", "elsif", "else", "unless", "while", "until", "for",
+            "foreach", "do", "done", "my", "our", "local", "use", "no",
+            "require", "print", "printf", "sub", "return", "die", "warn",
+            "undef", "defined", "and", "or", "not", "BEGIN", "END",
+        ],
+        "elixir" => &[
+            "def", "defmodule", "defp", "defmacro", "do", "end", "if",
+            "else", "case", "when", "fn", "fn", "use", "import", "require",
+            "alias", "with", "try", "rescue", "catch", "raise", "throw",
+            "true", "false", "nil",
+        ],
+        "html" | "xml" | "css" | "config" => &[],
+        _ => C_FAMILY,
+    }
+}
+
 // ── the grid table (docs/tui-markdown-render.md section 1) ────
 
 /// True when the hard line is a table row: a `|`-separated run with
@@ -778,5 +1139,97 @@ mod tests {
         let cell: String = grid[3].iter().map(|(_, s)| s.as_str()).collect();
         assert!(cell.contains('…'), "the elided cell: {cell:?}");
         assert!(last.contains('└'), "{last:?}");
+    }
+
+    // ── code-preview highlighter tests ─────────────────────────────
+
+    #[test]
+    fn language_from_path_maps_known_extensions() {
+        assert_eq!(language_from_path("/repo/src/main.rs"), Some("rust"));
+        assert_eq!(language_from_path("x.json"), Some("json"));
+        assert_eq!(language_from_path("a/b.md"), Some("markdown"));
+        assert_eq!(language_from_path("script.py"), Some("python"));
+        assert_eq!(language_from_path("app.go"), Some("go"));
+        assert_eq!(language_from_path("comp.ts"), Some("typescript"));
+        assert_eq!(language_from_path("run.sh"), Some("shell"));
+        assert_eq!(language_from_path("Dockerfile"), Some("dockerfile"));
+        assert_eq!(language_from_path("Makefile"), Some("make"));
+        // Unknown / no extension → None → plain text.
+        assert_eq!(language_from_path("data.csv"), None);
+        assert_eq!(language_from_path("notes.txt"), None);
+        assert_eq!(language_from_path("/noext"), None);
+    }
+
+    #[test]
+    fn code_highlighter_rust_line() {
+        let p = Palette::builtin(crate::color::Level::Rgb);
+        let mut hl = CodeHighlighter::new();
+        let s = hl.line("let x: u32 = 42; // note", Some("rust"), &p);
+        assert_eq!(joined(&s), "let x: u32 = 42; // note");
+        let kw = p.style(Role::SyntaxKeyword, Modifier::empty());
+        let num = p.style(Role::SyntaxNumber, Modifier::empty());
+        let cmt = p.style(Role::SyntaxComment, Modifier::DIM);
+        assert!(s.iter().any(|(st, t)| t == "let" && *st == kw), "{s:?}");
+        assert!(s.iter().any(|(st, t)| t == "42" && *st == num), "{s:?}");
+        assert!(s.iter().any(|(st, t)| t == "// note" && *st == cmt), "{s:?}");
+    }
+
+    #[test]
+    fn code_highlighter_python_comment_and_string() {
+        let p = Palette::builtin(crate::color::Level::Rgb);
+        let mut hl = CodeHighlighter::new();
+        let s = hl.line("x = \"hi\"  # greet", Some("python"), &p);
+        assert_eq!(joined(&s), "x = \"hi\"  # greet");
+        let string = p.style(Role::SyntaxString, Modifier::empty());
+        let cmt = p.style(Role::SyntaxComment, Modifier::DIM);
+        assert!(s.iter().any(|(st, t)| t == "\"hi\"" && *st == string), "{s:?}");
+        assert!(s.iter().any(|(st, t)| t == "# greet" && *st == cmt), "{s:?}");
+    }
+
+    #[test]
+    fn code_highlighter_block_comment_spans_lines() {
+        let p = Palette::builtin(crate::color::Level::Rgb);
+        let mut hl = CodeHighlighter::new();
+        let l1 = hl.line("/* start", Some("c"), &p);
+        let cmt = p.style(Role::SyntaxComment, Modifier::DIM);
+        assert!(l1.iter().all(|(st, _)| *st == cmt), "{l1:?}");
+        let l2 = hl.line("middle", Some("c"), &p);
+        assert!(l2.iter().all(|(st, _)| *st == cmt), "{l2:?}");
+        let l3 = hl.line("end */ code", Some("c"), &p);
+        assert!(l3.iter().any(|(st, t)| t == "end */" && *st == cmt), "{l3:?}");
+        // The rest after the block comment ends is plain.
+        assert!(l3.iter().any(|(st, t)| t == " code" && *st == Style::default()), "{l3:?}");
+    }
+
+    #[test]
+    fn code_highlighter_json_delegates() {
+        let p = Palette::builtin(crate::color::Level::Rgb);
+        let mut hl = CodeHighlighter::new();
+        let s = hl.line("{\"a\": 1}", Some("json"), &p);
+        let key = p.style(Role::SyntaxVariable, Modifier::empty());
+        assert!(s.iter().any(|(st, t)| t == "\"a\"" && *st == key), "{s:?}");
+    }
+
+    #[test]
+    fn code_highlighter_unknown_lang_is_plain() {
+        let p = Palette::builtin(crate::color::Level::Rgb);
+        let mut hl = CodeHighlighter::new();
+        let s = hl.line("hello \"world\" 42", None, &p);
+        // No known language → single plain segment, default style.
+        assert_eq!(s.len(), 1, "{s:?}");
+        assert_eq!(s[0].0, Style::default());
+        assert_eq!(s[0].1, "hello \"world\" 42");
+    }
+
+    #[test]
+    fn code_highlighter_markdown_fence_state() {
+        let p = Palette::builtin(crate::color::Level::Rgb);
+        let mut hl = CodeHighlighter::new();
+        let a = hl.line("```python", Some("markdown"), &p);
+        let fence = p.style(Role::Fence, Modifier::DIM);
+        assert!(a.iter().any(|(st, t)| t == "```" && *st == fence), "{a:?}");
+        let b = hl.line("x=1", Some("markdown"), &p);
+        let code = p.style(Role::Code, Modifier::empty());
+        assert_eq!(b, vec![(code, "x=1".to_string())], "{b:?}");
     }
 }

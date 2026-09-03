@@ -274,13 +274,30 @@ fn render_preview(
     palette: &crate::color::Palette,
 ) {
     let header = previewer.header(item).unwrap_or_else(|| item.label.clone());
-    let content = previewer.content(item);
+    let content = previewer.content(item, palette);
     let pane_h = preview_rect.height as usize;
     let start = state.preview_scroll.min(content.len());
-    let visible: Vec<String> = content.iter().skip(start).take(pane_h).cloned().collect();
-    let lines: Vec<Line> = visible
-        .into_iter()
-        .map(|l| Line::from(Span::styled(l, Style::default().fg(palette.color(crate::color::Role::PlainText)))))
+    // Plain (default-style) segments get the pane's plain-text tone;
+    // highlighted segments keep their palette syntax styles.
+    let plain_base = palette.style(crate::color::Role::PlainText, Modifier::empty());
+    let lines: Vec<Line> = content
+        .iter()
+        .skip(start)
+        .take(pane_h)
+        .map(|segs| {
+            if segs.is_empty() {
+                Line::from("")
+            } else {
+                let spans: Vec<Span> = segs
+                    .iter()
+                    .map(|(s, t)| {
+                        let style = if *s == Style::default() { plain_base } else { *s };
+                        Span::styled(t.clone(), style)
+                    })
+                    .collect();
+                Line::from(spans)
+            }
+        })
         .collect();
     let preview_block = Block::bordered()
         .border_type(BorderType::Rounded)

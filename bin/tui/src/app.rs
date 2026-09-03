@@ -245,6 +245,12 @@ pub struct App {
     /// picker is closed. Spawned when the picker opens, dropped when
     /// it closes.
     picker_matcher: Option<crate::picker::fuzzy::PickerMatcher>,
+    /// The file source backing the picker (the section 4.5 seam where
+    /// later symbol and git-file sources plug in).
+    picker_source: Option<crate::picker::items::FileItemSource>,
+    /// The search root the current matcher list was enumerated under.
+    /// Path queries re-root the search; a changed root re-enumerates.
+    picker_root: std::path::PathBuf,
     /// Latest `ext_status` values, id to value, for the active
     /// session. Maintained incrementally: `set_active` builds it
     /// and each appended watch event updates it. A tick reads this
@@ -389,6 +395,8 @@ impl App {
             follow_queue: false,
             picker: crate::picker::state::PickerState::new(),
             picker_matcher: None,
+            picker_source: None,
+            picker_root: std::path::PathBuf::new(),
         }
     }
 
@@ -825,30 +833,34 @@ impl App {
         &self.picker_matcher
     }
 
-    /// Open the picker: spawn the matcher with the file list, open
-    /// the state, and push the initial query.
+    /// Open the picker: enumerate files for the seed query's root,
+    /// spawn the matcher, open the state, and push the initial query.
     fn open_picker(&mut self) {
         if self.picker.open {
             return;
         }
         let cwd = std::env::current_dir().unwrap_or_default();
-        // Source is consumed through the `ItemSource` trait seam so
-        // later sources (symbols, git files) plug in without touching
-        // this code (docs/tui-file-picker.md section 4.5).
-        let source: Box<dyn crate::picker::items::ItemSource> =
-            Box::new(crate::picker::items::FileItemSource::new(cwd));
-        let items = source.items();
-        let matcher = crate::picker::fuzzy::PickerMatcher::new(items);
+        // The source is a `FileItemSource` for now; later sources
+        // (symbols, git files) plug in at this seam
+        // (docs/tui-file-picker.md section 4.5).
+        let source = crate::picker::items::FileItemSource::new(cwd.clone());
         // Seed the query from the editor's `@` token if present.
         let query = self
             .editor()
             .at_token_info()
             .map(|(_, q)| q)
             .unwrap_or_default();
+        // Path queries (`/abs`, `~/x`, `../y`) re-root the search;
+        // plain queries stay under the cwd.
+        let (root, tail) = crate::picker::items::query_root_tail(&query, &cwd);
+        let items = source.collect_in(&root);
+        let matcher = crate::picker::fuzzy::PickerMatcher::new(items);
         self.picker.open(&query, 10);
-        if !query.is_empty() {
-            matcher.query(&query);
+        if !tail.is_empty() {
+            matcher.query_ranked(&query, &tail);
         }
+        self.picker_source = Some(source);
+        self.picker_root = root;
         self.picker_matcher = Some(matcher);
     }
 
@@ -856,7 +868,8 @@ impl App {
     /// - no token and picker closed: do nothing;
     /// - token present and picker closed: open the picker seeded with the
     ///   token text, then push the query to the background matcher;
-    /// - token present and picker open: refresh the query in the matcher;
+    /// - token present and picker open: re-root if needed, then refresh
+    ///   the query in the matcher;
     /// - token gone and picker open: close the picker (the draft keeps the
     ///   text as typed; nothing is replaced).
     fn sync_picker(&mut self) {
@@ -868,16 +881,39 @@ impl App {
             }
             Some(q) => {
                 self.picker.query = q.clone();
-                if let Some(m) = &self.picker_matcher {
-                    m.query(&q);
-                }
+                self.update_picker_ranker(&q);
             }
             None => {
                 if self.picker.open {
                     self.picker.close();
                     self.picker_matcher = None;
+                    self.picker_source = None;
                 }
             }
+        }
+    }
+
+    /// Re-root and re-rank the picker when the `@` query changes.
+    /// Path queries (`/abs`, `~/x`, `../y`) move the search root;
+    /// a changed root re-enumerates the item list before the rank.
+    fn update_picker_ranker(&mut self, query: &str) {
+        let Some(src) = self.picker_source.as_ref() else {
+            return;
+        };
+        let base = src.base().to_path_buf();
+        let (root, tail) = crate::picker::items::query_root_tail(query, &base);
+        let need_replace = root != self.picker_root;
+        let new_items = if need_replace {
+            Some(src.collect_in(&root))
+        } else {
+            None
+        };
+        if let Some(m) = &mut self.picker_matcher {
+            if let Some(items) = new_items {
+                m.replace_items(items);
+                self.picker_root = root;
+            }
+            m.query_ranked(query, &tail);
         }
     }
 

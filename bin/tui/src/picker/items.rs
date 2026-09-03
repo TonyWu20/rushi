@@ -23,9 +23,11 @@ pub trait ItemSource {
     #[allow(dead_code)]
     fn name(&self) -> &str;
 
-    /// All candidate items. Called once when the picker opens;
-    /// the background matcher re-ranks this list on every keystroke
-    /// (section 4.2).
+    /// All candidate items. Called once when the picker opens; the
+    /// background matcher re-ranks this list on every keystroke
+    /// (section 4.2). Day-0 consumers call `collect_in` directly;
+    /// this trait method stays as the seam for later sources.
+    #[allow(dead_code)]
     fn items(&self) -> Vec<PickerItem>;
 }
 
@@ -44,36 +46,39 @@ impl FileItemSource {
         }
     }
 
-    /// Collect the file list for this source.
-    pub fn collect(&self) -> Vec<PickerItem> {
-        if is_git_repo(&self.root) {
-            git_ls_files(&self.root)
+    /// The base root this source was created with.
+    pub fn base(&self) -> &std::path::Path {
+        &self.root
+    }
+
+    /// Collect files under an arbitrary search root. Labels stay
+    /// relative to the base root when a file is under it (the day-0
+    /// case and `../` navigation); otherwise labels are absolute
+    /// paths, which is what path queries outside the base produce.
+    pub fn collect_in(&self, root: &std::path::Path) -> Vec<PickerItem> {
+        let base = self.root.clone();
+        if is_git_repo(root) {
+            git_ls_files(root)
                 .into_iter()
                 .map(|p| {
-                    let abs = self.root.join(&p);
-                    PickerItem {
-                        label: p.clone(),
-                        value: p.clone(),
-                        payload: abs.to_string_lossy().to_string(),
-                    }
+                    let abs = root.join(&p);
+                    self.file_item(&abs, &base)
                 })
                 .collect()
         } else {
-            walk_files(&self.root)
+            walk_files(root)
                 .into_iter()
-                .map(|p| {
-                    let rel = p
-                        .strip_prefix(&self.root)
-                        .unwrap_or(&p)
-                        .to_string_lossy()
-                        .to_string();
-                    PickerItem {
-                        label: rel.clone(),
-                        value: rel,
-                        payload: p.to_string_lossy().to_string(),
-                    }
-                })
+                .map(|abs| self.file_item(&abs, &base))
                 .collect()
+        }
+    }
+
+    fn file_item(&self, abs: &std::path::Path, base: &std::path::Path) -> PickerItem {
+        let label = display_path(abs, base);
+        PickerItem {
+            label: label.clone(),
+            value: label,
+            payload: abs.to_string_lossy().into_owned(),
         }
     }
 }
@@ -84,7 +89,65 @@ impl ItemSource for FileItemSource {
     }
 
     fn items(&self) -> Vec<PickerItem> {
-        self.collect()
+        self.collect_in(&self.root)
+    }
+}
+
+/// The label for a file: the path relative to `base` when the file is
+/// under it (including `../` navigation, which stays relative the way
+/// the user typed it); the absolute path otherwise.
+fn display_path(abs: &std::path::Path, base: &std::path::Path) -> String {
+    if let Ok(rel) = abs.strip_prefix(base) {
+        return rel.to_string_lossy().into_owned();
+    }
+    abs.to_string_lossy().into_owned()
+}
+
+/// Split a raw `@query` into the directory to enumerate and the fuzzy
+/// tail to rank against.
+///
+/// A query that names a path outside the base (starts with `/`, `~`,
+/// or `../`, or is `..`) re-roots the search: the part up to the last
+/// `/` is the new search root, the remainder is the fuzzy tail. Plain
+/// queries stay under the base and are matched whole (day-0
+/// behavior, section 4.1).
+pub fn query_root_tail(query: &str, base: &std::path::Path) -> (std::path::PathBuf, String) {
+    let expanded = expand_home(query);
+    if !is_path_query(&expanded) {
+        return (base.to_path_buf(), expanded);
+    }
+    let (dir_part, tail) = match expanded.rfind('/') {
+        Some(i) => (&expanded[..i], &expanded[i + 1..]),
+        None => (expanded.as_str(), ""),
+    };
+    let dir = dir_part.trim_end_matches('/');
+    let root = if dir.is_empty() {
+        std::path::PathBuf::from("/")
+    } else if dir.starts_with('/') {
+        std::path::PathBuf::from(dir)
+    } else {
+        base.join(dir)
+    };
+    (root, tail.to_string())
+}
+
+/// Whether a query names a path: absolute, home-relative, or parent
+/// navigation.
+fn is_path_query(q: &str) -> bool {
+    q.starts_with('/')
+        || q.starts_with('~')
+        || q == ".."
+        || q.starts_with("../")
+}
+
+/// Expand a leading `~` to `$HOME`.
+fn expand_home(q: &str) -> String {
+    match q.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            format!("{home}{rest}")
+        }
+        _ => q.to_string(),
     }
 }
 
@@ -133,15 +196,22 @@ fn git_ls_files(root: &std::path::Path) -> Vec<String> {
 }
 
 /// Plain directory walk (non-git repos). Skips hidden directories and
-/// common build/dependency directories.
+/// common build/dependency directories. Capped so an arbitrary root
+/// (e.g. `/` from an absolute path query) stays responsive.
+const MAX_WALK_DEPTH: usize = 12;
+const MAX_WALK_FILES: usize = 20_000;
+
 fn walk_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
-    walk(root, &mut out);
+    walk(root, 0, &mut out);
     out.sort();
     out
 }
 
-fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+fn walk(dir: &std::path::Path, depth: usize, out: &mut Vec<std::path::PathBuf>) {
+    if depth >= MAX_WALK_DEPTH || out.len() >= MAX_WALK_FILES {
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -154,8 +224,8 @@ fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
             continue;
         }
         if path.is_dir() {
-            walk(&path, out);
-        } else {
+            walk(&path, depth + 1, out);
+        } else if out.len() < MAX_WALK_FILES {
             out.push(path);
         }
     }
@@ -183,7 +253,7 @@ mod tests {
             .map(|s| s.success())
             .unwrap_or(false);
         let src = FileItemSource::new(tmp.clone());
-        let items = src.collect();
+        let items = src.collect_in(src.base());
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"src/main.rs"), "src/main.rs should be found");
         assert!(labels.contains(&"README.md"), "README.md should be found");
@@ -219,7 +289,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&git_dir);
 
         let src = FileItemSource::new(tmp.clone());
-        let items = src.collect();
+        let items = src.collect_in(src.base());
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"hello.txt"));
         assert!(labels.contains(&"world.rs"));
@@ -234,5 +304,75 @@ mod tests {
         assert_eq!(name, "files");
         let items = ItemSource::items(&src);
         assert!(!items.is_empty());
+    }
+
+    #[test]
+    fn query_root_tail_keeps_plain_queries_under_base() {
+        let base = std::path::PathBuf::from("/repo");
+        assert_eq!(query_root_tail("", &base), (base.clone(), String::new()));
+        assert_eq!(
+            query_root_tail("src/main", &base),
+            (base.clone(), "src/main".into())
+        );
+        // A `..` inside the name is not parent navigation.
+        assert_eq!(
+            query_root_tail("..notes", &base),
+            (base.clone(), "..notes".into())
+        );
+    }
+
+    #[test]
+    fn query_root_tail_reroots_absolute_paths() {
+        let base = std::path::PathBuf::from("/repo");
+        assert_eq!(
+            query_root_tail("/etc/passwd", &base),
+            (std::path::PathBuf::from("/etc"), "passwd".into())
+        );
+        assert_eq!(
+            query_root_tail("/etc/", &base),
+            (std::path::PathBuf::from("/etc"), String::new())
+        );
+        assert_eq!(
+            query_root_tail("/", &base),
+            (std::path::PathBuf::from("/"), String::new())
+        );
+    }
+
+    #[test]
+    fn query_root_tail_reroots_parent_paths() {
+        let base = std::path::PathBuf::from("/repo/app");
+        assert_eq!(
+            query_root_tail("../sibling/x.rs", &base),
+            (std::path::PathBuf::from("/repo/app/../sibling"), "x.rs".into())
+        );
+        assert_eq!(
+            query_root_tail("..", &base),
+            (std::path::PathBuf::from("/repo/app/.."), String::new())
+        );
+    }
+
+    #[test]
+    fn collect_in_labels_files_outside_base_as_absolute() {
+        let tmp = std::env::temp_dir().join("picker_test_reroot");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("b")).unwrap();
+        std::fs::write(tmp.join("b/x.txt"), "x").unwrap();
+        // A source based at `a` listing files under `b`: the file is
+        // not under the base, so its label is the absolute path.
+        let src = FileItemSource::new(tmp.join("a"));
+        let items = src.collect_in(&tmp.join("b"));
+        let labels: Vec<String> = items.iter().map(|i| i.label.clone()).collect();
+        assert!(
+            labels.contains(&tmp.join("b/x.txt").to_string_lossy().into_owned()),
+            "sibling file should be labeled absolute: {labels:?}"
+        );
+        // Files under the base keep relative labels.
+        let items = src.collect_in(src.base());
+        let labels: Vec<String> = items.iter().map(|i| i.label.clone()).collect();
+        assert!(
+            labels.iter().all(|l| !l.starts_with('/')),
+            "files under the base stay relative: {labels:?}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

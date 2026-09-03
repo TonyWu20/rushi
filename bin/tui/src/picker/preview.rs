@@ -1,10 +1,13 @@
 //! Previewers (section 4.4).
 //!
 //! The `Previewer` trait is the seam that swaps the preview pane
-//! content. Day 0: [`FilePreviewer`] shows file text. The
-//! [`NullPreviewer`] shows nothing. Later: code, diff, or none.
+//! content. [`FilePreviewer`] shows file text with syntax
+//! highlighting (section 9 follow-up: "code highlight is a later
+//! add"); the [`NullPreviewer`] shows nothing.
 
 use super::items::PickerItem;
+use crate::color::Palette;
+use crate::highlight::{language_from_path, CodeHighlighter, Seg};
 
 /// The previewer seam. A picker body takes one previewer and renders
 /// the preview pane for the selected item.
@@ -17,8 +20,11 @@ pub trait Previewer {
     /// `None` when the item cannot be previewed.
     fn header(&self, item: &PickerItem) -> Option<String>;
 
-    /// The preview text lines for the selected item.
-    fn content(&self, item: &PickerItem) -> Vec<String>;
+    /// The preview lines for the selected item, as styled segments
+    /// per hard line (`Seg` = `(Style, String)`). Highlighted runs
+    /// carry the palette syntax roles; plain runs keep the default
+    /// style, which the pane paints with the plain-text tone.
+    fn content(&self, item: &PickerItem, palette: &Palette) -> Vec<Vec<Seg>>;
 }
 
 /// A previewer that reads and shows the text content of a file.
@@ -59,16 +65,23 @@ impl Previewer for FilePreviewer {
         ))
     }
 
-    fn content(&self, item: &PickerItem) -> Vec<String> {
+    fn content(&self, item: &PickerItem, palette: &Palette) -> Vec<Vec<Seg>> {
         let path = &item.payload;
-        match std::fs::read_to_string(path) {
-            Ok(text) => text
-                .lines()
-                .take(self.max_lines)
-                .map(|l| l.to_string())
-                .collect(),
-            Err(_) => vec![format!("(cannot read {})", item.label)],
-        }
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(_) => {
+                return vec![vec![(
+                    palette.style(crate::color::Role::Error, ratatui::style::Modifier::empty()),
+                    format!("(cannot read {})", item.label),
+                )]]
+            }
+        };
+        let lang = language_from_path(path);
+        let mut hl = CodeHighlighter::new();
+        text.lines()
+            .take(self.max_lines)
+            .map(|l| hl.line(l, lang, palette))
+            .collect()
     }
 }
 
@@ -89,7 +102,7 @@ impl Previewer for NullPreviewer {
         None
     }
 
-    fn content(&self, _item: &PickerItem) -> Vec<String> {
+    fn content(&self, _item: &PickerItem, _palette: &Palette) -> Vec<Vec<Seg>> {
         Vec::new()
     }
 }
@@ -146,9 +159,11 @@ mod tests {
     fn file_previewer_content_returns_lines() {
         let (item, _f) = test_item();
         let p = FilePreviewer::new(100);
-        let content = p.content(&item);
+        let palette = crate::color::Palette::builtin(crate::color::Level::Rgb);
+        let content = p.content(&item, &palette);
         assert_eq!(content.len(), 3);
-        assert_eq!(content[0], "line one");
+        let text: String = content[0].iter().map(|(_, s)| s.as_str()).collect();
+        assert_eq!(text, "line one");
     }
 
     #[test]
@@ -170,9 +185,12 @@ mod tests {
             payload: path,
         };
         let p = FilePreviewer::new(5);
-        let content = p.content(&item);
+        let palette = Palette::builtin(crate::color::Level::Rgb);
+        let content = p.content(&item, &palette);
         assert_eq!(content.len(), 5);
-        assert_eq!(content[0], "line 0");
-        assert_eq!(content[4], "line 4");
+        let text: String = content[0].iter().map(|(_, s)| s.as_str()).collect();
+        assert_eq!(text, "line 0");
+        let last: String = content[4].iter().map(|(_, s)| s.as_str()).collect();
+        assert_eq!(last, "line 4");
     }
 }

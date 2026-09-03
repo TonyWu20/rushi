@@ -28,7 +28,14 @@ pub struct Snapshot {
 }
 
 enum Cmd {
-    Query(String),
+    /// Rank `rank` against the current item list and publish a
+    /// snapshot that records `full` as the query it answers for.
+    Query {
+        full: String,
+        rank: String,
+    },
+    /// Swap the item list (the search root changed).
+    Replace(Vec<PickerItem>),
     Shutdown,
 }
 
@@ -58,7 +65,7 @@ impl PickerMatcher {
 
         let snap_clone = Arc::clone(&snap);
         let worker = thread::spawn(move || {
-            worker_loop(rx, labels, items, snap_clone);
+            worker_loop(rx, items, labels, snap_clone);
         });
 
         Self {
@@ -72,7 +79,25 @@ impl PickerMatcher {
     /// The worker re-ranks the full item list and publishes a new
     /// snapshot.
     pub fn query(&self, q: &str) {
-        let _ = self.tx.send(Cmd::Query(q.to_string()));
+        self.query_ranked(q, q);
+    }
+
+    /// Push a query where `rank` is the text matched against item
+    /// labels and `full` is the raw query recorded in the snapshot.
+    /// Path queries rank only their tail against the labels while the
+    /// snapshot keeps the full query for display.
+    pub fn query_ranked(&self, full: &str, rank: &str) {
+        let _ = self.tx.send(Cmd::Query {
+            full: full.to_string(),
+            rank: rank.to_string(),
+        });
+    }
+
+    /// Replace the ranked item list. The worker swaps the list and
+    /// publishes the fresh full-list snapshot. Called when the search
+    /// root of a path query changes.
+    pub fn replace_items(&self, items: Vec<PickerItem>) {
+        let _ = self.tx.send(Cmd::Replace(items));
     }
 
     /// Read the latest snapshot without blocking.
@@ -91,27 +116,33 @@ impl Drop for PickerMatcher {
 
 fn worker_loop(
     rx: mpsc::Receiver<Cmd>,
-    labels: Vec<String>,
     items: Vec<PickerItem>,
+    labels: Vec<String>,
     snap: Arc<Mutex<Arc<Snapshot>>>,
 ) {
+    let mut items = items;
+    let mut labels = labels;
     for cmd in rx {
         match cmd {
-            Cmd::Query(q) => {
-                let ranked = if q.is_empty() {
+            Cmd::Query { full, rank } => {
+                let ranked = if rank.is_empty() {
                     items.clone()
                 } else {
-                    let mut m = Matcher::new(&q, &Config::default());
-                    let matches = m.match_list(&labels);
-                    matches
+                    let mut m = Matcher::new(&rank, &Config::default());
+                    m.match_list(&labels)
                         .iter()
                         .map(|m| items[m.index as usize].clone())
                         .collect()
                 };
-                let mut guard = snap.lock().unwrap();
-                *guard = Arc::new(Snapshot {
-                    items: ranked,
-                    query: q,
+                *snap.lock().unwrap() =
+                    Arc::new(Snapshot { items: ranked, query: full, settled: true });
+            }
+            Cmd::Replace(new_items) => {
+                items = new_items;
+                labels = items.iter().map(|i| i.label.clone()).collect();
+                *snap.lock().unwrap() = Arc::new(Snapshot {
+                    items: items.clone(),
+                    query: String::new(),
                     settled: true,
                 });
             }
@@ -203,5 +234,29 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         let snap = m.snapshot();
         assert!(snap.items.is_empty(), "no item matches 'zzzzz'");
+    }
+
+    #[test]
+    fn replace_items_swaps_the_ranked_list() {
+        let m = PickerMatcher::new(test_items());
+        m.replace_items(vec![PickerItem {
+            label: "zeta.txt".into(),
+            value: "zeta.txt".into(),
+            payload: "/z/zeta.txt".into(),
+        }]);
+        m.query("zeta");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let snap = m.snapshot();
+        assert_eq!(snap.items.len(), 1);
+        assert_eq!(snap.items[0].label, "zeta.txt");
+    }
+
+    #[test]
+    fn query_ranked_records_full_query_for_display() {
+        let m = PickerMatcher::new(test_items());
+        m.query_ranked("/etc/passwd", "passwd");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let snap = m.snapshot();
+        assert_eq!(snap.query, "/etc/passwd");
     }
 }
