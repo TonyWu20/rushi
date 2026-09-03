@@ -142,3 +142,20 @@ the linked doc.
       primitives are reused. The register store is shared
       between the editor and the browse overlay. Detail:
       `docs/tui-conversation-browsing.md` (section 11).
+
+## New requests (2026-09-08)
+
+- [ ] A file picker on the `@` trigger. The user types `@` in
+      the input box. A candidate file list opens. It re-ranks as
+      the user types. The picked path inserts into the draft.
+      Fuzzy search is on from day 0. The candidate window is a
+      reusable completion widget, not a one-off. The display is the
+      floating spawned window, chosen for the file content preview
+      pane. The preview saves opening the target in a second tmux
+      pane or shell session. The float adapts to the terminal width:
+      the preview sits on the right in a wide terminal and on the
+      bottom in a narrow one. Spec and layout decision committed
+      (`docs/tui-file-picker.md`, commit 5b6ac59). Implementation
+      pending. Detail:
+      `docs/tui-file-picker.md`. Library research:
+      `docs/tui-file-picker-research.md`.
