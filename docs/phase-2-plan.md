@@ -103,8 +103,9 @@ harness step SESSION  [--config PATH]
 | `[limits].context_budget_tokens` | the input budget (the clamp math is in `assemble`) |
 | `[limits].compact_enabled` | the kill switch (default true when absent) |
 | `[limits].compact_strategy` | the terminal context strategy: `handoff` (default) or `compact` (in-session last-resort; `docs/handoff-strategy.md`) |
+| `[hooks]` | lifecycle hook registration: `timeout_ms` and the ordered `on` list (see `docs/loop-lifecycle-hooks.md`) |
 
-One new key (`compact_strategy`). The loop reads these once per step. The awk scrapes
+Two new keys: `compact_strategy` and `[hooks]`. The loop reads these once per step. The awk scrapes
 go away. The `assemble` and `compact` binaries read the remaining
 `[limits]` compact knobs (`compact_reserve_tokens`,
 `compact_keep_tokens`, `compact_summary_max_tokens`,
@@ -228,20 +229,30 @@ gains a config key: the limits are named constants in the binary.
 4. `assemble` into the work file. An `error` form: append it to the
    log and stop the step (exit 0. The `error` event idles the
    claim).
-5. The `context_exhausted` form: dispatch on `[limits].compact_strategy`.
-   - `handoff` (default, `docs/handoff-strategy.md` §4): run the
-     summary call, seed a new session `<base>_h<N>` with the handoff
-     doc and the log index, write the `context_exhausted` marker on the
-     old session, release the old lock, acquire the new lock, rebind and
-     continue. No stop.
-   - `compact` (correction 63): run the last-resort compaction
-     (`compact --force`). On success, re-project through `assemble`
-     and continue. On failure, unwrap the embedded compact-candidate
-     request and send the unwrapped request. An empty envelope stops
-     the step with exit 1.
+5. The `context_exhausted` form: fire the `exhausted.handle`
+   lifecycle window (`docs/loop-lifecycle-hooks.md` §3.4). The
+   harness dispatches registered hooks for this window. Two built-in
+   strategies are available as hook registrations:
+   - **handoff** (default, `docs/handoff-strategy.md` §4): a
+     registered hook runs the summary call, seeds a new session
+     `<base>_h<N>` with the handoff doc and the log index, and
+     returns `{"decision":"handoff","new_session":"<name>"}`. The
+     loop then writes the `context_exhausted` marker, releases the old
+     lock, acquires the new lock, rebinds, and continues.
+   - **compact** (correction 63): a hook (or the built-in default)
+     runs `compact --force`, re-projects through `assemble`, and
+     returns `{"decision":"stay_compact"}`. On failure the
+     built-in unwraps the embedded compact-candidate request.
    `harness step` follows the same branch. A step cut mid-handoff
    recovers on the next start through `claim` and the
    `context_exhausted` marker (G2).
+
+   The `overflow.resolve` window (same doc §3.4) fires on any
+   overflow/silent/length-stop classification inside the retry loop
+   (step 6 below). The default decision is `stay_compact`. A
+   registered hook can return `handoff` to short-circuit to the
+   terminal path. See `docs/loop-lifecycle-hooks.md` for the full
+   window list and decision vocabulary.
 6. The model call, in the retry loop, with the exact current rules:
    - Binary crash or API failure: 2 retries, 3 s between. Then a
      terminal `error` event and a stop.
@@ -300,16 +311,26 @@ module. Rules port verbatim:
 ### 4.6 The session lock
 
 `harness run` acquires an exclusive `flock` on
-`sessions/<n>/.loop.lock` before any work. The lock holds for the
-process life. It dies with the process. No stale-lock cleanup
-exists, and none is needed: a dead holder releases the lock.
+`sessions/<n>/.loop.lock` before any work. The lock holds per
+session, not for the process life. On a handoff rebind (the
+`exhausted.handle` or `overflow.resolve` window returning
+`decision: "handoff"`), the loop releases the old lock, acquires the
+new session's lock, and continues. The process life can span
+multiple locks; each session's lock dies with its session binding.
+No stale-lock cleanup exists, and none is needed: a dead holder
+releases the lock.
 
 - Contested lock: exit 1. The message names the live loop pid read
   from `loop.pid`.
 - After the lock: write `loop.pid` with the harness pid (the
   process-group leader when the TUI starts it through `setsid`).
+  On rebind the loop overwrites `loop.pid` with the new session's
+  lock path.
 - The harness does not delete `loop.pid` on exit. A stale pid plus
   a free lock reads as not-running to the probe (5.2).
+- The TUI probe sees the released old lock as free and the new lock
+  as held. It re-tails the new session's `events.jsonl` on the
+  `context_exhausted` marker. No TUI loop change is required.
 
 ### 4.7 Signals and cancellation
 
@@ -396,6 +417,13 @@ The `stage` module holds the `StageRunner` trait and its payload
 types. It holds no copy and no event vocabulary. It joins
 `crates/core` in Phase 3 with the state machine.
 
+The `hooks` module (new) holds the lifecycle-window dispatcher and
+the decision types. It spawns registered hook commands and folds
+their stdout/exit-code into a typed decision. It is I/O-light: it
+spawns and reads one line. The fs and lock work stays in the loop
+through the `SessionStore` and `SessionLock` ports. See
+docs/loop-lifecycle-hooks.md for the full window set and ABI.
+
 Crate boundary rules (guardrail §7 stays intact):
 
 - `harness-common` is a utility crate, not the Phase 3 `core`
@@ -472,6 +500,12 @@ YAGNI guard):
 - No `core` crate. P3's gate decides `core`, not this phase.
 - No in-process or wasm stage runners. The trait is the seam.
   Phase 4 fills it.
+- No in-process hook ABI. Hooks are subprocess commands on a path.
+  The dispatcher spawns and reads stdout. No shared memory, no
+  plugin loader, no daemon (`docs/loop-lifecycle-hooks.md` §8).
+- No matcher DSL or per-event config tree. Each hook binds to one
+  named window. Filtering is the hook's own job from the stdin
+  JSON (`docs/loop-lifecycle-hooks.md` §4.1).
 - No parallel tool calls. `route` takes the batch, runs it in
   series, as today. The later parallel stage swaps the batch body
   for a bounded fan-out. Invariant it must hold: `claim` resolves
@@ -480,7 +514,7 @@ YAGNI guard):
 - No approval or policy pipeline. The loop runs a routed tool at
   once, under the tool's caps and timeout, as today. The policy
   pipeline is Phase 3 core work (readiness R8, left open).
-- No new event type, no `v` bump. One new config key: `[limits].compact_strategy` (default `handoff`).
+- No new event type, no `v` bump. Two new config keys: `[limits].compact_strategy` (default `handoff`) and `[hooks]` (window registration, `docs/loop-lifecycle-hooks.md` §4.1).
 - No daemon, no socket API. The single authoritative process
   shape is the one `architecture.md` §8 names for a future
   `jsonrpsee` layer. It wraps this state machine. Nothing here
@@ -542,19 +576,31 @@ with its unit tests.
 Gate: `compact-e2e.sh` re-pointed at `harness step` — all 12
 scenarios, 50 assertions. The parity script passes against the old
 `step.sh` on three fixture sessions (one idle, one mid-turn
-crash, one near the compact trigger). Add the handoff row of
-section 8: a fixture that exhausts with `compact_strategy =
-"handoff"` produces the seeded session, the `handoff.md` in both
-dirs, and the rebind. Gate: one live handoff cycle against the
+crash, one near the compact trigger). The lifecycle-window
+firing order is pinned by the hook-marker assertion (each
+`ext_status` id `hook.<window>` appears in log order).
+
+Add the handoff row of section 8: a fixture that exhausts with
+`compact_strategy = "handoff"` and the handoff hook registered
+produces the seeded session, the `handoff.md` in both dirs, the
+marker, and the rebind. Gate: one live handoff cycle against the
 SGLang server (the trigger fires, the new session starts, the
 old log is untouched).
 
-### Stage 3 — the entry points
+### Stage 3 — the entry points and hooks
 
 `[loop]` in `config.toml` points at `harness`. `.envrc` gains
 `target/debug`. `bin/user` reads the `[loop]` table (5.3). The
 TUI stops writing `loop.pid` and the probe takes the lock first
 (5.2).
+
+Ship the `hooks` module and the two built-in strategy hooks:
+`harness-hook-compact` (in-place, default) and
+`harness-hook-handoff` (seed + marker + rebind). Register them
+in `[hooks]` of `config.toml`. The handoff hook calls the
+`SessionStore` port for the fs work; it returns the decision
+envelope to the dispatcher. Gate: the conformance row in §8
+passes with the handoff hook registered.
 
 Gate: the TUI end-to-end matrix — start a loop, stream, stop,
 kill the TUI, restart, the probe reattaches (`verify-reattach.py`

@@ -97,37 +97,16 @@ As the plan stands, the swap touches four modules:
 That is clumsy. It is not a drop-in.
 
 The fix is one small seam added to the Phase 2 spec before the
-loop is written:
+loop is written: the lifecycle-window dispatcher and the
+`SessionStore` port (docs/loop-lifecycle-hooks.md). The
+`ContextStrategy` port sketched here is superseded by the window
+design. The `SessionStore` port survives as the fs boundary behind
+the `exhausted.handle` hook. The loop skeleton executes the decision
+from the hook. It does not branch on a strategy name.
 
-```rust
-// harness-common, next to the `stage` module
-pub trait ContextStrategy: Send {
-    fn name(&self) -> &'static str;
-    fn on_trigger(&self, ctx: &TriggerCtx) -> StrategyAction;
-}
-
-pub enum StrategyAction {
-    ContinueInPlace,             // compact, re-project, stay
-    Handoff { new_session: String },  // seed, marker, rebind
-    Stop,
-}
-
-pub trait SessionStore: Send {
-    fn create(&self, name: &str, seed: &SeedMessage)
-        -> Result<SessionDir>;
-}
-```
-
-The loop skeleton executes the action. `Handoff` appends the
-existing `context_exhausted` marker. It seeds the new session
-with the summary and the old log path. It releases the old lock.
-It takes the new lock. The default implementation is today's
-in-place behavior. The handoff is a second implementation and
-one config key. Recompile, no loop rewrite.
-
-That seam costs a trait, an enum, and one config key. If you
-add it after the loop is written, it also costs re-pointing the
-12-scenario compact e2e. Add it in Phase 2 or skip it.
+That seam costs a dispatcher module, a set of window names, and one
+config key. If you add it after the loop is written, it also costs
+re-pointing the 12-scenario compact e2e. Add it in Phase 2 or skip it.
 
 ## 3. Other debts found
 
@@ -149,9 +128,11 @@ to discover late.
 ## 4. Recommendation
 
 1. Implement the plan as a port. It is ready.
-2. Add two ports to plan section 3.3. Name them
-   `ContextStrategy` and `SessionStore`. Default to in-place.
-   Scope the handoff as a non-goal in section 9.
-3. Park the handoff strategy as an itch. No live episode demands
-   it yet. The recorded seam keeps it a drop-in when the need
-   lands. See `notes/itches.md`.
+2. Add the `hooks` module and the `SessionStore` port to plan
+   section 3.3. The `hooks` module owns the lifecycle-window
+   dispatcher. The `SessionStore` port owns fs seeding. Default to
+   the in-place compact hook. Register the handoff hook as the
+   alternate. See `docs/loop-lifecycle-hooks.md`.
+3. The handoff strategy is now a hook registration, not a parked
+   itch. It is ready when the `exhausted.handle` window ships.
+   See `docs/loop-lifecycle-hooks.md` section 5.2.

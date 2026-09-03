@@ -56,31 +56,25 @@ sync. Do not grow them in parallel.
 The trigger math joins the `LogLine` and validator copies as a
 promotion candidate for a shared `core`/`bin/common` crate.
 
-## The compact strategy is not a port (2026-09-07)
+## The compact strategy is not a port (2026-09-07) → resolved 2026-09-08
 
-The Phase 2 plan (`docs/phase-2-plan.md`) bakes the in-place compact
+The Phase 2 plan (`docs/phase-2-plan.md`) baked the in-place compact
 strategy into the `harness` loop. The `StageRunner::compact` payload
-names no handoff outcome. The `awaiting_model` branch ends every
+named no handoff outcome. The `awaiting_model` branch ended every
 recovery path with a re-projection in the same session. The `run`
-skeleton holds one session, one flock, one `loop.pid` for the
-process life. A handoff strategy (summary, seeded new session, pointer
-to the old `events.jsonl`, rebind the loop) touches four modules:
-`harness-common` (the outcome type), `bin/harness` (the strategy
-branch, the rebind, the lock swap), the session-creation path, and
-`bin/tui` (auto-follow). It is not a drop-in as the plan stands.
+skeleton held one session, one flock, one `loop.pid` for the
+process life. A handoff strategy touched four modules.
 
-The fix is one seam in the Phase 2 spec: a `ContextStrategy` port
-(action enum: in-place, handoff, stop) and a `SessionStore` port
-(create and seed the session dir). The default implementation is the
-in-place behavior. The handoff is a second implementation and one
-config key. No loop rewrite. The vocabulary side already exists:
-the `context_exhausted` schema with `new_session`, the `claim`
-`exhausted` state, the TUI `pending_handoff` and the `h` key.
-Recorded in `docs/phase-2-plan-audit.md` section 2. Trigger: the
-owner's 2026-09-07 question on strategy swappability. Episode 1 of
-3 (P9). No live episode demands the handoff yet. Add the seam to
-plan section 3.3 before the loop is written. Skip it if the
-in-place strategy is the final design.
+**Resolution (2026-09-08).** The design in
+`docs/loop-lifecycle-hooks.md` resolves this by decomposing the
+monolithic strategy into fine-grained lifecycle windows. Each window
+is an independent, swappable extension point. The
+`exhausted.handle` and `overflow.resolve` windows carry the decision
+vocabulary (`stay_compact`, `handoff`, `stop`). The `SessionStore`
+port survives as the fs boundary behind the `exhausted.handle` hook.
+The loop no longer branches on a strategy name; it fires the window
+and applies the decision. The swap is now a hook registration plus
+config, not a loop rewrite.
 
 ## The marker schemas join the validator list (2026-09-03)
 

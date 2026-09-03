@@ -34,64 +34,79 @@ The default is `handoff` (the owner's decision). `compact` keeps the
 correction-63 in-session behavior. Both share the same reactive
 overflow handling. They differ only on the terminal step.
 
-## 2. The strategy port (the seam)
+## 2. The strategy seam (lifecycle windows)
 
-This is the seam that makes the swap a drop-in. It lands in
-`harness-common` next to the `stage` module (plan §3.3). It stays out
-of the loop. The loop calls it and acts on the result.
+> **Update 2026-09-08.** The `ContextStrategy` port sketched below is
+> superseded by the granular lifecycle-window + hook design in
+> `docs/loop-lifecycle-hooks.md`. The `ContextStrategy` trait and its
+> `TerminalAction` enum are replaced by two named windows
+> (`overflow.resolve`, `exhausted.handle`) and a small decision
+> envelope. The `SessionStore` port survives as the fs port behind
+> the `exhausted.handle` hook. See that document §2 (reframe), §3
+> (window list), §4 (hook ABI), and §5 (strategy as plug-in).
+
+### 2.1 Original `ContextStrategy` port (superseded)
+
+The original sketch kept the strategy as a single port with one
+method:
 
 ```rust
-/// What to do when the context no longer fits. The loop owns the
-/// decision; the strategy owns the outcome. One implementation per
-/// strategy.
 pub trait ContextStrategy: Send {
     fn name(&self) -> &'static str;
-    /// Decide the terminal action for one exhausted context.
     fn on_exhausted(&self, ctx: &ExhaustedCtx) -> Result<TerminalAction>;
 }
 
 pub enum TerminalAction {
-    /// Continue in this session (the in-place compact result).
     Stay,
-    /// Seed `new_session`, then rebind the loop to it and continue.
     Handoff { new_session: SessionName },
-    /// Nothing fits anywhere. Stop in this session.
     Stop,
 }
 ```
 
-The loop's `awaiting_model` terminal step becomes:
+The audit (`docs/phase-2-plan-audit.md` §2.3) showed this monolithic
+port is still clumsy: the loop must know the rebind, the lock swap,
+and the fs seeding. The window+hook design removes that coupling by
+making each blocking point a named window with a closed decision
+vocabulary. The loop fires the window and applies the decision; it
+does not branch on strategy name.
 
-```
-match strategy.on_exhausted(ctx)? {
-    Stay      => { reproject; continue; }
-    Handoff{new_session} => {
-        let dir = store.seed(new_session, &summary, &old_dir)?;
-        append_exhausted_marker(old_dir, &new_session)?;
-        release_lock(old_dir);
-        reacquire_lock(dir);
-        session = dir;          // rebind
-        continue;
-    }
-    Stop => break,
-}
-```
+### 2.2 Current design (lifecycle windows)
 
-The second port owns session lifecycle. It is the piece correction
-57 lacked. That correction seeded the session by hand.
+The two overflow-strategy windows are:
+
+- **`overflow.resolve`** — fires when the model response classifies
+  as overflow, silent overflow, or length stop. Decision vocab:
+  `stay_compact` | `handoff` | `stop`.
+- **`exhausted.handle`** — fires when `assemble` returns the
+  `context_exhausted` form (last-resort compact cannot fit). Decision
+  vocab: `handoff` | `stop`.
+
+The `SessionStore` port remains the fs I/O boundary:
 
 ```rust
-/// Create and seed a session directory. The loop owns no fs layout.
 pub trait SessionStore: Send {
     fn next_handoff_name(&self, base: &str) -> SessionName;
     fn seed(&self, name: &SessionName, seed: &Seed) -> Result<SessionDir>;
 }
 ```
 
-Two strategies ship as two `ContextStrategy` impls: `HandoffStrategy`
-and `CompactStrategy`. The composition root (the `harness` binary) wires
-the one named in `[limits].compact_strategy`. The loop never names a
-strategy. It calls the trait.
+The handoff hook calls `SessionStore::seed` for the fs work and
+returns `{"decision":"handoff","new_session":"<name>"}` to the
+dispatcher. The dispatcher (in the loop) executes the lock swap and
+rebind. The loop owns the lock; the hook owns the seed content and
+the decision. See `docs/loop-lifecycle-hooks.md` §4 for the full
+ABI.
+
+Two strategies ship as two hook registrations on the same windows:
+- `harness-hook-compact` — default. Returns `stay_compact` on
+  `overflow.resolve` and `stop` on `exhausted.handle`.
+- `harness-hook-handoff` — the owner's terminal strategy. Returns
+  `handoff` on `exhausted.handle` (and optionally on
+  `overflow.resolve` when `can_recover` is false).
+
+The composition root wires whichever hook is registered in
+`[hooks].on`. The loop never names a strategy. It fires the window
+and applies the decision.
 
 ## 3. The handoff document
 
@@ -230,49 +245,60 @@ key path still covers a later manual retry.
 
 ## 5. What changes in the Phase 2 plan
 
-This section lists the edits the plan takes. No new event type. No new
-config key beyond `compact_strategy`. No `v` bump.
+This section lists the edits the plan takes. No new event type. Two new
+config keys: `compact_strategy` and `[hooks]`. No `v` bump.
 
-- **§3.3** — add `ContextStrategy` and `SessionStore` to the
-  `harness-common` `stage` module list. They move to `crates/core` in
-  Phase 3 with the state machine, like `StageRunner`.
-- **§4.3 step 5** — the `context_exhausted` form no longer unwraps the
-  embedded request and stays in the same session. It calls
-  `strategy.on_exhausted`. The `Stay` result keeps the current
-  in-session behavior. The `Handoff` result runs §4.
-- **§4.6** — the lock invariant changes. It held for the process life.
-  It now holds per session. The handoff releases one lock and takes
-  another. The TUI probe (a non-blocking `flock` attempt) sees the
-  released old lock as free. It sees the new lock as held.
+- **§3.3** — add the `hooks` module to `harness-common`, next to
+  `stage`. It holds the lifecycle-window dispatcher and decision
+  types. It is I/O-light: spawn a command, read one stdout line.
+  The `SessionStore` port remains the fs boundary. Both move to
+  `crates/core` in Phase 3 with the state machine.
+- **§4.3 step 5** — the `context_exhausted` form fires the
+  `exhausted.handle` lifecycle window. The harness dispatches
+  registered hooks for that window. The `handoff` hook returns
+  `handoff` + `new_session`. The `compact` hook returns
+  `stay_compact`. The loop executes the decision: rebind, lock
+  swap, or stop.
+- **§4.3 step 6** — the overflow/silent/length classification fires
+  the `overflow.resolve` window. Default decision is `stay_compact`.
+  A registered hook can return `handoff` to short-circuit to the
+  terminal path.
+- **§4.6** — the lock invariant changes. It held for the process
+  life. It now holds per session. The handoff releases one lock and
+  takes another. The TUI probe (a non-blocking `flock` attempt) sees
+  the released old lock as free. It sees the new lock as held.
 - **§7** — add two rows. "Handoff seeded: the old session is
   `exhausted`, the new session runs." and "Seed summary failed: the
   marker carries an empty `new_session`, the loop stops in the old
   session."
 - **§8** — add one conformance row. "handoff: a fixture session that
-  exhausts, with the strategy set to handoff. Assert: one new session
+  exhausts, with the handoff hook registered. Assert: one new session
   dir, `handoff.md` in both dirs, the seed event, the marker, the
   rebind, and the old log untouched."
 - **§9** — "no daemon" and "no TUI feature work" still hold. The new
-  non-goal is "no in-process strategy". The two strategies stay
-  subprocess-wired behind the port.
+  non-goal is "no in-process hook ABI". The two strategies stay
+  subprocess-wired behind the hook ABI.
+- **§10** — stage 2 adds the window dispatcher. Stage 3 adds the
+  two built-in strategy hooks and their conformance rows.
 
 ## 6. Design debt this removes
 
 The owner's question: would switching be clumsy? It is clumsy today
 because the strategy is not a port. This document makes it one.
 
-- The swap is one trait, one enum, one config key, and a recompile.
-- The loop never names a strategy. It names the port.
+- The swap is one hook registration, one config key, and a recompile.
+- The loop never names a strategy. It fires the window. It applies the
+  decision.
 - `claim`, `assemble`, `model`, `parse`, `route`, `log` change nothing
   on the handoff path. They stay adapters over the same contracts.
-- The only new module work is `ContextStrategy` plus `SessionStore`.
-  Both are small and I/O-light in `harness-common`. The fs writes in
-  `SessionStore::seed` are the one I/O call. It stays out of the pure
-  core.
+- The only new module work is the `hooks` dispatcher plus the
+  `SessionStore` port. Both are small and I/O-light in
+  `harness-common`. The fs writes in `SessionStore::seed` are the one
+  I/O call. It stays out of the pure core.
 
-The cost of deferring the port to Phase 3 is higher. It means the loop
+The cost of deferring the seam to Phase 3 is higher. It means the loop
 ships welded to one strategy and the swap becomes a loop rewrite.
-Adding the port now is cheap. Deferring it is not.
+Adding the window seam now is cheap. Deferring it is not.
 
 A second debt: the running `step.sh` and `auto-compact-plan.md` still
 specify a proactive threshold hook. It fires before the request when
