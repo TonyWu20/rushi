@@ -1,6 +1,6 @@
 # TUI conversation browsing
 
-Status: spec, not yet built. The requests live in
+Status: shipped in the 2026-09-05 pass. The requests live in
 `docs/tui_feature_requests_from_human.md` (the 2026-09-05
 items). Sections 3 to 5 are the contract. Section 6 records
 the reference machine. Sections 7 and 8 cover the search
@@ -157,10 +157,11 @@ stroke.
 Exit:
 
 - a double `s` in browse mode leaves it. The same `3 s` arm
-  window. The view returns to the tail (`scroll = 0`): the
-  user lands back on the live conversation. The cursor,
-  the gutter, and the bar drop away. The editor is in
-  normal mode with the still-empty draft.
+  window. The view stays where browse left it (`scroll`
+  unchanged): the user is still on the same spot of the
+  conversation. The cursor, the gutter, and the bar drop
+  away. The editor is in normal mode with the still-empty
+  draft.
 - `q` and `Ctrl+Q` in browse mode keep the quit gate. The
   gate still holds (empty draft, editor in normal mode
   under the overlay), so a double `q` quits the TUI as
@@ -486,7 +487,7 @@ Unit tests live in `bin/tui/src/` (the repo convention:
 | gate: non-empty | normal mode, the draft held | the `s` goes to the editor; no arm; the hint `ss browses — clear the draft first` |
 | gate: enter | normal, empty; `s s` inside `3 s` | browse; the cursor is the first visible line, col `0`; the view does not move; the gutter and the bar draw |
 | gate: expired arm | the arm expires; a fresh `s` | a new arm |
-| gate: exit | in browse; `s s` inside `3 s` | normal mode; `scroll = 0`; the gutter and the bar drop |
+| gate: exit | in browse; `s s` inside `3 s` | normal mode; the view stays where browse left it; the gutter and the bar drop |
 | quit in browse | in browse; `q q` | the TUI quits (the gate holds) |
 | `j` / `k` clamp | the cursor is line `1`; `k` | no move (the floor) |
 | `h` / `l` clamp | the cursor is col `0`; `h` | no move |
@@ -501,7 +502,7 @@ Unit tests live in `bin/tui/src/` (the repo convention:
 | `Ctrl+U` strand | the cursor sits on the view top; `Ctrl+U` | the view up half a page; the cursor lands on the new top line |
 | scrolloff margin | a `j` puts the cursor within three lines of the view bottom | the view scrolls the minimum lines to clear the margin |
 | grow while browsing | browse; a new event lands | `total` rises; the cursor pins; the tail marker moves; the view does not follow |
-| exit after grow | the above, then `s s` | `scroll = 0` on the grown tail |
+| exit after grow | the above, then `s s` | the view stays where browse left it |
 | resize while browsing | the pane narrows; the wrap reflows | the cursor col clamps; the view re-centers |
 | unbound key | a letter not in the table | the status hint; no state change |
 | stage 2: `/err` | the log holds `error` lines | the cursor jumps to the first match live (`incsearch`); the match lines highlight |

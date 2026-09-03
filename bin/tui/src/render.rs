@@ -95,16 +95,22 @@ fn clip_spans(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'static>> {
 }
 
 /// Wrap `text` at `wrap_w`, one gutter-prefixed line each, capped at
-/// `cap` lines with a hint for the remainder.
-fn body(text: &str, style: Style, cap: usize, wrap_w: usize, gutter: &str) -> Vec<Line<'static>> {
+/// `cap` lines with a hint for the remainder. The fold hint is the
+/// palette `Hint` role (the pi `muted` tone), not a hard-coded gray.
+fn body(
+    text: &str,
+    style: Style,
+    cap: usize,
+    wrap_w: usize,
+    gutter: &str,
+    hint: Style,
+) -> Vec<Line<'static>> {
     let text = text.trim_end_matches('\n');
     if text.is_empty() {
         return Vec::new();
     }
     let wrapped = wrap_styled(vec![(style, text.to_string())], wrap_w);
-    let dim = Style::default()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::DIM);
+    let dim = hint.add_modifier(Modifier::DIM);
     let mut out = Vec::with_capacity(cap + 1);
     for l in wrapped.iter().take(cap) {
         // Keep the wrapped line's styled spans (the tool-output tone) and
@@ -228,7 +234,9 @@ fn event_lines<'a>(
             let wrapped = render_message_content(&content, event_id, ext, wrap_w, prose, palette);
             let mut spans = vec![Span::styled(
                 format!("{LABEL}user"),
-                label_style(Color::Cyan),
+                // The pi accent tone (the pi-tool-display user box
+                // title), not a hard-coded cyan.
+                label_style(palette.color(crate::color::Role::Accent)),
             )];
             if let Some(first) = wrapped.first() {
                 spans.push(Span::raw("  "));
@@ -282,7 +290,9 @@ fn event_lines<'a>(
             let tool_calls = e.get("tool_calls").and_then(|v| v.as_array());
             let mut header = vec![Span::styled(
                 format!("{LABEL}assistant"),
-                label_style(Color::Green),
+                // The pi `toolTitle` tone: the assistant's actions
+                // show as tool calls in pi, titled in `toolTitle`.
+                label_style(palette.color(crate::color::Role::ToolCommand)),
             )];
             if let Some(calls) = tool_calls {
                 if !calls.is_empty() {
@@ -292,7 +302,7 @@ fn event_lines<'a>(
                             calls.len(),
                             if calls.len() == 1 { "" } else { "s" }
                         ),
-                        Style::default().fg(Color::DarkGray),
+                        dim,
                     ));
                 }
             }
@@ -329,10 +339,15 @@ fn event_lines<'a>(
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "[missing arguments]".to_string());
                 out.push(Line::from(vec![
-                    Span::styled(format!("{LABEL}tool:{name}"), label_style(Color::Magenta)),
+                    // The pi `toolTitle` tone for the tool name, the
+                    // muted tone for the arguments.
+                    Span::styled(
+                        format!("{LABEL}tool:{name}"),
+                        label_style(palette.color(crate::color::Role::ToolCommand)),
+                    ),
                     Span::styled(
                         format!(" {}", trunc(&args, wrap_w.max(20))),
-                        Style::default().fg(Color::DarkGray),
+                        dim,
                     ),
                 ]));
                 // The command of a bash call is the interesting part;
@@ -344,7 +359,14 @@ fn event_lines<'a>(
                         .and_then(|a| a.get("command"))
                         .and_then(|c| c.as_str())
                     {
-                        out.extend(body(cmd, command, TOOL_CALL_BODY_LINES, wrap_w, &gutter));
+                        out.extend(body(
+                            cmd,
+                            command,
+                            TOOL_CALL_BODY_LINES,
+                            wrap_w,
+                            &gutter,
+                            dim,
+                        ));
                     }
                 }
             }
@@ -361,8 +383,10 @@ fn event_lines<'a>(
             let value = e.get("value");
             let err = e.get_bool("is_error").unwrap_or(false);
             let status = result_status(value, err);
+            // The pi `error` accent (not a hard-coded red) on a failed
+            // result; the muted tone on a success.
             let status_style = if err {
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                palette.style(crate::color::Role::Error, Modifier::BOLD)
             } else {
                 dim
             };
@@ -411,8 +435,14 @@ fn event_lines<'a>(
                 }
             let title = format!("tool:{name}  {status}");
             let title_style = if err { Some(status_style) } else { None };
-            let rows =
-                crate::tool_display::box_rows(&title, &body, width, palette, title_style.as_ref());
+            let rows = crate::tool_display::box_rows(
+                &title,
+                &body,
+                width,
+                palette,
+                title_style.as_ref(),
+                err,
+            );
             for row in rows {
                 let spans: Vec<Span<'static>> =
                     row.into_iter().map(|(s, t)| Span::styled(t, s)).collect();
@@ -422,20 +452,14 @@ fn event_lines<'a>(
         EventKind::ApprovalRequest => {
             let id = e.get_str("id").unwrap_or("?");
             let prompt = e.get_str("prompt").unwrap_or("[no prompt]").to_string();
-            let st = Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD);
+            // The pi `warning` accent (not a hard-coded yellow).
+            let st = palette.style(crate::color::Role::Warning, Modifier::BOLD);
             let mut line = vec![
                 Span::styled(format!("[approval {id}] "), st),
                 Span::styled(trunc(&prompt, wrap_w.max(20)), output),
             ];
             if pending {
-                line.push(Span::styled(
-                    "  [y allow] [n deny] [e edit]",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ));
+                line.push(Span::styled("  [y allow] [n deny] [e edit]", st));
             }
             out.push(Line::from(line));
         }
@@ -445,13 +469,12 @@ fn event_lines<'a>(
             let edited = e.get("arguments").is_some();
             let mut spans = vec![Span::styled(
                 format!("[approval {id}] -> {decision}"),
-                Style::default().fg(Color::Green),
+                // The pi `success` accent on an allow, not a
+                // hard-coded green.
+                Style::default().fg(palette.color(crate::color::Role::Success)),
             )];
             if edited {
-                spans.push(Span::styled(
-                    " (edited arguments)",
-                    Style::default().fg(Color::DarkGray),
-                ));
+                spans.push(Span::styled(" (edited arguments)", dim));
             }
             out.push(Line::from(spans));
         }
@@ -470,9 +493,8 @@ fn event_lines<'a>(
         EventKind::ContextExhausted => {
             let msg = e.get_str("message").unwrap_or("").to_string();
             let ns = e.get_str("new_session").unwrap_or("").to_string();
-            let st = Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD);
+            // The pi `warning` accent (not a hard-coded yellow).
+            let st = palette.style(crate::color::Role::Warning, Modifier::BOLD);
             let mut spans = vec![Span::styled(format!("{LABEL}[context exhausted]"), st)];
             let wrapped = if msg.is_empty() {
                 Vec::new()
@@ -506,7 +528,8 @@ fn event_lines<'a>(
             let wrapped = wrap_styled(vec![(prose, msg)], wrap_w);
             let mut spans = vec![Span::styled(
                 format!("{LABEL}[error]"),
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                // The pi `error` accent (not a hard-coded red).
+                palette.style(crate::color::Role::Error, Modifier::BOLD),
             )];
             if let Some(first) = wrapped.first() {
                 spans.push(Span::raw("  "));
@@ -532,9 +555,8 @@ fn event_lines<'a>(
             let reason = e.get_str("reason").unwrap_or("threshold").to_string();
             let tokens = e.get_i64("tokens_before").unwrap_or(0);
             let style = if compaction_last_open && loop_running {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
+                // The pi `warning` accent on the live marker.
+                palette.style(crate::color::Role::Warning, Modifier::BOLD)
             } else {
                 dim
             };
@@ -551,9 +573,8 @@ fn event_lines<'a>(
             let after = e.get_i64("tokens_after").unwrap_or(0);
             let first_kept = e.get_i64("first_kept_seq").unwrap_or(0);
             let summary = e.get_str("summary").unwrap_or("").to_string();
-            let st = Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD);
+            // The pi `warning` accent (not a hard-coded yellow).
+            let st = palette.style(crate::color::Role::Warning, Modifier::BOLD);
             let spans = vec![Span::styled(
                 format!(
                     "{LABEL}context compacted ({reason}): {} to {} tokens, keeping events from seq {first_kept}",
@@ -575,7 +596,8 @@ fn event_lines<'a>(
         EventKind::CompactionFailed => {
             let reason = e.get_str("reason").unwrap_or("overflow").to_string();
             let detail = e.get_str("detail").unwrap_or("").to_string();
-            let st = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
+            // The pi `error` accent (not a hard-coded red).
+            let st = palette.style(crate::color::Role::Error, Modifier::BOLD);
             let mut spans = vec![Span::styled(
                 format!("{LABEL}compaction failed ({reason})"),
                 st,
@@ -603,7 +625,7 @@ fn event_lines<'a>(
             for l in e.pretty_capped(RAW_FALLBACK_MAX_LINES).lines() {
                 out.push(Line::from(Span::styled(
                     format!("{gutter}{l}"),
-                    Style::default().fg(Color::DarkGray),
+                    dim,
                 )));
             }
         }
@@ -620,7 +642,7 @@ fn event_lines<'a>(
             for l in e.pretty_capped(RAW_FALLBACK_MAX_LINES).lines() {
                 out.push(Line::from(Span::styled(
                     format!("{gutter}{l}"),
-                    Style::default().fg(Color::DarkGray),
+                    dim,
                 )));
             }
         }
@@ -631,7 +653,8 @@ fn event_lines<'a>(
                     "{LABEL}[malformed log line] {}",
                     trunc(&raw, wrap_w.max(20))
                 ),
-                Style::default().fg(Color::Red).add_modifier(Modifier::DIM),
+                // The pi `error` accent, dimmed (not a hard-coded red).
+                palette.style(crate::color::Role::Error, Modifier::DIM),
             )));
         }
     }
@@ -1447,7 +1470,11 @@ fn working_row(app: &App, running: bool, now: &chrono::DateTime<chrono::Utc>) ->
         format!("{} ", spinner_frame(now)),
         Style::default().fg(app.palette().thinking_border(app.thinking_level())),
     );
-    let body = Span::styled(format!(" {text}"), Style::default().fg(Color::DarkGray));
+    // The phase text in the pi `dim` tone (not a hard-coded gray).
+    let body = Span::styled(
+        format!(" {text}"),
+        app.palette().style(crate::color::Role::Status, Modifier::empty()),
+    );
     Line::from(vec![frame, body])
 }
 
@@ -1463,13 +1490,22 @@ fn status_rows(
     running: bool,
     row_width: usize,
 ) -> Vec<Line<'static>> {
-    let dim = Style::default().fg(Color::DarkGray);
+    // The built-in status text in the pi `dim` tone (not a
+    // hard-coded gray).
+    let dim = app
+        .palette()
+        .style(crate::color::Role::Status, Modifier::empty());
     if let Some(msg) = app.status() {
+        // The pi flash line: a neutral confirmation tone, not a hard
+        // coded cyan. The scheme `Hint` role (the pi `muted` value)
+        // carries it, bold for the emphasis (docs/tui-color-pi-
+        // alignment.md).
+        let hint = app
+            .palette()
+            .style(crate::color::Role::Hint, Modifier::BOLD);
         return vec![Line::from(Span::styled(
             format!(" {msg}"),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            hint,
         ))];
     }
     if app.pending_name().is_some() {
@@ -1511,7 +1547,8 @@ fn status_rows(
         }
         crate::ext::StatusRow::DeadHint(hint) => vec![Line::from(Span::styled(
             format!(" {hint}"),
-            Style::default().fg(Color::Red).add_modifier(Modifier::DIM),
+            // The pi `error` accent, dimmed (not a hard-coded red).
+            app.palette().style(crate::color::Role::Error, Modifier::DIM),
         ))],
         crate::ext::StatusRow::Builtin => {
             // The pending handoff hint wins the built-in slot: it is
@@ -1521,9 +1558,9 @@ fn status_rows(
             if let Some(name) = app.pending_handoff() {
                 return vec![Line::from(Span::styled(
                     format!(" context exhausted — press h to hand off to {name} · q×2 quit "),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
+                    // The pi `warning` accent (not a hard-coded yellow).
+                    app.palette()
+                        .style(crate::color::Role::Warning, Modifier::BOLD),
                 ))];
             }
             // The running loop names its phase in the reserved
@@ -1540,6 +1577,223 @@ fn status_rows(
                 None => vec![Line::from(Span::styled(help_line(running), dim))],
             }
         }
+    }
+}
+
+/// Resolve the transcript text width with the bar and the browse
+/// gutter reserved (sections 3 and 4.3). The width drives the wrap,
+/// the wrap the total, the total the gutter width: the loop runs to
+/// the fixpoint, capped at three passes.
+fn resolve_transcript_width(
+    app: &mut crate::app::App,
+    host: &crate::ext::ExtHost,
+    t_width: usize,
+    bar_w: usize,
+    browse_active: bool,
+) -> (usize, usize) {
+    // (text_w, gutter_w). The gutter hint seeds from the last
+    // rendered total; a missing layout reads as zero.
+    let mut gutter_w = if browse_active {
+        crate::browse::gutter_width(app.browse_layout_total())
+    } else {
+        0
+    };
+    let mut text_w = t_width.saturating_sub(bar_w).saturating_sub(gutter_w);
+    let mut total = app.transcript_lines(text_w, Some(host)).len();
+    if browse_active {
+        for _ in 0..2 {
+            let g = crate::browse::gutter_width(total);
+            if g == gutter_w {
+                break;
+            }
+            gutter_w = g;
+            text_w = t_width.saturating_sub(bar_w).saturating_sub(gutter_w);
+            total = app.transcript_lines(text_w, Some(host)).len();
+        }
+    }
+    (text_w, gutter_w)
+}
+
+/// The browse-mode window lines (sections 4.3 and 7.3): the gutter
+/// prefix on every row, the cursorline highlight and the caret block
+/// on the cursor row, the search highlight on the match rows. The
+/// styles are owned values: the caller precomputes them so no
+/// palette borrow crosses the lines borrow.
+#[allow(clippy::too_many_arguments)]
+fn browse_window_lines(
+    lines: &[Line<'static>],
+    start: usize,
+    h: usize,
+    gutter_w: usize,
+    cursor: (usize, usize),
+    hl: &std::collections::HashSet<usize>,
+    active_match: Option<(usize, usize)>,
+    dim: Style,
+    accent: Style,
+    cursor_bg: Color,
+    match_style: Style,
+    active_style: Style,
+) -> Vec<Line<'static>> {
+    let (cl, cc) = cursor;
+    lines
+        .iter()
+        .skip(start)
+        .take(h)
+        .enumerate()
+        .map(|(i, l)| {
+            let abs = start + i;
+            let is_cursor = abs == cl;
+            let line_matched = hl.contains(&abs);
+            let active_line = active_match.is_some_and(|m| m.0 == abs);
+            // The gutter: the absolute number at the cursor, the
+            // relative distance elsewhere (section 4.3), right-
+            // aligned in `gutter_w` cells (the digit count plus one
+            // trailing space).
+            let num = crate::browse::gutter_number(cl, abs);
+            let gutter_style = if is_cursor {
+                accent
+            } else {
+                dim
+            };
+            let gutter_span =
+                Span::styled(format!("{num:>width$}", width = gutter_w), gutter_style);
+            if is_cursor {
+                // The cursor row: the low-contrast background across
+                // the row (section 4.3), the caret block at the col.
+                // A matched cursor row keeps the accent tone.
+                let fg_override = if active_line {
+                    Some(active_style)
+                } else if line_matched {
+                    Some(match_style)
+                } else {
+                    None
+                };
+                let mut spans = vec![gutter_span];
+                spans.extend(caret_spans(l, cc, cursor_bg, fg_override));
+                Line::from(spans)
+            } else if active_line || line_matched {
+                // The match rows flatten to the highlight tone
+                // (section 7.3); the current match takes the accent
+                // tone.
+                let style = if active_line { active_style } else { match_style };
+                let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                Line::from(vec![gutter_span, Span::styled(text, style)])
+            } else {
+                let mut spans = vec![gutter_span];
+                spans.extend(l.spans.iter().cloned());
+                Line::from(spans)
+            }
+        })
+        .collect()
+}
+
+/// The caret block at col `cc`: the split span keeps its styling, the
+/// cell inverts, the tail keeps its styling. A col past the rendered
+/// line draws the block on the line-end blank (section 4.1).
+fn caret_spans(
+    l: &Line<'static>,
+    cc: usize,
+    bg: Color,
+    fg_override: Option<Style>,
+) -> Vec<Span<'static>> {
+    let patch = |s: &Span| {
+        let mut st = s.style.patch(Style::default().bg(bg));
+        if let Some(o) = fg_override {
+            st = o.patch(st);
+        }
+        st
+    };
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut rest = cc;
+    for s in &l.spans {
+        if rest == 0 {
+            out.push(Span::styled(s.content.clone(), patch(s)));
+            continue;
+        }
+        let n = s.content.chars().count();
+        if rest < n {
+            let chars: Vec<char> = s.content.chars().collect();
+            let pre: String = chars[..rest].iter().collect();
+            let at = chars[rest];
+            let post: String = chars[rest + 1..].iter().collect();
+            out.push(Span::styled(pre, patch(s)));
+            let mut caret = Style::default()
+                .bg(Color::Black)
+                .fg(Color::White)
+                .add_modifier(Modifier::REVERSED);
+            if let Some(o) = fg_override {
+                caret = o.patch(caret);
+            }
+            out.push(Span::styled(at.to_string(), caret));
+            out.push(Span::styled(post, patch(s)));
+            rest = 0;
+        } else {
+            out.push(Span::styled(s.content.clone(), patch(s)));
+            rest -= n;
+        }
+    }
+    if rest > 0 {
+        out.push(
+            Span::styled(
+                " ",
+                Style::default()
+                    .bg(Color::Black)
+                    .fg(Color::White)
+                    .add_modifier(Modifier::REVERSED),
+            ),
+        );
+    }
+    out
+}
+
+/// The position bar (section 3): one column at the right edge of the
+/// transcript. The track draws in the dim tone, the thumb in the
+/// normal transcript tone, the tail and cursor markers in the accent
+/// tone (the `Border4` role, docs/tui-color-scheme.md section 6).
+#[allow(clippy::too_many_arguments)]
+fn draw_position_bar(
+    f: &mut Frame,
+    t_area: &ratatui::layout::Rect,
+    total: usize,
+    scroll: usize,
+    cursor_line: Option<usize>,
+    track_c: Color,
+    thumb_c: Color,
+    mark_c: Color,
+) {
+    let h = t_area.height as usize;
+    let g = match crate::browse::bar_geometry(total, h, scroll, cursor_line) {
+        Some(g) => g,
+        None => return,
+    };
+    for row in 0..h {
+        let mut ch = '·';
+        let mut color = track_c;
+        if row >= g.thumb_top && row < g.thumb_top + g.thumb_h {
+            ch = '█';
+            color = thumb_c;
+        }
+        if row == g.tail_cell {
+            ch = '▼';
+            color = mark_c;
+        }
+        if g.cursor_cell == Some(row) {
+            ch = '▶';
+            color = mark_c;
+        }
+        let rect = ratatui::layout::Rect {
+            x: t_area.x + t_area.width - 1,
+            y: t_area.y + row as u16,
+            width: 1,
+            height: 1,
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                ch.to_string(),
+                Style::default().fg(color),
+            ))),
+            rect,
+        );
     }
 }
 
@@ -1816,7 +2070,21 @@ fn input_box_title(
     mode_label: &str,
     frame: &Option<crate::ext::FrameSpec>,
     border_color: Color,
+    browse_prompt: Option<&str>,
 ) -> Line<'static> {
+    // The browse command line owns the title while it is open
+    // (docs/tui-conversation-browsing.md sections 4.4 and 7.3):
+    // the `:N` goto and the `/` / `?` pattern, like the editor's
+    // search prompt.
+    if let Some(p) = browse_prompt {
+        return Line::from(Span::styled(
+            format!("{p}█"),
+            Style::default()
+                .fg(Color::Black)
+                .bg(border_color)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     if let Some(prompt) = editor.command_line_label() {
         Line::from(Span::styled(
             prompt,
@@ -1886,20 +2154,25 @@ pub fn draw(
     // running loop names its phase (`[wait]`, `[tools]`); an
     // idle loop or an unknown marker keeps the plain bit.
     let phase = phase_state(app, running);
+    // The palette colors as owned values: the palette borrow must
+    // end before the mutable app borrows below (the viewport and
+    // transcript lines).
+    let success_fg = app.palette().color(crate::color::Role::Success);
+    let status_fg = app.palette().color(crate::color::Role::Status);
+    let warning_fg = app.palette().color(crate::color::Role::Warning);
+    // The loop-phase bit in the pi accents: `success` while the loop
+    // runs, the `dim` tone when idle (not hard-coded swatches).
     let mut status_bits: Vec<Span<'static>> = vec![Span::styled(
         phase_bit(phase),
         Style::default()
-            .fg(if running {
-                Color::Green
-            } else {
-                Color::DarkGray
-            })
+            .fg(if running { success_fg } else { status_fg })
             .add_modifier(Modifier::BOLD),
     )];
     if app.other_running_loops() > 0 {
         status_bits.push(Span::styled(
             format!(" +{} loop", app.other_running_loops()),
-            Style::default().fg(Color::Yellow),
+            // The pi `warning` accent for the extra running loops.
+            Style::default().fg(warning_fg),
         ));
     }
 
@@ -1975,28 +2248,135 @@ pub fn draw(
     let t_area = rows[0];
     let t_width = t_area.width.saturating_sub(2) as usize;
     let h = t_area.height as usize;
-    let scroll = app.scroll();
+    let scroll0 = app.scroll();
     app.set_viewport_height(h);
-    let lines = app.transcript_lines(t_width, Some(host));
-    let total = lines.len();
+    // The position bar show decision (section 3): browse shows it
+    // always; normal mode shows it when the view left the tail.
+    // While shown, the bar owns the rightmost transcript column.
+    let browse_active = app.browse_ref().active();
+    let bar_shown = browse_active || scroll0 > 0;
+    let bar_w = if bar_shown { 1 } else { 0 };
+    // The text width with the bar and the browse gutter reserved
+    // (sections 3 and 4.3): the width drives the wrap, the wrap the
+    // total, the total the gutter width: iterate to the fixpoint.
+    let (text_w, gutter_w) = resolve_transcript_width(app, host, t_width, bar_w, browse_active);
+    // The total and the browse layout sync run before the lines
+    // borrow: the cache holds the lines, so no app borrow may stay
+    // live while the app mutates (the palette owned values above,
+    // same pattern).
+    let total = app.transcript_lines(text_w, Some(host)).len();
+    let mut scroll = scroll0;
+    if browse_active {
+        let grew = app.take_events_grew();
+        app.browse().sync(total, h, &mut scroll, grew);
+        app.set_scroll(scroll);
+    }
     let start = total.saturating_sub(scroll + h);
+    // The cursor col clamps to the visible cursor line length
+    // (section 4.1): a transient lines read, released before the
+    // mutation.
+    if browse_active {
+        let (cl, _) = app.browse_ref().line_col();
+        if cl >= start && cl < start + h {
+            let len = {
+                let ls = app.transcript_lines(text_w, Some(host));
+                ls[cl].spans.iter().map(|s| s.content.chars().count()).sum::<usize>()
+            };
+            app.browse().clamp_col(len);
+        }
+    }
+    // The press-path layout: the line texts and the width the
+    // browse motions and the search read.
+    if browse_active {
+        let texts: Vec<String> = app
+            .transcript_lines(text_w, Some(host))
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        app.set_browse_layout(total, h, text_w, texts);
+    }
+    // The owned browse draw inputs: the cursor, the match-line
+    // cache, the highlight styles. The cache clone is one pass per
+    // frame; the styles own their colors, so the palette borrow
+    // ends before the lines borrow.
+    let cursor_pos = app.browse_ref().line_col();
+    let (hl, active_match): (
+        std::collections::HashSet<usize>,
+        Option<(usize, usize)>,
+    ) = if browse_active {
+        app.browse_highlight(total)
+    } else {
+        (std::collections::HashSet::new(), None)
+    };
+    let pl = app.palette();
+    let dim_style = pl.style(crate::color::Role::Status, Modifier::empty());
+    let accent_style = pl.style(crate::color::Role::Border4, Modifier::empty());
+    let cursor_bg = pl.color(crate::color::Role::Status);
+    let match_style = pl.style(crate::color::Role::Hint, Modifier::BOLD);
+    let active_style = pl.style(crate::color::Role::Border4, Modifier::BOLD);
+    let track_c = pl.color(crate::color::Role::Status);
+    let thumb_c = pl.color(crate::color::Role::PlainText);
+    let mark_c = pl.color(crate::color::Role::Border4);
+    let lines = app.transcript_lines(text_w, Some(host));
     let window = &lines[start..];
     if window.is_empty() {
         let placeholder = match app.active() {
+            // The placeholder in the pi `dim` tone (not a hard-coded gray).
             Some(_) => Line::from(Span::styled(
                 " (no events yet — type a message below, then Ctrl+R to run the loop)",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(status_fg),
             )),
             None => Line::from(Span::styled(
                 " (no session yet — type the new session name below, Enter confirms)",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(status_fg),
             )),
         };
         let p = Paragraph::new(vec![placeholder]);
         f.render_widget(p, t_area);
     } else {
-        let p = Paragraph::new(window.to_vec());
+        let draw_lines = if browse_active {
+            browse_window_lines(
+                lines,
+                start,
+                h,
+                gutter_w,
+                cursor_pos,
+                &hl,
+                active_match,
+                dim_style,
+                accent_style,
+                cursor_bg,
+                match_style,
+                active_style,
+            )
+        } else {
+            window.to_vec()
+        };
+        let p = Paragraph::new(draw_lines);
         f.render_widget(p, t_area);
+        // The position bar: one column at the right edge (section 3).
+        if bar_shown {
+            let cursor_line = if browse_active {
+                let (cl, _) = cursor_pos;
+                if cl >= start && cl < start + h {
+                    Some(cl)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            draw_position_bar(
+                f,
+                &t_area,
+                total,
+                scroll,
+                cursor_line,
+                track_c,
+                thumb_c,
+                mark_c,
+            );
+        }
     }
 
     let mut row = 1usize;
@@ -2031,11 +2411,14 @@ pub fn draw(
                 .clone()
                 .unwrap_or_else(|| "(no prompt)".to_string())
         );
+        // The banner background is the pi `warning` accent (not a
+        // hard-coded yellow); the text keeps the black-on-color chip
+        // style.
         let l = Line::from(vec![Span::styled(
             text,
             Style::default()
                 .fg(Color::Black)
-                .bg(Color::Yellow)
+                .bg(warning_fg)
                 .add_modifier(Modifier::BOLD),
         )]);
         f.render_widget(Paragraph::new(l), rows[row]);
@@ -2080,7 +2463,20 @@ pub fn draw(
     // The mode label first: it is a value, so the call below keeps
     // no second borrow of `app` (the editor borrow is the only one).
     let mode_label = app.editor_mode_label();
-    let title = input_box_title(&*app.editor(), &mode_label, &frame, border_color);
+    // The browse command line prompt, when the overlay owns the
+    // input (docs/tui-conversation-browsing.md section 4.4).
+    let browse_prompt = if app.browse_ref().active() {
+        app.browse_ref().prompt()
+    } else {
+        None
+    };
+    let title = input_box_title(
+        &*app.editor(),
+        &mode_label,
+        &frame,
+        border_color,
+        browse_prompt.as_deref(),
+    );
     let input_block = Block::bordered()
         .border_type(border_type)
         .border_style(Style::default().fg(border_color))
@@ -2128,8 +2524,11 @@ pub fn draw(
         app.editor().cursor_display(input_wrap_w).1
     };
     // The search command line owns the input: the prompt renders in
-    // the box title and the text-area cursor block stays off.
-    let in_command_line = app.editor().command_line_label().is_some();
+    // the box title and the text-area cursor block stays off. The
+    // browse command line (docs/tui-conversation-browsing.md
+    // section 4.4) does the same: the caret parks on the prompt.
+    let in_command_line = app.editor().command_line_label().is_some()
+        || (app.browse_ref().active() && app.browse_ref().typing());
     let top = inner_i.y;
     for (j, l) in ed_lines.iter().enumerate() {
         let y = top + j as u16;
@@ -2192,6 +2591,24 @@ pub fn draw(
             let cx = inner_i.x + cursor_col as u16;
             if cy < inner_i.y + inner_i.height {
                 *cursor = Some((cx.min(inner_i.x + inner_i.width), cy));
+            }
+        }
+        // The browse caret (docs/tui-conversation-browsing.md
+        // section 4.1): the block cell over the transcript row, or
+        // the box title while the browse command line types.
+        if app.browse_ref().active() {
+            if let Some(prompt) = app.browse_ref().prompt() {
+                let prompt_w = prompt.chars().count() + 1;
+                let cx = inner_i.x + 1 + prompt_w as u16;
+                let cy = inner_i.y.saturating_sub(1);
+                *cursor = Some((cx.min(inner_i.x + inner_i.width), cy));
+            } else {
+                let (cl, cc) = app.browse_ref().line_col();
+                if cl >= start && cl < start + h {
+                    let cx = t_area.x + gutter_w as u16 + cc as u16;
+                    let cy = t_area.y + (cl - start) as u16;
+                    *cursor = Some((cx, cy));
+                }
             }
         }
     }
@@ -2285,6 +2702,175 @@ mod tests {
         e
     }
 
+    /// One drawn frame on a test backend: the buffer holds every
+    // cell, so the bar and gutter rows assert on real draw calls
+    /// (the section 9 mutation gate).
+    fn draw_frame(app: &mut App, width: u16, height: u16) -> ratatui::backend::TestBackend {
+        let (host, _tmp) = empty_host();
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut term = ratatui::Terminal::new(backend).expect("test backend");
+        let _ = term.draw(|f| {
+            let mut cursor = None;
+            draw(f, app, &mut cursor, &host);
+        });
+        term.backend().clone()
+    }
+
+    /// The count of buffer cells whose character passes `pred`.
+    fn cell_count(backend: &ratatui::backend::TestBackend, pred: impl Fn(char) -> bool) -> usize {
+        let buf = backend.buffer();
+        let area = buf.area();
+        let mut n = 0;
+        for y in 0..area.height {
+            for x in 0..area.width {
+                if let Some(cell) = buf.cell((x, y)) {
+                    if pred(cell.symbol().chars().next().unwrap_or(' ')) {
+                        n += 1;
+                    }
+                }
+            }
+        }
+        n
+    }
+
+    /// Twenty user messages: well past one viewport of transcript
+    /// lines, with no block glyphs in the content.
+    fn long_session_app() -> App {
+        let evs: Vec<Event> = (0..20).map(|i| produce::user_message(&format!("message {i}"))).collect();
+        app_with_session(evs)
+    }
+
+    // The position bar rows of section 9 (the draw-level rows).
+    #[test]
+    fn bar_hides_at_the_tail() {
+        // "bar hidden at the tail": normal mode, `scroll = 0` — no
+        // bar column; the text width is the full pane.
+        let mut app = long_session_app();
+        app.set_viewport_height(24);
+        let b = draw_frame(&mut app, 80, 30);
+        assert_eq!(
+            cell_count(&b, |c| matches!(c, '█' | '▼' | '▶')),
+            0,
+            "no bar column at the tail"
+        );
+    }
+
+    #[test]
+    fn bar_shows_on_scroll_back() {
+        // "bar on scroll-back": normal mode, `scroll > 0` — one
+        // right-edge column, the thumb plus the tail marker.
+        let mut app = long_session_app();
+        app.set_viewport_height(24);
+        app.scroll_up(10);
+        let b = draw_frame(&mut app, 80, 30);
+        assert!(
+            cell_count(&b, |c| c == '█') >= 1,
+            "the thumb shows on the right edge"
+        );
+        assert_eq!(cell_count(&b, |c| c == '▼'), 1, "the tail marker shows");
+        assert_eq!(cell_count(&b, |c| c == '▶'), 0, "no cursor marker outside browse");
+    }
+
+    #[test]
+    fn bar_shows_in_browse_with_the_cursor_marker() {
+        // "bar in browse": browse mode, `scroll = 0` — the bar
+        // shows, and the cursor marker sits on the cursor line (the
+        // last line after `G`).
+        let mut app = long_session_app();
+        app.set_viewport_height(24);
+        app.editor().press(crate::app::Key::Esc);
+        app.press(crate::app::Key::Char('s'));
+        app.press(crate::app::Key::Char('s'));
+        assert!(app.browse_ref().active());
+        // Prime the press-path layout, then drive `G`: the cursor
+        // to the last line, the view to the tail.
+        app.set_browse_layout(200, 24, 60, vec!["line".to_string(); 200]);
+        let mut sc = app.scroll();
+        app.browse().sync(200, 24, &mut sc, false);
+        app.set_scroll(sc);
+        assert!(app.press(crate::app::Key::Char('G')).is_empty());
+        assert_eq!(app.scroll(), 0, "the view is at the tail");
+        let b = draw_frame(&mut app, 80, 30);
+        assert_eq!(cell_count(&b, |c| c == '▶'), 1, "the cursor marker shows");
+        assert!(cell_count(&b, |c| c == '█') >= 1, "the thumb shows in browse");
+    }
+
+    /// True when any buffer row, read left to right, holds `needle`.
+    fn buffer_contains(backend: &ratatui::backend::TestBackend, needle: &str) -> bool {
+        let buf = backend.buffer();
+        let area = buf.area();
+        for y in 0..area.height {
+            let mut row = String::new();
+            for x in 0..area.width {
+                if let Some(cell) = buf.cell((x, y)) {
+                    row.push_str(cell.symbol());
+                }
+            }
+            if row.contains(needle) {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn browse_content_follows_the_scroll() {
+        // Regression: the browse window shows the lines `start..start+h`
+        // of the transcript, not the first `h` lines. The content
+        // must follow the view, like the gutter and the bar.
+        let mut app = long_session_app();
+        app.set_viewport_height(24);
+        app.editor().press(crate::app::Key::Esc);
+        app.press(crate::app::Key::Char('s'));
+        app.press(crate::app::Key::Char('s'));
+        assert!(app.browse_ref().active());
+        // The first browse frame primes the press-path layout.
+        let _ = draw_frame(&mut app, 80, 30);
+        // `gg`: the cursor to the top, the view to the top.
+        assert!(app.press(crate::app::Key::Char('g')).is_empty());
+        assert!(app.press(crate::app::Key::Char('g')).is_empty());
+        let top = draw_frame(&mut app, 80, 30);
+        assert!(
+            buffer_contains(&top, "message 0"),
+            "the top view shows the first message"
+        );
+        // `G`: the cursor to the last line, the view to the tail.
+        assert!(app.press(crate::app::Key::Char('G')).is_empty());
+        let tail = draw_frame(&mut app, 80, 30);
+        assert!(
+            buffer_contains(&tail, "message 19"),
+            "the tail view shows the last message"
+        );
+        assert!(
+            !buffer_contains(&tail, "message 5"),
+            "the middle messages scrolled out of the view"
+        );
+    }
+
+    #[test]
+    fn the_gutter_numbers_show_in_browse() {
+        // The gutter rows of section 4.3: in browse mode the left
+        // gutter shows the absolute number at the cursor, the
+        // relative distance elsewhere; outside browse there is no
+        // gutter.
+        let mut app = long_session_app();
+        app.set_viewport_height(24);
+        app.editor().press(crate::app::Key::Esc);
+        // Outside browse: no gutter digits crowd the left edge.
+        let plain = draw_frame(&mut app, 80, 30);
+        app.press(crate::app::Key::Char('s'));
+        app.press(crate::app::Key::Char('s'));
+        assert!(app.browse_ref().active());
+        let in_browse = draw_frame(&mut app, 80, 30);
+        let digits_plain = cell_count(&plain, |c| c.is_ascii_digit());
+        let digits_browse = cell_count(&in_browse, |c| c.is_ascii_digit());
+        assert!(
+            digits_browse > digits_plain,
+            "the gutter adds the line numbers ({digits_browse} > {digits_plain})"
+        );
+        let _ = plain;
+    }
+
     /// A frame spec whose label is the mode text `label`.
     fn frame_with_label(label: &str) -> Option<crate::ext::FrameSpec> {
         use crate::ext::{ExtLine, FrameSpec};
@@ -2334,12 +2920,24 @@ mod tests {
         // host keeps its modal-state render in the box title.
         let e = command_line_editor();
         let frame = frame_with_label("[COMMAND]");
-        let title = input_box_title(&e, "[COMMAND]", &frame, Color::DarkGray);
+        let title = input_box_title(&e, "[COMMAND]", &frame, Color::DarkGray, None);
         assert_eq!(title.to_string(), "/ab\u{2588}");
         // No frame label: the prompt still shows (the built-in case).
         let none: Option<crate::ext::FrameSpec> = None;
-        let title = input_box_title(&e, "[COMMAND]", &none, Color::DarkGray);
+        let title = input_box_title(&e, "[COMMAND]", &none, Color::DarkGray, None);
         assert_eq!(title.to_string(), "/ab\u{2588}");
+    }
+
+    #[test]
+    fn input_box_title_browse_prompt_wins() {
+        // The browse command line owns the box title (docs/tui-
+        // conversation-browsing.md section 4.4), over the editor
+        // prompt and the frame label.
+        let e = command_line_editor();
+        let frame = frame_with_label("[COMMAND]");
+        let title =
+            input_box_title(&e, "[COMMAND]", &frame, Color::DarkGray, Some("/err"));
+        assert_eq!(title.to_string(), "/err\u{2588}");
     }
 
     #[test]
@@ -2350,11 +2948,11 @@ mod tests {
         e.set_text("abc");
         e.press(crate::app::Key::Esc); // normal mode
         let frame = frame_with_label("[COMMAND]");
-        let title = input_box_title(&e, "[NORMAL]", &frame, Color::DarkGray);
+        let title = input_box_title(&e, "[NORMAL]", &frame, Color::DarkGray, None);
         assert_eq!(title.to_string(), "[COMMAND]");
         // No frame label: the built-in mode label shows.
         let none: Option<crate::ext::FrameSpec> = None;
-        let title = input_box_title(&e, "[NORMAL]", &none, Color::DarkGray);
+        let title = input_box_title(&e, "[NORMAL]", &none, Color::DarkGray, None);
         assert_eq!(title.to_string(), "[NORMAL]");
     }
 
@@ -2787,9 +3385,9 @@ mod tests {
         // padded to the pane width: trim before comparing. The
         // expected styles are the palette roles of `json_line_p`.
         let p = app.palette();
-        let key = p.style(crate::color::Role::JsonKey, Modifier::BOLD);
-        let num = p.style(crate::color::Role::JsonNumber, Modifier::empty());
-        let nul = p.style(crate::color::Role::JsonNull, Modifier::DIM);
+        let key = p.style(crate::color::Role::SyntaxVariable, Modifier::empty());
+        let num = p.style(crate::color::Role::SyntaxNumber, Modifier::empty());
+        let nul = p.style(crate::color::Role::SyntaxNumber, Modifier::empty());
         let spans: Vec<(Style, &str)> = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| (s.style, s.content.as_ref())))

@@ -172,6 +172,22 @@ pub struct App {
     /// The new-session name being typed, when the user started `tui`
     /// without a session argument. `None` means the name input is off.
     pending_name: Option<String>,
+    /// The browse mode state machine (docs/tui-conversation-browsing.
+    /// md section 4). The double-`s` overlay over the transcript.
+    browse: crate::browse::Browse,
+    /// Armed since the first `s`; a second `s` inside the window
+    /// enters or leaves browse mode. Any other key disarms. Mirrors
+    /// the `q q` arm of FT-012 for the `s s` gate (section 4.2).
+    ss_arm: Option<Instant>,
+    /// The last rendered browse layout: `(total, h, text_w, line
+    /// texts)`, refreshed by the renderer each frame while browse is
+    /// active. Browse motions and the search read it; tests prime it
+    /// by hand.
+    browse_layout: Option<(usize, usize, usize, Vec<String>)>,
+    /// A rendered event landed since the last browse sync
+    /// (section 4.6): the transcript growth is event growth, not a
+    /// pane rewrap, so the browse view does not follow.
+    events_grew: bool,
     /// The transcript pane height set by the last draw, in lines.
     /// Drives the half-page distance of Ctrl+U / Ctrl+D.
     viewport: usize,
@@ -319,6 +335,10 @@ pub const DEFAULT_THINKING_LEVEL: u32 = 0;
 
 /// The window in which a second `q` confirms the quit.
 const QUIT_ARM_TTL: std::time::Duration = std::time::Duration::from_secs(3);
+/// The window in which a second `s` enters or leaves browse mode
+/// (docs/tui-conversation-browsing.md section 4.2, the FT-012
+/// mirror).
+const SS_ARM_TTL: std::time::Duration = std::time::Duration::from_secs(3);
 /// Scroll distance kept between the viewport top and the log end. The
 /// transcript is capped anyway, so the scroll clamps at draw time.
 const SCROLL_CAP: usize = 100_000;
@@ -338,6 +358,10 @@ impl App {
             quitting: false,
             quit_arm: None,
             pending_name: None,
+            browse: crate::browse::Browse::new(),
+            ss_arm: None,
+            browse_layout: None,
+            events_grew: false,
             ext_status_values: HashMap::new(),
             ext_status_order: VecDeque::new(),
             ext_status_ts: HashMap::new(),
@@ -437,6 +461,11 @@ impl App {
         self.active = Some(id);
         self.events = events;
         self.scroll = 0;
+        // The browse state never survives a session switch (section
+        // 4.7): the reset rides the scroll reset.
+        self.browse.reset(&mut self.scroll);
+        self.ss_arm = None;
+        self.events_grew = false;
         self.events_version += 1;
         self.ext_status_values = statuses;
         self.ext_status_ts = status_ts;
@@ -479,6 +508,12 @@ impl App {
                     if let Some(id) = event.get_str("id") {
                         self.record_ext_status(id, value, event.get_str("ts"));
                     }
+                } else {
+                    // A rendered event: the transcript total may
+                    // grow (section 4.6). The browse sync uses this
+                    // to tell event growth from a pane-rewrap
+                    // growth (section 4.7).
+                    self.events_grew = true;
                 }
                 self.events.push(event);
                 self.events_version += 1;
@@ -487,6 +522,12 @@ impl App {
             WatchItem::Resumed => self.flash("session log restored — resuming"),
             WatchItem::IoError { message } => self.flash(format!("log read error: {message}")),
         }
+    }
+
+    pub fn take_events_grew(&mut self) -> bool {
+        let f = self.events_grew;
+        self.events_grew = false;
+        f
     }
 
     /// Set the transcript pane height (the renderer does this every
@@ -652,6 +693,104 @@ impl App {
 
     pub fn scroll_down(&mut self, lines: usize) {
         self.scroll = self.scroll.saturating_sub(lines);
+    }
+
+    pub fn set_scroll(&mut self, s: usize) {
+        self.scroll = s.min(SCROLL_CAP);
+    }
+
+    // ── browse mode (docs/tui-conversation-browsing.md) ──────
+
+    /// The browse state machine (section 4).
+    pub fn browse(&mut self) -> &mut crate::browse::Browse {
+        &mut self.browse
+    }
+
+    /// The browse state, read-only.
+    pub fn browse_ref(&self) -> &crate::browse::Browse {
+        &self.browse
+    }
+
+    /// The browse layout of the last render: `(total, h, text_w,`
+    /// `texts)`. The renderer refreshes it each frame while browse is
+    /// active; browse motions and the search read it (section 4.1).
+    pub fn set_browse_layout(
+        &mut self,
+        total: usize,
+        h: usize,
+        text_w: usize,
+        texts: Vec<String>,
+    ) {
+        self.browse_layout = Some((total, h, text_w, texts));
+    }
+
+    /// The browse highlight inputs for one frame: the match-line
+    /// cache (cloned: the cache borrows the machine) and the active
+    /// match, owned so no app borrow crosses the lines borrow in the
+    /// renderer.
+    pub fn browse_highlight(
+        &mut self,
+        total: usize,
+    ) -> (std::collections::HashSet<usize>, Option<(usize, usize)>) {
+        match &self.browse_layout {
+            Some((_, _, _, texts)) => {
+                let (hl, am) = self.browse.highlight_lines(total, texts.as_slice());
+                (hl.clone(), am)
+            }
+            None => (std::collections::HashSet::new(), None),
+        }
+    }
+
+    /// The total of the last browse layout: the gutter width hint of
+    /// the width fixpoint (section 4.3).
+    pub fn browse_layout_total(&self) -> usize {
+        self.browse_layout.as_ref().map(|l| l.0).unwrap_or(0)
+    }
+
+    /// The browse entry gate: the same two conditions as the `q q`
+    /// exit path (section 4.2): an empty draft, the editor in normal
+    /// mode, and no name input up.
+    fn browse_gate_open(&self) -> bool {
+        self.pending_name.is_none()
+            && self.editor.mode() == Mode::Normal
+            && self.editor.text().trim().is_empty()
+    }
+
+    /// One browse-owned key (section 4.4): the key table over the
+    /// rendered transcript. The view comes from the last rendered
+    /// layout, so a key before the first frame is a no-op.
+    fn browse_key(&mut self, key: Key) {
+        // The double-`s` exit arm (section 4.2): the shared arm
+        // window, the FT-012 mirror.
+        if let Key::Char('s') = key {
+            match self.ss_arm {
+                Some(at) if at.elapsed() < SS_ARM_TTL => {
+                    self.ss_arm = None;
+                    self.browse.exit();
+                    self.flash("browse left — view kept");
+                }
+                _ => {
+                    self.ss_arm = Some(Instant::now());
+                    self.flash("ss: press s again to leave browse");
+                }
+            }
+            return;
+        }
+        let (total, h, texts) = match &self.browse_layout {
+            Some((total, h, _w, texts)) => (*total, *h, texts.as_slice()),
+            None => return,
+        };
+        let half = self.half_page();
+        let mut view = crate::browse::View {
+            total,
+            h,
+            scroll: &mut self.scroll,
+            half,
+            texts,
+        };
+        if let Some(hint) = self.browse.key(key, &mut view) {
+            self.flash(hint);
+        }
     }
 
     // ── draft / editor ──────────────────────────────────────────
@@ -977,6 +1116,55 @@ impl App {
         if key != Key::Quit {
             self.quit_arm = None;
         }
+        // Any key other than the second `s` disarms a pending browse
+        // arm (the FT-012 mirror, section 4.2).
+        if !matches!(key, Key::Char('s')) {
+            self.ss_arm = None;
+        }
+        // The browse overlay owns its key table while it holds
+        // (section 4.4). The host roles fall through: the loop keys,
+        // the toggles, `Tab` (which leaves the mode first), and the
+        // `q q` quit gate.
+        if self.browse.active() {
+            match key {
+                Key::Tab => {
+                    // Leave browse, then cycle sessions (section
+                    // 4.4): the state never survives the switch.
+                    self.browse.exit();
+                    self.ss_arm = None;
+                    return vec![Action::CycleSessions(1)];
+                }
+                Key::CtrlC => {
+                    // The host stop role: the editor stays frozen
+                    // under the overlay, so no session means a
+                    // flash instead of an editor insert-exit.
+                    if self.active().is_none() {
+                        self.flash("no session to stop the loop for");
+                        return Vec::new();
+                    }
+                    return vec![Action::StopLoop];
+                }
+                Key::CtrlR => {
+                    // The host start role (docs/tui.md key Ctrl+R).
+                    if self.active().is_none() {
+                        self.flash("no session to run the loop for");
+                        return Vec::new();
+                    }
+                    return vec![Action::RunLoop];
+                }
+                // The unowned keys act in the browse state machine.
+                Key::Quit
+                | Key::CtrlO
+                | Key::CtrlT
+                | Key::CtrlX
+                | Key::CtrlF
+                | Key::CtrlL => {}
+                _ => {
+                    self.browse_key(key);
+                    return Vec::new();
+                }
+            }
+        }
         // The name input swallows editing keys while it is active.
         // Other keys (q, Ctrl+R, Tab, ...) fall through unchanged.
         if self.pending_name.is_some() {
@@ -1279,6 +1467,39 @@ impl App {
                         'e' => return vec![Action::AnswerApproval(Decision::Edit)],
                         _ => {}
                     }
+                }
+                // The double-`s` browse gate (section 4.2): the same
+                // two conditions as the `q q` exit path. In the
+                // gated state the first `s` arms; the second `s`
+                // inside the window enters browse. A held draft keeps
+                // the editor `s` role and hints the browse path.
+                if c == 's' && self.browse_gate_open() {
+                    match self.ss_arm {
+                        Some(at) if at.elapsed() < SS_ARM_TTL => {
+                            self.ss_arm = None;
+                            self.browse.enter();
+                            self.flash(crate::browse::BROWSE_HINT);
+                            return Vec::new();
+                        }
+                        _ => {
+                            self.ss_arm = Some(Instant::now());
+                            self.flash("ss: press s again to browse");
+                            return Vec::new();
+                        }
+                    }
+                }
+                if c == 's'
+                    && self.editor.mode() == Mode::Normal
+                    && !self.editor.text().trim().is_empty()
+                    && self.pending_name.is_none()
+                {
+                    // The editor keeps the `s` role (change one
+                    // char); the hint names the browse path.
+                    if let Some(h) = self.editor().press(Key::Char('s')) {
+                        self.flash(h);
+                    }
+                    self.flash("ss browses — clear the draft first");
+                    return Vec::new();
                 }
                 if let Some(h) = self.editor().press(Key::Char(c)) {
                     self.flash(h);
@@ -2391,5 +2612,232 @@ mod tests {
             DEFAULT_THINKING_LEVEL,
             "no marker in b's log: the default applies"
         );
+    }
+
+    // ── the browse gate (docs/tui-conversation-browsing.md
+    // section 9, the gate rows) ─────────────────────────────
+
+    /// An app in the gated browse state: an active session, the
+    /// editor in normal mode, an empty draft.
+    fn browse_gated_app() -> App {
+        let mut app = app_with(vec![], "s1");
+        app.editor().press(Key::Esc); // insert to normal
+        app
+    }
+
+    #[test]
+    fn browse_gate_insert_types_into_the_editor() {
+        // "gate: insert": insert mode, empty draft — the first `s`
+        // types into the editor, no arm.
+        let mut app = app_with(vec![], "s1"); // the editor starts in insert
+        assert!(app.press(Key::Char('s')).is_empty());
+        assert_eq!(app.take_draft(), "s", "s types into the editor");
+        assert!(!app.browse_ref().active(), "no browse");
+        assert!(app.ss_arm.is_none(), "no arm in insert mode");
+    }
+
+    #[test]
+    fn browse_gate_disarm_s_then_i() {
+        // "gate: disarm": `s` then `i` inside 3 s — no browse, the
+        // armed `s` drops, `i` enters insert alone.
+        let mut app = browse_gated_app();
+        assert!(app.press(Key::Char('s')).is_empty());
+        assert!(app.ss_arm.is_some(), "the first s arms");
+        assert!(app.press(Key::Char('i')).is_empty());
+        assert!(!app.browse_ref().active(), "no browse");
+        assert_eq!(
+            app.editor().mode(),
+            Mode::Insert,
+            "i enters insert alone"
+        );
+        assert!(app.ss_arm.is_none(), "the disarming key drops the arm");
+    }
+
+    #[test]
+    fn browse_gate_non_empty_draft_hints() {
+        // "gate: non-empty": a held draft in normal mode — the `s`
+        // keeps its editor role, no arm, the hint names the path.
+        let mut app = browse_gated_app();
+        app.editor().set_text("hi");
+        assert!(app.press(Key::Char('s')).is_empty());
+        assert!(!app.browse_ref().active(), "no browse");
+        assert!(app.ss_arm.is_none(), "no arm over a held draft");
+        assert!(
+            app.status().is_some_and(|s| s.contains("ss browses — clear the draft first")),
+            "the hint names the browse path"
+        );
+    }
+
+    #[test]
+    fn browse_gate_enter_s_s() {
+        // "gate: enter": `s s` inside 3 s — browse, the cursor is
+        // the first visible line col 0, the view does not move.
+        let mut app = browse_gated_app();
+        assert!(app.press(Key::Char('s')).is_empty());
+        assert!(app.browse_ref().active() == false, "the first s only arms");
+        assert!(app.press(Key::Char('s')).is_empty());
+        assert!(app.browse_ref().active(), "the second s enters browse");
+        assert_eq!(app.scroll(), 0, "the view does not move on entry");
+        // Resolve the entry against a primed layout: the cursor is
+        // the first visible line, col 0 (the renderer does this at
+        // the first frame).
+        let total = 50usize;
+        let h = 24usize;
+        let scroll = app.scroll();
+        app.set_browse_layout(total, h, 40, vec!["line".to_string(); total]);
+        app.browse.sync(total, h, &mut app.scroll, false);
+        let (l, c) = app.browse_ref().line_col();
+        assert_eq!(l, total - h, "the cursor is the first visible line");
+        assert_eq!(c, 0, "col 0");
+        assert_eq!(app.scroll(), scroll, "the view does not move");
+    }
+
+    #[test]
+    fn browse_gate_expired_arm_rearms() {
+        // "gate: expired arm": the arm expires; a fresh `s` re-arms,
+        // no entry.
+        let mut app = browse_gated_app();
+        assert!(app.press(Key::Char('s')).is_empty());
+        app.ss_arm = Some(Instant::now() - SS_ARM_TTL - std::time::Duration::from_millis(1));
+        assert!(app.press(Key::Char('s')).is_empty());
+        assert!(!app.browse_ref().active(), "an expired arm does not enter");
+        assert!(app.ss_arm.is_some(), "a fresh s re-arms");
+    }
+
+    #[test]
+    fn browse_gate_exit_s_s() {
+        // "gate: exit": in browse, `s s` inside 3 s — normal mode,
+        // scroll 0, the gutter and the bar drop (the renderer reads
+        // the mode).
+        let mut app = browse_gated_app();
+        app.press(Key::Char('s'));
+        app.press(Key::Char('s'));
+        assert!(app.browse_ref().active());
+        app.scroll_up(30); // back in history
+        assert_eq!(app.scroll(), 30);
+        assert!(app.press(Key::Char('s')).is_empty());
+        assert!(app.press(Key::Char('s')).is_empty());
+        assert!(!app.browse_ref().active(), "the double s leaves browse");
+        assert_eq!(app.scroll(), 30, "the view stays where browse left it");
+        assert_eq!(app.editor().mode(), Mode::Normal, "the editor is in normal mode");
+        assert!(app.editor().text().trim().is_empty(), "the draft is still empty");
+    }
+
+    #[test]
+    fn browse_quit_gate_holds() {
+        // "quit in browse": in browse, `q q` — the gate still holds
+        // (empty draft, the editor in normal under the overlay), so
+        // a double q quits as today.
+        let mut app = browse_gated_app();
+        app.press(Key::Char('s'));
+        app.press(Key::Char('s'));
+        assert!(app.browse_ref().active());
+        assert!(app.press(Key::Quit).is_empty(), "the first q arms, no quit");
+        assert!(!app.should_quit());
+        let actions = app.press(Key::Quit);
+        assert_eq!(actions, vec![Action::Quit], "the second q quits");
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn browse_tab_exits_then_cycles() {
+        // Section 4.4: `Tab` in browse mode leaves it, then cycles
+        // sessions. The state never survives the switch.
+        let mut app = app_with(vec![], "s1");
+        app.set_sessions(vec![SessionId::new("s1"), SessionId::new("s2")]);
+        app.editor().press(Key::Esc);
+        app.press(Key::Char('s'));
+        app.press(Key::Char('s'));
+        assert!(app.browse_ref().active());
+        let actions = app.press(Key::Tab);
+        assert_eq!(actions, vec![Action::CycleSessions(1)], "the cycle fires");
+        assert!(!app.browse_ref().active(), "browse left before the cycle");
+        assert_eq!(app.scroll(), 0, "the session switch resets the view");
+    }
+
+    #[test]
+    fn browse_ctrl_c_and_r_keep_the_host_roles() {
+        // Section 4.4: `Ctrl+C` / `Ctrl+R` keep the host stop /
+        // start roles under the overlay.
+        let mut app = app_with(vec![], "s1");
+        app.editor().press(Key::Esc);
+        app.press(Key::Char('s'));
+        app.press(Key::Char('s'));
+        assert_eq!(app.press(Key::CtrlR), vec![Action::RunLoop], "the start role");
+        assert_eq!(app.press(Key::CtrlC), vec![Action::StopLoop], "the stop role");
+        assert!(app.browse_ref().active(), "the overlay holds");
+    }
+
+    #[test]
+    fn browse_grow_pins_the_cursor_and_keeps_the_view() {
+        // "grow while browsing": a new event lands — the total
+        // rises, the cursor pins, the view does not follow.
+        let mut app = browse_gated_app();
+        app.press(Key::Char('s'));
+        app.press(Key::Char('s'));
+        let total = 30usize;
+        let h = 24usize;
+        app.set_browse_layout(total, h, 40, vec!["line".to_string(); total]);
+        app.browse.sync(total, h, &mut app.scroll, false);
+        let (l0, _) = app.browse_ref().line_col();
+        let scroll0 = app.scroll();
+        // A new event lands: the total rises by one rendered line.
+        app.on_watch_item(WatchItem::Event {
+            event: crate::event::produce::user_message("more"),
+            cursor: crate::port::TailCursor::end(),
+        });
+        let total2 = total + 1;
+        app.set_browse_layout(total2, h, 40, vec!["line".to_string(); total2]);
+        app.browse.sync(total2, h, &mut app.scroll, true);
+        let (l1, _) = app.browse_ref().line_col();
+        assert_eq!(l1, l0, "the cursor pins to its line number");
+        assert_eq!(app.scroll(), scroll0, "the view does not follow the growth");
+    }
+
+    #[test]
+    fn browse_exit_after_grow_keeps_the_view() {
+        // "exit after grow": the growth above, the view moves to
+        // the top, then `s s` — the view stays where browse left
+        // it, no reset to the tail.
+        let mut app = browse_gated_app();
+        app.press(Key::Char('s'));
+        app.press(Key::Char('s'));
+        let total = 30usize;
+        let h = 24usize;
+        app.set_browse_layout(total, h, 40, vec!["line".to_string(); total]);
+        app.browse.sync(total, h, &mut app.scroll, false);
+        app.on_watch_item(WatchItem::Event {
+            event: crate::event::produce::user_message("more"),
+            cursor: crate::port::TailCursor::end(),
+        });
+        let total2 = total + 1;
+        app.set_browse_layout(total2, h, 40, vec!["line".to_string(); total2]);
+        app.browse.sync(total2, h, &mut app.scroll, true);
+        // The view to the top inside browse.
+        app.press(Key::Char('g'));
+        app.press(Key::Char('g'));
+        let kept = app.scroll();
+        assert!(kept > 0, "the view left the tail");
+        app.press(Key::Char('s'));
+        app.press(Key::Char('s'));
+        assert!(!app.browse_ref().active(), "`s s` leaves browse mode");
+        assert_eq!(app.scroll(), kept, "the view stays where browse left it");
+    }
+
+    #[test]
+    fn browse_session_switch_resets_the_state() {
+        // "a session switch": the browse state resets with the
+        // scroll (section 4.7).
+        let mut app = app_with(vec![], "s1");
+        app.set_sessions(vec![SessionId::new("s1"), SessionId::new("s2")]);
+        app.editor().press(Key::Esc);
+        app.press(Key::Char('s'));
+        app.press(Key::Char('s'));
+        assert!(app.browse_ref().active());
+        app.scroll_up(20);
+        app.set_active(SessionId::new("s2"), vec![]);
+        assert!(!app.browse_ref().active(), "the browse state resets");
+        assert_eq!(app.scroll(), 0, "the scroll resets with it");
+        assert!(app.ss_arm.is_none(), "the arm resets with it");
     }
 }
