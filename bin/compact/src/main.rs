@@ -87,29 +87,13 @@ fn resolve_bin(flag: &Option<PathBuf>, env: &str, name: &str) -> PathBuf {
     sibling(name)
 }
 
-/// One compact-state record as loaded from session/compact.json. The
-/// fields are all loaded for the round-trip fidelity: the current
-/// trigger rule reads the engaged_at, boundary_seq, and caps, and the
-/// rest stay for the future rules.
-#[derive(Clone, Debug)]
-#[allow(dead_code)]
-struct StateInfo {
-    caps: Caps,
-    keep: u64,
-    drops: u64,
-    engaged_at: u64,
-    last_tokens: u64,
-    last_at: u64,
-    per_group: u64,
-    boundary_seq: u64,
-}
-
 /// The last `compaction_summary` marker, projected. The first_kept_seq
 /// below 1 is rejected: the log re-renders without the summary (docs/
 /// auto-compact-plan.md section 4.1). The summary text is kept for
 /// record fidelity: the update prompt reads it from the log event,
 /// not from this struct.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 struct Boundary {
     seq: usize,
     first_kept_seq: usize,
@@ -142,10 +126,6 @@ struct TriggerInput {
     /// The trigger level: budget minus reserve, clamped below the
     /// budget when the reserve is zero.
     trigger_level: u64,
-    /// Whether the trim form moved a lever: a drop group or a
-    /// halved keep window. A fresh re-engage moved nothing: the
-    /// cold check decides.
-    trim_engaged: bool,
     /// The trigger-form measurements, oldest first: the log sequence
     /// and the provider usage.
     trigger_readings: Vec<(usize, u64)>,
@@ -174,32 +154,10 @@ enum Decision {
     },
 }
 
-/// The measured growth rate of the trigger-form measurements: the
-/// average delta of the consecutive deltas, or 0 with one reading.
-fn measured_growth_rate(readings: &[(usize, u64)]) -> u64 {
-    if readings.len() < 2 {
-        return 0;
-    }
-    let mut deltas = Vec::with_capacity(readings.len() - 1);
-    for pair in readings.windows(2) {
-        let d = pair[1].1.saturating_sub(pair[0].1);
-        if d > 0 {
-            deltas.push(d);
-        }
-    }
-    if deltas.is_empty() {
-        return 0;
-    }
-    let total: u64 = deltas.iter().sum();
-    total / deltas.len() as u64
-}
-
-/// The trigger test. It fires when the trim is already engaged (any
-/// trigger path: the trim has not recovered) or when the latest
-/// trigger-form reading is at or over the level, or when the
-/// predicted reading crosses it. The overflow and the force skip the
-/// trigger test entirely. The threshold trigger is gated by the
-/// feature switch and the cooldown.
+/// The trigger test (pi-style, stateless): the last measured reading
+/// against the trigger level. No latch, no `.all()` scan. The
+/// overflow and the force skip the trigger test entirely. The
+/// threshold trigger is gated by the feature switch and the cooldown.
 fn decide_trigger(inp: &TriggerInput) -> Decision {
     if !inp.enabled && !inp.force && !inp.overflow {
         return Decision::Noop("the feature is disabled".to_string());
@@ -223,67 +181,14 @@ fn decide_trigger(inp: &TriggerInput) -> Decision {
             predicted: last,
         };
     }
-    if !inp.trim_engaged
-        && inp
-            .trigger_readings
-            .iter()
-            .all(|r| r.1 < inp.trigger_level)
-    {
-        // No reading crosses the level: the trigger is cold. The
-        // predicted reading is still checked: one step of measured
-        // growth ahead, the next request adds one turn, not the
-        // rest of the session.
-        let rate = measured_growth_rate(&inp.trigger_readings);
-        if inp.trigger_readings.last().is_some() {
-            let last = inp.trigger_readings.last().map(|r| r.1).unwrap_or(0);
-            let predicted = last + rate;
-            if predicted <= inp.trigger_level {
-                return Decision::Noop("the trigger is cold".to_string());
-            }
-        } else {
-            return Decision::Noop("no trigger-form reading yet".to_string());
-        }
-        let last = inp.trigger_readings.last().map(|r| r.1).unwrap_or(0);
-        return Decision::Fire {
-            predicted: last + rate,
-        };
+    // Pi-style stateless check: last measured reading vs trigger level.
+    match inp.trigger_readings.last() {
+        Some((_, tokens)) if *tokens >= inp.trigger_level => Decision::Fire {
+            predicted: *tokens,
+        },
+        Some(_) => Decision::Noop("the trigger is cold".to_string()),
+        None => Decision::Noop("no trigger-form reading yet".to_string()),
     }
-    // The trim engaged or a reading crossed the level: fire.
-    let last = inp
-        .trigger_readings
-        .last()
-        .map(|r| r.1)
-        .unwrap_or(0);
-    Decision::Fire {
-        predicted: last,
-    }
-}
-
-fn read_state(session: &Path) -> Option<StateInfo> {
-    let p = session.join("compact.json");
-    let raw = std::fs::read_to_string(&p).ok()?;
-    let v: Value = serde_json::from_str(&raw).ok()?;
-    if v.get("v").and_then(|x| x.as_u64()) != Some(2) {
-        return None;
-    }
-    let caps_v = v.get("caps")?;
-    let caps = Caps {
-        result: caps_v.get("result").and_then(|x| x.as_u64()),
-        text: caps_v.get("text").and_then(|x| x.as_u64()),
-    };
-    Some(StateInfo {
-        caps,
-        keep: v.get("keep").and_then(|x| x.as_u64()).unwrap_or(2),
-        drops: v.get("drops").and_then(|x| x.as_u64()).unwrap_or(0),
-        engaged_at: v.get("engaged_at").and_then(|x| x.as_u64()).unwrap_or(0),
-        last_tokens: v.get("last_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
-        last_at: v.get("last_at").and_then(|x| x.as_u64()).unwrap_or(0),
-        per_group: v.get("per_group").and_then(|x| x.as_u64()).unwrap_or(0),
-        boundary_seq: v
-            .get("boundary_seq")
-            .and_then(|x| x.as_u64())
-            .unwrap_or(0),
-    })
 }
 
 /// The boundary fields of a `compaction_summary` marker. The
@@ -443,16 +348,6 @@ fn main() {
         .cloned()
         .collect();
 
-    let state = read_state(&args.session);
-    // The state: current only at the last boundary. A state from
-    // before the last boundary is stale: the trim re-engages fresh.
-    let state_current = match (&state, &boundary) {
-        (Some(s), Some(b)) => s.boundary_seq == b.seq as u64,
-        (Some(_), None) => true,
-        (None, _) => false,
-    };
-    let trim_engaged = state_current && state.is_some();
-
     // The measurements: the provider usage of the assistant
     // messages, as the (log sequence, tokens) pairs. The log stores
     // the request input as `usage.input_tokens`.
@@ -472,31 +367,6 @@ fn main() {
         }
     }
 
-    // The trigger-form readings: between the boundary and the trim
-    // engagement, or all of them when the state file is absent. The
-    // stale guard drops the readings older than the boundary (the
-    // summary covers them).
-    let engaged_at = state.as_ref().map(|s| s.engaged_at).unwrap_or(0);
-    let trigger_readings: Vec<(usize, u64)> = if trim_engaged {
-        measurements
-            .iter()
-            .filter(|(seq, _)| {
-                if trim_engaged {
-                    let kept_idx = kept_events
-                        .iter()
-                        .position(|e| e.seq == *seq)
-                        .unwrap_or(usize::MAX);
-                    kept_idx < engaged_at as usize
-                } else {
-                    true
-                }
-            })
-            .cloned()
-            .collect()
-    } else {
-        measurements.clone()
-    };
-
     // The config: the budget and the compact knobs.
     let cfg = load_config(&args.config);
     let empty = toml::Value::Table(toml::map::Map::new());
@@ -515,29 +385,13 @@ fn main() {
     };
 
     let overflow = matches!(args.reason, Reason::Overflow);
-    // The trigger decision. The trim-engaged rule fires only when
-    // the trim actually moved a lever: a drop group or a halved
-    // keep window. A fresh re-engage after a boundary reset moved
-    // nothing: the cold check decides, and the compact loop does not
-    // re-fire on every step.
-    let keep_base: u64 = val_int(
-        cfg.get("limits").unwrap_or(&toml::Value::Table(toml::map::Map::new())),
-        "compact_keep_events",
-    )
-    .unwrap_or(24) as u64;
-    let trim_trimming = state.as_ref().is_some_and(|s| {
-        s.drops > 0 || s.keep < keep_base
-    }) && state_current;
-    let trim_engaged = trim_trimming;
     // The trigger decision. The tokens_before of the Fire branch is
     // the newest measurement of the kept region: the current context
-    // size the compact replaces. A stale trigger-form reading from
-    // the trim engagement would misreport the compact scale.
+    // size the compact replaces.
     let last_measurement = measurements.last().map(|m| m.1).unwrap_or(0);
     let decision = decide_trigger(&TriggerInput {
         trigger_level,
-        trim_engaged,
-        trigger_readings: trigger_readings.clone(),
+        trigger_readings: measurements.clone(),
         last_user_seq,
         failed_user_seq,
         cooldown: true,
@@ -560,7 +414,7 @@ fn main() {
             predicted,
         } => {
             let _ = predicted;
-            let builder = run_compaction()
+            run_compaction()
                 .args(&args)
                 .schemas_dir(&schemas_dir)
                 .kept_events(&kept_events)
@@ -568,12 +422,7 @@ fn main() {
                 .tokens_before(last_measurement)
                 .overflow(overflow)
                 .last_user_seq(last_user_seq)
-                .trim_engaged(trim_engaged);
-            if let Some(s) = state {
-                builder.state(s).call()
-            } else {
-                builder.call()
-            }
+                .call();
         }
     }
 }
@@ -588,17 +437,11 @@ fn run_compaction(
     tokens_before: u64,
     overflow: bool,
     last_user_seq: usize,
-    trim_engaged: bool,
-    state: Option<StateInfo>,
 ) -> ! {
     let cfg = load_config(&args.config);
     let empty = toml::Value::Table(toml::map::Map::new());
     let limits = cfg.get("limits").unwrap_or(&empty);
     let keep_tokens: u64 = val_int(limits, "compact_keep_tokens").unwrap_or(20_000) as u64;
-    let caps: Caps = Caps {
-        result: Some(val_int(limits, "compact_result_chars").unwrap_or(500) as u64),
-        text: Some(val_int(limits, "compact_text_chars").unwrap_or(200) as u64),
-    };
     let clip: u64 = val_int(limits, "tool_result_max_chars").unwrap_or(20_000) as u64;
 
     // The projected kept events, for the estimator. The marker
@@ -608,16 +451,9 @@ fn run_compaction(
         .map(|e| compact_math::project_event(&e.value))
         .collect();
 
-    // The estimate caps: the current form's caps. The trim engaged
-    // uses the caps the state file recorded at the engagement, the
-    // full form the result clip only.
-    let est_caps: Caps = if trim_engaged {
-        state.map(|s| s.caps).unwrap_or(caps)
-    } else {
-        Caps {
-            result: Some(clip),
-            text: None,
-        }
+    let est_caps: Caps = Caps {
+        result: Some(clip),
+        text: None,
     };
     let cut = compact_math::find_cut(&projected, keep_tokens, &est_caps);
     if cut == 0 {
@@ -964,7 +800,6 @@ mod tests {
     fn trigger_fires_on_a_crossing_reading() {
         let inp = TriggerInput {
             trigger_level: 100,
-            trim_engaged: false,
             trigger_readings: vec![(1, 40), (2, 60), (3, 110)],
             last_user_seq: 3,
             failed_user_seq: None,
@@ -980,35 +815,12 @@ mod tests {
     }
 
     #[test]
-    fn trigger_fires_on_the_predicted_crossing() {
-        // The last reading is below the level, but the measured
-        // growth rate predicts the crossing.
+    fn trigger_cold_is_the_noop() {
+        // The last reading is below the level: the trigger is cold.
         let inp = TriggerInput {
             trigger_level: 200,
-            trim_engaged: false,
             trigger_readings: vec![(1, 100), (2, 150), (3, 190)],
             last_user_seq: 3,
-            failed_user_seq: None,
-            cooldown: true,
-            enabled: true,
-            force: false,
-            overflow: false,
-        };
-        match decide_trigger(&inp) {
-            Decision::Noop(d) => panic!("expected fire, got noop: {d}"),
-            Decision::Fire { predicted, .. } => {
-                assert!(predicted > 200, "the predicted reading crosses");
-            }
-        }
-    }
-
-    #[test]
-    fn trigger_cold_is_the_noop() {
-        let inp = TriggerInput {
-            trigger_level: 10_000,
-            trim_engaged: false,
-            trigger_readings: vec![(1, 100), (2, 200)],
-            last_user_seq: 2,
             failed_user_seq: None,
             cooldown: true,
             enabled: true,
@@ -1022,29 +834,9 @@ mod tests {
     }
 
     #[test]
-    fn trim_engaged_fires_any_trigger() {
-        let inp = TriggerInput {
-            trigger_level: 100_000,
-            trim_engaged: true,
-            trigger_readings: vec![],
-            last_user_seq: 5,
-            failed_user_seq: None,
-            cooldown: true,
-            enabled: true,
-            force: false,
-            overflow: false,
-        };
-        match decide_trigger(&inp) {
-            Decision::Noop(d) => panic!("expected fire, got noop: {d}"),
-            Decision::Fire { .. } => {}
-        }
-    }
-
-    #[test]
     fn cooldown_gates_the_threshold_trigger() {
         let inp = TriggerInput {
             trigger_level: 100,
-            trim_engaged: false,
             trigger_readings: vec![(1, 90), (2, 95)],
             last_user_seq: 5,
             failed_user_seq: Some(5),
@@ -1074,7 +866,6 @@ mod tests {
     fn the_kill_switch_holds_the_threshold() {
         let inp = TriggerInput {
             trigger_level: 100,
-            trim_engaged: false,
             trigger_readings: vec![(1, 40), (2, 90)],
             last_user_seq: 2,
             failed_user_seq: None,
