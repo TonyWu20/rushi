@@ -1,38 +1,44 @@
-# Handoff strategy — session continuation across context exhaustion
+# Handoff document — the compact artifact
 
-Status: Spec (2026-09-08). This document records the owner's decision to
-steer the context strategy back to a session handoff. It amends
+Status: Spec (2026-09-08). This document describes the handoff
+document produced by the in-session shadow compact step. It amends
 `docs/phase-2-plan.md`. It follows the unix-philosophy model in
 `docs/skill-remapped-to-os-apps.md`.
 
 ## 1. The decision
 
-The terminal context strategy is a session handoff. The owner picks it
-over the in-session auto-compact of correction 63. The two strategies
-sit behind one port, so the swap is a recompile, not a rewrite.
+The terminal context strategy is in-session shadow compact. The
+compact step appends a handoff-instruction prompt to the current
+context. The model writes a structured handoff document covering
+goals, state, open questions, and next steps. The loop saves that
+document to `sessions/<n>/handoff.md` and shadows the old log
+region. The next request is built as: fixed system + tools + the
+handoff doc content + post-boundary events. No new session is
+created. The session continues in place.
 
 - **Reactive trigger only.** No proactive threshold cut. The loop
   does not trim on a predicted budget. It keeps the full window.
   Compact fires only when the response shows overflow: an overflow
   `error`, a silent overflow, or a `length` stop. This matches pi.
   The `compact_enabled` switch still gates the reactive compact.
-- **Terminal path.** When nothing fits after the reactive compact,
-  the loop runs a handoff. It summarizes the session, seeds a new
-  session, and starts that session's loop. The loop does not stop.
-  It rebinds to the new session and continues.
+- **No escalation path.** The handoff document is the compact
+  output. It shadows the old region. The model can re-read the
+  shadowed log via `read` or `bash` at any time. No new session
+  is created. No second strategy ships in Phase 2.
 
-The strategy is a config choice, not a hard branch. One knob picks the
-terminal strategy:
+The strategy is a config choice, not a hard branch. One knob selects
+the terminal strategy:
 
 ```toml
 [limits]
-# terminal context strategy: "handoff" or "compact"
-compact_strategy = "handoff"
+# context-overflow strategy: only `compact` ships in Phase 2
+compact_strategy = "compact"
 ```
 
-The default is `handoff` (the owner's decision). `compact` keeps the
-correction-63 in-session behavior. Both share the same reactive
-overflow handling. They differ only on the terminal step.
+The only shipped value is `compact`: in-session shadow compact.
+It shadows the log region with the model-written handoff doc and
+stays in the same session. The key is a seam for future strategies.
+No second strategy ships in Phase 2.
 
 ## 2. The strategy seam (lifecycle windows)
 
@@ -72,49 +78,46 @@ does not branch on strategy name.
 
 ### 2.2 Current design (lifecycle windows)
 
-The two overflow-strategy windows are:
+The overflow-strategy windows are:
 
 - **`overflow.resolve`** — fires when the model response classifies
   as overflow, silent overflow, or length stop. Decision vocab:
-  `stay_compact` | `handoff` | `stop`.
+  `stay_compact` | `stop`.
 - **`exhausted.handle`** — fires when `assemble` returns the
-  `context_exhausted` form (last-resort compact cannot fit). Decision
-  vocab: `handoff` | `stop`.
+  `context_exhausted` form (the assembled context exceeds the input
+  budget). Decision vocab: `stop`.
 
-The `SessionStore` port remains the fs I/O boundary:
+The `SessionStore` port remains the fs I/O boundary for session
+artifacts. In Phase 2 it handles the single in-session shadow
+compact flow: saving `handoff.md` and the `compaction_summary`
+event into `sessions/<n>/`.
 
 ```rust
 pub trait SessionStore: Send {
-    fn next_handoff_name(&self, base: &str) -> SessionName;
-    fn seed(&self, name: &SessionName, seed: &Seed) -> Result<SessionDir>;
+    fn save_handoff(&self, session: &SessionName, doc: &str)
+        -> Result<()>;
 }
 ```
 
-The handoff hook calls `SessionStore::seed` for the fs work and
-returns `{"decision":"handoff","new_session":"<name>"}` to the
-dispatcher. The dispatcher (in the loop) executes the lock swap and
-rebind. The loop owns the lock; the hook owns the seed content and
-the decision. See `docs/loop-lifecycle-hooks.md` §4 for the full
-ABI.
+The hook calls `SessionStore::save_handoff` for the fs work and
+returns `{"decision": "stop"}` on `exhausted.handle` (the loop then
+runs the in-session shadow compact and continues) or
+`{"decision": "stay_compact"}` on `overflow.resolve`. The
+composition root wires the registered hook in `[hooks].on`. The
+loop never names a strategy. It fires the window and applies the
+decision.
 
-Two strategies ship as two hook registrations on the same windows:
-- `harness-hook-compact` — default. Returns `stay_compact` on
-  `overflow.resolve` and `stop` on `exhausted.handle`.
-- `harness-hook-handoff` — the owner's terminal strategy. Returns
-  `handoff` on `exhausted.handle` (and optionally on
-  `overflow.resolve` when `can_recover` is false).
-
-The composition root wires whichever hook is registered in
-`[hooks].on`. The loop never names a strategy. It fires the window
-and applies the decision.
+The `handoff` decision value (new-session seeding) is reserved for
+future strategies. No second strategy ships in Phase 2.
 
 ## 3. The handoff document
 
 The handoff doc is a data artifact, not a skill. It is a file the loop
-writes. It is self-describing. It is produced from the summary call
-(`assemble --summary-input` plus `model`, the same path `bin/compact`
-uses). This is the unix-philosophy read of the mattpocock handoff
-skill: the procedure is a tool, and the output is data on the path.
+writes into the current session dir. It is self-describing. It is
+produced from the summary call (`assemble --summary-input` plus
+`model`, the same path `bin/compact` uses). This is the
+unix-philosophy read of the mattpocock handoff skill: the procedure
+is a tool, and the output is data on the path.
 
 ### 3.1 Format
 
@@ -125,11 +128,10 @@ two changes for this repo.
 # Handoff: <short task title>
 
 Date: <ISO-8601>
-From: sessions/<old>
-To:   sessions/<new>
+Session: sessions/<n>
 
 ## Goal
-<what the task is, what the next session continues>
+<what the task is, what the session continues>
 
 ## Progress
 ### Done
@@ -149,28 +151,31 @@ To:   sessions/<new>
 <invariants, gotchas, caps that must hold>
 
 ## Suggested next actions
-<the tools and commands the next agent should run first>
+<the tools and commands the model should run first>
 
 ## Log index (source of truth)
-- events: sessions/<old>/events.jsonl
-- tools:  sessions/<old>/tools.jsonl
+- events: sessions/<n>/events.jsonl
+- tools:  sessions/<n>/tools.jsonl
 
 This document is a summary. The logs are the truth. When the summary
 and a log disagree, read the log. Do not trust this doc over the log.
 ```
 
+The format keeps one session dir. The `From` / `To` fields do not
+apply: the shadow stays in the current session.
+
 ### 3.2 Adaptations to this repo
 
 - **No SKILL.md.** The mattpocock "suggested skills" section becomes
-  "Suggested next actions". It names the commands and tools the next
-  agent runs. Those tools self-document through `--help` (§4 of
+  "Suggested next actions". It names the commands and tools the
+  model runs next. Those tools self-document through `--help` (§4 of
   `skill-remapped-to-os-apps.md`). There is no skill file.
 - **Reference, do not duplicate.** The doc points to existing artifacts
   by path. It does not copy their content. It names the log files, not
   their lines.
 - **Logs are the truth.** The doc ends with the log index and the rule:
-  the logs win over the doc. The next agent may read
-  `sessions/<old>/events.jsonl` and `sessions/<old>/tools.jsonl` at
+  the logs win over the doc. The model may read
+  `sessions/<n>/events.jsonl` and `sessions/<n>/tools.jsonl` at
   will. It reads them to see what ran, what failed, and what worked.
   The summary is an aid to orientation, not a record.
 - **Redact.** Drop API keys, tokens, and personal data. The doc is a
@@ -179,69 +184,50 @@ and a log disagree, read the log. Do not trust this doc over the log.
 ### 3.3 Storage (both directories, not the OS temp dir)
 
 The mattpocock skill saves the doc to the user's temp dir, outside the
-workspace. This repo keeps it in the session, in both session
-directories. Both copies are session artifacts.
+workspace. This repo keeps it in the session dir alongside
+`events.jsonl`.
 
-- `sessions/<old>/handoff.md` — the record of what happened and where
-  the task went. It stays with the session it closed.
-- `sessions/<new>/handoff.md` — the onboarding doc the new agent reads
-  first. It is the seed of the new session.
-
-The old copy is the audit trail. The new copy is the entry point. They
-are the same file, written to both dirs. This is the owner's override of
-the skill's temp-dir rule.
+- `sessions/<n>/handoff.md` — the shadow summary. It is the entry
+  point for the next `assemble` cycle. It sits next to the log it
+  shadows.
 
 The doc is a file, not an event. No new event type. The
-`context_exhausted` event already carries `new_session`. The file is
+`compaction_summary` event carries `first_kept_seq`. The file is
 separate from the log. It adds no schema. It adds no `v` bump (P1a).
 
 ## 4. The terminal flow, in order
 
-This is the `Handoff` arm of §2, fully spelled out. It runs when the
-last-resort compact fails, or when `compact_strategy = "handoff"` and
-the context is exhausted.
+This is the in-session shadow compact flow. It runs when the context
+is exhausted and the reactive compact path (overflow, silent, length
+stop) does not recover enough headroom.
 
-1. Run the summary call on the compacted log. One cheap call. A capped
-   output. No tools. The `assemble --summary-input` path already builds
-   this.
-2. Write `handoff.md` into `sessions/<old>/`.
-3. Create `sessions/<new>` via `SessionStore::next_handoff_name`. The
-   name is `<base>_h<N>`. `N` is the next free index.
-4. Copy `handoff.md` into `sessions/<new>/`.
-5. Seed `sessions/<new>/events.jsonl` with one `user_message` event.
-   Its content is the handoff summary plus the instruction to continue
-   the task plus the log index from §3.1. The log index names both log
-   files. It tells the new agent to read them when in doubt.
-6. Copy the `cwd` file from the old session to the new one.
-7. Append the `context_exhausted` marker to `sessions/<old>/events.jsonl`.
-   Its `new_session` field is the new name. This marker already exists
-   and `bin/log` already validates it.
-8. Release the old session's `.loop.lock`.
-9. Acquire the new session's `.loop.lock`.
-10. Rebind the loop's `session` to the new dir. Continue the loop. No
-    stop. No restart from the TUI. The loop process stays one process.
+1. Run the summary call on the compacted log. One call. No tools.
+   The handoff document's length is model-determined; it is not
+   capped below the model's own `max_output_tokens`. The
+   `assemble --summary-input` path already builds this.
+2. Write `handoff.md` into `sessions/<n>/` (the current session
+dir). No new session is created.
+3. Append a `compaction_summary` event with `first_kept_seq` to
+   `sessions/<n>/events.jsonl`. The next `assemble` skips events
+   before `first_kept_seq` and prepends the handoff doc content to
+   the request.
+4. Shadowed events remain in `events.jsonl`. The model can re-read
+   them via `read` or `bash` at any time.
+5. Continue the loop in the same session. No rebind, no lock swap,
+   no new session.
 
-### 4.1 Auto-start
+### 4.1 TUI observation
 
-Correction 57 seeded the session but left the start to the human. The
-TUI `h` key started the new loop on demand. This design removes the key
-press. Step 10 rebinds and continues in the same process. The TUI
-follows automatically.
+The TUI tails one session and does not need to switch session dirs.
+The shadow compact stays in the same session. The TUI re-reads the
+same `events.jsonl` and the `handoff.md` file in place. No re-tail
+of a different session dir is needed.
 
-The TUI side needs one change. Today the TUI tails one session and
-waits for the `h` key to switch (§5.2 of the plan, the `Action::Handoff`
-path in `bin/tui/src/main.rs`). Under auto-start the TUI re-attaches on
-the `context_exhausted` marker alone. It reads `new_session` from the
-marker and tails that session. No key press. The `h` key stays as the
-manual override for the failed-seed case (`new_session` empty, the
-summary call died).
+### 4.2 Failure of the summary call
 
-### 4.2 Failure of the seed
-
-If the summary call fails, no session seeds. The marker still lands on
-the old session with an empty `new_session`, as correction 57 did. The
-loop logs the terminal `error` and stops in the old session. The `h`
-key path still covers a later manual retry.
+If the summary call fails, no `handoff.md` is written. The loop logs
+a terminal `error` and stops in the session. A later manual retry can
+re-invoke the compact step.
 
 ## 5. What changes in the Phase 2 plan
 
@@ -255,31 +241,28 @@ config keys: `compact_strategy` and `[hooks]`. No `v` bump.
   `crates/core` in Phase 3 with the state machine.
 - **§4.3 step 5** — the `context_exhausted` form fires the
   `exhausted.handle` lifecycle window. The harness dispatches
-  registered hooks for that window. The `handoff` hook returns
-  `handoff` + `new_session`. The `compact` hook returns
-  `stay_compact`. The loop executes the decision: rebind, lock
-  swap, or stop.
+  registered hooks for that window. The shipped hook runs the
+  in-session shadow compact: it saves `handoff.md` in the session
+dir and returns `stop`. The loop continues in the same session.
 - **§4.3 step 6** — the overflow/silent/length classification fires
   the `overflow.resolve` window. Default decision is `stay_compact`.
-  A registered hook can return `handoff` to short-circuit to the
-  terminal path.
-- **§4.6** — the lock invariant changes. It held for the process
-  life. It now holds per session. The handoff releases one lock and
-  takes another. The TUI probe (a non-blocking `flock` attempt) sees
-  the released old lock as free. It sees the new lock as held.
-- **§7** — add two rows. "Handoff seeded: the old session is
-  `exhausted`, the new session runs." and "Seed summary failed: the
-  marker carries an empty `new_session`, the loop stops in the old
-  session."
-- **§8** — add one conformance row. "handoff: a fixture session that
-  exhausts, with the handoff hook registered. Assert: one new session
-  dir, `handoff.md` in both dirs, the seed event, the marker, the
-  rebind, and the old log untouched."
+  The hook runs one in-session shadow compact and the loop retries.
+- **§4.6** — the lock invariant: it holds for the process life in
+  the current session. No lock swap. No rebind.
+- **§7** — add one row. "Shadow compact: a `context_exhausted` form
+  with `compact_strategy = compact`. One `compaction_summary` event,
+  one `handoff.md` in the session dir, the shadowed range logged,
+  the next `assemble` skips shadowed events, no new session dir."
+- **§8** — add one conformance row. "Shadow compact: a fixture
+  session that exhausts with the default `compact_strategy` produces
+  one `compaction_summary` event, one `handoff.md` in the session
+  dir, the shadowed range logged, the next `assemble` skips shadowed
+  events, and no new session dir."
 - **§9** — "no daemon" and "no TUI feature work" still hold. The new
-  non-goal is "no in-process hook ABI". The two strategies stay
+  non-goal is "no in-process hook ABI". The strategy hook stays
   subprocess-wired behind the hook ABI.
 - **§10** — stage 2 adds the window dispatcher. Stage 3 adds the
-  two built-in strategy hooks and their conformance rows.
+  shadow-compact hook and its conformance rows.
 
 ## 6. Design debt this removes
 
@@ -287,18 +270,19 @@ The owner's question: would switching be clumsy? It is clumsy today
 because the strategy is not a port. This document makes it one.
 
 - The swap is one hook registration, one config key, and a recompile.
-- The loop never names a strategy. It fires the window. It applies the
-  decision.
-- `claim`, `assemble`, `model`, `parse`, `route`, `log` change nothing
-  on the handoff path. They stay adapters over the same contracts.
+- The loop never names a strategy. It fires the window. It applies
+  the decision.
+- `claim`, `assemble`, `model`, `parse`, `route`, `log` change
+  nothing on the compact path. They stay adapters over the same
+  contracts.
 - The only new module work is the `hooks` dispatcher plus the
   `SessionStore` port. Both are small and I/O-light in
-  `harness-common`. The fs writes in `SessionStore::seed` are the one
-  I/O call. It stays out of the pure core.
+  `harness-common`. The fs writes in `SessionStore::save_handoff`
+  are the one I/O call. It stays out of the pure core.
 
-The cost of deferring the seam to Phase 3 is higher. It means the loop
-ships welded to one strategy and the swap becomes a loop rewrite.
-Adding the window seam now is cheap. Deferring it is not.
+The cost of deferring the seam to Phase 3 is higher. It means the
+loop ships welded to one strategy and the swap becomes a loop
+rewrite. Adding the window seam now is cheap. Deferring it is not.
 
 A second debt: the running `step.sh` and `auto-compact-plan.md` still
 specify a proactive threshold hook. It fires before the request when
@@ -310,15 +294,12 @@ it.
 
 ## 7. Open items
 
-- The `n` index rule for `<base>_h<N>`: next free index, not a
-  timestamp. It must scan the sessions root. It must skip a dir that
-  exists but is empty. Confirm against `sessions/` before wiring
-  `next_handoff_name`.
-- The seed event content: how much of the handoff doc goes into the
-  `user_message` body. The doc stays in the dir. The seed event
-  carries the summary and the log index. It does not paste the whole
-  doc into the log.
-- The TUI auto-reattach: it re-uses `pending_handoff`. It drops the
-  key press on the success path. The `h` key stays for the
-  failed-seed retry. This is a TUI touch, so it lands in the same
+- The `n` index rule for `<base>_h<N>` is a future concern. No new
+  session dir is created in Phase 2. The `compact_strategy` key and
+  window vocabulary are seams for a future strategy that may seed a
+  new session. Confirm against `sessions/` before wiring that future
+  path.
+- The TUI auto-reattach is a future concern. In Phase 2 the TUI
+  tails one session dir for the process life. No re-tail of a
+  different session dir is needed.
   stage as the loop, not a TUI feature pass.
