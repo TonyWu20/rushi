@@ -56,6 +56,32 @@ sync. Do not grow them in parallel.
 The trigger math joins the `LogLine` and validator copies as a
 promotion candidate for a shared `core`/`bin/common` crate.
 
+## The compact strategy is not a port (2026-09-07)
+
+The Phase 2 plan (`docs/phase-2-plan.md`) bakes the in-place compact
+strategy into the `harness` loop. The `StageRunner::compact` payload
+names no handoff outcome. The `awaiting_model` branch ends every
+recovery path with a re-projection in the same session. The `run`
+skeleton holds one session, one flock, one `loop.pid` for the
+process life. A handoff strategy (summary, seeded new session, pointer
+to the old `events.jsonl`, rebind the loop) touches four modules:
+`harness-common` (the outcome type), `bin/harness` (the strategy
+branch, the rebind, the lock swap), the session-creation path, and
+`bin/tui` (auto-follow). It is not a drop-in as the plan stands.
+
+The fix is one seam in the Phase 2 spec: a `ContextStrategy` port
+(action enum: in-place, handoff, stop) and a `SessionStore` port
+(create and seed the session dir). The default implementation is the
+in-place behavior. The handoff is a second implementation and one
+config key. No loop rewrite. The vocabulary side already exists:
+the `context_exhausted` schema with `new_session`, the `claim`
+`exhausted` state, the TUI `pending_handoff` and the `h` key.
+Recorded in `docs/phase-2-plan-audit.md` section 2. Trigger: the
+owner's 2026-09-07 question on strategy swappability. Episode 1 of
+3 (P9). No live episode demands the handoff yet. Add the seam to
+plan section 3.3 before the loop is written. Skip it if the
+in-place strategy is the final design.
+
 ## The marker schemas join the validator list (2026-09-03)
 
 The three auto-compact marker schemas (`compaction_started`,
