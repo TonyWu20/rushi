@@ -31,7 +31,8 @@ Every role holds a fixed color.
       The values lower to the active capability level, as the
       extension hex wire colors do today.
 - Selection. The user names the scheme in the config. The
-      default keeps the current built-in palette.
+      default is the `catppuccin macchiato` scheme (the reference
+      pi theme).
 
 ## 4. Open design questions
 
@@ -54,7 +55,7 @@ capability lowering applies to every scheme.
 The design questions of section 4, answered in
 `bin/tui/src/color.rs` and `bin/tui/src/config.rs`:
 
-- **The role list**: the 28-role `Role` enum. The three built-in
+- **The role list**: the 38-role `Role` enum. The three built-in
   tones, the markdown and JSON highlight styles, the thinking
   block, the fold/expand hint, the error and success accents, the
   five thinking-level border colors, the built-in status row, and
@@ -67,9 +68,21 @@ The design questions of section 4, answered in
   keeps its current value. An unknown role name is a hard error
   at load.
 - **The scheme switch point**: config load. The user names the
-  scheme in `[tui] color_scheme`. The first internal scheme is
-  `catppuccin-macchiato`, the built-in value of the 2026-08-29
-  palette. Absent, the built-in tones stand.
+  scheme in `[tui] color_scheme`. The default is the
+  `catppuccin macchiato` scheme (the reference pi theme).
+  Absent a named scheme, the TUI loads it.
 - The thinking-level border colors join the palette as roles
   (`Border0` to `Border4`), so a scheme recolors the border
   too.
+
+## 7. Pi alignment (2026-09-05 pass)
+
+The role table rebases to the `pi` TUI element colors
+(docs/tui-color-pi-alignment.md): the 28-role list grows to 38
+(the nine `syntax*` roles replace the six `Json*` roles; `Accent`,
+`Warning`, the three `Diff*` and the two box-state backgrounds
+join the list). The `catppuccin macchiato` scheme carries the pi
+`catppuccin-macchiato` theme JSON values verbatim, role by role, and
+is the no-scheme default (the reference pi theme the user runs).
+The pi built-in `dark` theme is the fallback for an unset role in a
+user scheme table. Partial custom tables still overlay role by role.

@@ -456,7 +456,7 @@ environment variable.
 ```toml
 [tui]
 color = "truecolor"   # truecolor | 256 | 16 | 8 (aliases: rgb, 24bit, 256color, 8color)
-color_scheme = "catppuccin-macchiato"   # absent: the built-in tones
+color_scheme = "catppuccin macchiato"   # absent: the default is also catppuccin macchiato
 # custom schemes overlay the built-in palette role by role:
 # [tui.custom_schemes.name]
 # plain_text = "#cdd6f4"   # a partial table keeps the rest
@@ -467,8 +467,10 @@ hex wire colors and the built-in tones lower to it. Unknown names
 are a hard error at load. Absent, the TUI detects from the
 environment (COLORTERM, TERM; color.rs module docs).
 
-`[tui] color_scheme` selects a built-in scheme. The first internal
-scheme is `catppuccin-macchiato` (docs/tui-color-scheme.md):
+`[tui] color_scheme` selects a named scheme. The default (and the
+first internal scheme) is `catppuccin macchiato` (docs/tui-color-
+scheme.md, the pi `catppuccin-macchiato` theme values, docs/tui-color-pi-
+alignment.md):
 every role resolves to a scheme hex, lowered to the capability
 level. A `[tui.custom_schemes.<name>]` table overlays the
 selected palette role by role; an unset role keeps its current
@@ -566,12 +568,13 @@ splits the queues: steer messages wake the loop at the next
   step; follow messages run as new turns at the idle boundary
   (`--inject-follow`). The TUI renders the two blocks and
   `Ctrl+F` toggles the composer between the queues.
-- **Color schemes** (docs/tui-color-scheme.md): the 28-role
-  palette with the built-in tones as the default. The first
-  internal scheme is `catppuccin-macchiato` (the built-in value
-  of the 2026-08-29 palette work), selected by `[tui]
-  color_scheme`. Custom schemes overlay role by role under
-  `[tui.custom_schemes.<name>]`, a partial table allowed.
+- **Color schemes** (docs/tui-color-scheme.md): the 38-role
+  palette. The no-scheme default is `catppuccin macchiato` (the pi
+  `catppuccin-macchiato` theme values, docs/tui-color-pi-alignment.md);
+  the pi built-in `dark` theme values are the fallback for an unset
+  role in a user scheme. `[tui] color_scheme` selects a named scheme;
+  `[tui.custom_schemes.<name>]` overlays the selected base palette
+  role by role, a partial table allowed.
 - **The reference renderers stop the gray abuse** (docs/
   tui-color-tones.md section 4): `ui_extensions-demos/tool_result/
   tool_result.sh` and `ext-rs/tool_result-rs` paint the body in

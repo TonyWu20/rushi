@@ -230,8 +230,10 @@ pub fn body_rows(
     let hint = Style::default()
         .fg(palette.color(crate::color::Role::Hint))
         .add_modifier(Modifier::DIM);
-    let success = Style::default().fg(palette.color(crate::color::Role::Success));
+    let diff_added = Style::default().fg(palette.color(crate::color::Role::DiffAdded));
+    let diff_removed = Style::default().fg(palette.color(crate::color::Role::DiffRemoved));
     let error = Style::default().fg(palette.color(crate::color::Role::Error));
+    let command = Style::default().fg(palette.color(crate::color::Role::ToolCommand));
     let code = Style::default().fg(palette.color(crate::color::Role::Code));
     match tool {
         "read" => read_body(value, cfg, &out, &hint, &code, expanded, width),
@@ -241,8 +243,7 @@ pub fn body_rows(
                 .cfg(cfg)
                 .out(&out)
                 .hint(&hint)
-                .success(&success)
-                .code(&code)
+                .diff_added(&diff_added)
                 .expanded(expanded)
                 .width(width);
             if let Some(ca) = call_args {
@@ -256,9 +257,8 @@ pub fn body_rows(
             .cfg(cfg)
             .out(&out)
             .hint(&hint)
-            .success(&success)
-            .error(&error)
-            .code(&code)
+            .diff_added(&diff_added)
+            .diff_removed(&diff_removed)
             .expanded(expanded)
             .width(width)
             .call(),
@@ -269,13 +269,13 @@ pub fn body_rows(
             .out(&out)
             .hint(&hint)
             .error(&error)
-            .code(&code)
+            .command(&command)
             .err(err)
             .expanded(expanded)
             .width(width)
             .call(),
-        "list" => search_body(value, cfg, &out, &hint, &code, expanded, width),
-        _ => generic_body(value, cfg, &out, &hint, &code, expanded, width),
+        "list" => search_body(value, cfg, &out, &hint, expanded, width),
+        _ => generic_body(value, cfg, &out, &hint, expanded, width),
     }
 }
 
@@ -403,8 +403,9 @@ fn read_body(
 /// summary (`{text, path, operation, bytes}`); the written content
 /// is the call argument `content` (the TUI holds the call
 /// arguments through `call_args`). The diff shows the new content
-/// as added lines, collapsed to `diff_collapsed_lines`. The summary
-/// row names the size, like the reference write summary.
+/// as added lines (the pi `toolDiffAdded` color), collapsed to
+/// `diff_collapsed_lines`. The summary row names the size, like the
+/// reference write summary.
 #[builder]
 fn write_body(
     value: &serde_json::Value,
@@ -412,8 +413,7 @@ fn write_body(
     cfg: &ToolDisplay,
     out: &Style,
     hint: &Style,
-    success: &Style,
-    code: &Style,
+    diff_added: &Style,
     expanded: bool,
     width: usize,
 ) -> Vec<BodyRow> {
@@ -454,31 +454,30 @@ fn write_body(
         };
         let remaining = content_lines.len().saturating_sub(cap);
         for l in content_lines.iter().take(cap) {
-            rows.push(vec![(*success, format!("+ {l}"))]);
+            rows.push(vec![(*diff_added, format!("+ {l}"))]);
         }
         if let Some(h) = fold_hint(remaining, expanded, hint, width) {
             rows.push(vec![h]);
         }
     }
-    let _ = code;
     rows
 }
 
 /// The body of an `Edit` result: the adaptive edit diff of
 /// docs/tui-tool-result-truncation.md. The value carries `before`
 /// (the old string) and `after` (the new string). The unified
-/// layout colors the removed lines in the error role and the added
-/// lines in the success role; the split layout shows the two sides
-/// in one wide row. Collapsed to `diff_collapsed_lines`.
+/// layout colors the removed lines in the pi `toolDiffRemoved`
+/// role and the added lines in the pi `toolDiffAdded` role; the
+/// split layout shows the two sides in one wide row. Collapsed to
+/// `diff_collapsed_lines`.
 #[builder]
 fn edit_body(
     value: &serde_json::Value,
     cfg: &ToolDisplay,
     out: &Style,
     hint: &Style,
-    success: &Style,
-    error: &Style,
-    code: &Style,
+    diff_added: &Style,
+    diff_removed: &Style,
     expanded: bool,
     width: usize,
 ) -> Vec<BodyRow> {
@@ -544,12 +543,12 @@ fn edit_body(
                 let b_style = if b.is_empty() {
                     *out
                 } else {
-                    *error
+                    *diff_removed
                 };
                 let a_style = if a.is_empty() {
                     *out
                 } else {
-                    *success
+                    *diff_added
                 };
                 // One split row: the left pane, the divider column,
                 // the right pane. Each pane clamps to its half of
@@ -573,14 +572,14 @@ fn edit_body(
                 if shown >= cap {
                     break;
                 }
-                rows.push(vec![(*error, format!("- {l}"))]);
+                rows.push(vec![(*diff_removed, format!("- {l}"))]);
                 shown += 1;
             }
             for l in after.iter() {
                 if shown >= cap {
                     break;
                 }
-                rows.push(vec![(*success, format!("+ {l}"))]);
+                rows.push(vec![(*diff_added, format!("+ {l}"))]);
                 shown += 1;
             }
             let remaining = total.saturating_sub(shown);
@@ -589,7 +588,6 @@ fn edit_body(
             }
         }
     }
-    let _ = code;
     rows
 }
 
@@ -607,7 +605,7 @@ fn bash_body(
     out: &Style,
     hint: &Style,
     error: &Style,
-    code: &Style,
+    command: &Style,
     err: bool,
     expanded: bool,
     width: usize,
@@ -636,8 +634,18 @@ fn bash_body(
                 cfg.bash_collapsed_lines
             };
             let remaining = lines.len().saturating_sub(cap);
+            // The line styles: the `$ <command>` opener in the pi
+            // `toolTitle` tone (the `command` style), the output
+            // lines in the pi `toolOutput` tone. A failed command
+            // paints every line in the error accent.
             for (i, l) in lines.iter().enumerate().take(cap) {
-                let st = if err { *error } else { *code };
+                let st = if err {
+                    *error
+                } else if i == 0 {
+                    *command
+                } else {
+                    *out
+                };
                 if i == 0 {
                     // The command line: the bash result text opens
                     // with the `$ <command>` line. On a narrow pane
@@ -670,7 +678,6 @@ fn search_body(
     cfg: &ToolDisplay,
     out: &Style,
     hint: &Style,
-    code: &Style,
     expanded: bool,
     width: usize,
 ) -> Vec<BodyRow> {
@@ -698,14 +705,15 @@ fn search_body(
             };
             let remaining = lines.len().saturating_sub(cap);
             for l in lines.iter().take(cap) {
-                rows.push(vec![(*code, l.to_string())]);
+                // The listing lines are plain text, the pi
+                // `toolOutput` tone, not code.
+                rows.push(vec![(*out, l.to_string())]);
             }
             if let Some(h) = fold_hint(remaining, expanded, hint, width) {
                 rows.push(vec![h]);
             }
         }
     }
-    let _ = out;
     rows
 }
 
@@ -713,13 +721,13 @@ fn search_body(
 /// output. Collapsed shows the first lines (the `preview` cap of
 /// the reference `generic` rendering); expanded, the body up to the
 /// expanded cap. The body is the result text (the tool's `text`
-/// field, the reference body precedence of docs/tui.md 13.1).
+/// field, the reference body precedence of docs/tui.md 13.1), the
+/// pi `toolOutput` tone.
 fn generic_body(
     value: &serde_json::Value,
     cfg: &ToolDisplay,
     out: &Style,
     hint: &Style,
-    code: &Style,
     expanded: bool,
     width: usize,
 ) -> Vec<BodyRow> {
@@ -733,12 +741,11 @@ fn generic_body(
     };
     let remaining = lines.len().saturating_sub(cap);
     for l in lines.iter().take(cap) {
-        rows.push(vec![(*code, l.to_string())]);
+        rows.push(vec![(*out, l.to_string())]);
     }
     if let Some(h) = fold_hint(remaining, expanded, hint, width) {
         rows.push(vec![h]);
     }
-    let _ = out;
     rows
 }
 
@@ -853,19 +860,25 @@ fn wrap_hard_line(line: &str, width: usize) -> Vec<String> {
 
 // ── the box (docs/tui-tool-display-port.md section 2: the box) ──
 
-/// The light background of a tool-result box, per the color role
-/// `tool_box_bg` (docs/tui-color-scheme.md): a light background at
-/// the active capability level, one cell of padding, the rounded
-/// corners.
-pub fn box_bg(palette: &crate::color::Palette) -> Color {
-    palette.color(crate::color::Role::ToolBoxBg)
+/// The background of a tool-result box, per the pi box-state role
+/// (docs/tui-color-pi-alignment.md): the `toolBoxBgSuccess` /
+/// `toolBoxBgError` palette role, lowered to the active capability
+/// level. One cell of padding, the rounded corners.
+pub fn box_bg(palette: &crate::color::Palette, err: bool) -> Color {
+    if err {
+        palette.color(crate::color::Role::ToolBoxBgError)
+    } else {
+        palette.color(crate::color::Role::ToolBoxBgSuccess)
+    }
 }
 
 /// The rows of the rounded tool-result box: the top border with the
 /// title text, the body rows (one cell of left padding, the border
 /// cells of the row), and the bottom border. Every segment carries
-/// the `tool_box_bg` background so the box reads as one lighter
-/// panel on the transcript. `width` is the box width in columns.
+/// the box-state background (`err` picks the pi `toolErrorBg` role,
+/// otherwise the `toolSuccessBg` role) so the box reads as one
+/// lighter panel on the transcript. `width` is the box width in
+/// columns.
 ///
 /// `title_style` restyles the title run of the top border (the
 /// result status accent, like the red bold of an error status);
@@ -882,8 +895,9 @@ pub fn box_rows(
     width: usize,
     palette: &crate::color::Palette,
     title_style: Option<&Style>,
+    err: bool,
 ) -> Vec<BodyRow> {
-    let bg = box_bg(palette);
+    let bg = box_bg(palette, err);
     let border = Style::default()
         .fg(palette.color(crate::color::Role::Hint))
         .bg(bg);
@@ -1366,7 +1380,7 @@ mod tests {
             .expanded(false)
             .width(120)
             .call();
-        let boxed = box_rows("tool:edit  ok", &rows, 120, &p, None);
+        let boxed = box_rows("tool:edit  ok", &rows, 120, &p, None, false);
         for r in &boxed {
             let w: usize = r.iter().map(|(_, t)| t.chars().count()).sum();
             assert_eq!(w, 120, "a box row overflows the wide pane: {w}");
@@ -1383,7 +1397,7 @@ mod tests {
             .expanded(false)
             .width(60)
             .call();
-        let boxed = box_rows("tool:edit  ok", &rows, 60, &p, None);
+        let boxed = box_rows("tool:edit  ok", &rows, 60, &p, None, false);
         for r in &boxed {
             let w: usize = r.iter().map(|(_, t)| t.chars().count()).sum();
             assert!(w <= 60, "a box row overflows the narrow pane: {w}");
@@ -1467,7 +1481,7 @@ mod tests {
         let p = crate::color::Palette::builtin(crate::color::Level::Rgb);
         let long = "a".repeat(500);
         let rows: Vec<BodyRow> = vec![vec![(Style::default(), long.clone())]];
-        let boxed = box_rows("tool:read  ok", &rows, 80, &p, None);
+        let boxed = box_rows("tool:read  ok", &rows, 80, &p, None, false);
         // The body row sits between the top and the bottom border.
         assert_eq!(boxed.len(), 3, "the box has three rows: {boxed:?}");
         let body = &boxed[1];
@@ -1490,7 +1504,7 @@ mod tests {
                 (Style::default(), "│".to_string()),
                 (Style::default(), seg),
             ]];
-        let boxed3 = box_rows("tool:edit  ok", &rows3, 60, &p, None);
+        let boxed3 = box_rows("tool:edit  ok", &rows3, 60, &p, None, false);
         let b3 = &boxed3[1];
         let w3: usize = b3.iter().map(|(_, t)| t.chars().count()).sum();
         assert_eq!(w3, 60, "the split row keeps the box width: {w3}");
@@ -1508,7 +1522,7 @@ mod tests {
             vec![(Style::default(), "line one".to_string())],
             vec![(Style::default(), "line two".to_string())],
         ];
-        let rows = box_rows("tool:read  ok", &body, 30, &p, None);
+        let rows = box_rows("tool:read  ok", &body, 30, &p, None, false);
         // One terminal line per row: the top border row, then the
         // body rows (border + body + border cells), then the bottom.
         assert_eq!(rows.len(), 4, "top + 2 body rows + bottom");

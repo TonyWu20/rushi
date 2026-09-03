@@ -257,12 +257,16 @@ pub fn looks_like_json(text: &str) -> bool {
         && serde_json::from_str::<serde_json::Value>(t).is_ok()
 }
 
-/// The JSON token walk: one hard line as styled segments,
-/// the colors lowered through the palette roles. The same token split as
-///
-/// colors lowered through the palette roles. Used when the result
-/// body of a read or unknown tool is a JSON document (docs/tui-
-/// color-tones.md: the JSON tokens keep their colors).
+/// The JSON token walk: one hard line as styled segments, the
+/// colors lowered through the palette roles. The same token split as
+/// the pi highlight.js JSON scope mapping (docs/tui-color-pi-
+/// alignment.md): a string followed by `:` is a key, the `attr`
+/// scope, colored through `SyntaxVariable`; string values through
+/// `SyntaxString`; numbers, and the `true` / `false` / `null`
+/// literals (the `literal` scope), through `SyntaxNumber`; the
+/// structural punctuation through `SyntaxPunctuation`. The colors
+/// carry no extra modifiers, like the pi token colors. Used when
+/// the result body of a read or unknown tool is a JSON document.
 pub fn json_line_p(line: &str, palette: &Palette) -> Vec<Seg> {
     let cs: Vec<char> = line.chars().collect();
     let n = cs.len();
@@ -296,12 +300,12 @@ pub fn json_line_p(line: &str, palette: &Palette) -> Vec<Seg> {
                     k += 1;
                 }
                 if k < n && cs[k] == ':' {
-                    style(Role::JsonKey, Modifier::BOLD)
+                    style(Role::SyntaxVariable, Modifier::empty())
                 } else {
-                    style(Role::JsonString, Modifier::empty())
+                    style(Role::SyntaxString, Modifier::empty())
                 }
             } else {
-                style(Role::JsonString, Modifier::empty())
+                style(Role::SyntaxString, Modifier::empty())
             };
             out.push((st, seg(&cs, i, end)));
             i = end;
@@ -316,7 +320,7 @@ pub fn json_line_p(line: &str, palette: &Palette) -> Vec<Seg> {
             if !plain.is_empty() {
                 out.push((Style::default(), std::mem::take(&mut plain)));
             }
-            out.push((style(Role::JsonNumber, Modifier::empty()), seg(&cs, i, j)));
+            out.push((style(Role::SyntaxNumber, Modifier::empty()), seg(&cs, i, j)));
             i = j;
             continue;
         }
@@ -324,7 +328,7 @@ pub fn json_line_p(line: &str, palette: &Palette) -> Vec<Seg> {
             if !plain.is_empty() {
                 out.push((Style::default(), std::mem::take(&mut plain)));
             }
-            out.push((style(Role::JsonLiteral, Modifier::BOLD), "true".to_string()));
+            out.push((style(Role::SyntaxNumber, Modifier::empty()), "true".to_string()));
             i += 4;
             continue;
         }
@@ -333,7 +337,7 @@ pub fn json_line_p(line: &str, palette: &Palette) -> Vec<Seg> {
                 out.push((Style::default(), std::mem::take(&mut plain)));
             }
             out.push((
-                style(Role::JsonLiteral, Modifier::BOLD),
+                style(Role::SyntaxNumber, Modifier::empty()),
                 "false".to_string(),
             ));
             i += 5;
@@ -343,7 +347,7 @@ pub fn json_line_p(line: &str, palette: &Palette) -> Vec<Seg> {
             if !plain.is_empty() {
                 out.push((Style::default(), std::mem::take(&mut plain)));
             }
-            out.push((style(Role::JsonNull, Modifier::DIM), "null".to_string()));
+            out.push((style(Role::SyntaxNumber, Modifier::empty()), "null".to_string()));
             i += 4;
             continue;
         }
@@ -351,7 +355,7 @@ pub fn json_line_p(line: &str, palette: &Palette) -> Vec<Seg> {
             if !plain.is_empty() {
                 out.push((Style::default(), std::mem::take(&mut plain)));
             }
-            out.push((style(Role::JsonPunct, Modifier::DIM), c.to_string()));
+            out.push((style(Role::SyntaxPunctuation, Modifier::empty()), c.to_string()));
         } else {
             plain.push(c);
         }
@@ -652,19 +656,19 @@ mod tests {
             "{s:?}"
         );
         let st = |i: usize| s[i].0;
-        let key = p.style(crate::color::Role::JsonKey, Modifier::BOLD);
-        let string = p.style(crate::color::Role::JsonString, Modifier::empty());
-        let num = p.style(crate::color::Role::JsonNumber, Modifier::empty());
-        let lit = p.style(crate::color::Role::JsonLiteral, Modifier::BOLD);
-        let nul = p.style(crate::color::Role::JsonNull, Modifier::DIM);
+        let key = p.style(crate::color::Role::SyntaxVariable, Modifier::empty());
+        let string = p.style(crate::color::Role::SyntaxString, Modifier::empty());
+        let num = p.style(crate::color::Role::SyntaxNumber, Modifier::empty());
+        // The literals color through the number role, like the pi
+        // `literal` scope mapping: `null` is no longer a dim token.
         assert_eq!(st(1), key, "strings before : are keys");
         assert_eq!(st(5), key);
         assert_eq!(st(9), key);
         assert_eq!(st(13), key);
         assert_eq!(st(7), string, "strings after : are values");
         assert_eq!(st(3), num);
-        assert_eq!(st(11), lit);
-        assert_eq!(st(15), nul);
+        assert_eq!(st(11), num, "true is a literal");
+        assert_eq!(st(15), num, "null is a literal");
     }
 
     #[test]
@@ -679,8 +683,8 @@ mod tests {
             "a leading + is not a JSON number start: it stays plain"
         );
         let st = |i: usize| s[i].0;
-        let num = p.style(crate::color::Role::JsonNumber, Modifier::empty());
-        let punct = p.style(crate::color::Role::JsonPunct, Modifier::DIM);
+        let num = p.style(crate::color::Role::SyntaxNumber, Modifier::empty());
+        let punct = p.style(crate::color::Role::SyntaxPunctuation, Modifier::empty());
         assert_eq!(st(0), num);
         assert_eq!(st(1), punct);
         assert_eq!(st(3), num);

@@ -133,8 +133,8 @@ fn default_arg_style() -> String {
 /// The optional `[tui]` table: `color` forces the color capability
 /// level (`truecolor`, `256`, `8`, `16`; unknown names are a hard
 /// error like the other keys). `color_scheme` selects a named color
-/// scheme (docs/tui-color-scheme.md section 3: the default keeps the
-/// current built-in palette). `color_schemes` holds user-defined
+/// scheme (docs/tui-color-scheme.md section 3: the default is the
+/// `catppuccin macchiato` scheme, the reference pi theme). `color_schemes` holds user-defined
 /// role-to-hex tables; a table name the `color_scheme` value does
 /// not name is inert.
 #[derive(Debug, Default, Deserialize)]

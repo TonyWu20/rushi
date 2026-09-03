@@ -77,16 +77,17 @@ JQ
 # The JSON tokenizer (awk): one hard line of JSON in, one multi-span
 # wire line out (an array of [text, style] pairs). A string that a
 # colon follows is a key; the other strings are values. Whitespace
-# is one plain span. The style objects are catppuccin-macchiato hex
+# is one plain span. The style objects are the pi catppuccin-
+# macchiato `syntax*` token colors (docs/tui-color-pi-alignment.md)
 # the host lowers at storage time.
 read -r -d '' AWK_TOKENIZER <<'AWK' || true
 BEGIN {
-  K   = "{\"fg\":\"#a6e3a1\"}"
-  S   = "{\"fg\":\"#f0c674\"}"
-  NUM = "{\"fg\":\"#fab387\"}"
-  LIT = "{\"fg\":\"#babcfc\"}"
-  NUL = "{\"fg\":\"#8f92ac\"}"
-  P   = "{\"fg\":\"#585b70\"}"
+  K   = "{\"fg\":\"#cad3f5\"}"
+  S   = "{\"fg\":\"#a6da95\"}"
+  NUM = "{\"fg\":\"#f5a97f\"}"
+  LIT = "{\"fg\":\"#f5a97f\"}"
+  NUL = "{\"fg\":\"#f5a97f\"}"
+  P   = "{\"fg\":\"#939ab7\"}"
 }
 {
   line = $0
@@ -178,7 +179,7 @@ read -r -d '' REPLY <<'JQ' || true
   then $spans
   else
     ( (.body // "") | split("\n") | map(select(length > 0))
-      | map([ ., {"fg": "#8f92ac"} ]) )
+      | map([ ., {"fg": "#cad3f5"} ]) )
   end ) as $body_lines
 | {
     v: 1,
@@ -186,8 +187,11 @@ read -r -d '' REPLY <<'JQ' || true
     event_id: $eid,
     lines:
       ( [ [ "[ext] tool:" + .tid + "  " + .status,
-            (if .err then {fg: "red", bold: true}
-             else {fg: "green", bold: true} end) ] ]
+            # The pi macchiato accents (docs/tui-color-pi-
+            # alignment.md): the `error` red on a failure, the
+            # `success` green otherwise.
+            (if .err then {fg: "#ed8796", bold: true}
+             else {fg: "#a6da95", bold: true} end) ] ]
         + $body_lines )
   }
 JQ
@@ -205,7 +209,9 @@ while IFS= read -r line; do
     # degrades to an [ext] marker instead of nothing.
     id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\),.*/\1/p' | head -n 1)
     [ -n "$id" ] || continue
-    printf '{"v":1,"op":"lines","event_id":%s,"lines":[["[ext] tool result",{"fg":"cyan","bold":true}]]}\n' "$id"
+    # The marker in the pi macchiato `toolTitle` accent (docs/
+    # tui-color-pi-alignment.md), not a hard-coded cyan.
+    printf '{"v":1,"op":"lines","event_id":%s,"lines":[["[ext] tool result",{"fg":"#c6a0f6","bold":true}]]}\n' "$id"
     continue
   fi
   fields=$(printf '%s' "$line" | jq -c "$EXTRACT" 2>/dev/null)

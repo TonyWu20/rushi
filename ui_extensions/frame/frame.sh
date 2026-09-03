@@ -6,11 +6,22 @@
 # rounded border to correlate with the active model's thinking level,
 # and labels the frame with the current editor mode:
 #
-# - thinking 0 (no thinking published): idle gray
-# - thinking 1: blue
-# - thinking 2: cyan
-# - thinking 3: green
-# - thinking 4+: amber
+# - thinking 0 (no thinking published): idle gray (the pi
+#   `thinkingOff` color, catppuccin-macchiato `overlay1`)
+# - thinking 1 (low): teal (the pi `thinkingLow` color, `teal`)
+# - thinking 2 (medium): green (the pi `thinkingMedium` color, `green`)
+# - thinking 3 (high): yellow (the pi `thinkingHigh` color, `yellow`)
+# - thinking 4+ (highest): peach (the pi `thinkingXhigh` color,
+#   `peach`)
+#
+# The hex values are the pi `catppuccin-macchiato` theme
+# `thinking*` border colors (docs/tui-color-pi-alignment.md), the
+# same table as the host's `catppuccin macchiato` scheme
+# `border0`..`border4` roles and the reference statusline palette
+# (docs/tui-statusline-powerline.md). The host lowers them to the
+# active terminal capability level at storage (ext.rs
+# `lower_frame_spec`). A level the table does not know keeps the
+# idle gray.
 #
 # The label is the mode the host passes in the `frame` op (`mode` is
 # the editor's modal state, e.g. "INSERT", "NORMAL", "[d-PENDING]").
@@ -24,16 +35,18 @@
 
 set -u
 
-# The thinking-level border colors, mirroring the host's built-in
-# palette (bin/tui/src/render.rs `thinking_border`). A level the
-# table does not know keeps the idle gray.
+# The thinking-level border colors: the pi catppuccin-macchiato
+# theme `thinking*` values (the host `catppuccin macchiato` scheme
+# `border0`..`border4` table, docs/tui-color-pi-alignment.md).
+# `frame.sh` is a reference extension: it carries the hex values of
+# that table, which the host lowers to the terminal level.
 frame_color() {
   case "$1" in
-    0) printf 'darkgray' ;;
-    1) printf 'blue' ;;
-    2) printf 'cyan' ;;
-    3) printf 'green' ;;
-    *) printf 'yellow' ;;
+    0) printf '#8087a2' ;;
+    1) printf '#8bd5ca' ;;
+    2) printf '#a6da95' ;;
+    3) printf '#eed49f' ;;
+    *) printf '#f5a97f' ;;
   esac
 }
 

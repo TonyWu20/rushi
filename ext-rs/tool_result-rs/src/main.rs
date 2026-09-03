@@ -8,6 +8,8 @@
 //! reply:
 //! - a header line: an [ext] marker, the tool_call id, and the
 //!   exit status. Green when ok, red when the result is an error
+//!   (the pi macchiato `success` / `error` hexes, docs/tui-color-
+//!   pi-alignment.md)
 //! - the result body. A body that is a complete JSON document gets
 //!   JSON syntax highlighting (keys, strings, numbers, literals,
 //!   punctuation), one multi-span line per hard line. Any other
@@ -35,17 +37,21 @@ use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 
 /// Muted body tone that replaces the single darkgray (the gray
-/// abuse of docs/tui-color-tones.md). Catppuccin-macchiato hex;
+/// abuse of docs/tui-color-tones.md). The pi catppuccin-macchiato
+/// `toolOutput` value (`text` var), docs/tui-color-pi-alignment.md;
 /// the host lowers it to the capability level at storage time.
-const BODY_TONE: &str = "#8f92ac";
-/// JSON token colors (the TUI palette's JSON roles): keys,
-/// strings, numbers, literals (true/false), null, punctuation.
-const JSON_KEY: &str = "#a6e3a1";
-const JSON_STRING: &str = "#f0c674";
-const JSON_NUMBER: &str = "#fab387";
-const JSON_LITERAL: &str = "#babcfc";
-const JSON_NULL: &str = "#8f92ac";
-const JSON_PUNCT: &str = "#585b70";
+const BODY_TONE: &str = "#cad3f5";
+/// JSON token colors (the pi `syntax*` roles the JSON walk colors
+/// through, docs/tui-color-pi-alignment.md): keys through
+/// `syntaxVariable`, strings through `syntaxString`, numbers and
+/// the `true`/`false`/`null` literals through `syntaxNumber`, and
+/// the punctuation through `syntaxPunctuation`.
+const JSON_KEY: &str = "#cad3f5";
+const JSON_STRING: &str = "#a6da95";
+const JSON_NUMBER: &str = "#f5a97f";
+const JSON_LITERAL: &str = "#f5a97f";
+const JSON_NULL: &str = "#f5a97f";
+const JSON_PUNCT: &str = "#939ab7";
 
 /// The body of a tool result value, in the built-in precedence
 /// (docs/tui.md 13.1): `text`, then `stdout` plus `stderr`, then a
@@ -249,9 +255,12 @@ fn main() {
         let value = ev.get("value").unwrap_or(&Value::Null);
         let body = body_of(value);
         let header_style = if is_error {
-            json!({"fg": "red", "bold": true})
+            // The pi macchiato `error` hex (docs/tui-color-pi-
+            // alignment.md), not a hard-coded swatch.
+            json!({"fg": "#ed8796", "bold": true})
         } else {
-            json!({"fg": "green", "bold": true})
+            // The pi macchiato `success` hex.
+            json!({"fg": "#a6da95", "bold": true})
         };
         let header = json!([format!("[ext] tool:{tid}  {status}"), header_style]);
         let mut lines: Vec<Value> = vec![header];

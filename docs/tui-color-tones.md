@@ -58,3 +58,12 @@ capability-aware tones"):
   source-code highlighting stays out of scope: the port follows
   `pi-tool-display`, which highlights JSON, diff, and bash, not
   arbitrary languages.
+
+## 5. Pi alignment (2026-09-05 pass)
+
+The tone and token hexes rebase to the pi `catppuccin-macchiato`
+theme values (docs/tui-color-pi-alignment.md): the reference
+body tone moves from `#8f92ac` to the pi `toolOutput` value
+(`#cad3f5`), and the JSON token hexes move to the pi `syntax*`
+role values (`#cad3f5` keys, `#a6da95` strings, `#f5a97f`
+numbers and literals, `#939ab7` punctuation).

@@ -53,11 +53,14 @@ full port of the extension.
 The port lives in `bin/tui/src/tool_display.rs` plus the
 `ToolResult` render pass in `bin/tui/src/render.rs`:
 
-- **Box**: each result sits in a rounded box with the `tool_box_bg`
-  role background (the lighter box), one cell of padding, the
-  command header row with the exit status. The top border carries
-  the `tool:<name>  <status>` title (the red bold accent on an
-  error), so no separate header line sits above the box.
+- **Box**: each result sits in a rounded box with the box-state
+  background role (`tool_box_bg_success` on success, the
+  `tool_box_bg_error` role on failure; docs/tui-color-pi-
+  alignment.md: the pi `toolSuccessBg` / `toolErrorBg` values),
+  one cell of padding, the command header row with the exit
+  status. The top border carries the `tool:<name>  <status>`
+  title (the red bold accent on an error), so no separate header
+  line sits above the box.
 - **Call/result merge**: a bash tool_call whose result follows
   drops its own line: the result box body opens with the
   `$ <command>` line, so the separate call line would repeat the
@@ -84,5 +87,9 @@ The port lives in `bin/tui/src/tool_display.rs` plus the
 - **Diff layout**: `Edit` results render as a diff (before and
   after). `diff_view` `auto` switches split at
   `DIFF_SPLIT_MIN_WIDTH` (120 columns), `unified` and `split`
-  force a layout. The JSON and bash bodies syntax-highlight
-  inside the box (docs/tui-color-tones.md section 4).
+  force a layout. The added and removed lines color through the
+  `diff_added` / `diff_removed` roles (the pi `toolDiffAdded` /
+  `toolDiffRemoved` values, docs/tui-color-pi-alignment.md). The
+  JSON and bash bodies syntax-highlight inside the box
+  (docs/tui-color-tones.md section 4): the JSON tokens color
+  through the `syntax*` roles, the pi scope mapping.
