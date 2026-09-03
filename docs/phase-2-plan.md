@@ -103,9 +103,11 @@ harness step SESSION  [--config PATH]
 | `[limits].context_budget_tokens` | the input budget (the clamp math is in `assemble`) |
 | `[limits].compact_enabled` | the kill switch (default true when absent) |
 | `[limits].compact_strategy` | the terminal context strategy: `handoff` (default) or `compact` (in-session last-resort; `docs/handoff-strategy.md`) |
+| `[limits].approval_timeout_s` | the `awaiting_approval` wait bound. Absent: the loop waits for the answer without limit. Set: on timeout the loop synthesizes a deny `tool_result` and continues (4.8) |
 | `[hooks]` | lifecycle hook registration: `timeout_ms` and the ordered `on` list (see `docs/loop-lifecycle-hooks.md`) |
 
-Two new keys: `compact_strategy` and `[hooks]`. The loop reads these once per step. The awk scrapes
+Three new keys: `compact_strategy`, `approval_timeout_s`, and
+`[hooks]`. The loop reads these once per step. The awk scrapes
 go away. The `assemble` and `compact` binaries read the remaining
 `[limits]` compact knobs (`compact_reserve_tokens`,
 `compact_keep_tokens`, `compact_summary_max_tokens`,
@@ -157,9 +159,17 @@ The loop emits only the event types that exist in
   `context_exhausted`) lands through the stage binaries, exactly as
   today.
 
-No new event type (P1a). The `cancel` event stays TUI-owned. The
-loop never appends it (parity with today: `step.sh` appends no
-cancel line).
+Two sanctioned new event types, both already named in the TUI
+`EventKind` (see `docs/tui.md` §13.5): `approval_request` and
+`approval`. The TUI renders the request banner and answers it
+today. The loop is the missing producer and consumer (4.8). The two
+schema files join `schemas/events/v1/`. The validator glob picks
+them up with no code change (section 8, the validator-glob row).
+No `v` bump.
+
+Everything else stays closed (P1a). The `cancel` event stays
+TUI-owned. The loop never appends it (parity with today: `step.sh`
+appends no cancel line).
 
 ### 3.5 Session artifacts
 
@@ -185,7 +195,10 @@ files disturb no render.
 loop:
   step(session)                      # section 4.2
   claim = claim(session)
-  if claim.state == idle and claim.pending_follow_ups is empty: stop, exit 0
+  if claim.state == idle and claim.pending_follow_ups is empty:
+    fire run.idle window (4.9)
+    if decision is continue: append the follow message, continue
+    else: stop, exit 0
   if claim.state == exhausted: stop, exit 0
 ```
 
@@ -204,6 +217,7 @@ Given the claim state:
 | `exhausted` | stop | no new events, except a possible `model_thinking` marker |
 | `awaiting_tool_result` | publish `loop_phase=tools`, route the pending calls with no model call, append the results | one `tool_result` per pending call, crash recovery G2 |
 | `awaiting_model` | the branch in 4.3 | per 4.3 |
+| `awaiting_approval` | wait for the `approval` event on the matching `approval_request` id, then apply the answer (4.8) | the pending `approval_request` is answered, one `tool_result` or `tool_call` re-dispatch, then the step continues |
 
 Step entry always runs the `model_thinking` on-change publish
 before `claim`, as `step.sh` does: the input-border color reflects
@@ -275,10 +289,29 @@ gains a config key: the limits are named constants in the binary.
    - Empty turn: no text and no tool calls. Up to 3 total
      attempts (the initial call plus 2 retries). A persisted
      empty turn logs a terminal `error` and stops.
-7. `parse`. Exit 1 routes the tool calls (`loop_phase=tools`,
-   `route` with `--tools`, `--cwd`, `--tool-log`), then appends
-   the parsed and routed lines. Any other exit appends the parsed
-   lines only.
+7. `parse`. Exit 1 routes the tool calls. Before the `route`
+   call, the loop fires the `tool.before` window on the pending
+   batch (`docs/loop-lifecycle-hooks.md` §3.5). The window
+   carries the pending `tool_call` events. Three outcomes:
+   - `proceed` (default, no hook answer): route the batch as
+     today (`loop_phase=tools`, `route` with `--tools`,
+     `--cwd`, `--tool-log`).
+   - `block`: the hook payload carries `reason` and an optional
+     `calls` list (default: all pending calls). The loop
+     synthesizes a `tool_result` per blocked call with
+     `is_error: true` and the reason as the result text. No
+     `route` call is made for blocked calls. The model reads the
+     reason on the next step and can correct the command. This is
+     the mechanism that makes `no-find-grep` and `no-bare-python`
+     work without in-process extensions.
+   - `approve`: the hook payload carries `prompt` and a `call_id`.
+     The loop appends an `approval_request` event for that call and
+     transitions to `awaiting_approval` (4.8). Unblocked calls in
+     the same batch route normally; the approved call waits.
+   After `route` completes, the loop fires the `tool.after`
+   window (observation, no decision) with the results. Then append
+   the parsed and routed lines. Any other `parse` exit appends the
+   parsed lines only.
 8. Every append goes through the shared `LogLine` and validator. A
    failed append aborts the step with exit 1, as today.
 
@@ -349,6 +382,144 @@ releases the lock.
   starts the loop (the TUI's `setsid` pre_exec). A group kill from
   the TUI still reaches them. The harness handler covers direct
   signals to the process.
+
+### 4.8 The approval round-trip (human-in-the-loop)
+
+This section closes the gap identified in
+`docs/pi-extension-port-investigation.md` (the `rpiv-ask-user-question`
+and `pi-automode` permission-ask requirements). It adds a bounded
+human-in-the-loop mechanism so that a `tool.before` hook or a tool
+itself can pause the loop and ask the user for a decision before a
+tool call runs.
+
+**New events.** Two new event types join `schemas/events/v1/`:
+
+- `approval_request` — `{id, tool_call_id, prompt}`. The loop
+  appends this when a `tool.before` hook returns an `approve`
+  decision. The `prompt` is the human-readable question. The
+  `tool_call_id` binds the request to the pending tool call that
+  triggered it.
+- `approval` — `{id, decision: "allow" | "deny", arguments?: object}`.
+  The user's answer. `arguments` is optional: when present (an
+  "edit" path in the TUI), it replaces the tool call's arguments.
+  The TUI already derives the oldest pending `approval_request` and
+  renders the banner (`docs/tui.md` §13.5, G6). It already appends
+  `approval` events on `y`/`n`/`e`.
+
+**New claim state.** `claim` gains one state: `awaiting_approval`.
+It is derived when the log's last event for the active
+`approval_request` id is an unanswered `approval_request`.
+The `claim` binary returns it alongside the four existing states.
+
+**Loop behavior (new `step` branch, §4.2 row):**
+
+On `awaiting_approval`, the loop polls the log for an `approval`
+event matching the pending `approval_request.id`. It reads the
+log tail periodically (the same mechanism the TUI tailer uses;
+the loop process can tail the file or use `inotify`). On a match:
+
+- `decision: "allow"` — re-dispatch the pending tool call through
+  `route` (with the original or the edited `arguments`). The
+  `tool_result` lands as usual. The step continues.
+- `decision: "deny"` — the loop appends a `tool_result` with
+  `is_error: true` and the prompt text as the result body. The
+  model reads the denial on the next step. No `route` call.
+
+If `[limits].approval_timeout_s` is set and the wait exceeds it, the
+loop synthesizes a deny `tool_result` with the reason
+"approval timed out after N s" and continues the step. When the key
+is absent, the loop waits indefinitely. A `SIGTERM`/`SIGINT` during
+the wait exits per 4.7. The unanswered `approval_request` remains in
+the log. The next `harness run` re-derives `awaiting_approval` via
+`claim` and resumes the wait. This is crash-recovery by the existing
+G2 principle.
+
+**Interaction with `tool.before`.** The `approve` decision in
+§4.3 step 7 is the producer. A hook on `tool.before` returns
+`{"decision": "approve", "payload": {"prompt": "...", "call_id":
+"<id>"}}`. The loop appends the `approval_request`, appends
+synthesized `tool_result` events for any unblocked calls in the
+same batch (if the hook did not block them), and transitions to
+`awaiting_approval`. This is how a `pi-automode`-style permission
+hook would work: the deterministic layers run as `block` decisions;
+the LLM-classifier layer that is unsure emits `approve` with a
+human-facing prompt.
+
+**What this is not.** It is not a policy pipeline. There is no
+per-tool config tree, no matcher DSL, and no policy evaluation
+engine. A `tool.before` hook decides which calls need approval.
+The loop only implements the wait-and-apply mechanics. The full
+policy pipeline remains Phase 3 core work (readiness R8).
+
+**TUI side.** No TUI feature work. The banner, the `y`/`n`/`e`
+keys, and the `approval` append already exist (the TUI side of
+the approval mechanism is shipped). The only new behavior is that
+the loop now *consumes* the `approval` event it already sees in
+the log.
+
+### 4.9 Goal continuation (the `run.idle` window)
+
+This section closes the gap identified in
+`docs/pi-extension-port-investigation.md` (the `pi-goal` requirement
+for auto-continuation). It adds a single window so that an external
+hook can keep the loop going when it would otherwise stop on idle.
+
+**The window.** `run.idle` fires in the `run` loop at the point
+where the loop would stop on an `idle` claim with no pending
+follow-ups. It is the last check before the `stop, exit 0`
+line. It carries the session name and the id of the last
+`assistant_message`.
+
+**Decisions.**
+
+- `stop` (default, no hook registered or no hook answer): the
+  loop exits with code 0. This is the current behavior and the
+  byte-identical path when no `run.idle` hook is registered.
+- `continue` — the hook payload carries a `message` string. The
+  loop appends a `user_message` event with `queue = "follow"` and
+  that text. The next iteration's `step` drains it as a new turn.
+  The loop does not stop. This is the `pi-goal` continuation
+  pattern: a hook that holds the goal state (in a session-dir
+  file, like `compact.json`) inspects the last assistant message
+  for the `goal_complete` tool call. If the goal is not complete,
+  it returns `continue` with a continuation prompt that tells the
+  model to keep working.
+
+**Where the goal state lives.** The hook owns its own state file
+under `sessions/<n>/` (for example `goal.json`). The loop does
+not read or write it. It only fires the window and applies the
+decision. This keeps the loop free of goal-specific logic, in
+keeping with the hooks doc section 2 (the kernel owns the call
+point, the application owns the logic).
+
+**Bound.** The `run.idle` window has no iteration cap. A hook that
+always returns `continue` produces an infinite loop. The guard is
+the context budget: when the session exhausts its context window,
+the `exhausted.handle` window fires and the `handoff` or `stop`
+decision ends the cycle. The `compact.before` cancel decision (a
+`pi-goal`-style budget veto) can also fire here to refuse a
+compaction that would lose goal-critical context, forcing a
+`stop`.
+
+**What this is not.** It is not a `pi-goal` reimplementation in the
+loop. The loop gains one window fire and one branch. The goal
+state machine, the token budget, the `goal_complete`/`goal_blocked`
+tools, and the `/goal` command are application-level work: tool
+binaries under `tools/` and a hook binary on the hook path.
+
+### 4.10 Tool sidecar services
+
+A tool may talk to a long-lived external service (a browser engine,
+a search index) exactly as the loop talks to the model server.
+The service is a sidecar process on the host. It is not a harness
+daemon and is out of scope for this phase. The tool binary spawns
+the service on first use and talks to it over a socket or a pipe
+subsequent calls. The `tb` (terminal-browser) port is the first
+example: the `tb_fetch` and `tb_browser` tools are one-shot CLIs
+under `tools/`. The Chromium daemon they talk to is a sidecar,
+like the model server. This is a boundary clarification, not a
+new design surface. The "No daemon" bullet in section 9 applies
+to the harness core, not to the services a tool talks to.
 
 ## 5. Entry points and the TUI seam
 
@@ -460,6 +631,8 @@ that byte stability.
 | `SIGTERM` / `SIGINT` mid-step | 143 / 130 after cleanup | exit 1 after cleanup |
 | `model --describe` fails | the thinking publish skips, the step proceeds on the defaults | same |
 | The model call fails after all retries | a terminal `error` event, exit 0 (the loop stops without error, the session reopens) | same |
+| `awaiting_approval` and no answer arrives within `approval_timeout_s` | the loop synthesizes a deny `tool_result` (reason: "approval timed out") and continues | same |
+| `awaiting_approval` and the loop is killed | the log ends in an unanswered `approval_request`; the next `harness step` re-derives `awaiting_approval` via `claim` and re-waits (G2) | same |
 
 ## 8. Conformance tests
 
@@ -485,6 +658,13 @@ output. The tables pin the observable behavior.
 | `loop_phase` markers | one step with a tool call | a `wait` then a `tools` marker, in that order |
 | validator glob | a new `*.json` schema in the dir | `log` accepts its events with no code change |
 | `user` entry | `user --session X` with a `[loop]` table | the loop starts through the table, not a hardcoded script |
+| `tool.before` block | a hook on `tool.before` returns `block` with a `reason` | one `tool_result` per blocked call with `is_error: true` and the reason; no `route` spawn for those calls |
+| `tool.before` approve | a hook on `tool.before` returns `approve` with a `prompt` | one `approval_request` appended, the step halts in `awaiting_approval` |
+| `awaiting_approval` allow | an `approval` event with `decision: "allow"` | the tool runs once through `route`, one `tool_result` |
+| `awaiting_approval` deny | an `approval` event with `decision: "deny"` | one `tool_result` with `is_error: true` and the prompt text; no `route` call |
+| `awaiting_approval` crash | a log ending in an unanswered `approval_request` | `step` re-waits; no `route` until an answer arrives |
+| `run.idle` continue | a `run.idle` hook returns `continue` with a `message` | one `user_message` (`queue=follow`) appended, the loop continues |
+| `run.idle` default | no `run.idle` hook registered | exit 0, byte-identical to the no-hooks path |
 | parity | one fixture session through old `step.sh` and `harness step` | byte-identical `events.jsonl` |
 
 The parity row is the mutation gate: a dropped rule in the port
@@ -511,14 +691,18 @@ YAGNI guard):
   for a bounded fan-out. Invariant it must hold: `claim` resolves
   tool results by id, so completion order is safe. The stage that
   adds fan-out proves that against the log.
-- No approval or policy pipeline. The loop runs a routed tool at
-  once, under the tool's caps and timeout, as today. The policy
-  pipeline is Phase 3 core work (readiness R8, left open).
+- No broad policy pipeline. The bounded approval round-trip
+  (4.8) is in scope: one `approval_request`, one `approval`, the
+  `awaiting_approval` claim state. The general policy engine
+  (per-tool config, matcher DSL, multiple evaluators) is Phase 3
+  core work (readiness R8, left open).
 - No new event type, no `v` bump. Two new config keys: `[limits].compact_strategy` (default `handoff`) and `[hooks]` (window registration, `docs/loop-lifecycle-hooks.md` §4.1).
-- No daemon, no socket API. The single authoritative process
-  shape is the one `architecture.md` §8 names for a future
+- No harness daemon, no socket API. The single authoritative
+  process shape is the one `architecture.md` §8 names for a future
   `jsonrpsee` layer. It wraps this state machine. Nothing here
-  precludes it.
+  precludes it. A tool that talks to a long-lived external
+  service (a browser engine, a search index) is a sidecar, not a
+  harness daemon (4.10).
 - No TUI feature work beyond the two named seams (5.1, 5.2).
 - No CI. The script gates stand.
 
@@ -558,10 +742,10 @@ Gate: section 6 migration gate, plus the TUI probe tests
 ### Stage 1 — the loop skeleton
 
 `bin/harness` with `run`/`step`, the TOML config read, the claim
-branches (`idle`, `exhausted`, `awaiting_tool_result`), the
-session lock, the `loop.pid` write, the signal handlers, the
-markers (4.5), the `StageRunner` trait with its subprocess
-implementation.
+branches (`idle`, `exhausted`, `awaiting_tool_result`,
+`awaiting_approval`), the session lock, the `loop.pid` write, the
+signal handlers, the markers (4.5), the `StageRunner` trait with its
+subprocess implementation.
 
 Gate: a manual TUI session (start, stream, stop, restart, the
 probe shows the running loop, the stop works). The lock-rejected
@@ -578,7 +762,10 @@ scenarios, 50 assertions. The parity script passes against the old
 `step.sh` on three fixture sessions (one idle, one mid-turn
 crash, one near the compact trigger). The lifecycle-window
 firing order is pinned by the hook-marker assertion (each
-`ext_status` id `hook.<window>` appears in log order).
+`ext_status` id `hook.<window>` appears in log order). The
+`tool.before` window fires before `route`; the `tool.after`
+window fires after. The block and approve decision rows of §8
+pass.
 
 Add the handoff row of section 8: a fixture that exhausts with
 `compact_strategy = "handoff"` and the handoff hook registered
@@ -601,6 +788,20 @@ in `[hooks]` of `config.toml`. The handoff hook calls the
 `SessionStore` port for the fs work; it returns the decision
 envelope to the dispatcher. Gate: the conformance row in §8
 passes with the handoff hook registered.
+
+Ship the approval round-trip (4.8): the two schema files
+(`approval_request.json`, `approval.json`) in
+`schemas/events/v1/`, the `awaiting_approval` branch in `step`, the
+`tool.before` `approve` decision, and the `[limits].approval_timeout_s`
+key. The TUI already renders the banner and appends `approval`
+events; the loop now consumes them. Gate: the
+`awaiting_approval` rows of §8 pass.
+
+Ship the `run.idle` window (4.9). The window fires at the idle
+stop point in the `run` loop. The default is `stop` (byte-identical
+to the no-hooks path). A registered hook that returns `continue`
+with a `message` payload appends a follow `user_message` and the
+loop continues. Gate: the `run.idle` rows of §8 pass.
 
 Gate: the TUI end-to-end matrix — start a loop, stream, stop,
 kill the TUI, restart, the probe reattaches (`verify-reattach.py`
@@ -628,13 +829,17 @@ model session to completion through the TUI.
 Affected:
 
 - New: `bin/harness`, `crates/common`.
-- Changed: `log`, `user`, `route`, `tui`, `assemble`, `compact`
-  (the copy-to-crate migration. No CLI or wire change in any of
-  them). `bin/user` loop start. The TUI `loop.pid` writer and
-  probe. `config.toml` `[loop]`. `.envrc`.
-- Unchanged: the tools under `tools/`, the schema files, the
-  event vocabulary, the session log format, the `loop.pid`
-  format, `verify-reattach.py`'s expectations.
+- New schema files: `schemas/events/v1/approval_request.json`,
+  `schemas/events/v1/approval.json`. The validator glob picks
+  them up; no code change in `log` or the validator.
+- Changed: `log`, `user`, `route`, `tui`, `assemble`, `compact`,
+  `claim` (the `awaiting_approval` state). The copy-to-crate
+  migration. No CLI or wire change in the stage binaries.
+  `bin/user` loop start. The TUI `loop.pid` writer and probe.
+  `config.toml` `[loop]`, `[limits].approval_timeout_s`. `.envrc`.
+- Unchanged: the tools under `tools/`, the existing schema files,
+  the session log format, the `loop.pid` format,
+  `verify-reattach.py`'s expectations.
 
 Migration: additive. No `v` bump (P1b). Old sessions replay
 unchanged: the two new artifacts are files beside

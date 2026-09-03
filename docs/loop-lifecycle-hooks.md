@@ -110,10 +110,34 @@ heart of this design.
 ### 3.5 Tool scope (per `route` batch)
 
 - `tool.before` — before `route` for a pending tool batch. Carries
-  the pending `tool_call`s. Decisions: `proceed` or `block`. This is
-  where policy and approval attach in Phase 3. The window exists now
-  so that policy lands without a loop rewrite.
+  the pending `tool_call`s. Three decisions:
+  - `proceed` (the default when no hook answers) — route the batch.
+  - `block` — the payload carries a `reason` string and an optional
+    `calls` list (default: all pending calls). The loop synthesizes a
+    `tool_result` per blocked call with `is_error: true` and the
+    reason as the text. It skips `route` for those calls. The model
+    reads the reason on the next step and can correct the command.
+  - `approve` — the payload carries a `prompt` string and a
+    `call_id`. The loop appends an `approval_request` event, holds
+    the batch, and waits for an `approval` answer. On `allow` the
+    tool runs (with optionally edited arguments). On `deny` the
+    loop synthesizes a `tool_result` with `is_error: true` and the
+    prompt text. See `phase-2-plan.md` §4.8.
 - `tool.after` — after `route`. Carries the results. Observation.
+
+### 3.6 Run-loop scope (per `harness run` iteration)
+
+- `run.idle` — fires when the `run` loop is about to stop on an
+  `idle` claim with no pending follow-ups. Carries the session
+  name and the last `assistant_message` id. Two decisions:
+  - `stop` (default) — the loop exits. This is the current
+    behavior with no hooks registered.
+  - `continue` — the payload carries a `message` string. The loop
+    appends a `user_message` event with `queue = "follow"` and that
+    text, then the next `step` drains it as a new turn. This is the
+    seam for goal-continuation hooks (the `pi-goal` pattern): a
+    hook that knows the goal is not yet complete returns `continue`
+    with a continuation prompt.
 
 ## 4. The hook ABI (the Unix contract)
 
@@ -167,12 +191,14 @@ A hook returns one of three outcomes:
   applies.
 - **Exit 0, a JSON decision** — one object:
   `{"decision": "<name>", "payload": { ... }}`. The `decision` name
-  comes from the window's closed vocab (section 3.4 and 3.5). The
-  `payload` carries the window's extra fields, for example
-  `{"new_session": "<name>"}` on `exhausted.handle`.
+  comes from the window's closed vocab (sections 3.4, 3.5, and 3.6).
+  The `payload` carries the window's extra fields, for example
+  `{"new_session": "<name>"}` on `exhausted.handle`, `reason` on
+  `tool.before` block, and `message` on `run.idle` continue.
 - **Exit 2** — a blocking decision. The harness aborts the window's
   default action. On `overflow.resolve` and `exhausted.handle`, exit
-  2 means `stop`. On `tool.before`, it means `block`.
+  2 means `stop`. On `tool.before`, it means `block`. On `run.idle`,
+  it means `stop`.
 - **Any other non-zero exit** — a non-blocking failure. The harness
   logs an `ext_status` marker `hook.<window>.error` and applies the
   window default. A hook must never wedge the loop. A hook timeout
@@ -330,13 +356,19 @@ core".
   No MCP hook. No LLM prompt hook. No async hook.
 - No matcher DSL. No per-event config tree. Registration is the flat
   ordered `hooks.on` list in section 4.1.
-- No new event type. Window markers ride the existing `ext_status`
-  schema. The `context_exhausted` schema keeps `new_session`.
+- The approval round-trip adds two new event types (`approval_request`
+  and `approval`). They ride the existing `schemas/events/v1/` dir
+  and the validator glob. No `v` bump. This is the only sanctioned
+  new event type in Phase 2.
 - No TUI feature work beyond reading the existing
-  `context_exhausted` marker for reattach.
+  `context_exhausted` marker for reattach and the existing approval
+  banner. The `ask_user_question` rich dialog is application work,
+  not a Phase 2 loop change.
 - No change to the tool contract, the tool registry, or the stage
   binaries. Hooks are a new, parallel invocation path for the
-  harness only.
+  harness only. A tool that talks to an external daemon (for example
+  a browser engine) is a long-lived sidecar service, like the model
+  server. It is not a harness daemon.
 
 ## 9. The seams to add to the Phase 2 plan
 
@@ -361,6 +393,15 @@ authorizes.
   loop can release one lock and take another at the `handoff`
   decision. That is the rebind. The TUI probe reads the released lock
   as free and the new lock as held.
+- **Section 4.3 step 7 (route):** fire `tool.before` before the
+  route call. On `block`, synthesize `tool_result` events with the
+  reason. On `approve`, append `approval_request` and wait in
+  `awaiting_approval`. See `phase-2-plan.md` §4.8.
+- **Section 4.1 / 4.2 (run loop and step table):** add the
+  `run.idle` window (section 3.6). The `run` loop fires it before
+  the idle-stop decision. A `continue` decision appends a follow
+  `user_message` and the loop continues. The `step` table gains an
+  `awaiting_approval` row.
 - **Section 8 (conformance):** add two rows. One registers the
   in-place hooks and asserts byte-identical `events.jsonl` against
   the no-hooks default. One registers the handoff hooks on a fixture
