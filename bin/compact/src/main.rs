@@ -8,17 +8,17 @@
 //! markers through `log`. The loop keeps the session: no handoff, no
 //! new session directory.
 //!
-//! The trigger math and the chars/4 estimator are copied from bin/
-//! assemble (no shared crate: correction 4). The copy is noted in
-//! notes/itches.md.
+//! The trigger math and the chars/4 estimator are the shared
+//! `harness_common::compact_math` module (docs/phase-2-plan.md
+//! section 6).
 
-use std::collections::HashSet;
 use bon::builder;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use clap::Parser;
+use harness_common::compact_math::{self, Caps, Ev};
 use serde_json::Value;
 
 /// The one-shot auto-compaction call. It exits 0 with a status JSON on
@@ -87,14 +87,6 @@ fn resolve_bin(flag: &Option<PathBuf>, env: &str, name: &str) -> PathBuf {
     sibling(name)
 }
 
-/// The caps of a compact-form estimate: text trimmed to the cap,
-/// reasoning dropped. A None cap keeps the text full.
-#[derive(Clone, Copy, Debug)]
-struct Caps {
-    result: Option<u64>,
-    text: Option<u64>,
-}
-
 /// One compact-state record as loaded from session/compact.json. The
 /// fields are all loaded for the round-trip fidelity: the current
 /// trigger rule reads the engaged_at, boundary_seq, and caps, and the
@@ -125,31 +117,6 @@ struct Boundary {
     summary: String,
     read_files: Vec<String>,
     modified_files: Vec<String>,
-}
-
-/// A compact event: the three shapes that carry projection tokens.
-#[derive(Clone, Debug, PartialEq)]
-enum Ev {
-    User {
-        text: String,
-    },
-    Assistant {
-        text: String,
-        calls: Vec<Call>,
-        reasoning_chars: u64,
-    },
-    Result {
-        call_id: String,
-        chars: u64,
-    },
-}
-
-/// One tool call inside an assistant message: the name and the
-/// serialized arguments.
-#[derive(Clone, Debug, PartialEq)]
-struct Call {
-    name: String,
-    args_str: String,
 }
 
 /// A parsed event line with its 1-based log sequence.
@@ -290,151 +257,6 @@ fn decide_trigger(inp: &TriggerInput) -> Decision {
     Decision::Fire {
         predicted: last,
     }
-}
-
-/// The chars/4 estimator of one projected event. It mirrors bin/
-/// assemble `est_tokens` for the three event shapes: user content
-/// chars, assistant text plus call argument chars, the tool result
-/// body capped at the form cap. The copy is noted in notes/itches.md.
-fn est_tokens(ev: &Ev, caps: &Caps) -> u64 {
-    let chars: u64 = match ev {
-        Ev::User { text } => text.chars().count() as u64,
-        Ev::Assistant {
-            text,
-            calls,
-            reasoning_chars,
-        } => {
-            let text_chars = if let Some(cap) = caps.text {
-                std::cmp::min(text.chars().count() as u64, cap)
-            } else {
-                text.chars().count() as u64
-            };
-            let call_chars: u64 = calls.iter().map(|c| c.args_str.chars().count() as u64).sum();
-            let call_cap = if let Some(cap) = caps.text {
-                std::cmp::min(call_chars, cap)
-            } else {
-                call_chars
-            };
-            text_chars + call_cap + reasoning_chars
-        }
-        Ev::Result { chars, .. } => {
-            if let Some(cap) = caps.result {
-                std::cmp::min(*chars, cap)
-            } else {
-                *chars
-            }
-        }
-    };
-    chars / 4
-}
-
-/// The cut point of the old region: it walks backward from the last
-/// kept event, accumulating the estimated tokens of the projected
-/// items, until `keep_tokens` is reached. The cut snaps to a valid
-/// cut point: a user or an assistant message, never a tool result.
-/// It never crosses a turn boundary behind the cut: the keep window
-/// holds the last turn whole, and the old region is a whole number
-/// of steps (assemble's drop groups, pi parity).
-/// The return is the 0-based index of the first kept event (the
-/// cut). A cut at index 0 leaves an empty old region: the no-op.
-fn find_cut(
-    kept: &[Ev],
-    keep_tokens: u64,
-    caps: &Caps,
-) -> usize {
-    let total: u64 = kept.iter().map(|e| est_tokens(e, caps)).sum();
-    if total <= keep_tokens {
-        return 0;
-    }
-    let mut acc = 0u64;
-    let mut cut = kept.len();
-    for ev in kept.iter().rev() {
-        acc += est_tokens(ev, caps);
-        cut -= 1;
-        if acc >= keep_tokens {
-            break;
-        }
-    }
-    // Snap the cut to the valid cut point: a user or an assistant
-    // message, never a tool result. A result must follow its call.
-    // It never crosses a turn boundary behind the cut: the keep
-    // window holds the last turn whole. The old region is a whole
-    // number of steps (assemble's drop groups, pi parity).
-    while cut > 0 {
-        match &kept[cut] {
-            Ev::Assistant { .. } | Ev::User { .. } => break,
-            _ => {
-                cut -= 1;
-            }
-        }
-    }
-    if let Some(i) = (0..cut).rev().find(|&i| matches!(kept[i], Ev::User { .. })) {
-        cut = i;
-    }
-    cut
-}
-
-/// The estimated tokens after the compact: the summary framing item
-/// plus the kept events in the full form (the next request re-
-/// engages fresh at the boundary, so the full-form estimate is the
-/// one the next request will use).
-fn est_tokens_after(kept: &[Ev], summary: &str, clip: u64) -> u64 {
-    let framing: u64 = summary.chars().count() as u64 / 4 + 64;
-    let full_caps = Caps {
-        result: Some(clip),
-        text: None,
-    };
-    let mut total = framing;
-    for ev in kept.iter() {
-        if let Ev::Result { chars, .. } = ev {
-            total += std::cmp::min(*chars, clip) / 4;
-        } else {
-            total += est_tokens(ev, &full_caps);
-        }
-    }
-    total
-}
-
-/// The file operations of the old region, extracted from the
-/// assistant messages' tool calls: read names the file, write and
-/// edit modify it. The lists merge with the previous boundary's
-/// lists, not re-extract (docs/auto-compact-plan.md section 4.1).
-fn extract_file_ops(events: &[LogEvent]) -> (Vec<String>, Vec<String>) {
-    let mut reads: Vec<String> = Vec::new();
-    let mut modified: Vec<String> = Vec::new();
-    for e in events {
-        if e.value.get("type").and_then(|t| t.as_str()) != Some("assistant_message") {
-            continue;
-        }
-        let calls = match e.value.get("tool_calls").and_then(|c| c.as_array()) {
-            Some(c) => c,
-            None => continue,
-        };
-        for call in calls {
-            let name = call.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            let args = call.get("arguments");
-            let path = args
-                .and_then(|a| a.get("file_path"))
-                .and_then(|f| f.as_str())
-                .map(str::to_string);
-            if name == "read" {
-                if let Some(p) = path {
-                    reads.push(p);
-                }
-            } else if name == "write" || name == "edit" {
-                if let Some(p) = path {
-                    modified.push(p);
-                }
-            }
-        }
-    }
-    fn dedup(v: &mut Vec<String>) {
-        let mut seen = HashSet::new();
-        v.retain(|s| seen.insert(s.clone()));
-    }
-    dedup(&mut reads);
-    dedup(&mut modified);
-    (reads, modified)
 }
 
 fn read_state(session: &Path) -> Option<StateInfo> {
@@ -781,7 +603,10 @@ fn run_compaction(
 
     // The projected kept events, for the estimator. The marker
     // types project to an empty user: zero tokens, no group effect.
-    let projected: Vec<Ev> = kept_events.iter().map(|e| project_event(&e.value)).collect();
+    let projected: Vec<Ev> = kept_events
+        .iter()
+        .map(|e| compact_math::project_event(&e.value))
+        .collect();
 
     // The estimate caps: the current form's caps. The trim engaged
     // uses the caps the state file recorded at the engagement, the
@@ -794,7 +619,7 @@ fn run_compaction(
             text: None,
         }
     };
-    let cut = find_cut(&projected, keep_tokens, &est_caps);
+    let cut = compact_math::find_cut(&projected, keep_tokens, &est_caps);
     if cut == 0 {
         let status = serde_json::json!({
             "status": "noop",
@@ -962,7 +787,10 @@ fn run_compaction(
 
     // The file ops: merge with the previous boundary's lists, not
     // re-extract (docs/auto-compact-plan.md section 4.1).
-    let (reads, modified) = extract_file_ops(summary_events);
+    let (reads, modified) = {
+        let values: Vec<Value> = summary_events.iter().map(|e| e.value.clone()).collect();
+        compact_math::extract_file_ops(&values)
+    };
     let read_files: Vec<String> = if let Some(b) = boundary.as_ref() {
         let mut v = b.read_files.clone();
         for r in &reads {
@@ -1003,7 +831,7 @@ fn run_compaction(
     // The tokens after: the full-form estimate of the kept region
     // plus the summary framing.
     let kept_projected: Vec<Ev> = projected[cut..].to_vec();
-    let tokens_after = est_tokens_after(&kept_projected, &summary, clip);
+    let tokens_after = compact_math::est_tokens_after(&kept_projected, &summary, clip);
 
     let mut done = serde_json::json!({
         "v": 1,
@@ -1128,185 +956,9 @@ fn resolve_budget(config: &toml::Value) -> u64 {
     budget.max(1)
 }
 
-/// The projection of one raw event to the estimator shape. The
-/// marker types project to nothing.
-fn project_event(v: &Value) -> Ev {
-    let t = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
-    match t {
-        "user_message" => Ev::User {
-            text: v
-                .get("content")
-                .and_then(|c| c.as_str())
-                .unwrap_or("")
-                .to_string(),
-        },
-        "assistant_message" => {
-            let text = v
-                .get("content")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string();
-            let reasoning_chars: u64 = v
-                .get("reasoning")
-                .and_then(|r| r.as_array())
-                .map(|r| r.iter().map(|b| b.to_string().chars().count() as u64).sum())
-                .unwrap_or(0);
-            let calls: Vec<Call> = v
-                .get("tool_calls")
-                .and_then(|c| c.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|c| {
-                            Some(Call {
-                                name: c.get("name")?.as_str()?.to_string(),
-                                args_str: c
-                                    .get("arguments")
-                                    .map(|a| a.to_string())
-                                    .unwrap_or_else(|| "{}".to_string()),
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            Ev::Assistant {
-                text,
-                calls,
-                reasoning_chars,
-            }
-        }
-        "tool_result" => Ev::Result {
-            call_id: v
-                .get("id")
-                .and_then(|c| c.as_str())
-                .unwrap_or("")
-                .to_string(),
-            chars: v
-                .get("value")
-                .and_then(|o| o.get("text"))
-                .and_then(|s| s.as_str())
-                .map(|s| s.chars().count() as u64)
-                .unwrap_or(0),
-        },
-        _ => Ev::User {
-            text: String::new(),
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn ev_user(t: &str) -> Ev {
-        Ev::User {
-            text: t.to_string(),
-        }
-    }
-    fn ev_asst(text: &str) -> Ev {
-        Ev::Assistant {
-            text: text.to_string(),
-            calls: vec![],
-            reasoning_chars: 0,
-        }
-    }
-    fn ev_res(call: &str, body: &str) -> Ev {
-        Ev::Result {
-            call_id: call.to_string(),
-            chars: body.chars().count() as u64,
-        }
-    }
-
-    #[test]
-    fn est_tokens_mirrors_the_assemble_estimator() {
-        let caps = Caps {
-            result: Some(500),
-            text: Some(100),
-        };
-        // The user content: the chars over 4.
-        assert_eq!(est_tokens(&ev_user(&"a".repeat(400)), &caps), 100);
-        // The assistant text is capped at the cap, the call args
-        // capped too.
-        let big = "b".repeat(400);
-        let ev = Ev::Assistant {
-            text: big.clone(),
-            calls: vec![Call {
-                name: "bash".to_string(),
-                args_str: big,
-            }],
-            reasoning_chars: 0,
-        };
-        // The text caps at 100 chars, the args at 100: 200 chars
-        // over 4 is 50.
-        assert_eq!(est_tokens(&ev, &caps), 50);
-        // The reasoning chars ride in unbounded: 1 + 1000 chars
-        // over 4 is 250.
-        let ev = Ev::Assistant {
-            text: "x".to_string(),
-            calls: vec![],
-            reasoning_chars: 1000,
-        };
-        assert_eq!(est_tokens(&ev, &caps), 250);
-        // The result is capped at the cap.
-        assert_eq!(est_tokens(&ev_res("1", &"c".repeat(4000)), &caps), 125);
-        // The full form: no caps.
-        let full = Caps {
-            result: None,
-            text: None,
-        };
-        assert_eq!(est_tokens(&ev_res("1", &"c".repeat(4000)), &full), 1000);
-    }
-
-    #[test]
-    fn cut_snaps_to_the_group_start() {
-        // The session shape: user, assistant, result, user, assistant,
-        // result. A keep window that lands in the last result cuts
-        // at the second group's start, then the split-turn rule pulls
-        // it back to the second user (pi parity).
-        let kept = vec![
-            ev_user("task one"),
-            ev_asst("step one"),
-            ev_res("1", &"x".repeat(4000)),
-            ev_user("task two"),
-            ev_asst("step two"),
-            ev_res("2", &"y".repeat(4000)),
-        ];
-        let caps = Caps {
-            result: Some(1000),
-            text: None,
-        };
-        // Each result is 250 tokens. A keep window of 150 stops
-        // inside the last result: the cut snaps to the group start,
-        // then pulls back to the user that started the turn.
-        let cut = find_cut(&kept, 150, &caps);
-        assert_eq!(cut, 3, "the cut sits at the second user");
-    }
-
-    #[test]
-    fn cut_pulls_in_the_orphan_user() {
-        let kept = vec![
-            ev_user("task"),
-            ev_asst("step one"),
-            ev_res("1", &"x".repeat(4000)),
-        ];
-        let caps = Caps {
-            result: Some(1000),
-            text: None,
-        };
-        let cut = find_cut(&kept, 10, &caps);
-        // The walk stops before the user message: the orphan rule
-        // pulls the cut back to the user.
-        assert_eq!(cut, 0, "the orphan user sits behind the cut: it comes along");
-    }
-
-    #[test]
-    fn cut_at_zero_is_the_empty_region() {
-        let kept = vec![ev_user("task"), ev_asst("step one")];
-        let caps = Caps {
-            result: None,
-            text: None,
-        };
-        assert_eq!(find_cut(&kept, 1_000_000, &caps), 0);
-    }
 
     #[test]
     fn trigger_fires_on_a_crossing_reading() {
@@ -1451,24 +1103,18 @@ mod tests {
     #[test]
     fn extract_file_ops_reads_and_writes() {
         let events = vec![
-            LogEvent {
-                seq: 1,
-                value: serde_json::json!({
-                    "type": "assistant_message",
-                    "tool_calls": [
-                        {"name": "read", "arguments": {"file_path": "a.txt"}},
-                        {"name": "write", "arguments": {"file_path": "b.rs"}},
-                        {"name": "edit", "arguments": {"file_path": "b.rs"}},
-                        {"name": "bash", "arguments": {"command": "ls"}},
-                    ]
-                }),
-            },
-            LogEvent {
-                seq: 2,
-                value: serde_json::json!({"type": "user_message", "content": "hi"}),
-            },
+            serde_json::json!({
+                "type": "assistant_message",
+                "tool_calls": [
+                    {"name": "read", "arguments": {"file_path": "a.txt"}},
+                    {"name": "write", "arguments": {"file_path": "b.rs"}},
+                    {"name": "edit", "arguments": {"file_path": "b.rs"}},
+                    {"name": "bash", "arguments": {"command": "ls"}},
+                ]
+            }),
+            serde_json::json!({"type": "user_message", "content": "hi"}),
         ];
-        let (reads, modified) = extract_file_ops(&events);
+        let (reads, modified) = compact_math::extract_file_ops(&events);
         assert_eq!(reads, vec!["a.txt".to_string()]);
         assert_eq!(modified, vec!["b.rs".to_string()], "the dedup keeps one");
     }

@@ -30,7 +30,7 @@ USAGE
 EXAMPLES
   # the default: this repo, target/debug/tui, the better-ui session:
   verify-reattach.py
-  # a session whose loop was just started with turn.sh:
+  # a session whose loop was just started with `harness run`:
   verify-reattach.py --session better-ui
 """
 import argparse

@@ -44,17 +44,19 @@ portable. The TUI copy (`port_file.rs`) supports only `const`,
 (string/integer/number/boolean/array/object). Do not grow the three
 copies in parallel.
 
-## The compact trigger math is a second copy (2026-09-03)
+## The compact trigger math is a second copy (2026-09-03) → resolved 2026-09-09
 
-`bin/compact` duplicates the trigger math and the cut walk of
+`bin/compact` duplicated the trigger math and the cut walk of
 `bin/assemble` (phase-1 policy: no shared crate). The one-step
 predicted reading (`last + rate`), the `est_tokens` estimator, and
-the backward cut walk each live in both binaries. The estimator
+the backward cut walk each lived in both binaries. The estimator
 copy is noted in the `find_cut` doc comment. Keep the two copies in
 sync. Do not grow them in parallel.
 
-The trigger math joins the `LogLine` and validator copies as a
-promotion candidate for a shared `core`/`bin/common` crate.
+Resolved: the math now lives once in `crates/common/src/compact_math.rs`
+(the shared `harness-common` crate, docs/phase-2-plan.md section 6).
+`bin/compact` imports `harness_common::compact_math`; the local
+copies are removed.
 
 ## The compact strategy is not a port (2026-09-07) → resolved 2026-09-08
 

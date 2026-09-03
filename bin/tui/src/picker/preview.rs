@@ -7,7 +7,7 @@
 
 use super::items::PickerItem;
 use crate::color::Palette;
-use crate::highlight::{language_from_path, CodeHighlighter, Seg};
+use crate::highlight::{language_from_path, highlight_text_lines, Seg};
 
 /// The previewer seam. A picker body takes one previewer and renders
 /// the preview pane for the selected item.
@@ -76,11 +76,12 @@ impl Previewer for FilePreviewer {
                 )]]
             }
         };
+        // The shared syntax-highlight entry point: the language is
+        // detected from the file path; unknown types stay plain.
         let lang = language_from_path(path);
-        let mut hl = CodeHighlighter::new();
-        text.lines()
+        highlight_text_lines(&text, lang, palette)
+            .into_iter()
             .take(self.max_lines)
-            .map(|l| hl.line(l, lang, palette))
             .collect()
     }
 }

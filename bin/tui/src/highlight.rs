@@ -459,7 +459,9 @@ impl CodeHighlighter {
     /// The generic code tokenizer: string literals, number literals,
     /// line comments, `/* */` block comments, and a per-language
     /// keyword set. Plain runs come out with the default style so
-    /// the caller's plain-base pass can paint them.
+    /// the caller's plain-base pass can paint them. All indexing is
+    /// in character space (the `cs` vec), never byte offsets into
+    /// the raw line, so multibyte text cannot desync the indexes.
     fn code_line(&mut self, line: &str, lang: &str, palette: &Palette) -> Vec<Seg> {
         let style = |role: Role, mods: Modifier| palette.style(role, mods);
         let cs: Vec<char> = line.chars().collect();
@@ -471,22 +473,27 @@ impl CodeHighlighter {
         let kws = keywords_for(lang);
         let lc_prefixes = line_comment_prefixes(lang);
         let block_comment = has_block_comment(lang);
+        let lc_chars: Vec<Vec<char>> =
+            lc_prefixes.iter().map(|p| p.chars().collect()).collect();
 
         // Resume a block comment opened on a previous line.
         if self.in_block_comment {
-            if let Some(close_pos) = line.find("*/") {
-                self.in_block_comment = false;
-                let end = close_pos + 2;
-                out.push((
-                    style(Role::SyntaxComment, Modifier::DIM),
-                    line[..end].to_string(),
-                ));
-                i = end;
-            } else {
-                return vec![(
-                    style(Role::SyntaxComment, Modifier::DIM),
-                    line.to_string(),
-                )];
+            match find_char_seq(&cs, 0, "*/") {
+                Some(pos) => {
+                    self.in_block_comment = false;
+                    let end = pos + 2;
+                    out.push((
+                        style(Role::SyntaxComment, Modifier::DIM),
+                        seg(&cs, 0, end),
+                    ));
+                    i = end;
+                }
+                None => {
+                    return vec![(
+                        style(Role::SyntaxComment, Modifier::DIM),
+                        line.to_string(),
+                    )];
+                }
             }
         }
 
@@ -524,33 +531,35 @@ impl CodeHighlighter {
             }
 
             // Line comment: everything to end of line.
-            if lc_prefixes.iter().any(|p| line[i..].starts_with(p)) {
+            if lc_chars.iter().any(|p| cs[i..].starts_with(p.as_slice())) {
                 flush_plain(&mut out, &mut plain);
                 out.push((
                     style(Role::SyntaxComment, Modifier::DIM),
-                    line[i..].to_string(),
+                    seg(&cs, i, n),
                 ));
                 return out;
             }
 
             // Block comment; may run past the end of this line.
-            if block_comment && line[i..].starts_with("/*") {
+            if block_comment && n - i >= 2 && cs[i] == '/' && cs[i + 1] == '*' {
                 flush_plain(&mut out, &mut plain);
-                let rest = &line[i + 2..];
-                if let Some(close_pos) = rest.find("*/") {
-                    let end = i + 2 + close_pos + 2;
-                    out.push((
-                        style(Role::SyntaxComment, Modifier::DIM),
-                        seg(&cs, i, end),
-                    ));
-                    i = end;
-                } else {
-                    out.push((
-                        style(Role::SyntaxComment, Modifier::DIM),
-                        line[i..].to_string(),
-                    ));
-                    self.in_block_comment = true;
-                    return out;
+                match find_char_seq(&cs, i + 2, "*/") {
+                    Some(pos) => {
+                        let end = pos + 2;
+                        out.push((
+                            style(Role::SyntaxComment, Modifier::DIM),
+                            seg(&cs, i, end),
+                        ));
+                        i = end;
+                    }
+                    None => {
+                        out.push((
+                            style(Role::SyntaxComment, Modifier::DIM),
+                            seg(&cs, i, n),
+                        ));
+                        self.in_block_comment = true;
+                        return out;
+                    }
                 }
                 continue;
             }
@@ -560,7 +569,10 @@ impl CodeHighlighter {
                 let mut j = i + 1;
                 while j < n
                     && (cs[j].is_ascii_digit()
-                        || matches!(cs[j], '.' | 'x' | 'X' | 'o' | 'O' | 'b' | 'B' | 'e' | 'E' | '_' | 'f' | 'F' | 'a' | 'A' | 'c' | 'C' | 'd' | 'D'))
+                        || matches!(
+                            cs[j], '.' | 'x' | 'X' | 'o' | 'O' | 'b' | 'B' | 'e' | 'E' | 'a'
+                                | 'f' | 'A' | 'F' | '_'
+                        ))
                 {
                     j += 1;
                 }
@@ -579,12 +591,12 @@ impl CodeHighlighter {
                 while j < n && (cs[j].is_ascii_alphanumeric() || cs[j] == '_') {
                     j += 1;
                 }
-                let word = &line[i..j];
-                if kws.contains(&word) {
+                let word: String = cs[i..j].iter().collect();
+                if kws.contains(&word.as_str()) {
                     flush_plain(&mut out, &mut plain);
                     out.push((
                         style(Role::SyntaxKeyword, Modifier::empty()),
-                        word.to_string(),
+                        word,
                     ));
                     i = j;
                     continue;
@@ -597,6 +609,24 @@ impl CodeHighlighter {
         flush_plain(&mut out, &mut plain);
         out
     }
+}
+
+/// Find the character run `needle` at or after `from` in `cs`, in
+/// character space. The result is a char index, safe to feed into
+/// [`seg`] on lines with multibyte characters.
+fn find_char_seq(cs: &[char], from: usize, needle: &str) -> Option<usize> {
+    let nc: Vec<char> = needle.chars().collect();
+    let n = cs.len();
+    if nc.is_empty() || nc.len() > n || from >= n {
+        return None;
+    }
+    let limit = n - nc.len() + 1;
+    for i in from..limit {
+        if cs[i..i + nc.len()] == nc[..] {
+            return Some(i);
+        }
+    }
+    None
 }
 
 impl Default for CodeHighlighter {
@@ -726,6 +756,17 @@ fn keywords_for(lang: &str) -> &'static [&'static str] {
         "html" | "xml" | "css" | "config" => &[],
         _ => C_FAMILY,
     }
+}
+
+/// Highlight a whole text body as styled hard lines. Shared by the
+/// picker preview pane and the tool-result renderer. `lang` is from
+/// [`language_from_path`]; `None` keeps every line plain. Returns
+/// one `Vec<Seg>` per hard line, ready for the word-wraper.
+pub fn highlight_text_lines(text: &str, lang: Option<&str>, palette: &Palette) -> Vec<Vec<Seg>> {
+    let mut hl = CodeHighlighter::new();
+    text.lines()
+        .map(|l| hl.line(l, lang, palette))
+        .collect()
 }
 
 // ── the grid table (docs/tui-markdown-render.md section 1) ────
@@ -1219,6 +1260,51 @@ mod tests {
         assert_eq!(s.len(), 1, "{s:?}");
         assert_eq!(s[0].0, Style::default());
         assert_eq!(s[0].1, "hello \"world\" 42");
+    }
+
+    #[test]
+    fn code_highlighter_survives_multibyte_lines() {
+        // The tokenizer works in char space: a comment that starts
+        // after a multibyte run must not desync byte/char indexes.
+        let p = Palette::builtin(crate::color::Level::Rgb);
+        let mut hl = CodeHighlighter::new();
+        let s = hl.line("let ä = 1; // naïve ☃", Some("rust"), &p);
+        assert_eq!(joined(&s), "let ä = 1; // naïve ☃");
+        let cmt = p.style(Role::SyntaxComment, Modifier::DIM);
+        assert!(
+            s.iter().any(|(st, t)| t == "// naïve ☃" && *st == cmt),
+            "{s:?}"
+        );
+    }
+
+    #[test]
+    fn code_highlighter_number_suffixes_and_hex() {
+        let p = Palette::builtin(crate::color::Level::Rgb);
+        let mut hl = CodeHighlighter::new();
+        let s = hl.line("let a = 0xFF; let b = 1_000;", Some("rust"), &p);
+        assert_eq!(joined(&s), "let a = 0xFF; let b = 1_000;");
+        let num = p.style(Role::SyntaxNumber, Modifier::empty());
+        let texts: Vec<&str> = s.iter().map(|(_, t)| t.as_str()).collect();
+        assert!(
+            texts.contains(&"0xFF") && texts.contains(&"1_000"),
+            "hex and underscore literals stay one token: {texts:?}"
+        );
+        assert!(s.iter().any(|(st, t)| t == "0xFF" && *st == num));
+        assert!(s.iter().any(|(st, t)| t == "1_000" && *st == num));
+    }
+
+    #[test]
+    fn highlight_text_lines_shared_entry_point() {
+        let p = Palette::builtin(crate::color::Level::Rgb);
+        let rows = highlight_text_lines("fn main() {}\nlet x = 2;", Some("rust"), &p);
+        assert_eq!(rows.len(), 2, "one styled row per hard line");
+        let kw = p.style(Role::SyntaxKeyword, Modifier::empty());
+        assert!(rows[0].iter().any(|(st, t)| t == "fn" && *st == kw));
+        let num = p.style(Role::SyntaxNumber, Modifier::empty());
+        assert!(rows[1].iter().any(|(st, t)| t == "2" && *st == num));
+        // No language: lines come back as single plain runs.
+        let plain = highlight_text_lines("just text", None, &p);
+        assert_eq!(plain, vec![vec![(Style::default(), "just text".to_string())]]);
     }
 
     #[test]

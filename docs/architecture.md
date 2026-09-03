@@ -281,7 +281,7 @@ Rules:
 - Tool manifests as TOML; tools are arbitrary scripts/programs.
 - TUI is the first stateful Rust binary (see `docs/tui.md`).
 
-### Phase 2 — Promote the glue
+### Phase 2 — Promote the glue ✅ (2026-09-09)
 - The bash orchestration becomes a small Rust binary (`harness`) that still shells out to the same stage binaries.
 - One authoritative process owns looping, retries, fan-out, session lock, cancellation.
 

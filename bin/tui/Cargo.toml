@@ -20,6 +20,7 @@ toml = "1.1"
 libc = "0.2"
 bon = { workspace = true }
 frizbee = "0.13"
+harness-common = { path = "../../crates/common" }
 
 [dev-dependencies]
 tempfile = "3"

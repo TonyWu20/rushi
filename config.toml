@@ -2,8 +2,8 @@
 # The TUI never sees the internals of this command; it starts it,
 # streams its output, and stops it on request.
 [loop]
-command = "bash"
-args = ["scripts/turn.sh"]
+command = "harness"
+args = ["run"]
 arg_style = "append_session"
 
 [model]
@@ -23,14 +23,14 @@ base_url = "http://127.0.0.1:30000"
 api_key_env = "LLAMA_API_KEY"
 context_tokens = 262144
 
-[model."Qwen3.8-27B-NVFP4-RTX5090-DSPARK"]
-model_id = "Qwen3.8-27B-NVFP4-RTX5090-DSPARK"
+[model."Qwen3.8-27B-NVFP4-RTX5090-DFlash2"]
+model_id = "Qwen3.8-27B-NVFP4-RTX5090-DFlash2"
 base_url = "http://127.0.0.1:30000"
 api_key_env = "LLAMA_API_KEY"
 context_tokens = 262144
 
 [active]
-model = "Qwen3.8-27B-NVFP4-RTX5090-DSPARK"
+model = "Qwen3.8-27B-NVFP4-RTX5090-DFlash2"
 
 [paths]
 sessions_root = "sessions"

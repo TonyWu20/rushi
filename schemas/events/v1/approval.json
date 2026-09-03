@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["v", "type", "ts", "id", "decision"],
+  "properties": {
+    "v": { "type": "integer", "const": 1 },
+    "type": { "type": "string", "const": "approval" },
+    "ts": { "type": "string", "format": "date-time" },
+    "id": { "type": "string", "description": "the approval_request id being answered" },
+    "decision": { "type": "string", "enum": ["allow", "deny"] },
+    "arguments": {
+      "type": "object",
+      "description": "optional edited arguments (the edit-then-allow path)"
+    }
+  }
+}

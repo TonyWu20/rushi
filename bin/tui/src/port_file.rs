@@ -17,145 +17,14 @@ use crate::config::{LoopCommand, TuiConfig};
 use crate::event::{Event, EventKind};
 use crate::port::{BusError, LoopHandle, LoopLine, SessionId, SessionPort, TailCursor, WatchItem};
 
-use serde_json::Value;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::SyncSender;
 use std::time::Duration;
 
-/// `LogLine` — the only type that may write a session log.
-///
-/// FT-005: a regular file gets no `O_APPEND` write atomicity at any
-/// size. The `PIPE_BUF` guarantee applies to pipes only. Two
-/// concurrent writers can resolve the same end offset and corrupt
-/// each other's bytes into lines that look complete. This type
-/// closes the hole:
-///
-/// - one `LogLine` owns the full event bytes, including the trailing
-///   newline. It is the only value that reaches the log.
-/// - `commit` is the only write path. It takes an exclusive `flock`
-///   and does one `write(2)` of the whole buffer. The type has no
-///   `impl Write`, so a line cannot be appended in pieces. Concurrent
-///   appends from any number of processes serialize on the lock.
-///
-/// TUI copy of the shared capability. Keep in sync with
-/// `bin/log/src/logline.rs` and `bin/user/src/logline.rs`
-/// (deliberate duplication, phase 1; see `notes/itches.md`).
-mod logline {
-    use std::io::{self, Write};
-    use std::os::fd::AsRawFd;
-    use std::path::Path;
-
-    /// One complete session log line: event bytes plus the trailing newline.
-    #[derive(Debug)]
-    pub struct LogLine {
-        bytes: Vec<u8>,
-    }
-
-    impl LogLine {
-        /// Build a line from a serialized JSON event.
-        ///
-        /// The input holds no raw newline. `serde_json` emits only
-        /// escaped newlines inside strings, and every caller passes
-        /// one single line.
-        pub fn from_json(json_line: &str) -> Self {
-            let mut bytes = Vec::with_capacity(json_line.len() + 1);
-            bytes.extend_from_slice(json_line.as_bytes());
-            bytes.push(b'\n');
-            LogLine { bytes }
-        }
-
-        /// The only append path. An exclusive lock, one `write(2)`, unlock.
-        ///
-        /// The lock serializes appends across processes. The lock also
-        /// dies with the writer. A dead writer cannot wedge the log.
-        pub fn commit(&self, path: &Path) -> io::Result<()> {
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)?;
-            let fd = file.as_raw_fd();
-            if unsafe { libc::flock(fd, libc::LOCK_EX) } != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let res = file.write_all(&self.bytes);
-            // The close releases the lock too. The explicit unlock keeps
-            // the lock from spanning the close.
-            if unsafe { libc::flock(fd, libc::LOCK_UN) } != 0 {
-                // The close still releases it. Nothing to report.
-            }
-            res
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::LogLine;
-
-        #[test]
-        fn commit_appends_one_complete_line_per_event() {
-            let dir = tempfile::tempdir().unwrap();
-            let log = dir.path().join("events.jsonl");
-            LogLine::from_json(r#"{"v":1,"type":"user_message","ts":"t","content":"one"}"#)
-                .commit(&log)
-                .unwrap();
-            LogLine::from_json(r#"{"v":1,"type":"user_message","ts":"t","content":"two"}"#)
-                .commit(&log)
-                .unwrap();
-            let text = std::fs::read_to_string(&log).unwrap();
-            let lines: Vec<&str> = text.lines().collect();
-            assert_eq!(lines.len(), 2, "{text:?}");
-            assert!(lines[0].contains("\"one\""), "{lines:?}");
-            assert!(lines[1].contains("\"two\""), "{lines:?}");
-            assert!(text.ends_with('\n'));
-        }
-
-        #[test]
-        fn concurrent_commits_stay_line_granular() {
-            // FT-005 regression. Two writers, multi-KB lines. Without
-            // the per-commit lock, two concurrent `O_APPEND` writes
-            // can resolve the same end offset and corrupt each
-            // other's bytes into lines that look complete.
-            let dir = tempfile::tempdir().unwrap();
-            let log = dir.path().join("events.jsonl");
-            let payload = "x".repeat(4000);
-            let json = format!(
-                r#"{{"v":1,"type":"tool_result","ts":"t","result":"{}"}}"#,
-                payload
-            );
-            let n = 50;
-            let mut handles = Vec::new();
-            for _ in 0..2 {
-                let log = log.clone();
-                let json = json.clone();
-                handles.push(std::thread::spawn(move || {
-                    let line = LogLine::from_json(&json);
-                    for _ in 0..n {
-                        line.commit(&log).unwrap();
-                    }
-                }));
-            }
-            for h in handles {
-                h.join().unwrap();
-            }
-            let text = std::fs::read_to_string(&log).unwrap();
-            let lines: Vec<&str> = text.lines().collect();
-            assert_eq!(
-                lines.len(),
-                2 * n,
-                "every commit must land as one whole line"
-            );
-            for line in &lines {
-                let v: serde_json::Value = serde_json::from_str(line)
-                    .unwrap_or_else(|e| panic!("a line is not valid JSON: {e}"));
-                let got = v["result"].as_str().expect("the payload field");
-                assert_eq!(got.len(), payload.len(), "the payload must survive intact");
-            }
-        }
-    }
-}
-use logline::LogLine;
+use harness_common::logline::LogLine;
 
 /// Session log file name. A storage detail; never referenced above the port.
 const LOG_FILE: &str = "events.jsonl";
@@ -166,6 +35,9 @@ const LOG_FILE: &str = "events.jsonl";
 const TRACE_FILE: &str = "tui-trace.jsonl";
 /// Working directory recorded at session start. A storage detail.
 const CWD_FILE: &str = "cwd";
+/// The session loop lock file name. The harness holds an exclusive
+/// `flock` on this file for the process life (phase-2 plan 4.6).
+const LOOP_LOCK_FILE: &str = ".loop.lock";
 /// How often the tailer polls the log file.
 const TAIL_INTERVAL: Duration = Duration::from_millis(250);
 /// How often the tailer retries a missing log file.
@@ -218,12 +90,17 @@ impl FileSessionPort {
         Ok(Some(pid))
     }
 
-    /// Probe for a live loop of this session. Returns the group leader
-    /// pid when the session's `loop.pid` names a live process group
-    /// whose command line carries the session id, else `None` (FT-003
-    /// reattach). A recycled pid or a dead group is not this session's
-    /// loop.
+    /// Probe for a live loop of this session. Lock-first: attempts a
+    /// non-blocking `flock` on `sessions/<name>/.loop.lock`. If the
+    /// lock is free, no live loop exists and the probe returns
+    /// `None`. If the lock is held, a live loop owns the session; the
+    /// `loop.pid` check (pid alive plus the session id in its command
+    /// line) names the group to report.
     pub fn external_loop_pid(&self, session: &SessionId) -> Result<Option<i32>, BusError> {
+        let dir = self.session_dir(session)?;
+        if loop_lock_is_free(&dir) {
+            return Ok(None);
+        }
         let Some(pid) = self.read_loop_pid(session)? else {
             return Ok(None);
         };
@@ -234,10 +111,17 @@ impl FileSessionPort {
         }
     }
 
-    /// Stop a loop this TUI did not start. Reattach through the
-    /// persistent `loop.pid` artifact. Returns a message on success, or
-    /// `None` when no live loop matches this session (FT-003).
+    /// Stop a loop this TUI did not start. Lock-first: attempts a
+    /// non-blocking `flock` on `.loop.lock`. If the lock is free, no
+    /// live loop exists. If the lock is held, proceeds with the
+    /// pid-based stop via the persistent `loop.pid` artifact. Returns
+    /// a message on success, or `None` when no live loop matches this
+    /// session (FT-003).
     pub fn stop_external_loop(&self, session: &SessionId) -> Result<Option<String>, BusError> {
+        let dir = self.session_dir(session)?;
+        if loop_lock_is_free(&dir) {
+            return Ok(None);
+        }
         let Some(pid) = self.read_loop_pid(session)? else {
             return Ok(None);
         };
@@ -517,25 +401,17 @@ impl SessionPort for FileSessionPort {
 
         // G3: producers validate before append, when the schema file exists.
         if let Some(dir) = &self.schemas_dir {
-            let schema_path = dir.join(format!("{ty}.json"));
-            if schema_path.is_file() {
-                let raw = std::fs::read_to_string(&schema_path).map_err(|e| BusError::Io {
-                    what: format!("cannot read schema {}: {e}", schema_path.display()),
-                })?;
-                let schema: Value = serde_json::from_str(&raw).map_err(|e| BusError::Io {
-                    what: format!("invalid schema {}: {e}", schema_path.display()),
-                })?;
-                if !matches_schema(&obj, &schema) {
-                    return Err(BusError::InvalidEvent {
-                        reason: format!(
-                            "does not match {}",
-                            schema_path
-                                .file_name()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                        ),
-                    });
-                }
+            let dir_str = dir.to_str().ok_or_else(|| BusError::Io {
+                what: format!("schemas dir is not valid UTF-8: {}", dir.display()),
+            })?;
+            let schemas = harness_common::event_validation::load_schemas(dir_str);
+            // Skip validation when the event type has no schema in the set
+            // (P1b: additive types need no schema to flow through the TUI).
+            if schemas.iter().any(|(t, _)| t == ty) {
+                harness_common::event_validation::validate_value(&obj, &schemas)
+                    .map_err(|e| BusError::InvalidEvent {
+                        reason: format!("does not match schema: {e}"),
+                    })?;
             }
         }
 
@@ -635,16 +511,6 @@ impl SessionPort for FileSessionPort {
         let pid = child.id().map(|p| p as i32).ok_or_else(|| BusError::Io {
             what: "loop process has no pid".to_string(),
         })?;
-
-        // Persist the loop PID as a session artifact. A restarted TUI
-        // reads this file to reattach and stop an orphaned loop
-        // (FT-003). The PID is the process-group leader (setsid).
-        let session_dir = self.session_dir(session)?;
-        if let Err(e) = std::fs::write(session_dir.join("loop.pid"), format!("{pid}\n")) {
-            // A missing pid file degrades reattach; it must not break
-            // the loop itself. Note it and continue.
-            eprintln!("tui: cannot write loop.pid: {e}");
-        }
 
         // Output plumbing: two pump tasks (stdout, stderr) share one
         // unbounded channel; each reports EOF on a one-shot so the
@@ -815,6 +681,38 @@ impl LoopHandle for ProcessLoopHandle {
     }
 }
 
+/// Attempt a non-blocking exclusive `flock` on the session's
+/// `.loop.lock`. Returns `true` when the lock is free (no live loop
+/// holds it), `false` when a live loop holds the lock.
+///
+/// Opens the lock file with `write(true).create(true)` (no truncate),
+/// then tries `flock(fd, LOCK_EX | LOCK_NB)`. If the lock is free it
+/// is released immediately. If it is held (EWOULDBLOCK), a live loop
+/// owns the session. When the file cannot be opened at all (e.g. the
+/// session dir is missing), no live loop can exist; report free.
+fn loop_lock_is_free(session_dir: &Path) -> bool {
+    let lock_path = session_dir.join(LOOP_LOCK_FILE);
+    let Ok(file) = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(&lock_path)
+    else {
+        // Cannot open the lock file (e.g. session dir missing). No
+        // live loop can exist, so the pid-file check will also return
+        // None. Treat as "free".
+        return true;
+    };
+    let fd = file.as_raw_fd();
+    if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        // Lock was free: release immediately and report no live loop.
+        unsafe { libc::flock(fd, libc::LOCK_UN) };
+        true
+    } else {
+        // EWOULDBLOCK: a live loop holds the lock.
+        false
+    }
+}
+
 fn group_alive(pid: i32) -> bool {
     // Signal 0 checks group existence without delivering anything.
     // ESRCH: the group is gone (or already reaped).
@@ -853,64 +751,6 @@ fn pid_is_loop(pid: i32, session: &str) -> bool {
         .any(|arg| arg == session.as_bytes())
 }
 
-/// Minimal JSON Schema validator for the event schemas under
-/// `schemas/events/v1/`. Supports the subset those schemas use:
-/// `const`, `required`, `properties`, and `type` for
-/// string/integer/boolean/number/boolean/array/object.
-///
-/// NOTE: this is a deliberate third copy of the validator that lives in
-/// the one-shot binaries (phase 1 has no shared Rust crate, P3:
-/// duplicate deliberately). Parked in `notes/itches.md` for promotion.
-fn matches_schema(value: &Value, schema: &Value) -> bool {
-    if let Some(const_val) = schema.get("const") {
-        return value == const_val;
-    }
-    match schema.get("type").and_then(|t| t.as_str()) {
-        Some("object") => {
-            let Some(obj) = value.as_object() else {
-                return false;
-            };
-            if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
-                for req in required {
-                    if let Some(field) = req.as_str() {
-                        if !obj.contains_key(field) {
-                            return false;
-                        }
-                    }
-                }
-            }
-            if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
-                for (key, prop_schema) in props {
-                    if let Some(val) = obj.get(key) {
-                        if !matches_schema(val, prop_schema) {
-                            return false;
-                        }
-                    }
-                }
-            }
-            true
-        }
-        Some("string") => value.is_string(),
-        Some("integer") => value.is_i64(),
-        Some("number") => value.is_f64(),
-        Some("boolean") => value.is_boolean(),
-        Some("array") => {
-            if let Some(arr) = value.as_array() {
-                if let Some(items) = schema.get("items") {
-                    for item in arr {
-                        if !matches_schema(item, items) {
-                            return false;
-                        }
-                    }
-                }
-                true
-            } else {
-                false
-            }
-        }
-        _ => true,
-    }
-}
 
 impl TailCursor {
     /// Private constructor used by the port; the TUI only ever uses
@@ -1119,10 +959,13 @@ mod tests {
         let dir = c.dir.path().join("sessions").join("s-probe");
         std::fs::create_dir_all(&dir).unwrap();
         let pid_file = dir.join("leader.pid");
+        let lock_path = dir.join(LOOP_LOCK_FILE);
         // A live session-leader group that keeps the session name in
-        // its command line, like a real loop.
+        // its command line, like a real loop. It also holds the flock
+        // on `.loop.lock`, which is what the lock-first probe checks.
         let inner = format!(
-            "echo $$ > {}; while :; do sleep 1; done",
+            "exec 9>'{}'; flock -x 9; echo $$ > {}; while :; do sleep 1; done",
+            lock_path.display(),
             pid_file.display()
         );
         let mut child = std::process::Command::new("setsid")
@@ -1152,8 +995,9 @@ mod tests {
             Some(pid),
             "the live group naming the session passes the probe"
         );
-        // Kill the group. The probe must clear within the window.
-        // A killed leader lingers as a zombie until reaped, so poll.
+        // Kill the group. The lock is released on process death, so the
+        // probe must clear within the window. A killed leader lingers as
+        // a zombie until reaped, so poll.
         unsafe { libc::kill(-pid, libc::SIGKILL) };
         let mut cleared = false;
         for _ in 0..50 {
@@ -1225,11 +1069,13 @@ mod tests {
         let dir = c.dir.path().join("sessions").join("s-reattach");
         std::fs::create_dir_all(&dir).unwrap();
         let pid_file = dir.join("leader.pid");
+        let lock_path = dir.join(LOOP_LOCK_FILE);
         // Spawn a session-leader loop that stays alive in a loop and
-        // keeps the session name in its command line. It records its
-        // own pid. A std launch keeps the test free of a tokio reaper.
+        // keeps the session name in its command line. It also holds the
+        // flock on `.loop.lock`, which the lock-first stop path checks.
         let inner = format!(
-            "echo $$ > {}; while :; do sleep 1; done",
+            "exec 9>'{}'; flock -x 9; echo $$ > {}; while :; do sleep 1; done",
+            lock_path.display(),
             pid_file.display()
         );
         let mut child = std::process::Command::new("setsid")
@@ -1563,12 +1409,12 @@ mod tests {
             .expect("a produced event has an object")
             .clone();
         assert!(
-            matches_schema(&produced_obj, &schema),
+            harness_common::event_validation::validate_against_schema(&produced_obj, &schema),
             "producer envelope must match the repo schema: {produced_obj:?}"
         );
         let missing_value = serde_json::json!({"v":1,"type":"ext_status","ts":"t","id":"vim_mode"});
         assert!(
-            !matches_schema(&missing_value, &schema),
+            !harness_common::event_validation::validate_against_schema(&missing_value, &schema),
             "a missing `value` must fail the repo schema"
         );
     }
