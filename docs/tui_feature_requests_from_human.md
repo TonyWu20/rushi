@@ -13,7 +13,14 @@ the linked doc.
 - [x] Mouse scroll support. Shipped: was laggy, uncontrollable,
       and hung the process. A double `q` could not exit.
 - [x] Syntax highlighting for tool results. Markdown
-      highlighting and rendering for `content`.
+      highlighting and rendering for `content`. Shipped: the
+      `Read` body drives the shared `CodeHighlighter` from
+      `bin/tui/src/highlight.rs` (the same engine the picker
+      preview pane uses, `docs/tui-file-picker.md` section 9). The
+      fix (2026-09-05) threads the tool call arguments into
+      `read_body` so the file path — and therefore the language —
+      resolves even though the log stores the path in the call
+      argument (`file_path`), not the result value.
 
 ## New requests (2026-08-29)
 
