@@ -62,7 +62,7 @@ const DEFAULT_TICK_MS: u64 = 1000;
 /// reply (ui-extension-plan stage 4 open items: status staleness).
 const INITIAL_STATUS_GRACE: Duration = Duration::from_secs(10);
 /// The capability names a manifest may list.
-pub const CAPS: &[&str] = &["render", "status", "transform", "append", "notify", "frame"];
+pub const CAPS: &[&str] = &["render", "status", "transform", "append", "notify", "frame", "commands"];
 
 /// One parsed and validated `ext.toml` (docs/ui-extension.md section 3).
 #[derive(Debug, Clone)]
@@ -628,6 +628,58 @@ fn lower_frame_spec(mut spec: FrameSpec, level: crate::color::Level) -> FrameSpe
     spec
 }
 
+/// One command or setting owned by an extension, as declared in a
+/// `commands_list` reply (docs/tui-command-palette.md section 10).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtCommand {
+    /// Stable command id, e.g. `"reload"` or `"theme"`.
+    pub id: String,
+    /// Display label shown in the palette.
+    pub label: String,
+    /// `true` when the command carries options (a setting).
+    pub is_setting: bool,
+    /// Optional hint (keybinding, current value, …).
+    pub hint: String,
+    /// Help text shown in the preview pane.
+    pub help: String,
+    /// Option values for a setting. Empty for plain commands.
+    pub options: Vec<String>,
+}
+
+/// Parse a `commands_list` reply payload. Returns `None` if the
+/// `commands` field is missing or malformed (G5: keep the last
+/// valid list).
+fn parse_commands_list(v: &Value) -> Option<Vec<ExtCommand>> {
+    let arr = v.get("commands")?.as_array()?;
+    let mut out = Vec::new();
+    for item in arr {
+        let obj = item.as_object()?;
+        let id = obj.get("id")?.as_str()?.to_string();
+        let label = obj
+            .get("label")
+            .and_then(|l| l.as_str())
+            .unwrap_or(&id)
+            .to_string();
+        let is_setting = obj.get("kind").and_then(|k| k.as_str()) == Some("set");
+        let hint = obj.get("hint").and_then(|h| h.as_str()).unwrap_or("").to_string();
+        let help = obj.get("help").and_then(|h| h.as_str()).unwrap_or("").to_string();
+        let options = obj
+            .get("options")
+            .and_then(|o| o.as_array())
+            .map(|arr| arr.iter().filter_map(|o| o.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        out.push(ExtCommand {
+            id,
+            label,
+            is_setting,
+            hint,
+            help,
+            options,
+        });
+    }
+    Some(out)
+}
+
 /// Items the host reports to the TUI main loop. The main loop owns
 /// the side effects: log appends go through the port, flashes hit
 /// the status row, notify ops hit the terminal the host owns.
@@ -678,6 +730,28 @@ pub enum ExtItem {
     /// The host skipped an extension (protocol mismatch or a spawn
     /// failure). The main loop flashes the reason.
     Skipped { ext: String, reason: String },
+    /// A `commands_list` reply landed in the cache. The main loop
+    /// refreshes the palette items for this extension.
+    /// Fields are part of the wire protocol; the handler uses
+    /// `host.command_items()` for aggregation so the fields are
+    /// informational / future-use.
+    #[allow(dead_code)]
+    CommandsListUpdated {
+        ext: String,
+        commands: Vec<ExtCommand>,
+    },
+    /// An `invoke_reply` completed. `ok` mirrors the extension's own
+    /// flag; `message` is a short status string the main loop can
+    /// flash.
+    InvokeReply {
+        ext: String,
+        req: u64,
+        ok: bool,
+        message: String,
+    },
+    /// The `invoke` request timed out (2 s). The extension's commands
+    /// are dropped from the palette.
+    InvokeTimeout { ext: String },
 }
 
 /// The lifecycle state of one extension slot.
@@ -820,6 +894,44 @@ impl TransformRegistry {
     }
 }
 
+/// In-flight `invoke` requests (docs/tui-command-palette.md §10).
+/// One in-flight `invoke` request.
+#[derive(Debug, Clone)]
+struct InvokeReq {
+    owner: usize,
+    sent_at: Instant,
+    state: InvokeState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InvokeState {
+    Pending,
+    Done,
+    Stale,
+}
+
+/// Mirrors the transform pattern: request id, 2 s timeout, G5
+/// fallback. A dead or stale extension is dropped from the list and
+/// the host flashes the reason.
+#[derive(Debug, Clone)]
+struct InvokeRegistry {
+    next: u64,
+    reqs: HashMap<u64, InvokeReq>,
+}
+
+impl InvokeRegistry {
+    fn new() -> Self {
+        InvokeRegistry {
+            next: 1,
+            reqs: HashMap::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.reqs.clear();
+    }
+}
+
 /// Per-extension shared state. The monitor thread owns the child
 /// wait; the writer thread owns the stdin writes; the reader thread
 /// owns the stdout pump.
@@ -879,6 +991,13 @@ struct HostInner {
     /// ANSI colors pass through unchanged, so this only reshapes
     /// free-form RGB from extension hex colors.
     color_level: crate::color::Level,
+    /// Per-slot cached `commands_list` replies, keyed by slot index.
+    commands_cache: Mutex<HashMap<usize, (Instant, Vec<ExtCommand>)>>,
+    /// One in-flight `invoke` request. The `req` id is the key; the
+    /// value tracks the owner slot and when it was sent.
+    invoke: Mutex<InvokeRegistry>,
+    /// Timeout for `invoke` requests (same as transform timeout).
+    invoke_timeout: Mutex<Duration>,
 }
 
 /// The extension host: one supervised process per enabled extension
@@ -941,6 +1060,9 @@ impl ExtHost {
                 out_tx,
                 transform_timeout: Mutex::new(TRANSFORM_TIMEOUT),
                 color_level: cfg.color.unwrap_or_else(crate::color::Level::detect),
+                commands_cache: Mutex::new(HashMap::new()),
+                invoke: Mutex::new(InvokeRegistry::new()),
+                invoke_timeout: Mutex::new(TRANSFORM_TIMEOUT),
             }),
             disc: disc.clone(),
             config_path: cfg.config_path.clone(),
@@ -1131,6 +1253,8 @@ impl ExtHost {
             s.lines_cache.lock().unwrap().clear();
         }
         self.inner.transform.lock().unwrap().clear();
+        self.inner.commands_cache.lock().unwrap().clear();
+        self.inner.invoke.lock().unwrap().clear();
         self.inner.replies_version.fetch_add(1, Ordering::SeqCst);
     }
 
@@ -1264,6 +1388,147 @@ impl ExtHost {
             }
         }
     }
+
+    /// Send a `commands` op to every extension that declared the
+    /// `commands` cap (docs/tui-command-palette.md section 10).
+    /// The extension replies with a `commands_list` that the host
+    /// caches and exposes via [`ExtHost::command_items`].
+    pub fn request_commands(&self, session: Option<&str>, loop_running: bool) {
+        for (i, s) in self.inner.slots.iter().enumerate() {
+            if !s.manifest.caps.iter().any(|c| c == "commands") {
+                continue;
+            }
+            if *s.state.lock().unwrap() == SlotState::Skipped {
+                continue;
+            }
+            let mut obj = json!({
+                "v": 1,
+                "op": "commands",
+                "loop_running": loop_running,
+            });
+            if let Some(ses) = session {
+                obj["session"] = json!(ses);
+            }
+            self.send_op(i, &obj);
+            // Track the pending request so poll_commands can time out.
+            self.inner
+                .commands_cache
+                .lock()
+                .unwrap()
+                .insert(i, (Instant::now(), Vec::new()));
+        }
+    }
+
+    /// Send an `invoke` op to the extension that owns the given
+    /// command. Returns the request id, or `None` when no extension
+    /// is alive.
+    pub fn request_invoke(&self, ext: &str, id: &str, value: Option<&str>) -> Option<u64> {
+        let i = self.disc.index_by_name.get(ext)?;
+        let s = &self.inner.slots[*i];
+        if !matches!(
+            *s.state.lock().unwrap(),
+            SlotState::Running | SlotState::Restarting
+        ) {
+            return None;
+        }
+        let mut reg = self.inner.invoke.lock().unwrap();
+        let req = reg.next;
+        reg.next += 1;
+        reg.reqs.insert(
+            req,
+            InvokeReq {
+                owner: *i,
+                sent_at: Instant::now(),
+                state: InvokeState::Pending,
+            },
+        );
+        drop(reg);
+        let mut obj = json!({
+            "v": 1,
+            "op": "invoke",
+            "req": req,
+            "id": id,
+        });
+        if let Some(v) = value {
+            obj["value"] = json!(v);
+        }
+        self.send_op(*i, &obj);
+        Some(req)
+    }
+
+    /// Expire pending `invoke` requests that hit the 2 s timeout.
+    /// For each expired request the extension's commands are dropped
+    /// (G5 fallback).
+    pub fn poll_invokes(&self) {
+        let mut reg = self.inner.invoke.lock().unwrap();
+        let timeout = *self.inner.invoke_timeout.lock().unwrap();
+        let now = Instant::now();
+        let stale_owners: Vec<usize> = reg
+            .reqs
+            .values()
+            .filter(|r| matches!(r.state, InvokeState::Pending))
+            .filter(|r| now.duration_since(r.sent_at) > timeout)
+            .map(|r| r.owner)
+            .collect();
+        for r in reg.reqs.values_mut() {
+            if matches!(r.state, InvokeState::Pending)
+                && now.duration_since(r.sent_at) > timeout
+            {
+                r.state = InvokeState::Stale;
+            }
+        }
+        drop(reg);
+        for owner in stale_owners {
+            let name = self.inner.slots.get(owner).map(|s| s.name.clone());
+            self.drop_commands_for(owner);
+            if let Some(name) = name {
+                let _ = self.inner.out_tx.try_send(ExtItem::InvokeTimeout {
+                    ext: name,
+                });
+            }
+        }
+    }
+
+    /// Remove the cached commands and in-flight invokes for one slot
+    /// (used by [`mark_dead`] and by `poll_invokes` on timeout).
+    fn drop_commands_for(&self, idx: usize) {
+        self.inner
+            .commands_cache
+            .lock()
+            .unwrap()
+            .remove(&idx);
+        {
+            let mut reg = self.inner.invoke.lock().unwrap();
+            for r in reg.reqs.values_mut() {
+                if r.owner == idx {
+                    r.state = InvokeState::Stale;
+                }
+            }
+        }
+    }
+
+    /// Collect the cached `commands_list` payloads from every live
+    /// extension. Extensions that have not replied yet, or whose
+    /// commands have been dropped, contribute nothing.
+    pub fn command_items(&self) -> Vec<crate::palette::items::PaletteItem> {
+        let cache = self.inner.commands_cache.lock().unwrap();
+        let mut out: Vec<crate::palette::items::PaletteItem> = Vec::new();
+        for (i, _entry) in cache.iter() {
+            let s = &self.inner.slots[*i];
+            if !matches!(
+                *s.state.lock().unwrap(),
+                SlotState::Running | SlotState::Restarting
+            ) {
+                continue;
+            }
+            let cmds = cache.get(i).map(|(_, c)| c.clone()).unwrap_or_default();
+            out.extend(crate::palette::items::from_extension(
+                &s.name, &cmds,
+            ));
+        }
+        out
+    }
+
 
     /// A resize re-requests every transform block: one new request
     /// per block, and the superseded request id stops matching. The
@@ -1826,6 +2091,51 @@ impl HostInner {
                 }
                 _ => {}
             },
+            // ── commands / invoke (docs/tui-command-palette.md §10) ──
+            "commands_list" => {
+                let cmds = match parse_commands_list(&v) {
+                    Some(cmds) => cmds,
+                    None => return, // G5: bad payload, keep last valid
+                };
+                {
+                    let mut cache = self.commands_cache.lock().unwrap();
+                    cache.insert(idx, (Instant::now(), cmds.clone()));
+                }
+                let _ = self.out_tx.try_send(ExtItem::CommandsListUpdated {
+                    ext: slot.name.clone(),
+                    commands: cmds,
+                });
+            }
+            "invoke_reply" => {
+                let Some(req) = v.get("req").and_then(|x| x.as_u64()) else {
+                    return;
+                };
+                let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
+                let message = v
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let mut reg = self.invoke.lock().unwrap();
+                let timeout = *self.invoke_timeout.lock().unwrap();
+                let now = Instant::now();
+                match reg.reqs.get_mut(&req) {
+                    Some(r)
+                        if matches!(r.state, InvokeState::Pending)
+                            && now.duration_since(r.sent_at) <= timeout =>
+                    {
+                        r.state = InvokeState::Done;
+                        drop(reg);
+                        let _ = self.out_tx.try_send(ExtItem::InvokeReply {
+                            ext: slot.name.clone(),
+                            req,
+                            ok,
+                            message,
+                        });
+                    }
+                    _ => {}
+                }
+            }
             // An unknown op never crashes the TUI (G5).
             _ => {}
         }
@@ -2108,6 +2418,16 @@ fn mark_dead(slot: &Arc<SlotShared>, inner: &Arc<HostInner>, idx: usize) {
         }
     }
     inner.replies_version.fetch_add(1, Ordering::SeqCst);
+    // Also clear any cached commands and in-flight invokes for this slot.
+    inner.commands_cache.lock().unwrap().remove(&idx);
+    {
+        let mut reg = inner.invoke.lock().unwrap();
+        for r in reg.reqs.values_mut() {
+            if r.owner == idx {
+                r.state = InvokeState::Stale;
+            }
+        }
+    }
     let _ = inner.out_tx.try_send(ExtItem::Dead {
         ext: slot.name.clone(),
     });

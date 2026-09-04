@@ -7,6 +7,10 @@
     "type": { "type": "string", "const": "user_message" },
     "ts": { "type": "string", "format": "date-time" },
     "content": { "type": "string" },
-    "queue": { "type": "string", "enum": ["steer", "follow"] }
+    "queue": { "type": "string", "enum": ["steer", "follow"] },
+    "id": {
+      "type": "string",
+      "description": "optional stable identifier (UUID v4 recommended) for retraction. Existing logs without this field remain valid."
+    }
   }
 }

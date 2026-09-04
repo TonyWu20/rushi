@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["v", "type", "ts", "target"],
+  "properties": {
+    "v": { "type": "integer", "const": 1 },
+    "type": { "type": "string", "const": "user_message_retract" },
+    "ts": { "type": "string", "format": "date-time" },
+    "target": {
+      "type": "string",
+      "description": "the id of the user_message being retracted"
+    },
+    "reason": {
+      "type": "string",
+      "description": "why the message was retracted. v1 value: user_edit."
+    }
+  }
+}
