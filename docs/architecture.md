@@ -313,3 +313,46 @@ Rules:
 - `jsonrpsee` — if/when the core API becomes a socket interface for loop/policy plugins
 - `wasmtime` — later, for in-process isolated plugins
 - `duct` — alternative for simple blocking subprocess handling
+
+## Properties
+
+Lean-style invariants for this spec (see `lean-driven-development.md`).
+One property per non-trivial invariant. Each property is observable:
+given an input, an output guarantee.
+
+P1. tool-io: given one JSON object on stdin, observe one JSON object
+    on stdout as the canonical result, with exit 0 on success and
+    non-zero on failure.
+P2. non-json-wrap: given non-JSON stdout from a tool, observe the
+    harness wrap it as `{"text":"..."}` before it reaches the log.
+P3. stderr-forward: given a non-zero tool exit, observe the harness
+    forward stderr as the error message without parsing it.
+P4. log-is-truth: given a model-visible event, observe it recorded
+    in the append-only session JSONL log.
+P5. core-io-free: given the `core` crate, observe `cargo tree -p core`
+    show no HTTP or process-spawn dependency.
+
+## Verification
+
+Each property maps to its proof. `proven` means the cited test exists
+and passes. `open` names the blocker and what unblocks it.
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | tool-io | `scripts/tool-conformance.sh` runs each tool on fixed JSON input and checks the JSON stdout and exit code | proven |
+| P2 | non-json-wrap | Blocked: no route test feeds non-JSON stdout. Unblocked by a route test that feeds non-JSON stdout and asserts the `text` wrap | open |
+| P3 | stderr-forward | `error_run_shows_stderr_when_present` in `bin/route/src/main.rs` | proven |
+| P4 | log-is-truth | Blocked: no direct property test. The e2e paths exercise it. Unblocked by a test that appends a model-visible event and asserts it lands in `events.jsonl` | open |
+| P5 | core-io-free | Blocked: the `core` crate is not yet extracted (Phase 3). Unblocked by the Phase 3 extraction and the `cargo tree -p core` check | open |
+
+## Gate
+
+Gate: blocked — the I/O-free `core` crate is a Phase 3 target, not yet built.
+
+The acceptance commands. All must exit 0 for this spec to be proven.
+
+```
+cargo build
+cargo test
+scripts/tool-conformance.sh
+```

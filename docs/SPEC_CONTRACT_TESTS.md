@@ -81,3 +81,21 @@ The spec author never audits the spec. The tester audits while it writes tests. 
 ## When it helps
 
 Only large or critical tasks justify the cost. Small tasks do not.
+
+## The Lean stage (spec properties to gate)
+
+The two-agent method feeds the Lean-driven workflow defined in
+`lean-driven-development.md`. The pipeline runs in this order:
+
+1. The spec freezes its properties (the P1...Pn invariants).
+2. The tester writes one proof per property. Each proof is a test
+   that discharges exactly one property. No proof may leave its
+   property open without a named blocker.
+3. The implementer builds the interface first. The compiler is the
+   first gate. A test against a missing interface does not compile.
+4. The gate runs: `cargo build`, `cargo test`, and the e2e scripts
+   named in the spec's `## Gate` section. A clean gate with zero open
+   properties is the acceptance guarantee.
+5. The mutation gate still applies: removing the target behavior must
+   make at least one proof fail. A proof that survives mutation is a
+   placebo. Reject it.

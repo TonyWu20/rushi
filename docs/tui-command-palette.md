@@ -312,3 +312,57 @@ that exercises the new surface.
   adds. v1 items take no free-form arguments.
 - Per-message queue editing is in
   `docs/user-message-editing.md`.
+
+## Properties
+
+Lean-style invariants for this spec (see `lean-driven-development.md`).
+Each property is observable: given an input, an output guarantee.
+
+P1. colon-trigger: given the `:` keypress in normal mode with an empty
+    draft, observe the floating command palette open over the
+    transcript; a non-empty draft does not block the open.
+P2. key-table: given the palette is open, observe printable characters
+    and Backspace edit the query, `j`/`k` and `Ctrl+J`/`Ctrl+K` move
+    the cursor, `Enter` commits, `Esc` closes dropping any sub-stage,
+    `Ctrl+P` toggles the preview pane, and host keys (`Ctrl+C`,
+    `Ctrl+R`, `Tab`, `Shift+Tab`, `q` when quit gate open) pass
+    through unchanged.
+P3. command-kinds: given a `Run` item, observe `Enter` fires the
+    action and closes; given a `Set` item, observe `Enter` applies the
+    selected option; given a `Goto` item, observe a sub-list opens and
+    the query feeds the sub-list; given an `Ext` item, observe an
+    `invoke` op is sent to the owning extension.
+P4. session-buffer: given a `b` `Goto` item with typed text, observe
+    the session list filter and `Enter` emit `SwitchSession(name)`;
+    given `bn`/`bp`, observe `CycleSessions(+1)` / `CycleSessions(-1)`.
+P5. effort-set: given the `effort` `Set` item with a chosen value,
+    observe main write the config, bump `events_version`, and flash the
+    new value.
+P6. extension-commands: given an extension declaring the `commands`
+    cap and returning a `commands_list` reply, observe its items appear
+    in the palette; given a dead or stale extension, observe its items
+    are absent and the TUI remains responsive.
+
+## Verification
+
+Each property maps to its proof. `proven` means the cited test exists
+and passes. `open` names the blocker and what unblocks it.
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | colon-trigger | open: `:` key routing not yet wired in `press()`; unblocked when build plan step 2 lands. State machine unit tests exist in `bin/tui/src/palette/state.rs`. | open |
+| P2 | key-table | open: key routing and preview-toggle wiring not yet in `main.rs`; unblocked at build plan step 2. State-machine transitions tested in `bin/tui/src/palette/state.rs`. | open |
+| P3 | command-kinds | open: item dispatch and `invoke` op not yet wired; unblocked at build plan steps 2–4. Item data structures tested in `bin/tui/src/palette/items.rs`. | open |
+| P4 | session-buffer | open: `SwitchSession` action and `b` sub-list not yet wired; unblocked at build plan step 3. | open |
+| P5 | effort-set | open: `set_effort` extraction and config write not yet implemented; unblocked at build plan step 3. | open |
+| P6 | extension-commands | open: `commands` cap and `invoke` op protocol not yet built; unblocked at build plan step 4. | open |
+
+## Gate
+
+Gate: blocked — the command palette is spec-only; build plan steps 2 to
+4 must land before the gate can pass.
+
+```
+cargo build
+cargo test -p tui
+```

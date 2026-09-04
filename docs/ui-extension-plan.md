@@ -123,3 +123,31 @@ Exit: every surface has a bash and a Rust reference.
 - hot reload (stop, edit, restart stays the update path)
 - in-process mounting of extension code
 - audio output
+
+## Properties
+
+Lean-style invariants for this plan (see `lean-driven-development.md`).
+
+P1. mechanism-complete: given the stage-1 host, observe the full protocol, manifest, discovery, and fallback behavior with no extension content required.
+P2. reference-renders: given the bash reference extensions, observe each render in a real session and survive a kill.
+P3. no-hot-reload: given an edited extension, observe the update path stay stop, edit, restart. The host never hot-reloads or mounts in-process.
+P4. guardrail-scan: given any stage, observe the `docs/tui.md` section-10 forbidden-string scan pass.
+
+## Verification
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | mechanism-complete | `manifest_bad_toml_refuses_with_the_file`, `restart_budget_ends_in_dead` in `bin/tui/src/ext.rs`; `scripts/tui-pty-smoke.py` | proven |
+| P2 | reference-renders | `ui_extensions/statusline`, `ui_extensions/notify`, `ui_extensions-demos/tool_result` plus `scripts/tui-pty-smoke.py` | proven |
+| P3 | no-hot-reload | Blocked: no test forbids a hot-reload path. Unblock with a test that the host exposes only stop and restart. | open |
+| P4 | guardrail-scan | `storage_and_loop_strings_stay_behind_the_port`, `stage_names_are_not_strings_in_the_tui` in `bin/tui/src/main.rs` | proven |
+
+## Gate
+
+The acceptance commands. All must exit 0 for this spec to be proven.
+
+```
+cargo build
+cargo test
+scripts/tui-pty-smoke.py
+```

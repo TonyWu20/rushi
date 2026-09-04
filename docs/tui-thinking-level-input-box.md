@@ -282,3 +282,57 @@ the publish in the config section. This doc lands in
   `ext_status` values: no `model_thinking` or `loop_phase` text,
   no `st:` section. The level presents through the border color
   only; the number stays in the log and in `--describe` output.
+
+## Properties
+
+Lean-style invariants for this spec (see `lean-driven-development.md`).
+One property per non-trivial invariant. Each property is observable:
+given an input, an output guarantee.
+
+P1. effort-level-map: given a configured reasoning effort, observe
+    `bin/model --describe` reports the mapped level: `none` to 0,
+    `minimal`/`low` to 1, `medium` to 2, `high` to 3, `xhigh`/`max`
+    to 4, and an unknown effort to 0.
+P2. level-read: given the last `model_thinking` value in the log,
+    observe the TUI level tracks it, a later event wins, an
+    out-of-range value clamps to 4, and a missing or non-integer
+    value falls back to 0.
+P3. border-color-map: given a thinking level, observe the
+    input-area border, the title-label background, and the spinner
+    render in the level's color (0 gray, 1 blue, 2 cyan, 3 green,
+    4+ yellow).
+P4. restart-rebuild: given a TUI restart, observe the per-id value
+    map rebuilds from the log and the border restores without a new
+    marker.
+P5. pty-capture: given the TUI run under a pty against a marker log
+    and a marker-free log, observe the marker session emits
+    yellow-family SGR codes and the plain session emits gray with no
+    yellow.
+P6. publish-on-change: given two consecutive steps with an
+    unchanged config, observe the first step appends one
+    `model_thinking` event and the second appends nothing.
+
+## Verification
+
+Each property maps to its proof. `proven` means the cited test or
+script exists and passes. `open` names the blocker and what unblocks
+it.
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | effort-level-map | `thinking_level_maps_the_documented_efforts`, `thinking_level_is_case_insensitive_and_unknown_is_zero` in `bin/model/src/main.rs` | proven |
+| P2 | level-read | `thinking_level_tracks_the_last_published_value`, `thinking_level_later_event_wins`, `thinking_level_clamps_an_out_of_range_value`, `thinking_level_falls_back_to_the_default` in `bin/tui/src/app.rs` | proven |
+| P3 | border-color-map | `palette_thinking_border_tracks_the_levels` in `bin/tui/src/color.rs` | proven |
+| P4 | restart-rebuild | `thinking_level_session_switch_rebuilds` in `bin/tui/src/app.rs` | proven |
+| P5 | pty-capture | `scripts/capture-thinking-border.py` | proven |
+| P6 | publish-on-change | Blocked: no test drives the `scripts/step.sh` on-change gate. Unblock with a step-level check that a second step appends no `model_thinking` event when the config is unchanged | open |
+
+## Gate
+
+The acceptance commands. All must exit 0 for this spec to be proven.
+
+```
+cargo build
+cargo test
+scripts/capture-thinking-border.py
+```

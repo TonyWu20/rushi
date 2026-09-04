@@ -118,3 +118,49 @@ wrong tokenization for complex code).
 - Open: per-token colors inside the `Edit` diff.
 - Deferred: `syntect`. Adopt only when breadth or diff-token color
   demand it.
+
+## Properties
+
+Lean-style invariants for this spec (see `lean-driven-development.md`).
+One property per non-trivial invariant. Each property is observable:
+given an input, an output guarantee.
+
+P1. language-detect: given a file path, observe the language detected
+    from the extension (the shipped extension set plus the
+    `Makefile`/`Dockerfile` special cases), and an unknown extension
+    falls back to `generic`.
+P2. stateful-tokenizer: given a multi-line input where a block
+    comment or a markdown fence spans lines, observe the tokenizer
+    carries the state across lines and resumes it on the next line.
+P3. multibyte-safe: given a line containing multibyte characters,
+    observe the tokenizer runs in char space and the token boundaries
+    do not desync.
+P4. one-shot-entry: given `text`, an optional language, and a
+    `Palette`, observe `highlight_text_lines` returns one styled row
+    per hard line.
+P5. truncate-then-highlight: given content that exceeds the preview
+    cap, observe truncation happens before highlighting and the
+    truncated view still carries full syntax color.
+
+## Verification
+
+Each property maps to its proof. `proven` means the cited test or
+script exists and passes. `open` names the blocker and what unblocks
+it.
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | language-detect | `language_from_path_maps_known_extensions`, `code_highlighter_unknown_lang_is_plain` in `bin/tui/src/highlight.rs` | proven |
+| P2 | stateful-tokenizer | `code_highlighter_block_comment_spans_lines`, `fence_state_toggles_across_lines` in `bin/tui/src/highlight.rs` | proven |
+| P3 | multibyte-safe | `code_highlighter_survives_multibyte_lines` in `bin/tui/src/highlight.rs` | proven |
+| P4 | one-shot-entry | `highlight_text_lines_shared_entry_point` in `bin/tui/src/highlight.rs` | proven |
+| P5 | truncate-then-highlight | `read_preview_folds_to_the_preview_lines`, `read_preview_highlights_known_language` in `bin/tui/src/tool_display.rs` | proven |
+
+## Gate
+
+The acceptance commands. All must exit 0 for this spec to be proven.
+
+```
+cargo build
+cargo test
+```

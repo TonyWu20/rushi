@@ -899,3 +899,48 @@ hardcode.
 | `flock` on a new file confuses a TUI tailer | the tailer watches `events.jsonl` only (verified in `port_file`). No render path reads the lock file |
 | A recycled pid in `loop.pid` blocks a start | the lock is the authority (4.6). The pid file feeds the message and the stop only. The existing cmdline check stays as a second gate |
 | The `bon` rule on wide functions | `coding-conventions.md` applies to all new Rust. The step-pipeline entry point gets a builder at 8+ parameters |
+
+## Properties
+
+Lean-style invariants for this spec (see `lean-driven-development.md`).
+One property per non-trivial invariant. Each property is observable:
+given an input, an output guarantee.
+
+P1. run-idle-stop: given an `idle` claim with no pending follow-ups,
+    observe `run` exit 0 with no new events.
+P2. classifier-table: given the ten self-test overflow details, observe
+    the ten recorded verdicts.
+P3. classifier-exclusion: given a detail that matches an exclusion and
+    an overflow pattern, observe the exclusion win.
+P4. run-idle-continue: given a `run.idle` hook returning `continue`
+    with a message, observe one follow `user_message` appended and the
+    run continue.
+P5. shadow-compact: given a `context_exhausted` form under the `compact`
+    strategy, observe one `compaction_summary` event, one `handoff.md`
+    in the session dir, the shadowed range logged, and the next
+    `assemble` skip shadowed events.
+
+## Verification
+
+Each property maps to its proof. `proven` means the cited test exists
+and passes. `open` names the blocker and what unblocks it.
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | run-idle-stop | the `no-goal` scenario in `scripts/run-idle-continue-e2e.sh` | proven |
+| P2 | classifier-table | `self_test_rows` in `bin/harness/src/classifier.rs` | proven |
+| P3 | classifier-exclusion | `exclusion_wins_over_overflow_pattern` in `bin/harness/src/classifier.rs` | proven |
+| P4 | run-idle-continue | the `budgeted-goal` scenario in `scripts/run-idle-continue-e2e.sh` | proven |
+| P5 | shadow-compact | Blocked: the shadow-compact conformance row is not yet an e2e. Unblocked by adding that row to `scripts/compact-e2e.sh` | open |
+
+## Gate
+
+The acceptance commands. All must exit 0 for this spec to be proven.
+
+```
+cargo build
+cargo test
+scripts/compact-e2e.sh
+scripts/model-before-transform-e2e.sh
+scripts/run-idle-continue-e2e.sh
+```

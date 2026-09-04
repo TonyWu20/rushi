@@ -226,3 +226,34 @@ now committed, and its `scripts/compact-e2e.sh` self-generates
 fixtures into `scratch/e2e-compact/` — no committed test references
 `ctest/` or `replay/`, and the `threshold` scenario still passes
 (7/7) after the removal._
+
+## Properties
+
+Lean-style invariants for this spec (see `lean-driven-development.md`).
+
+P1. path-registration: given a tool under `tools/` with a `tool.toml`, observe `route` discover it and make it runnable. Being on the path is the whole registration.
+P2. self-doc: given each aligned app run with `--help`, observe a self-documenting help text and no `SKILL.md`.
+P3. catalog: given `tools --list`, observe a sorted, deterministic listing of `name — description` with an optional `--json` form, shared by the agent and the TUI.
+P4. no-prompt-mutation: given adding, removing, or rewording a tool, observe the frozen prompt prefix stay byte-identical.
+P5. fenced-failure: given a fenced tool that fails, observe the host report it as not-run or failed to the agent, never hang.
+
+## Verification
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | path-registration | `scripts/tool-conformance.sh` runs the `tools/*` binaries through `route` discovery | proven |
+| P2 | self-doc | Blocked: no test asserts the `--help` output of the four aligned apps. Unblock with a conformance row that runs each app's `--help` and checks for non-empty help. | open |
+| P3 | catalog | Blocked: the `tools --list` catalog and the TUI `/`-window are not built. Unblock when the catalog lands with a sorted, byte-identical test. | open |
+| P4 | no-prompt-mutation | `scripts/cache-e2e.sh` asserts a byte-identical cached prefix across turns | proven |
+| P5 | fenced-failure | the spawn-failure rows in `scripts/tool-conformance.sh` assert a reported failure, not a hang | proven |
+
+## Gate
+
+Gate: blocked — the `tools --list` catalog and the TUI `/`-window in section 5 are not yet built.
+
+```
+cargo build
+cargo test
+scripts/tool-conformance.sh
+scripts/cache-e2e.sh
+```

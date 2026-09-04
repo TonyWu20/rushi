@@ -93,3 +93,32 @@ The port lives in `bin/tui/src/tool_display.rs` plus the
   JSON and bash bodies syntax-highlight inside the box
   (docs/tui-color-tones.md section 4): the JSON tokens color
   through the `syntax*` roles, the pi scope mapping.
+
+## Properties
+
+Lean-style invariants for this spec (see `lean-driven-development.md`).
+
+P1. result-box: given a finished tool result, observe a rounded box with the success or error background role, one cell of padding, and the `tool:<name> <status>` title on the top border.
+P2. call-merge: given a bash `tool_call` whose result follows, observe the call line drop and the box open with the `$ <command>` line. A call with no result keeps its own line.
+P3. fold: given a result longer than the tool preview cap, observe a collapsed preview with a muted `N more lines` hint naming `Ctrl+O`.
+P4. expand: given a collapsed block, observe `Ctrl+O` open every block to the full output capped at `expanded_max_lines`.
+P5. preset-override: given a per-tool override in `[tui.tool_display]`, observe the effective preset become `custom` and the named per-tool limits apply.
+
+## Verification
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | result-box | `box_rows_draw_the_rounded_panel` in `bin/tui/src/tool_display.rs`; `tool_result_box_carries_the_title_in_the_border` in `bin/tui/src/render.rs` | proven |
+| P2 | call-merge | `bash_call_merges_into_the_result_box` in `bin/tui/src/render.rs` | proven |
+| P3 | fold | `read_preview_folds_to_the_preview_lines` in `bin/tui/src/tool_display.rs`; `long_tool_result_folds_to_the_preview_cap` in `bin/tui/src/render.rs` | proven |
+| P4 | expand | `expand_overrides_the_hidden_and_summary_modes` in `bin/tui/src/tool_display.rs` | proven |
+| P5 | preset-override | `preset_and_mode_parsing`, `preset_value_tables` in `bin/tui/src/tool_display.rs` | proven |
+
+## Gate
+
+The acceptance commands. All must exit 0 for this spec to be proven.
+
+```
+cargo build
+cargo test
+```

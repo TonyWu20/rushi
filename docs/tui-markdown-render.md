@@ -37,3 +37,47 @@ The original request item (syntax highlighting) shipped the
 highlight layer. This request changes the presentation: the
 markers out, the styles in. The `highlight` module keeps the
 segment split. The render pass drops the marker text.
+
+## Properties
+
+Lean-style invariants for this spec (see `lean-driven-development.md`).
+Each property is observable: given an input, an output guarantee.
+
+P1. bold-no-markers: given `**bold**` in a message, observe the word
+    rendered in bold style with the asterisk markers removed.
+P2. heading-no-markers: given a `# Heading` line, observe the heading
+    rendered in heading style with the `#` prefix removed.
+P3. table-grid: given a markdown table with `|` separators, observe
+    it rendered as a grid table with fixed column widths, not raw
+    pipe-delimited text.
+P4. fence-literal: given a fenced code block, observe the fence
+    delimiter lines render in dim `Fence` style and the code content
+    stays literal in `Code` style.
+P5. link-rendering: given a markdown link, observe the link text in
+    link style and the URL in dimmed `LinkUrl` style, with the
+    bracket and paren markers removed.
+P6. quote-no-markers: given a `> quoted` line, observe the text
+    rendered in quote style with the `>` marker removed.
+
+## Verification
+
+Each property maps to its proof. `proven` means the cited test exists
+and passes. `open` names the blocker and what unblocks it.
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | bold-no-markers | `inline_tokens_are_styled_and_text_survives` in `bin/tui/src/highlight.rs` | proven |
+| P2 | heading-no-markers | `headings_lists_and_quotes_are_styled` in `bin/tui/src/highlight.rs` | proven |
+| P3 | table-grid | `table_grid_rows_keep_fixed_column_widths` in `bin/tui/src/highlight.rs` | proven |
+| P4 | fence-literal | `fence_state_toggles_across_lines` in `bin/tui/src/highlight.rs` | proven |
+| P5 | link-rendering | `inline_tokens_are_styled_and_text_survives` in `bin/tui/src/highlight.rs` | proven |
+| P6 | quote-no-markers | `headings_lists_and_quotes_are_styled` in `bin/tui/src/highlight.rs` | proven |
+
+## Gate
+
+The acceptance commands. All must exit 0 for this spec to be proven.
+
+```
+cargo build
+cargo test -p tui
+```

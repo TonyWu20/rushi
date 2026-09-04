@@ -101,6 +101,9 @@ A spec passes review when it satisfies every criterion below.
 | Behavior | Input-to-output rules, no implementation detail |
 | Failure modes | Table: condition, exit code, `is_error`, `text` content |
 | Conformance tests | Table: test name, input, expected output |
+| Properties | Numbered Lean-style invariants (P1, P2, ...) in input-to-output form |
+| Verification | Table mapping each property to its proof and status |
+| Gate | The acceptance command list that must pass for the spec to be proven |
 | What this does not do | Explicit non-goals and deferrals |
 | Impact | Which binaries, event types, schemas are affected |
 | Migration | Additive or breaking. Old-session replay guarantee |
@@ -117,6 +120,25 @@ A spec passes review when it satisfies every criterion below.
 - The system prompt change (if any) keeps the prefix cache-stable: no
   timestamps, PIDs, or temp paths in the added text.
 - The spec does not contradict a rule in `refinement-policy.md`.
+
+## 10. Lean spec contract (Properties, Verification, Gate)
+
+Per `lean-driven-development.md`, every spec doc ends with three
+sections. Review rejects a spec that lacks them:
+
+- **Properties.** One numbered invariant per non-trivial guarantee.
+  Each property is observable: "given X input, observe Y output."
+  No property bundles two unrelated invariants.
+- **Verification.** One table row per property. A `proven` row cites
+  the existing test or script that discharges it. An `open` row names
+  the exact blocker and what unblocks it. A property with no row is a
+  rejection.
+- **Gate.** The command list that constitutes acceptance. `cargo build`
+  and `cargo test` plus the doc-specific conformance or e2e scripts.
+  For unbuilt specs, the gate is marked blocked with the prerequisite.
+
+The spec author runs `scripts/verify-specs.sh` before the tester pass.
+A failing doc gate returns the spec to the author.
 
 ## Review procedure
 

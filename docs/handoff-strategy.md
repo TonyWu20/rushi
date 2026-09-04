@@ -303,3 +303,33 @@ it.
   tails one session dir for the process life. No re-tail of a
   different session dir is needed.
   stage as the loop, not a TUI feature pass.
+
+## Properties
+
+Lean-style invariants for this spec (see `lean-driven-development.md`).
+
+P1. reactive-only: given an overflowing response, observe the compact fire only on that response. No proactive threshold cut fires before the request.
+P2. windows: given an overflow classification, observe the `overflow.resolve` window fire and apply the `stay_compact` decision. Given a `context_exhausted` form, observe `exhausted.handle` fire.
+P3. in-session-continue: given a finished shadow compact, observe the next request carry the handoff content plus events from `first_kept_seq` on, in the same session with no new session dir.
+P4. shadowed-readable: given a compacted region, observe the shadowed events stay in `events.jsonl` and remain readable by the model via `read` or `bash`.
+P5. summary-failure: given a failed summary call, observe no handoff doc written, a terminal `error` logged, and the loop stop in the session.
+
+## Verification
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | reactive-only | Blocked: no test asserts the proactive threshold hook stays loop-dead. Unblock when the threshold path is confirmed unused by the loop. | open |
+| P2 | windows | `scenario_overflow`, `scenario_threshold` in `scripts/compact-e2e.sh`; the `overflow.resolve` and `exhausted.handle` windows in `bin/hook-compact` and `crates/common/src/hooks.rs` | proven |
+| P3 | in-session-continue | Blocked: `SessionStore::save_handoff` and the `handoff.md` write are not yet built. `hook-handoff` is a reserved seam. Unblock when the in-session shadow-compact hook lands. | open |
+| P4 | shadowed-readable | Blocked: no test reads a shadowed region back through a tool. Unblock with a test that `read` returns a shadowed `events.jsonl` line after a compact. | open |
+| P5 | summary-failure | `scenario_compact_failure` in `scripts/compact-e2e.sh` | proven |
+
+## Gate
+
+Gate: blocked — the in-session shadow-compact hook and `SessionStore::save_handoff` are not yet implemented.
+
+```
+cargo build
+cargo test
+scripts/compact-e2e.sh
+```

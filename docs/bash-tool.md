@@ -387,3 +387,63 @@ Consumers of the new tool:
 - No directory listing. Use `list` for that.
 - No streaming output. The tool waits for the command to finish (or timeout)
   before returning. Streaming is a Phase 2 concern.
+
+## Properties
+
+Lean-style invariants for this spec (see `lean-driven-development.md`).
+One property per non-trivial invariant. Each property is observable:
+given an input, an output guarantee.
+
+P1. command-execution: given a `command` that runs to completion in the
+    session cwd, observe tool exit 0, one JSON object on stdout, and
+    `exit_code` equal to the command exit code in `text`, `stdout`, and
+    `stderr` fields.
+P2. command-failure: given a command that exits non-zero (including 127
+    not-found), observe tool exit 0, `is_error` false, and `exit_code`
+    equal to the command exit code. A non-zero command exit is a command
+    result, not a tool error.
+P3. timeout: given a command that exceeds `timeout_secs`, observe tool
+    exit 0, `timed_out` true, `exit_code` 143, and no surviving process
+    from the command's process group after the tool returns.
+P4. output-cap: given combined stdout and stderr exceeding the byte cap,
+    observe `truncated` true, the kept bytes are the tail of the combined
+    output, `stdout` and `stderr` together hold at most the cap, and the
+    marker is the second line of `text`.
+P5. input-validation: given `timeout_secs` below 1 or above 300, observe
+    tool exit non-zero, a stderr diagnostic, and no command execution.
+P6. spawn-failure: given a spawn that cannot start (interpreter missing
+    on PATH), observe tool exit non-zero and a stderr diagnostic.
+P7. cwd: given the working directory set by the harness, observe the
+    command run in that directory and the tool not read the cwd file.
+P8. stdin-eof: given the child stdin closed at spawn, observe an
+    interactive command (`cat`) receive EOF and exit with empty output.
+P9. schema-rejection: given a model tool call missing the `command`
+    field, observe the schema validation reject before spawn, a
+    `tool_result` with `is_error` true, and the validation message.
+
+## Verification
+
+Each property maps to its proof. `proven` means the cited test or script
+exists and passes. `open` names the blocker and what unblocks it.
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | command-execution | `bash: echo`, `bash: pipeline` in `scripts/tool-conformance.sh` | proven |
+| P2 | command-failure | `bash: non-zero exit`, `bash: command not found` in `scripts/tool-conformance.sh` | proven |
+| P3 | timeout | `bash: timeout` in `scripts/tool-conformance.sh` | proven |
+| P4 | output-cap | `bash: output cap`, `bash: output cap keeps tail` in `scripts/tool-conformance.sh` | proven |
+| P5 | input-validation | `bash: timeout zero`, `bash: timeout negative`, `bash: timeout too large` in `scripts/tool-conformance.sh` | proven |
+| P6 | spawn-failure | `bash: spawn failure` in `scripts/tool-conformance.sh` | proven |
+| P7 | cwd | `bash: cwd` in `scripts/tool-conformance.sh` | proven |
+| P8 | stdin-eof | `bash: stdin EOF` in `scripts/tool-conformance.sh` | proven |
+| P9 | schema-rejection | `validate_args` tests in `bin/route/src/main.rs` (`mod tests`), the `route` schema-validation path | proven |
+
+## Gate
+
+The acceptance commands. All must exit 0 for this spec to be proven.
+
+```
+cargo build
+cargo test
+scripts/tool-conformance.sh
+```

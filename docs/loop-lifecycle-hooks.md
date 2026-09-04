@@ -463,3 +463,54 @@ points, not just the terminal action.
 - `cargo tree -p harness-common` shows no HTTP and no new process
   spawn beyond the stage runners and the hook spawn. The guardrails
   in `architecture.md` section 7 hold.
+
+## Properties
+
+Lean-style invariants for this spec (see `lean-driven-development.md`).
+One property per non-trivial invariant. Each property is observable:
+given an input, an output guarantee.
+
+P1. no-hooks-identical: given a session with no hooks registered,
+    observe the run byte-identical to the no-hooks default on the
+    `compact-e2e.sh` fixtures.
+P2. decision-fold: given a hook on a window that exits 0 with a JSON
+    decision, observe the harness fold that decision and log a
+    `hook.<window>` marker.
+P3. tool-block: given a `tool.before` hook returning `block` with a
+    reason, observe one `tool_result` per blocked call with
+    `is_error` true and no `route` spawn for those calls.
+P4. nonblocking-fail: given a hook that exits with an unexpected
+    non-zero code, observe a `hook.<window>.error` marker and the
+    window default applied.
+P5. hook-timeout: given a hook that passes the window timeout, observe
+    the window default applied and no hang.
+P6. shadow-compact: given a `context_exhausted` form under the `compact`
+    strategy, observe one `compaction_summary` event, one `handoff.md`
+    in the session dir, the shadowed range logged, and the next
+    `assemble` skip shadowed events.
+
+## Verification
+
+Each property maps to its proof. `proven` means the cited test exists
+and passes. `open` names the blocker and what unblocks it.
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | no-hooks-identical | the `default` scenario in `scripts/model-before-transform-e2e.sh` and the no-hooks runs in `scripts/compact-e2e.sh` assert a marker-free byte-identical default | proven |
+| P2 | decision-fold | `fold_prefers_the_first_explicit_decision`, `window_roundtrip` in `crates/common/src/hooks.rs`; the `transform` scenario in `scripts/model-before-transform-e2e.sh` | proven |
+| P3 | tool-block | Blocked: no e2e drives a `tool.before` block decision to synthesized `tool_result`s. Unblocked by a `tool.before`-block e2e row | open |
+| P4 | nonblocking-fail | `fold_failed_hooks_yield_no_decision` in `crates/common/src/hooks.rs` | proven |
+| P5 | hook-timeout | `a_slow_hook_times_out` in `crates/common/src/hooks.rs` | proven |
+| P6 | shadow-compact | Blocked: the shadow-compact conformance row (one `compaction_summary`, one `handoff.md`, shadowed range, next `assemble` skips it) is not yet an e2e. Unblocked by adding that row to `scripts/compact-e2e.sh` | open |
+
+## Gate
+
+The acceptance commands. All must exit 0 for this spec to be proven.
+
+```
+cargo build
+cargo test
+scripts/compact-e2e.sh
+scripts/model-before-transform-e2e.sh
+scripts/run-idle-continue-e2e.sh
+```

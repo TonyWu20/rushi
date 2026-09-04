@@ -170,3 +170,49 @@ them (docs/tui-markdown-render.md).
   (`no_scheme_default_is_the_macchiato_scheme`); the pi `dark`
   fallback asserts its own values
   (`builtin_palette_mirrors_the_pi_dark_theme`).
+
+## Properties
+
+Lean-style invariants for this spec (see `lean-driven-development.md`).
+Each property is observable: given an input, an output guarantee.
+
+P1. macchiato-values: given the `catppuccin macchiato` scheme, observe
+    its role table carry the pi `catppuccin-macchiato` theme values
+    verbatim, role by role.
+P2. default-scheme: given no named scheme in the config, observe the
+    TUI load the `catppuccin macchiato` scheme as the default.
+P3. pi-dark-fallback: given a user scheme table with an unset role,
+    observe that role fall back to the pi built-in `dark` theme value.
+P4. syntax-roles: given a complete JSON document body, observe keys
+    paint through `SyntaxVariable`, strings through `SyntaxString`,
+    numbers and literals through `SyntaxNumber`, punctuation through
+    `SyntaxPunctuation`, with no extra modifiers.
+P5. diff-roles: given an `Edit` tool diff body, observe added lines
+    paint through `DiffAdded` and removed lines through
+    `DiffRemoved`.
+P6. code-block-fallback: given a fenced-code body with an unknown
+    language, observe the block paint in one `Code` role color with no
+    auto-detected token colors.
+
+## Verification
+
+Each property maps to its proof. `proven` means the cited test exists
+and passes. `open` names the blocker and what unblocks it.
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | macchiato-values | `macchiato_scheme_maps_every_role` in `bin/tui/src/color.rs` | proven |
+| P2 | default-scheme | `no_scheme_default_is_the_macchiato_scheme` in `bin/tui/src/color.rs` | proven |
+| P3 | pi-dark-fallback | `builtin_palette_mirrors_the_pi_dark_theme` in `bin/tui/src/color.rs` | proven |
+| P4 | syntax-roles | `json_line_styles_keys_strings_numbers_literals`, `looks_like_json_only_accepts_complete_documents` in `bin/tui/src/highlight.rs` | proven |
+| P5 | diff-roles | `edit_diff_shows_removed_and_added` in `bin/tui/src/tool_display.rs` | proven |
+| P6 | code-block-fallback | `code_highlighter_unknown_lang_is_plain` in `bin/tui/src/highlight.rs` | proven |
+
+## Gate
+
+The acceptance commands. All must exit 0 for this spec to be proven.
+
+```
+cargo build
+cargo test -p tui
+```

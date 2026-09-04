@@ -773,3 +773,64 @@ convention: `cargo test -p tui`). Every row is a check.
 | the unmatched object | `yi[` with no `]` on the line | a no-op; the hint names the object; the operator clears |
 | the read-only gate | any yank in browse | the transcript lines are unchanged |
 | the mutation gate | the yank wiring is deleted | the handoff and the register rows fail |
+
+## Properties
+
+Lean-style invariants for this spec (see `lean-driven-development.md`).
+Each property is observable: given an input, an output guarantee.
+
+P1. bar-visibility: given the view is not at the tail (scroll > 0) or the
+    user is in browse mode, observe the position bar shown at the right
+    edge of the transcript pane; given the view at the tail in normal
+    mode, observe the bar hidden.
+P2. bar-geometry: given total line count T, viewport height H, and
+    scroll offset S, observe the thumb height equal max(1, H*H/T) with
+    its bottom S lines above the track bottom.
+P3. gutter-numbering: given browse mode with the cursor at line N of
+    total T, observe line N show its absolute number in the accent tone
+    and every other visible line show its relative distance in the dim
+    tone.
+P4. browse-entry-exit: given normal mode with an empty draft, observe
+    a double `s` within 3 s enter browse mode and a second double `s`
+    exit it; given a non-empty draft or insert mode, observe `s` not
+    trigger browse entry.
+P5. jump-motions: given `gg`, observe the cursor on line 1 and the view
+    at the top; given `G`, observe the cursor on the last line and the
+    view at the tail (scroll = 0).
+P6. goto-line: given `:N` where N is within 1..=total, observe the
+    cursor move to line N; given N greater than total, observe the
+    cursor clamped to the last line; given a non-number, observe no
+    move and a hint.
+P7. regex-search: given a forward regex pattern typed after `/`,
+    observe the cursor jump to the first match on each keystroke and
+    all match lines highlight; given `n` or `N`, observe step to the
+    next or previous match with wrap-around and the view center on the
+    match.
+P8. yank-read-only: given a yank operator or text object in browse
+    mode, observe the yanked text land in a register and the
+    transcript lines remain unchanged.
+
+## Verification
+
+Each property maps to its proof. `proven` means the cited test exists
+and passes. `open` names the blocker and what unblocks it.
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | bar-visibility | `bar_hides_at_the_tail`, `bar_shows_on_scroll_back`, `bar_shows_in_browse_with_the_cursor_marker` in `bin/tui/src/render.rs` | proven |
+| P2 | bar-geometry | `bar_geometry_row` in `bin/tui/src/browse.rs` | proven |
+| P3 | gutter-numbering | `gutter_numbering`, `gutter_width_is_digits_plus_one` in `bin/tui/src/browse.rs` | proven |
+| P4 | browse-entry-exit | `browse_gate_enter_s_s`, `browse_gate_exit_s_s`, `browse_gate_non_empty_draft_hints` in `bin/tui/src/app.rs` | proven |
+| P5 | jump-motions | `gg_lands_on_line_one_at_the_top`, `g_lands_on_the_last_line_at_the_tail` in `bin/tui/src/browse.rs` | proven |
+| P6 | goto-line | `goto_line_42_of_100`, `goto_clamps_to_the_last_line`, `goto_non_number_hints_and_moves_nothing` in `bin/tui/src/browse.rs` | proven |
+| P7 | regex-search | `forward_search_jumps_live_and_highlights`, `n_wraps_to_the_first_match_and_centers`, `n_after_a_forward_jump_restores_the_saved_view` in `bin/tui/src/browse.rs` | proven |
+| P8 | yank-read-only | open: stage 3 select-and-yank not yet implemented in `bin/tui/src/browse.rs`; unblocked when the `y` operator, visual selection, and shared register store are wired into browse mode. | open |
+
+## Gate
+
+The acceptance commands. All must exit 0 for this spec to be proven.
+
+```
+cargo build
+cargo test -p tui
+```
