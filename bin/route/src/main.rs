@@ -552,41 +552,69 @@ impl WaitWithOutput for Child {
         let start = std::time::Instant::now();
         let duration = std::time::Duration::from_millis(timeout_ms);
 
-        while start.elapsed() < duration {
+        // Drain stdout and stderr concurrently so the child never blocks
+        // on a full pipe buffer while the parent is still polling for
+        // exit. Without this, a child that writes more than the pipe
+        // capacity deadlocks: it blocks on write, never exits, and the
+        // timeout below fires.
+        let stdout_thread = self.stdout.take().map(|mut s| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                io::Read::read_to_end(&mut s, &mut buf).unwrap_or(0);
+                buf
+            })
+        });
+        let stderr_thread = self.stderr.take().map(|mut s| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                io::Read::read_to_end(&mut s, &mut buf).unwrap_or(0);
+                buf
+            })
+        });
+
+        let status = loop {
             match self.try_wait() {
-                Ok(Some(status)) => {
-                    let stdout = self
-                        .stdout
-                        .take()
-                        .map(|mut s| {
-                            let mut buf = Vec::new();
-                            io::Read::read_to_end(&mut s, &mut buf).unwrap_or(0);
-                            buf
-                        })
-                        .unwrap_or_default();
-                    let stderr = self
-                        .stderr
-                        .take()
-                        .map(|mut s| {
-                            let mut buf = Vec::new();
-                            io::Read::read_to_end(&mut s, &mut buf).unwrap_or(0);
-                            buf
-                        })
-                        .unwrap_or_default();
-                    return Ok(std::process::Output {
-                        status,
-                        stdout,
-                        stderr,
-                    });
-                }
+                Ok(Some(s)) => break s,
                 Ok(None) => {
+                    if start.elapsed() >= duration {
+                        let _ = self.kill();
+                        let _ = self.wait();
+                        // Pipes close when the killed child is reaped,
+                        // so the reader threads will finish shortly.
+                        if let Some(h) = stdout_thread {
+                            let _ = h.join();
+                        }
+                        if let Some(h) = stderr_thread {
+                            let _ = h.join();
+                        }
+                        return Err(io::Error::new(io::ErrorKind::TimedOut, "Timeout"));
+                    }
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    if let Some(h) = stdout_thread {
+                        let _ = h.join();
+                    }
+                    if let Some(h) = stderr_thread {
+                        let _ = h.join();
+                    }
+                    return Err(e);
+                }
             }
-        }
+        };
 
-        Err(io::Error::new(io::ErrorKind::TimedOut, "Timeout"))
+        let stdout = stdout_thread
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default();
+        let stderr = stderr_thread
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default();
+
+        Ok(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        })
     }
 }
 
