@@ -174,3 +174,37 @@ the linked doc.
       C-FFI grammar builds are disproportionate for a preview pane and
       an inline tool-result body. Revisit if highlight quality
       demands it.
+- [ ] Redesign session navigation. The `Tab` / `Shift+Tab`
+      bindings were freed from unconditional session cycling so
+      they can serve the file picker (path completion). The
+      `CycleSessions` action and `cycle_target` helper remain in
+      `app.rs` as the seam for a redesigned session navigator.
+      The new design should: (1) not hijack keys the user expects
+      for text editing or picker completion; (2) support listing
+      all sessions, not just next/prev; (3) be reachable in one
+      key press. The design now lives in the `:` command palette:
+      `:b` opens a fuzzy session list, `:bn` / `:bp` cycle next
+      and previous. Detail: `docs/tui-command-palette.md`
+      (section 7); `bin/tui/src/app.rs` `Action::CycleSessions`.
+
+## New requests (2026-09-11)
+
+- [ ] A `:` command palette in normal mode. The user types `:`
+      in normal mode. A floating two-pane window opens: the left
+      pane lists commands and settings with fuzzy filtering, the
+      right pane shows help text, option pickers, and session
+      metadata. Built-in commands cover toggles, the effort
+      setter, session buffers (`b`, `bn`, `bp`), `new-session`,
+      `edit-queue`, open editor, and quit. Extension-provided
+      commands join the list through a new `commands` cap and
+      `invoke` op on the extension protocol. The window reuses
+      the `picker/` fuzzy ranker and floating layout. Detail:
+      `docs/tui-command-palette.md`.
+- [ ] Recall and edit pending user messages. `Alt + Up` pulls
+      every pending message into the editor in one shot. The
+      user edits the combined text and sends it. The log stays
+      append-only: a new `user_message_retract` event cancels the
+      originals, and the loop skips retracted ids. `:edit-queue`
+      in the `:` palette is the deliberate entry point for the
+      same flow. Detail:
+      `docs/user-message-editing.md`.

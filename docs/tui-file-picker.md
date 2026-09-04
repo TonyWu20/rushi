@@ -90,9 +90,9 @@ parts. Each part has one job.
   the open flag, the cursor index, and the visible window.
 - It is crossterm-free. Tests drive it directly, like `app.rs` and
   `browse.rs` do today.
-- Keys: type to edit the query, `j`/`k` or arrows to move, `PgUp` /
-  `PgDn` to page, `Home` / `End` to jump, `Tab` to toggle a
-  multi-select (later), `Enter` to commit, `Esc` to close.
+- Keys: type to edit the query, `Ctrl+J` / `Ctrl+K` or arrows to
+  move, `PgUp` / `PgDn` to page, `Home` / `End` to jump, `Enter` to
+  commit, `Esc` to close.
 
 ### 4.4 Body render and preview (`picker/render.rs`,
 `picker/preview.rs`)
@@ -109,7 +109,7 @@ parts. Each part has one job.
 - The preview scroll reuses the visual mode scroll primitives when
   the visual mode lands (the open select-and-yank, section 11 of
   `docs/tui-conversation-browsing.md`). Until then the pane scrolls
-  on `j`/`k` and `Ctrl+U`/`Ctrl+D`.
+  on `Ctrl+J`/`Ctrl+K` and `Ctrl+U`/`Ctrl+D`.
 - If a render or source function grows past eight parameters, use the
   `bon` builder. This follows `docs/coding-conventions.md`.
 
@@ -126,16 +126,22 @@ a symbol picker share all four.
 
 ## 5. The `@` trigger
 
-- In the editor insert mode, a `@` at a word start opens the
-  picker. The text after `@` seeds the query.
+- In the editor insert mode, a `@` preceded only by whitespace (or at
+  the start of the line) opens the picker. The text after `@` seeds
+  the query. An `@` preceded by a non-whitespace character (e.g.
+  `user@domain`) does not trigger the picker.
 - The picker filters the item list live as the user types.
-- `Enter` replaces the `@query` token with the chosen path and
-  closes the picker. The draft keeps the caret at the path end.
-- `Esc` closes the picker and leaves the draft as typed.
-- With zero results, `Enter` commits the raw `@query` text. This
-  matches how agent TUIs treat a failed reference.
-- The token rules keep the existing editor motion. The picker only
-  owns the candidate list and the final insert.
+- `Enter` replaces the `@query` token with the chosen path (prefixed
+  with `@`) and closes the picker. The draft keeps the caret at the
+  path end.
+- `Esc` closes the picker and leaves the draft as typed (the `@` and
+  any query text remain).
+- With zero results, `Enter` keeps the raw `@query` text in the
+  draft.
+- List navigation uses `Ctrl+J` / `Ctrl+K` (or arrow keys), leaving
+  plain `j`/`k` free for typing into the query.
+- The picker only opens on a freshly typed `@`; a stale `@` left in
+  the draft after a previous pick or dismiss does not re-trigger it.
 
 ## 6. Display decision (settled: floating)
 
@@ -199,7 +205,7 @@ keys move within the pane.
 
 The scroll reuses the visual mode primitives when the visual mode
 lands (`docs/tui-conversation-browsing.md` section 11, the open
-select-and-yank). Until then the pane scrolls on `j`/`k` and
+select-and-yank). Until then the pane scrolls on `Ctrl+J`/`Ctrl+K` and
 `Ctrl+U`/`Ctrl+D`.
 
 ### Orientation: wide and narrow
@@ -281,6 +287,6 @@ exercises the new surface.
   disproportionate for a preview pane and an inline tool-result
   body. Revisit if highlight quality demands it.
 - The preview scroll reuses the visual mode when it lands. Until
-  then the pane scrolls on `j`/`k` and `Ctrl+U`/`Ctrl+D`.
+  then the pane scrolls on `Ctrl+J`/`Ctrl+K` and `Ctrl+U`/`Ctrl+D`.
 - The multi-select and quickfix behavior from `telescope` is a later
   add, not day 0.

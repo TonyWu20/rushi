@@ -50,6 +50,9 @@ pub enum Key {
     /// inserts a hard newline; in normal mode it is the `j` motion.
     /// `Enter` sends the draft (docs/tui.md section 7).
     CtrlJ,
+    /// The picker list navigation: Ctrl+K moves up, Ctrl+J moves
+    /// down (docs/tui-file-picker.md section 5).
+    CtrlK,
     /// The picker preview-pane toggle (docs/tui-file-picker.md
     /// section 4.4).
     CtrlP,
@@ -79,6 +82,12 @@ pub enum Decision {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     /// Cycle to the next/previous session, then reload its log.
+    ///
+    /// Reserved for the session-navigation design (docs/tui_feature_
+    /// requests_from_human.md). The Tab / BackTab bindings were freed
+    /// for the file picker, so this variant is currently unconstructed
+    /// but kept as the seam for the redesigned session navigator.
+    #[allow(dead_code)]
     CycleSessions(i32),
     /// `SessionPort::spawn_loop(active)` (docs/tui.md key Ctrl+R).
     /// Main gates the spawn on the persistent loop probe (FT-003): a
@@ -251,6 +260,11 @@ pub struct App {
     /// The search root the current matcher list was enumerated under.
     /// Path queries re-root the search; a changed root re-enumerates.
     picker_root: std::path::PathBuf,
+    /// The `(row, col)` of the `@` token that opened the picker,
+    /// so `sync_picker` can compute the query from that fixed
+    /// position instead of re-detecting the token (which would
+    /// fail if the user types another `@` into the query).
+    picker_at: Option<(usize, usize)>,
     /// Latest `ext_status` values, id to value, for the active
     /// session. Maintained incrementally: `set_active` builds it
     /// and each appended watch event updates it. A tick reads this
@@ -397,6 +411,7 @@ impl App {
             picker_matcher: None,
             picker_source: None,
             picker_root: std::path::PathBuf::new(),
+            picker_at: None,
         }
     }
 
@@ -845,11 +860,11 @@ impl App {
         // (docs/tui-file-picker.md section 4.5).
         let source = crate::picker::items::FileItemSource::new(cwd.clone());
         // Seed the query from the editor's `@` token if present.
-        let query = self
-            .editor()
-            .at_token_info()
-            .map(|(_, q)| q)
-            .unwrap_or_default();
+        let (at_col, query) = match self.editor().at_token_info() {
+            Some(info) => info,
+            None => return,
+        };
+        self.picker_at = Some((self.editor().row, at_col));
         // Path queries (`/abs`, `~/x`, `../y`) re-root the search;
         // plain queries stay under the cwd.
         let (root, tail) = crate::picker::items::query_root_tail(&query, &cwd);
@@ -865,32 +880,56 @@ impl App {
     }
 
     /// Keep the picker in sync with the editor `@query` token:
-    /// - no token and picker closed: do nothing;
-    /// - token present and picker closed: open the picker seeded with the
-    ///   token text, then push the query to the background matcher;
-    /// - token present and picker open: re-root if needed, then refresh
-    ///   the query in the matcher;
-    /// - token gone and picker open: close the picker (the draft keeps the
-    ///   text as typed; nothing is replaced).
+    /// - token present and picker open: refresh the query in the
+    ///   matcher (re-roots when the query crosses into a new path).
+    /// - token gone and picker open: close the picker (the draft keeps
+    ///   the text as typed; nothing is replaced).
+    ///
+    /// The picker only *opens* in direct response to a freshly typed
+    /// `@` keypress (see the key handler below); a stale `@` left in
+    /// the draft after a previous pick or dismiss is inert and does
+    /// not re-trigger the overlay.
     fn sync_picker(&mut self) {
-        let token = self.editor().at_token_info();
-        match token {
-            Some(_) if !self.picker.open => {
-                // Open the picker seeded with the current token text.
-                self.open_picker();
-            }
-            Some((_, q)) => {
-                self.picker.query = q.clone();
-                self.update_picker_ranker(&q);
-            }
-            None if self.picker.open => {
-                // The `@` token was deleted; close the picker.
+        if !self.picker.open {
+            return;
+        }
+        let (row, at_col) = match self.picker_at {
+            Some(p) => p,
+            None => {
                 self.picker.close();
                 self.picker_matcher = None;
                 self.picker_source = None;
+                return;
             }
-            _ => {}
+        };
+        // Verify the `@` is still at the tracked position.
+        let chars: Vec<char> = match self.editor.lines.get(row) {
+            Some(line) => line.chars().collect(),
+            None => {
+                self.picker.close();
+                self.picker_matcher = None;
+                self.picker_source = None;
+                self.picker_at = None;
+                return;
+            }
+        };
+        if chars.get(at_col) != Some(&'@') {
+            // The `@` was deleted or the line changed; close the picker.
+            self.picker.close();
+            self.picker_matcher = None;
+            self.picker_source = None;
+            self.picker_at = None;
+            return;
         }
+        // Compute the query: text from just after the `@` to the cursor.
+        let cursor_col = self.editor.col.min(chars.len());
+        let query = if cursor_col > at_col + 1 {
+            chars[at_col + 1..cursor_col].iter().collect()
+        } else {
+            String::new()
+        };
+        self.picker.query = query.clone();
+        self.update_picker_ranker(&query);
     }
 
     /// Re-root and re-rank the picker when the `@` query changes.
@@ -929,7 +968,7 @@ impl App {
                 if let Some(m) = &self.picker_matcher {
                     let snap = m.snapshot();
                     if let Some(item) = snap.items.get(idx) {
-                        if let Some((at_col, _)) = self.editor().at_token_info() {
+                        if let Some((_, at_col)) = self.picker_at {
                             // Keep the `@` so the model receives an
                             // unambiguous file-reference marker.
                             self.editor()
@@ -945,6 +984,7 @@ impl App {
             }
         }
         self.picker_matcher = None;
+        self.picker_at = None;
     }
 
     // ── draft / editor ──────────────────────────────────────────
@@ -1281,12 +1321,12 @@ impl App {
         // `q q` quit gate.
         if self.browse.active() {
             match key {
-                Key::Tab => {
-                    // Leave browse, then cycle sessions (section
-                    // 4.4): the state never survives the switch.
+                Key::Tab | Key::BackTab => {
+                    // Leave browse (section 4.4). Tab is free for the
+                    // picker; no session cycle for now.
                     self.browse.exit();
                     self.ss_arm = None;
-                    return vec![Action::CycleSessions(1)];
+                    return Vec::new();
                 }
                 Key::CtrlC => {
                     // The host stop role: the editor stays frozen
@@ -1337,7 +1377,7 @@ impl App {
                     self.sync_picker();
                     return Vec::new();
                 }
-                Key::Char('j') | Key::Char('k') => {
+                Key::CtrlJ | Key::CtrlK => {
                     let _ = self.picker.press(
                         &key,
                         count,
@@ -1370,13 +1410,12 @@ impl App {
                         }
                         crate::picker::state::PickAction::Closed => {
                             self.picker_matcher = None;
-                            // Strip the `@` token from the draft so the
-                            // user can retype without leftover artifacts.
-                            if let Some((at_pos, _)) = self.editor().at_token_info() {
-                                self.editor().replace_at_token(at_pos, "");
-                            }
+                            self.picker_at = None;
+                            // No stripping: the `@` stays in the draft
+                            // as inert text. The picker only reopens
+                            // on a freshly typed `@` keypress.
                             self.picker.close();
-                            self.flash("picker closed — @ token stripped");
+                            self.flash("picker closed — draft kept");
                         }
                         crate::picker::state::PickAction::Query => {
                             // Re-rank after an in-state query edit.
@@ -1409,7 +1448,7 @@ impl App {
                 Key::Esc => {
                     self.pending_name = None;
                     self.flash(
-                        "name input cancelled — pass a session argument, or Tab an existing session",
+                        "name input cancelled — pass a session argument",
                     );
                     return Vec::new();
                 }
@@ -1422,18 +1461,9 @@ impl App {
                     }
                     return vec![Action::ConfirmNewSession(name)];
                 }
-                Key::Tab => {
-                    if let Some(actions) = self.cycle_naming(1) {
-                        return actions;
-                    }
-                    return Vec::new();
-                }
-                Key::BackTab => {
-                    if let Some(actions) = self.cycle_naming(-1) {
-                        return actions;
-                    }
-                    return Vec::new();
-                }
+                // Tab / BackTab are free: reserved for a future
+                // session-navigation design. No-op for now.
+                Key::Tab | Key::BackTab => {}
                 _ => {}
             }
         }
@@ -1514,6 +1544,12 @@ impl App {
                 }
                 Vec::new()
             }
+            Key::CtrlK => {
+                // The picker list navigation key (docs/tui-file-picker.md
+                // section 5): Ctrl+K moves up in the picker list. The
+                // picker handles it when open; when closed it is a no-op.
+                Vec::new()
+            }
             Key::Backspace
             | Key::Delete
             | Key::Left
@@ -1572,8 +1608,9 @@ impl App {
                     vec![Action::OpenEditor]
                 }
             }
-            Key::Tab => vec![Action::CycleSessions(1)],
-            Key::BackTab => vec![Action::CycleSessions(-1)],
+            // Tab / BackTab are free: reserved for a future session
+            // navigation design (docs/tui_feature_requests_from_human.md).
+            Key::Tab | Key::BackTab => Vec::new(),
             Key::PgUp => {
                 self.scroll_up(10);
                 Vec::new()
@@ -1741,6 +1778,16 @@ impl App {
                 if let Some(h) = self.editor().press(Key::Char(c)) {
                     self.flash(h);
                 }
+                // Open the picker when `@` is freshly typed at a valid
+                // position (start of line or preceded only by
+                // whitespace). A stale `@` left in the draft after a
+                // previous pick or dismiss does not re-trigger it.
+                if c == '@'
+                    && !self.picker.open
+                    && self.editor().at_token_info().is_some()
+                {
+                    self.open_picker();
+                }
                 // Sync the picker after any editor mutation so the
                 // `@query` text stays in step with the draft.
                 self.sync_picker();
@@ -1753,19 +1800,6 @@ impl App {
         self.quitting
     }
 
-    /// Tab / BackTab while the name input is up. Cycling to a real
-    /// session ends the input: the typed name is abandoned. With no
-    /// session to cycle to, the input stays up.
-    /// Some(action) = end naming and emit the cycle; None = keep naming.
-    fn cycle_naming(&mut self, delta: i32) -> Option<Vec<Action>> {
-        if self.cycle_target(delta).is_none() {
-            self.flash("no sessions to cycle to — keep typing the name");
-            return None;
-        }
-        self.pending_name = None;
-        self.flash("name input cancelled — cycling sessions");
-        Some(vec![Action::CycleSessions(delta)])
-    }
 }
 
 #[cfg(test)]
@@ -2366,20 +2400,17 @@ mod tests {
     }
 
     #[test]
-    fn tab_while_naming_cycles_and_ends_the_input() {
+    fn tab_while_naming_is_free() {
+        // Tab / BackTab are reserved for a future session-navigation
+        // design; they are no-ops in the name input for now.
         let mut app = App::new();
         app.set_sessions(vec![SessionId::new("a"), SessionId::new("b")]);
         app.start_naming();
         app.press(Key::Char('x'));
-        assert_eq!(app.press(Key::Tab), vec![Action::CycleSessions(1)]);
-        assert_eq!(app.pending_name(), None, "cycling ends the name input");
-        assert!(app.status().is_some());
-        // Without a session to cycle to, the input stays up.
-        let mut app = App::new();
-        app.start_naming();
         assert!(app.press(Key::Tab).is_empty());
-        assert_eq!(app.pending_name(), Some(""), "no target: input stays");
-        assert!(app.status().is_some());
+        assert_eq!(app.pending_name(), Some("x"), "Tab is a no-op");
+        assert!(app.press(Key::BackTab).is_empty());
+        assert_eq!(app.pending_name(), Some("x"), "BackTab is a no-op");
     }
 
     #[test]
@@ -2980,9 +3011,9 @@ mod tests {
     }
 
     #[test]
-    fn browse_tab_exits_then_cycles() {
-        // Section 4.4: `Tab` in browse mode leaves it, then cycles
-        // sessions. The state never survives the switch.
+    fn browse_tab_exits_without_cycling() {
+        // Section 4.4: `Tab` in browse mode leaves it. Tab is free
+        // for the picker; no session cycle for now.
         let mut app = app_with(vec![], "s1");
         app.set_sessions(vec![SessionId::new("s1"), SessionId::new("s2")]);
         app.editor().press(Key::Esc);
@@ -2990,9 +3021,8 @@ mod tests {
         app.press(Key::Char('s'));
         assert!(app.browse_ref().active());
         let actions = app.press(Key::Tab);
-        assert_eq!(actions, vec![Action::CycleSessions(1)], "the cycle fires");
-        assert!(!app.browse_ref().active(), "browse left before the cycle");
-        assert_eq!(app.scroll(), 0, "the session switch resets the view");
+        assert!(actions.is_empty(), "Tab leaves browse without cycling");
+        assert!(!app.browse_ref().active(), "browse left");
     }
 
     #[test]
@@ -3095,7 +3125,50 @@ mod tests {
     }
 
     #[test]
-    fn picker_esc_closes_and_strips_at() {
+    fn picker_not_open_for_at_after_word_chars() {
+        let mut app = app_with(vec![], "s1");
+        app.press(Key::Char('f'));
+        app.press(Key::Char('o'));
+        app.press(Key::Char('o'));
+        app.press(Key::Char('@'));
+        assert!(
+            !app.picker_ref().open,
+            "@ after word chars (foo@) should NOT open the picker"
+        );
+        assert_eq!(app.draft(), "foo@");
+    }
+
+    #[test]
+    fn picker_opens_for_at_after_only_spaces() {
+        let mut app = app_with(vec![], "s1");
+        app.press(Key::Char(' '));
+        app.press(Key::Char(' '));
+        app.press(Key::Char('@'));
+        assert!(
+            app.picker_ref().open,
+            "@ preceded only by spaces should open the picker"
+        );
+    }
+
+    #[test]
+    fn picker_opens_for_at_after_text_and_space() {
+        // After picking a file the draft is e.g. `@docs/file.md`.
+        // Typing a space + @ on the same line must still open the
+        // picker, because the `@` is preceded by a space.
+        let mut app = app_with(vec![], "s1");
+        app.press(Key::Char('f'));
+        app.press(Key::Char('o'));
+        app.press(Key::Char('o'));
+        app.press(Key::Char(' '));
+        app.press(Key::Char('@'));
+        assert!(
+            app.picker_ref().open,
+            "@ preceded by a space should open the picker even mid-line"
+        );
+    }
+
+    #[test]
+    fn picker_esc_closes_and_keeps_draft() {
         let mut app = app_with(vec![], "s1");
         app.press(Key::Char('@'));
         assert!(app.picker_ref().open);
@@ -3103,8 +3176,8 @@ mod tests {
         assert!(!app.picker_ref().open, "Esc closes the picker");
         assert_eq!(
             app.draft(),
-            "",
-            "ESC strips the @ token; draft is empty"
+            "@",
+            "ESC keeps the @ token in the draft; no stripping"
         );
     }
 
@@ -3127,27 +3200,27 @@ mod tests {
                 app.draft()
             );
         } else {
-            assert_eq!(app.draft(), "", "zero results: @ stripped, draft is empty");
+            assert_eq!(app.draft(), "@", "zero results: @ kept in draft");
         }
     }
 
     #[test]
-    fn picker_j_k_moves_cursor() {
+    fn picker_ctrl_j_k_moves_cursor() {
         let mut app = app_with(vec![], "s1");
         app.press(Key::Char('@'));
         assert!(app.picker_ref().open);
-        app.press(Key::Char('j'));
-        app.press(Key::Char('j'));
+        app.press(Key::CtrlJ);
+        app.press(Key::CtrlJ);
         assert_eq!(
             app.picker_ref().cursor(),
             2,
-            "j moves the cursor down two positions"
+            "ctrl+j moves the cursor down two positions"
         );
-        app.press(Key::Char('k'));
+        app.press(Key::CtrlK);
         assert_eq!(
             app.picker_ref().cursor(),
             1,
-            "k moves the cursor up one position"
+            "ctrl+k moves the cursor up one position"
         );
     }
 }
