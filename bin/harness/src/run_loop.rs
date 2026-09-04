@@ -18,7 +18,7 @@ use harness_common::stage::{Claim, SessionDir, StageRunner};
 
 use crate::config::HarnessConfig;
 use crate::signals;
-use crate::step::{append_event, hook_env_for_run, make_runner};
+use crate::step::{append_event, hook_env, make_runner, StepMode};
 
 /// The `harness run` entry point.
 pub fn run(cfg: &HarnessConfig, session_dir: &Path) {
@@ -54,7 +54,7 @@ pub fn run(cfg: &HarnessConfig, session_dir: &Path) {
 
     // The turn loop.
     loop {
-        crate::step::do_step(cfg, &session_dir);
+        crate::step::do_step(cfg, &session_dir, StepMode::Run);
 
         // Fire step.end (observation, after the step completes).
         fire_observation(cfg, &session, Window::StepEnd, &serde_json::json!({
@@ -89,7 +89,7 @@ pub fn run(cfg: &HarnessConfig, session_dir: &Path) {
                 &cfg.hooks,
                 Window::RunIdle,
                 &payload,
-                &hook_env_for_run(cfg, &session),
+                &hook_env(cfg, &session, "run", Window::RunIdle),
                 cfg.hooks_timeout_ms,
             );
             log_hook_results(cfg, &session, "run.idle", &results);
@@ -177,7 +177,7 @@ fn fire_observation(
         &cfg.hooks,
         window,
         payload,
-        &hook_env_for_run(cfg, session),
+        &hook_env(cfg, session, "run", window),
         cfg.hooks_timeout_ms,
     );
     log_hook_results(cfg, session, window.name(), &results);
@@ -194,7 +194,7 @@ fn fire_session_end(cfg: &HarnessConfig, session: &SessionDir, reason: &str) {
         &cfg.hooks,
         Window::SessionEnd,
         &payload,
-        &hook_env_for_run(cfg, session),
+        &hook_env(cfg, session, "run", Window::SessionEnd),
         cfg.hooks_timeout_ms,
     );
 }

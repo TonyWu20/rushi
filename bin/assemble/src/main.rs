@@ -73,7 +73,8 @@ enum Ev {
         text: String,
         calls: Vec<Call>,
         reasoning: Vec<serde_json::Value>,
-        usage_input: Option<usize>,
+        #[allow(dead_code)]
+    usage_input: Option<usize>,
     },
     ToolResult {
         id: String,
@@ -94,355 +95,165 @@ struct Caps {
     text: usize,
 }
 
-/// The compact state, persisted per session as `compact.json`.
-///
-/// The compact form is sticky (correction 62). Once a session
-/// engages compaction, every later request uses the compact form.
-/// The caps freeze at engagement. The keep window halves down to
-/// two across the trigger steps. The drop count only grows. The
-/// compact region re-renders only when one of those moves. That
-/// keeps the request prefix byte-stable between moves, which is
-/// what the provider prefix KV cache needs.
-///
-/// `last_tokens` and `last_at` are the measured `usage.input_tokens`
-/// of the last compact request, with the event index it belongs to.
-/// `drops_at_last` is the drop count at that measurement. The
-/// difference gives the measured token savings per dropped group
-/// (`per_group`): the drop jump of the next over-budget reading.
-#[derive(Clone, Copy, PartialEq, Debug)]
-struct CompactState {
-    caps: Caps,
-    /// The current keep window. It halves down to two. It never
-    /// grows back.
-    keep: usize,
-    /// Dropped step groups. It only grows.
-    drops: usize,
-    /// The event index at engagement. The measurements at or after
-    /// it belong to compact-form requests.
-    engaged_at: usize,
-    /// The measured input tokens of the last compact request.
-    last_tokens: usize,
-    /// The event index of that measurement.
-    last_at: usize,
-    /// The drop count at that measurement.
-    drops_at_last: usize,
-    /// Measured token savings per dropped group. Zero until the
-    /// first drop is measured.
-    per_group: usize,
-    /// The log seq of the last compaction boundary this state was
-    /// engaged against (0 when no boundary). A boundary newer than
-    /// the state re-engages the state fresh at the boundary
-    /// (docs/auto-compact-plan.md 4.3).
-    boundary_seq: usize,
-}
-
-impl CompactState {
-    fn to_json(self) -> serde_json::Value {
-        serde_json::json!({
-            "v": 2,
-            "caps": { "result": self.caps.result, "text": self.caps.text },
-            "keep": self.keep,
-            "drops": self.drops,
-            "engaged_at": self.engaged_at,
-            "last_tokens": self.last_tokens,
-            "last_at": self.last_at,
-            "drops_at_last": self.drops_at_last,
-            "per_group": self.per_group,
-            "boundary_seq": self.boundary_seq,
-        })
-    }
-
-    fn from_json(v: &serde_json::Value) -> Option<Self> {
-        Some(CompactState {
-            caps: Caps {
-                result: v.get("caps")?.get("result")?.as_u64()? as usize,
-                text: v.get("caps")?.get("text")?.as_u64()? as usize,
-            },
-            keep: v.get("keep")?.as_u64()? as usize,
-            drops: v.get("drops")?.as_u64()? as usize,
-            engaged_at: v.get("engaged_at")?.as_u64()? as usize,
-            last_tokens: v.get("last_tokens").and_then(|x| x.as_u64())? as usize,
-            last_at: v.get("last_at").and_then(|x| x.as_u64())? as usize,
-            drops_at_last: v.get("drops_at_last").and_then(|x| x.as_u64())? as usize,
-            per_group: v.get("per_group").and_then(|x| x.as_u64())? as usize,
-            // Legacy state files carry no boundary key: zero means
-            // "no boundary", the pre-compaction form.
-            boundary_seq: v.get("boundary_seq").and_then(|x| x.as_u64()).unwrap_or(0) as usize,
-        })
-    }
-}
-
-/// The load result of the compact state file.
-///
-/// Absent is a fresh full-form session. Corrupt re-engages at stage
-/// zero with the base caps: the safe side.
-#[derive(Debug)]
-enum StateLoad {
-    Absent,
-    Corrupt,
-    Found(CompactState),
-}
-
-/// Read the compact state file of a session directory.
-fn read_compact_state(session_dir: &Path) -> StateLoad {
-    let raw = match fs::read_to_string(session_dir.join("compact.json")) {
-        Ok(raw) => raw,
-        Err(_) => return StateLoad::Absent,
-    };
-    let value: serde_json::Value = match serde_json::from_str(raw.trim()) {
-        Ok(v) => v,
-        Err(_) => return StateLoad::Corrupt,
-    };
-    match CompactState::from_json(&value) {
-        Some(s) => StateLoad::Found(s),
-        None => StateLoad::Corrupt,
-    }
-}
-
-/// Write the compact state file atomically. One writer: assemble
-/// runs in the step loop. A failed write drops the state: the next
-/// run re-engages from the log measurements.
-fn write_compact_state(session_dir: &Path, state: &CompactState) {
-    let path = session_dir.join("compact.json");
-    let tmp = session_dir.join("compact.json.tmp");
-    if let Err(e) = fs::write(
-        &tmp,
-        serde_json::to_string(&state.to_json()).unwrap_or_else(|_| panic!("state json")),
-    )
-    .and_then(|_| fs::rename(&tmp, path))
-    {
-        eprintln!("Warning: compact state write failed: {e}");
-    }
-}
-
-/// The request form of one assemble run, decided in token space.
-///
-/// No char mechanism (correction 62). The token budget compares
-/// against measured `usage.input_tokens` of the log. The growth of
-/// appended events converts at the measured per-event token growth,
-/// not at a chars-per-token rate.
-#[derive(Debug, PartialEq)]
-enum RequestForm {
-    Full,
-    /// The sticky compact form: the frozen caps, the current keep
-    /// window, the current drop count. The compact region re-renders
-    /// only when one of those moves.
-    Compact {
-        caps: Caps,
-        keep: usize,
-        drops: usize,
-    },
-    /// The drop count reached its max and the estimate still
-    /// outgrows the budget: the handoff.
-    Exhausted {
-        caps: Caps,
-        keep: usize,
-        drops: usize,
-    },
-}
-
-/// Decide the request form of one run, in token space.
-///
-/// Absent state: the full log when the measured estimate fits the
-/// budget, else engage at the base caps, the full keep window, no
-/// drops. Present state: the compact form. An over-budget reading
-/// moves one lever per run. The keep window halves down to two.
-/// Then the drop count jumps by the measured per-group savings, or
-/// by one group until the first drop is measured. No post-engagement
-/// measurement: the blind crawl drops one group per run until the
-/// handoff. The drop count and the keep window never move back.
-///
-/// The second return is the state to persist. None persists nothing.
-#[builder]
-fn decide_form(
-    n_events: usize,
-    budget_tokens: usize,
-    measurements: &[(usize, usize)],
-    state: Option<CompactState>,
-    base_caps: Caps,
-    keep_events: usize,
-    max_drops: usize,
-    boundary_seq: usize,
-) -> (RequestForm, Option<CompactState>) {
-    match state {
-        None => {
-            let last = measurements.last().copied();
-            let rate = measured_growth_rate(measurements, 0);
-            let predicted = predict_tokens(last, rate);
-            if predicted <= budget_tokens {
-                (RequestForm::Full, None)
-            } else {
-                let s = CompactState {
-                    caps: base_caps,
-                    keep: keep_events.max(2),
-                    drops: 0,
-                    engaged_at: n_events,
-                    last_tokens: 0,
-                    last_at: 0,
-                    drops_at_last: 0,
-                    per_group: 0,
-                    boundary_seq,
-                };
-                (
-                    RequestForm::Compact {
-                        caps: base_caps,
-                        keep: s.keep,
-                        drops: 0,
-                    },
-                    Some(s),
-                )
-            }
-        }
-        Some(mut s) => {
-            // The log measurements at or after engagement are the
-            // compact-form measurements. A new one recalibrates the
-            // per-group drop savings, then replaces the last point.
-            let meas: Vec<(usize, usize)> = measurements
-                .iter()
-                .copied()
-                .filter(|(i, _)| *i >= s.engaged_at)
-                .collect();
-            let new_last = meas.last().copied();
-            if let Some((idx, tokens)) = new_last {
-                if idx > s.last_at {
-                    if s.last_tokens > 0 && s.drops > s.drops_at_last {
-                        let saved = s.last_tokens.saturating_sub(tokens);
-                        s.per_group = saved / s.drops.saturating_sub(s.drops_at_last).max(1);
+/// Step groups over the projected events, in log order. A step group
+/// is one assistant message, its tool calls, and the results that
+/// follow it. User messages are standalone groups. A leading result,
+/// before the first assistant message, is a standalone group.
+fn step_groups(events: &[&Ev]) -> Vec<(usize, usize)> {
+    let mut groups = Vec::new();
+    let mut i = 0;
+    while i < events.len() {
+        match events[i] {
+            Ev::Assistant { .. } => {
+                let start = i;
+                i += 1;
+                while i < events.len() {
+                    match events[i] {
+                        Ev::ToolResult { .. } => {
+                            i += 1;
+                        }
+                        _ => break,
                     }
-                    s.last_tokens = tokens;
-                    s.last_at = idx;
-                    s.drops_at_last = s.drops;
                 }
+                groups.push((start, i));
             }
-            let rate = measured_growth_rate(&meas, 0);
-            let predicted = predict_tokens(new_last, rate);
-            let over = predicted > budget_tokens;
-            let mut moved = false;
-            // Blind crawl: no compact measurement yet, the keep
-            // window is at the floor. One drop group per run. The
-            // provider window is the backstop until the first
-            // measurement recalibrates the drop jump.
-            if new_last.is_none() && s.keep <= 2 && s.drops < max_drops {
-                s.drops += 1;
-                moved = true;
-            }
-            if over {
-                if s.keep > 2 {
-                    let keeps = next_keeps(keep_events);
-                    let next = keeps.iter().find(|&&k| k < s.keep).copied().unwrap_or(2);
-                    s.keep = next;
-                    moved = true;
-                } else if s.drops < max_drops {
-                    let deficit = predicted - budget_tokens;
-                    let k = match deficit.saturating_sub(1).checked_div(s.per_group) {
-                        Some(n) => (n + 1).min(max_drops - s.drops),
-                        None => 1,
-                    };
-                    s.drops = s.drops.saturating_add(k).min(max_drops);
-                    moved = true;
-                }
-            }
-            if s.drops >= max_drops && over {
-                (
-                    RequestForm::Exhausted {
-                        caps: s.caps,
-                        keep: s.keep,
-                        drops: s.drops,
-                    },
-                    moved.then_some(s),
-                )
-            } else {
-                (
-                    RequestForm::Compact {
-                        caps: s.caps,
-                        keep: s.keep,
-                        drops: s.drops,
-                    },
-                    moved.then_some(s),
-                )
+            _ => {
+                groups.push((i, i + 1));
+                i += 1;
             }
         }
     }
+    groups
 }
 
-/// Per-event token growth, measured in token space.
-///
-/// The last two measurements at or after `engaged_at` give the
-/// growth: the token delta over the event delta, ceiled. A shrunken
-/// request (a stage move) reads as zero growth: the clamp is the
-/// conservative side. Fewer than two measurements: zero.
-fn measured_growth_rate(measurements: &[(usize, usize)], engaged_at: usize) -> usize {
-    let v: Vec<(usize, usize)> = measurements
-        .iter()
-        .copied()
-        .filter(|(i, _)| *i >= engaged_at)
-        .collect();
-    if v.len() < 2 {
-        return 0;
-    }
-    let (ia, ta) = v[v.len() - 2];
-    let (ib, tb) = v[v.len() - 1];
-    if ib <= ia || tb <= ta {
-        return 0;
-    }
-    (tb - ta).div_ceil(ib - ia)
+/// The projection boundary: the last `compaction_summary` event and
+/// the first log sequence its summary does not cover
+/// (docs/auto-compact-plan.md section 4.1).
+struct Boundary {
+    /// The 1-based log seq of the compaction_summary event.
+    #[allow(dead_code)]
+    seq: usize,
+    /// The 1-based log seq of the first event the summary does not
+    /// cover. Projection replaces every earlier event with the
+    /// summary.
+    first_kept_seq: usize,
+    /// The summary text, frozen in the log.
+    summary: String,
+    /// The file-op lists, carried forward across compactions.
+    read_files: Vec<String>,
+    modified_files: Vec<String>,
 }
 
-/// Predict the token count of the next request.
-/// The predicted input of the next request: the last measured
-/// input plus one step of measured growth. A step is one
-/// measurement event: the next request adds one turn, not the rest
-/// of the session. No measurement: zero: the provider window is
-/// the backstop of a fresh session.
-fn predict_tokens(last: Option<(usize, usize)>, rate: usize) -> usize {
-    match last {
-        Some((_, tokens)) => tokens + rate,
-        None => 0,
+/// Parse one `compaction_summary` event into the projection
+/// boundary. A value that cannot be parsed is rejected: `None`
+/// re-renders without the summary (docs/auto-compact-plan.md
+/// section 4.1).
+fn parse_boundary(event: &serde_json::Value, seq: usize) -> Option<Boundary> {
+    let first_kept_seq = event.get("first_kept_seq")?.as_u64()? as usize;
+    if first_kept_seq < 1 {
+        return None;
+    }
+    let summary = event.get("summary")?.as_str()?.to_string();
+    let lists = |key: &str| -> Vec<String> {
+        event
+            .get(key)
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default()
+    };
+    Some(Boundary {
+        seq,
+        first_kept_seq,
+        summary,
+        read_files: lists("read_files"),
+        modified_files: lists("modified_files"),
+    })
+}
+
+/// The user-role framing item that carries the last summary in the
+/// request. One message, frozen in the log: between compaction
+/// moves the request prefix stays byte-stable (the correction 62
+/// property, preserved).
+fn summary_framing_item(summary: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "message",
+        "role": "user",
+        "content": format!(
+            "[Session context summary of the events before this point. The events after it are kept.]\n\n{summary}"
+        )
+    })
+}
+
+/// The first-time compaction prompt (docs/auto-compact-plan.md
+/// section 4.2, adapted from the pi 0.84.2 summarization prompt).
+/// The structured format: Goal, Constraints, Progress (done / in
+/// progress / blocked), Key Decisions, Next Steps, Critical Context.
+/// Exact file paths, function names, and error messages must survive.
+const COMPACT_INSTRUCTIONS_FIRST: &str = "The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.\n\nUse this EXACT format:\n\n## Goal\n[What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]\n\n## Constraints & Preferences\n- [Any constraints, preferences, or requirements mentioned by user]\n- [Or \"(none)\" if none were mentioned]\n\n## Progress\n### Done\n- [x] [Completed tasks/changes]\n\n### In Progress\n- [ ] [Current work]\n\n### Blocked\n- [Issues preventing progress, if any]\n\n## Key Decisions\n- **[Decision]**: [Brief rationale]\n\n## Next Steps\n1. [Ordered list of what should happen next]\n\n## Critical Context\n- [Any data, examples, or references needed to continue]\n- [Or \"(none)\" if not applicable]\n\nKeep each section concise. Preserve exact file paths, function names, and error messages.";
+
+/// The iterative-update prompt: preserve, add, move items from In
+/// Progress to Done (the pi preserve/add/move rules). The previous
+/// summary and its file-op lists ride in the request, so the lists
+/// merge, not re-extract (docs/auto-compact-plan.md section 4.2).
+const COMPACT_INSTRUCTIONS_UPDATE: &str = "The messages above are NEW conversation messages to incorporate into the existing summary provided in the previous-summary block.\n\nUpdate the existing structured summary with new information. RULES:\n- PRESERVE all existing information from the previous summary\n- ADD new progress, decisions, and context from the new messages\n- UPDATE the Progress section: move items from In Progress to Done when completed\n- UPDATE Next Steps based on what was accomplished\n- PRESERVE exact file paths, function names, and error messages\n- If something is no longer relevant, you may remove it\n\nKeep each section concise. Use the same six-section format as the previous summary.\n\n<previous-summary>\n{summary}\n</previous-summary>\nPreviously read files:\n{read_files}\nPreviously modified files:\n{modified_files}";
+
+/// The summary ask of the first-time request.
+const COMPACT_ASK_FIRST: &str = "Write the summary now, using the conversation above.";
+
+/// The summary ask of the update request.
+const COMPACT_ASK_UPDATE: &str = "Update the summary now, incorporating the new messages above.";
+
+/// Format the file-op list lines of the update prompt. An empty
+/// list shows the none marker, pi-style.
+fn file_list_lines(list: &[String]) -> String {
+    if list.is_empty() {
+        "(none)".to_string()
+    } else {
+        list.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n")
     }
 }
 
-/// The event selection of a keep window and a drop count: the log
-/// minus the first `drop_count` droppable step groups. The
-/// droppable groups are the leading assistant groups strictly
-/// before the keep tail. User groups are never dropped. The keep
-/// tail is never dropped.
-fn stage_selection<'a>(events: &'a [&'a Ev], keep: usize, drop_count: usize) -> Vec<&'a Ev> {
-    let groups = step_groups(events);
-    let tail_start = events.len().saturating_sub(keep);
+/// The update instructions with the previous summary and its
+/// file-op lists carried in.
+fn compact_update_instructions(b: &Boundary) -> String {
+    COMPACT_INSTRUCTIONS_UPDATE
+        .replace(
+            "{summary}",
+            &b.summary,
+        )
+        .replace("{read_files}", &file_list_lines(&b.read_files))
+        .replace("{modified_files}", &file_list_lines(&b.modified_files))
+}
+
+/// Drop the oldest `count` droppable step groups (the assistant
+/// groups) from a region. User groups never drop: the task
+/// statement must survive.
+fn drop_oldest_groups<'a>(
+    events: &'a [&'a Ev],
+    droppable: &[(usize, usize)],
+    count: usize,
+) -> Vec<&'a Ev> {
     let mut keep_idx: Vec<usize> = (0..events.len()).collect();
-    let mut dropped = 0usize;
-    for &(start, end) in &groups {
-        if !matches!(events[start], Ev::Assistant { .. }) {
-            continue;
-        }
-        if start >= tail_start || end > tail_start {
-            break;
-        }
-        if dropped >= drop_count {
-            break;
-        }
+    for &(start, end) in droppable.iter().take(count) {
         keep_idx.retain(|i| !(start..end).contains(i));
-        dropped += 1;
     }
     keep_idx.iter().map(|i| events[*i]).collect()
 }
 
-/// The droppable step group count at the final keep window. It sets
-/// the max stage: halving count plus this count.
-fn max_droppable_groups(events: &[&Ev], keep: usize) -> usize {
+/// The request-time exclusion of the last assistant step group
+/// (docs/auto-compact-plan.md section 4.3): its message, its calls,
+/// and its results. Nothing is persisted. Excluding the whole group
+/// excludes no orphan function_call.
+fn drop_last_assistant_group<'a>(events: &[&'a Ev]) -> Vec<&'a Ev> {
     let groups = step_groups(events);
-    let tail_start = events.len().saturating_sub(keep);
-    let mut count = 0;
-    for &(start, end) in &groups {
-        if !matches!(events[start], Ev::Assistant { .. }) {
-            continue;
+    match groups.iter().rev().find(|&&(start, _)| matches!(events[start], Ev::Assistant { .. })) {
+        Some(&(start, end)) => {
+            let mut out: Vec<&'a Ev> = events[..start].to_vec();
+            out.extend(events[end..].iter());
+            out
         }
-        if start >= tail_start || end > tail_start {
-            break;
-        }
-        count += 1;
+        None => events.to_vec(),
     }
-    count
 }
 
 /// Resolve the active model name from the MODEL env var or config.
@@ -874,202 +685,6 @@ fn build_items(
     build_items_off(events, keep, caps, clip_chars, drop_pairs, ptrs).0
 }
 
-/// Keep-window search order. Halve down to a floor of two.
-fn next_keeps(k0: usize) -> Vec<usize> {
-    let mut out = vec![k0.max(1)];
-    let mut k = out[0];
-    while k > 2 {
-        k /= 2;
-        out.push(k.max(2));
-    }
-    out
-}
-
-/// Step groups over the projected events, in log order. A step group
-/// is one assistant message, its tool calls, and the results that
-/// follow it. User messages are standalone groups. A leading result,
-/// before the first assistant message, is a standalone group.
-fn step_groups(events: &[&Ev]) -> Vec<(usize, usize)> {
-    let mut groups = Vec::new();
-    let mut i = 0;
-    while i < events.len() {
-        match events[i] {
-            Ev::Assistant { .. } => {
-                let start = i;
-                i += 1;
-                while i < events.len() {
-                    match events[i] {
-                        Ev::ToolResult { .. } => {
-                            i += 1;
-                        }
-                        _ => break,
-                    }
-                }
-                groups.push((start, i));
-            }
-            _ => {
-                groups.push((i, i + 1));
-                i += 1;
-            }
-        }
-    }
-    groups
-}
-
-/// The projection boundary: the last `compaction_summary` event and
-/// the first log sequence its summary does not cover
-/// (docs/auto-compact-plan.md section 4.1).
-struct Boundary {
-    /// The 1-based log seq of the compaction_summary event.
-    seq: usize,
-    /// The 1-based log seq of the first event the summary does not
-    /// cover. Projection replaces every earlier event with the
-    /// summary.
-    first_kept_seq: usize,
-    /// The summary text, frozen in the log.
-    summary: String,
-    /// The file-op lists, carried forward across compactions.
-    read_files: Vec<String>,
-    modified_files: Vec<String>,
-}
-
-/// Parse one `compaction_summary` event into the projection
-/// boundary. A value that cannot be parsed is rejected: `None`
-/// re-renders without the summary (docs/auto-compact-plan.md
-/// section 4.1).
-fn parse_boundary(event: &serde_json::Value, seq: usize) -> Option<Boundary> {
-    let first_kept_seq = event.get("first_kept_seq")?.as_u64()? as usize;
-    if first_kept_seq < 1 {
-        return None;
-    }
-    let summary = event.get("summary")?.as_str()?.to_string();
-    let lists = |key: &str| -> Vec<String> {
-        event
-            .get(key)
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
-            .unwrap_or_default()
-    };
-    Some(Boundary {
-        seq,
-        first_kept_seq,
-        summary,
-        read_files: lists("read_files"),
-        modified_files: lists("modified_files"),
-    })
-}
-
-/// The user-role framing item that carries the last summary in the
-/// request. One message, frozen in the log: between compaction
-/// moves the request prefix stays byte-stable (the correction 62
-/// property, preserved).
-fn summary_framing_item(summary: &str) -> serde_json::Value {
-    serde_json::json!({
-        "type": "message",
-        "role": "user",
-        "content": format!(
-            "[Session context summary of the events before this point. The events after it are kept.]\n\n{summary}"
-        )
-    })
-}
-
-/// The first-time compaction prompt (docs/auto-compact-plan.md
-/// section 4.2, adapted from the pi 0.84.2 summarization prompt).
-/// The structured format: Goal, Constraints, Progress (done / in
-/// progress / blocked), Key Decisions, Next Steps, Critical Context.
-/// Exact file paths, commands, and error messages must survive.
-const COMPACT_INSTRUCTIONS_FIRST: &str = "The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.\n\nUse this EXACT format:\n\n## Goal\n[What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]\n\n## Constraints & Preferences\n- [Any constraints, preferences, or requirements mentioned by user]\n- [Or \"(none)\" if none were mentioned]\n\n## Progress\n### Done\n- [x] [Completed tasks/changes]\n\n### In Progress\n- [ ] [Current work]\n\n### Blocked\n- [Issues preventing progress, if any]\n\n## Key Decisions\n- **[Decision]**: [Brief rationale]\n\n## Next Steps\n1. [Ordered list of what should happen next]\n\n## Critical Context\n- [Any data, examples, or references needed to continue]\n- [Or \"(none)\" if not applicable]\n\nKeep each section concise. Preserve exact file paths, function names, and error messages.";
-
-/// The iterative-update prompt: preserve, add, move items from In
-/// Progress to Done (the pi preserve/add/move rules). The previous
-/// summary and its file-op lists ride in the request, so the lists
-/// merge, not re-extract (docs/auto-compact-plan.md section 4.2).
-const COMPACT_INSTRUCTIONS_UPDATE: &str = "The messages above are NEW conversation messages to incorporate into the existing summary provided in the previous-summary block.\n\nUpdate the existing structured summary with new information. RULES:\n- PRESERVE all existing information from the previous summary\n- ADD new progress, decisions, and context from the new messages\n- UPDATE the Progress section: move items from In Progress to Done when completed\n- UPDATE Next Steps based on what was accomplished\n- PRESERVE exact file paths, function names, and error messages\n- If something is no longer relevant, you may remove it\n\nKeep each section concise. Use the same six-section format as the previous summary.\n\n<previous-summary>\n{summary}\n</previous-summary>\nPreviously read files:\n{read_files}\nPreviously modified files:\n{modified_files}";
-
-/// The summary ask of the first-time request.
-const COMPACT_ASK_FIRST: &str = "Write the summary now, using the conversation above.";
-
-/// The summary ask of the update request.
-const COMPACT_ASK_UPDATE: &str = "Update the summary now, incorporating the new messages above.";
-
-/// Format the file-op list lines of the update prompt. An empty
-/// list shows the none marker, pi-style.
-fn file_list_lines(list: &[String]) -> String {
-    if list.is_empty() {
-        "(none)".to_string()
-    } else {
-        list.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n")
-    }
-}
-
-/// The update instructions with the previous summary and its
-/// file-op lists carried in.
-fn compact_update_instructions(b: &Boundary) -> String {
-    COMPACT_INSTRUCTIONS_UPDATE
-        .replace(
-            "{summary}",
-            &b.summary,
-        )
-        .replace("{read_files}", &file_list_lines(&b.read_files))
-        .replace("{modified_files}", &file_list_lines(&b.modified_files))
-}
-
-/// Drop the oldest `count` droppable step groups (the assistant
-/// groups) from a region. User groups never drop: the task
-/// statement must survive.
-fn drop_oldest_groups<'a>(
-    events: &'a [&'a Ev],
-    droppable: &[(usize, usize)],
-    count: usize,
-) -> Vec<&'a Ev> {
-    let mut keep_idx: Vec<usize> = (0..events.len()).collect();
-    for &(start, end) in droppable.iter().take(count) {
-        keep_idx.retain(|i| !(start..end).contains(i));
-    }
-    keep_idx.iter().map(|i| events[*i]).collect()
-}
-
-/// The request-time exclusion of the last assistant step group
-/// (docs/auto-compact-plan.md section 4.3): its message, its calls,
-/// and its results. Nothing is persisted. Excluding the whole group
-/// excludes no orphan function_call.
-fn drop_last_assistant_group<'a>(events: &[&'a Ev]) -> Vec<&'a Ev> {
-    let groups = step_groups(events);
-    match groups.iter().rev().find(|&&(start, _)| matches!(events[start], Ev::Assistant { .. })) {
-        Some(&(start, end)) => {
-            let mut out: Vec<&'a Ev> = events[..start].to_vec();
-            out.extend(events[end..].iter());
-            out
-        }
-        None => events.to_vec(),
-    }
-}
-
-/// The input items of one compact request. The compact region is
-/// everything before the keep window minus the dropped step groups.
-/// It re-renders only when the caps, the keep window, or the drop
-/// count moves. Within those moves the items are byte-stable: that
-/// is the cache property (correction 62). The provider prefix cache
-/// holds until the next move.
-///
-/// The schema-error pairs go out of the request, keep window
-/// included (correction 60). The drop count drops the oldest
-/// droppable step groups (correction 55, monotone form).
-fn compact_candidate(
-    events: &[&Ev],
-    keep: usize,
-    drops: usize,
-    caps: &Caps,
-    clip_chars: usize,
-    ptrs: &LogPointers,
-) -> Vec<serde_json::Value> {
-    let sel = stage_selection(events, keep, drops);
-    // Every schema-error pair goes out of the request (correction
-    // 60): old region and keep window alike.
-    let drop_pairs = drop_pair_ids(&sel, sel.len());
-    build_items(&sel, keep, caps, clip_chars, &drop_pairs, ptrs)
-}
-
 /// The delivery-queue gate of the user event (docs/tui-pending-user-
 /// messages.md stage 2). Returns `Some(text)` when the event rides
 /// the model input, `None` when it stays out. `follow` messages
@@ -1149,20 +764,9 @@ fn main() {
     };
     let tool_result_max_chars: usize =
         val_int(&limits, "tool_result_max_chars").unwrap_or(20000) as usize;
-    let compact_keep_events: usize = val_int(&limits, "compact_keep_events").unwrap_or(24) as usize;
-    // The frozen base caps of the compact form (correction 62).
-    // They freeze at engagement. They never halve.
     let compact_result_chars: usize =
         val_int(&limits, "compact_result_chars").unwrap_or(500) as usize;
     let compact_text_chars: usize = val_int(&limits, "compact_text_chars").unwrap_or(200) as usize;
-    // Auto-compact knobs (docs/auto-compact-plan.md 4.5). The
-    // summary call output cap defaults to 0.8 * compact_reserve
-    // tokens (pi's ratio) and clamps to the model max output.
-    let compact_reserve_tokens: usize =
-        val_int(&limits, "compact_reserve_tokens").unwrap_or(16384) as usize;
-    let compact_summary_max_tokens: u64 = val_int(&limits, "compact_summary_max_tokens")
-        .map(|v| v.max(1) as u64)
-        .unwrap_or(((compact_reserve_tokens as f64) * 0.8) as u64);
     // A cheaper effort for the summary call on a local GPU. The
     // session reasoning_effort is the default when unset.
     let compact_reasoning_effort: Option<String> =
@@ -1406,28 +1010,15 @@ fn main() {
         })
     };
 
-    // Sticky auto-compact, token-only (correction 62). The projected
-    // log goes out while the measured estimate fits the token budget:
-    // the last measured `usage.input_tokens` plus the projected
-    // growth at the measured per-event token growth. A fresh session
-    // without measurements sends the full log: the provider window
-    // is its backstop. When the estimate outgrows the budget, the
-    // session engages the sticky compact form once. After that the
-    // compact form never gives the log back. Each over-budget
-    // reading moves one lever: the keep window halves, or the drop
-    // count jumps by the measured per-group savings. The levers
-    // never move back. When the drop count reaches its max and the
-    // estimate still outgrows the budget, the `context_exhausted`
-    // signal runs the last-resort in-session compaction
-    // (docs/auto-compact-plan.md section 4.3): the summary replaces
-    // the old region in the original session. No new session. No
-    // `context_exhausted` marker.
-    //
-    // The projected events are the kept region after the last
-    // compaction boundary (docs/auto-compact-plan.md section 4.3):
-    // the summary replaces every earlier event. The sticky compact
-    // form, the drop search, and `max_drops` apply to the kept
-    // region only.
+    // Phase 2 handoff-based projection (docs/phase-2-plan.md 4.3).
+    // The projected events are the post-boundary region when a
+    // compaction_summary boundary exists, else the full log. No
+    // sticky state, no keep-window halving, no group-drop levers.
+    // The handoff document (handoff.md) or the boundary summary
+    // serves as the framing item. If a boundary exists and the
+    // projected context still exceeds the input budget, the
+    // context_exhausted form fires the exhausted.handle window
+    // (docs/loop-lifecycle-hooks.md 3.4).
     let (events_refs, projected_seqs): (Vec<&Ev>, Vec<usize>) = match &boundary {
         Some(b) => events
             .iter()
@@ -1468,7 +1059,7 @@ fn main() {
             .old(&old_region)
             .prev(&boundary)
             .model(&model_settings.model_id)
-            .max_out_cap(compact_summary_max_tokens.min(model_settings.max_output_tokens))
+            .max_out_cap(model_settings.max_output_tokens)
             .caps(&base_caps)
             .input_budget(budget_tokens)
             .ptrs(&ptrs);
@@ -1483,171 +1074,64 @@ fn main() {
         return;
     }
 
-    // The measured input token count of each request, with the event
-    // index it belongs to. The growth of appended events converts
-    // at the measured per-event token growth, never at a char rate.
-    let measurements: Vec<(usize, usize)> = events_refs
-        .iter()
-        .enumerate()
-        .filter_map(|(i, e)| match e {
-            Ev::Assistant {
-                usage_input: Some(t),
-                ..
-            } => Some((i, *t)),
-            _ => None,
-        })
-        .collect();
-
-    let n = events_refs.len();
-    let base_caps = Caps {
-        result: compact_result_chars,
-        text: compact_text_chars,
-    };
-    // The drop count max: the droppable groups at the floor keep
-    // window. Past it, the last-resort compaction takes over.
-    let max_drops = max_droppable_groups(&events_refs, 2);
-
-    // Read the sticky state. A corrupt state re-engages at the base
-    // caps with no drops: the safe side. A state older than the last
-    // compaction boundary re-engages fresh at the boundary index:
-    // pre-compaction measurements poison the growth rate and the
-    // drop search (docs/auto-compact-plan.md section 4.3).
-    let session_dir = Path::new(&args.session);
-    let boundary_seq = boundary.as_ref().map(|b| b.seq).unwrap_or(0);
-    let fresh_state = |boundary_seq: usize| CompactState {
-        caps: base_caps,
-        keep: compact_keep_events.max(2),
-        drops: 0,
-        engaged_at: 0,
-        last_tokens: 0,
-        last_at: 0,
-        drops_at_last: 0,
-        per_group: 0,
-        boundary_seq,
-    };
-    let state = match read_compact_state(session_dir) {
-        StateLoad::Absent => None,
-        StateLoad::Corrupt => {
-            eprintln!("Warning: corrupt compact.json; re-engaging at the base caps");
-            Some(fresh_state(boundary_seq))
-        }
-        StateLoad::Found(s) => {
-            if boundary_seq > 0 && s.boundary_seq < boundary_seq {
-                eprintln!("Info: compact.json predates the last compaction; re-engaging fresh at the boundary");
-                Some(fresh_state(boundary_seq))
-            } else {
-                Some(s)
-            }
-        }
-    };
-
-    let builder = decide_form()
-        .n_events(n)
-        .budget_tokens(budget_tokens)
-        .measurements(&measurements)
-        .base_caps(base_caps)
-        .keep_events(compact_keep_events)
-        .max_drops(max_drops)
-        .boundary_seq(boundary_seq);
-    let (form, persist) = if let Some(s) = state {
-        builder.state(s).call()
-    } else {
-        builder.call()
-    };
-    if let Some(s) = persist {
-        write_compact_state(session_dir, &s);
-    }
-
-    // The request-time exclusion of the last assistant group (docs/
-    // auto-compact-plan.md section 4.3). Nothing is persisted: the
-    // log keeps the group. The budget decision above ran on the
-    // full projected list, so the state stays consistent.
+    // The request-time exclusion of the last assistant group.
     let sel_events: Vec<&Ev> = if args.drop_last_assistant {
         drop_last_assistant_group(&events_refs)
     } else {
         events_refs.clone()
     };
 
-    // The summary framing item: one user-role message carrying the
-    // last summary. It is frozen in the log, so the request prefix
-    // stays byte-stable between compaction moves.
-    let framing: Option<serde_json::Value> =
-        boundary.as_ref().map(|b| summary_framing_item(&b.summary));
-    let prepend_summary = |items: &mut Vec<serde_json::Value>,
-                           framing: &Option<serde_json::Value>| {
-        if let Some(f) = framing {
-            items.insert(0, f.clone());
-        }
+    // The framing item: the handoff document when present, else the
+    // boundary summary from the log. Both are user-role messages that
+    // lead the post-boundary events (docs/phase-2-plan.md 4.3 step 5).
+    let session_dir = Path::new(&args.session);
+    let handoff_doc = std::fs::read_to_string(session_dir.join("handoff.md")).ok();
+    let framing: Option<serde_json::Value> = match (&handoff_doc, &boundary) {
+        (Some(doc), _) => Some(summary_framing_item(doc.trim())),
+        (None, Some(b)) => Some(summary_framing_item(&b.summary)),
+        (None, None) => None,
     };
 
-    let items = match &form {
-        RequestForm::Full => {
-            let mut items = build_items(
-                &sel_events,
-                n,
-                &Caps {
-                    result: 0,
-                    text: 0,
-                },
-                tool_result_max_chars,
-                &drop_pair_ids(&events_refs, n),
-                &ptrs,
-            );
-            prepend_summary(&mut items, &framing);
-            items
-        }
-        RequestForm::Compact {
-            caps,
-            keep,
-            drops,
-        } => {
-            let mut items = compact_candidate(
-                &sel_events,
-                *keep,
-                *drops,
-                caps,
-                tool_result_max_chars,
-                &ptrs,
-            );
-            prepend_summary(&mut items, &framing);
-            items
-        }
-        RequestForm::Exhausted {
-            caps,
-            keep,
-            drops,
-        } => {
-            let mut items = compact_candidate(
-                &sel_events,
-                *keep,
-                *drops,
-                caps,
-                tool_result_max_chars,
-                &ptrs,
-            );
-            prepend_summary(&mut items, &framing);
-            // The terminal handoff retired (docs/auto-compact-plan.md
-            // section 4.3): the Exhausted form signals the last-
-            // resort in-session compaction. It carries the compact-
-            // candidate request so the loop can proceed in the
-            // current form when the forced compaction fails.
-            let request = make_request(&items);
+    // The projected events: post-boundary when a boundary exists,
+    // else the full log. No sticky state, no keep halving, no
+    // group-drop levers (docs/phase-2-plan.md stage 0).
+    let drop_pairs = drop_pair_ids(&events_refs, events_refs.len());
+    let mut items = build_items(
+        &sel_events,
+        sel_events.len(),
+        &Caps { result: 0, text: 0 },
+        tool_result_max_chars,
+        &drop_pairs,
+        &ptrs,
+    );
+    if let Some(f) = &framing {
+        items.insert(0, f.clone());
+    }
+
+    // Budget check: estimate the request size in tokens (chars/4).
+    // Only emit `context_exhausted` when a boundary already exists
+    // (i.e. an earlier compaction ran but the context is still too
+    // big). Without a boundary, the threshold or overflow path in
+    // the harness handles it (docs/phase-2-plan.md 4.3 step 5).
+    let request = make_request(&items);
+    if boundary.is_some() {
+        let est_tokens = serde_json::to_string(&request)
+            .map(|s| s.chars().count() / 4)
+            .unwrap_or(0);
+        if est_tokens > budget_tokens {
             let exhausted = serde_json::json!({
                 "v": 1,
                 "type": "context_exhausted",
-                "ts": chrono_utc_now(),
-                "message": "Context budget exhausted after compaction. The last-resort in-session compaction takes over: compact this session and continue in place.",
+                "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                "message": "Context budget exhausted. The last-resort in-session compaction takes over.",
                 "request": request,
             });
             println!("{}", exhausted);
             return;
         }
-    };
-    println!("{}", make_request(&items));
-}
+    }
 
-fn chrono_utc_now() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    println!("{}", request);
 }
 
 /// The summary-input request of the in-session compaction
@@ -1953,60 +1437,6 @@ not json at all
     /// The stage candidate drops every schema-error pair from the
     /// request, keep window included (correction 60). The task
     /// statement survives.
-    #[test]
-    fn compact_candidate_drops_schema_error_pairs() {
-        let mut events: Vec<Ev> = vec![Ev::User {
-            text: "the task".to_string(),
-        }];
-        for i in 0..30 {
-            events.push(Ev::Assistant {
-                text: "x".to_string(),
-                calls: vec![Call {
-                    id: format!("c{i}"),
-                    name: "bash".to_string(),
-                    args_str: "{}".to_string(),
-                }],
-                reasoning: vec![],
-                usage_input: None,
-            });
-            // Half the steps fail schema validation. They are the
-            // self-priming pairs (FT-008).
-            if i % 2 == 0 {
-                events.push(ev_schema_error(&format!("r{i}")));
-            } else {
-                events.push(ev_res(&format!("r{i}"), &"R".repeat(3000)));
-            }
-        }
-        let refs: Vec<&Ev> = events.iter().collect();
-        // The base caps, the full keep window, no drops.
-        let out = compact_candidate(
-            &refs,
-            4,
-            0,
-            &Caps {
-                result: 8000,
-                text: 2000,
-            },
-            20000,
-            &test_ptrs(),
-        );
-        let s = serde_json::to_string(&out).unwrap();
-        assert!(s.contains("the task"), "the task statement must survive");
-        // Correction 60: no failed pair survives in the request.
-        // The oldest pair r0 and the keep-tail pair r28 are both
-        // out: the history of empty-argument failures self-priming
-        // the next call (FT-008).
-        assert!(
-            !s.contains("\"call_id\":\"r0\""),
-            "the old failed pair must be out"
-        );
-        let last_even = 28;
-        assert!(
-            !s.contains(&format!("\"call_id\":\"r{last_even}\"")),
-            "the keep-tail failed pair must be out too"
-        );
-    }
-
     /// The full form drops the schema-error pairs even when the log
     /// fits the budget (correction 60). A fitting log is no reason
     /// to hand the model its own failures.
@@ -2243,14 +1673,6 @@ not json at all
             "{out}"
         );
     }
-
-    #[test]
-    fn next_keeps_halves_to_floor() {
-        assert_eq!(next_keeps(24), vec![24, 12, 6, 3, 2]);
-        assert_eq!(next_keeps(8), vec![8, 4, 2]);
-        assert_eq!(next_keeps(2), vec![2]);
-    }
-
     #[test]
     fn assistant_compact_shrinks_text_and_args() {
         let ev = Ev::Assistant {
@@ -2370,457 +1792,27 @@ not json at all
     /// A session whose reasoning items outgrow the budget still fits
     /// after compaction. The compacted events drop the items. The
     /// full tail keeps them. The task statement survives.
-    #[test]
-    fn compact_candidate_drops_reasoning_from_compacted_events() {
-        let big_thinking = "t".repeat(5000);
-        let mut events = vec![Ev::User {
-            text: "the task".to_string(),
-        }];
-        for i in 0..5 {
-            events.push(Ev::Assistant {
-                text: "x".repeat(100),
-                calls: vec![Call {
-                    id: format!("c{i}"),
-                    name: "bash".to_string(),
-                    args_str: "{}".to_string(),
-                }],
-                reasoning: vec![serde_json::json!({
-                    "type": "reasoning",
-                    "id": format!("rs_{i}"),
-                    "status": "completed",
-                    "content": [{ "type": "reasoning_text", "text": big_thinking }],
-                    "summary": [],
-                    "encrypted_content": null
-                })],
-                usage_input: None,
-            });
-        }
-        let refs: Vec<&Ev> = events.iter().collect();
-        let full = build_items(
-            &refs,
-            refs.len(),
-            &Caps { result: 0, text: 0 },
-            20000,
-            &HashSet::new(),
-            &test_ptrs(),
-        );
-        assert!(
-            serde_json::to_string(&full).unwrap().len() > 12000,
-            "the full form must outgrow the budget"
-        );
-        // A small keep window: the compact region drops the
-        // reasoning items, the full tail keeps them.
-        let out = compact_candidate(
-            &refs,
-            3,
-            0,
-            &Caps {
-                result: 8000,
-                text: 2000,
-            },
-            20000,
-            &test_ptrs(),
-        );
-        let s = serde_json::to_string(&out).unwrap();
-        assert!(s.contains("the task"), "the task statement must survive");
-        // The compacted events drop their items. The full tail keeps
-        // its items.
-        assert!(!s.contains("rs_0"), "compacted turn 0 must drop its item");
-        assert!(!s.contains("rs_1"), "compacted turn 1 must drop its item");
-        assert!(s.contains("rs_3"), "the full tail keeps its items");
-        assert!(s.contains("rs_4"), "the full tail keeps its items");
-    }
-
     /// The keep window halves down to two across over-budget
     /// readings. It never grows back.
-    #[test]
-    fn decide_form_halves_the_keep_window() {
-        let mut state: Option<CompactState> = None;
-        let mut keeps = Vec::new();
-        let mut drops = 0;
-        for i in 0..6 {
-            let n = 6 + i * 2;
-            let meas: Vec<(usize, usize)> = (0..=7)
-                .map(|j| (j, 100_000 + 4_000 * j))
-                .filter(|(idx, _)| *idx < n)
-                .collect();
-            let builder = decide_form()
-                .n_events(n)
-                .budget_tokens(50_000)
-                .measurements(&meas)
-                .base_caps(Caps {
-                    result: 500,
-                    text: 100,
-                })
-                .keep_events(24)
-                .max_drops(100)
-                .boundary_seq(0);
-            let (form, persist) = if let Some(s) = state {
-                builder.state(s).call()
-            } else {
-                builder.call()
-            };
-            state = persist;
-            match form {
-                RequestForm::Compact {
-                    keep, drops: dr, ..
-                } => {
-                    keeps.push(keep);
-                    drops = dr;
-                }
-                other => panic!("expected compact, got {other:?}"),
-            }
-        }
-        assert_eq!(
-            keeps,
-            vec![24, 12, 6, 3, 2, 2],
-            "halving to two, then stable at two"
-        );
-        assert_eq!(
-            drops, 1,
-            "the last over-budget reading drops one trial group"
-        );
-    }
-
     /// The drop jump is measured. Without a drop measurement, the
     /// over-budget reading drops one group (the trial). After the
     /// drop measurement, the jump is the measured per-group savings.
-    #[test]
-    fn decide_form_jump_is_measured() {
-        let s0 = CompactState {
-            caps: Caps {
-                result: 500,
-                text: 100,
-            },
-            keep: 2,
-            drops: 0,
-            engaged_at: 0,
-            last_tokens: 0,
-            last_at: 0,
-            drops_at_last: 0,
-            per_group: 0,
-            boundary_seq: 0,
-        };
-        // No compact measurement yet: the blind crawl drops one
-        // group per run.
-        let (form, _persist) = decide_form()
-            .n_events(10)
-            .budget_tokens(50_000)
-            .measurements(&[])
-            .state(s0)
-            .base_caps(Caps {
-                result: 500,
-                text: 100,
-            })
-            .keep_events(24)
-            .max_drops(100)
-            .boundary_seq(0)
-            .call();
-        assert_eq!(
-            form,
-            RequestForm::Compact {
-                caps: s0.caps,
-                keep: 2,
-                drops: 1
-            },
-            "the blind crawl drops one group"
-        );
-        // The measured jump. The trial drop saved 500 tokens for
-        // one group. The predicted overage is 9,500 tokens: the
-        // jump is 19 more groups, 20 total.
-        let s1 = CompactState {
-            caps: s0.caps,
-            keep: 2,
-            drops: 1,
-            engaged_at: 0,
-            last_tokens: 60_000,
-            last_at: 5,
-            drops_at_last: 0,
-            per_group: 0,
-                    boundary_seq: 0,
-        };
-        let meas: Vec<(usize, usize)> = vec![(5, 60_000), (9, 59_500)];
-        let (form, _persist) = decide_form()
-            .n_events(10)
-            .budget_tokens(50_000)
-            .measurements(&meas)
-            .state(s1)
-            .base_caps(Caps {
-                result: 500,
-                text: 100,
-            })
-            .keep_events(24)
-            .max_drops(100)
-            .boundary_seq(0)
-            .call();
-        match form {
-            RequestForm::Compact { drops, .. } => {
-                assert_eq!(drops, 20, "the measured jump: one trial plus nineteen");
-            }
-            other => panic!("expected compact, got {other:?}"),
-        }
-    }
-
     /// The drop count drops the oldest droppable step groups.
-    #[test]
-    fn compact_candidate_drops_oldest_steps() {
-        let ev = vec![
-            Ev::User {
-                text: "task".into(),
-            },
-            ev_asst("step one"),
-            ev_res("1", "ok"),
-            ev_res("2", "ok"),
-            ev_asst("step two"),
-            ev_res("3", "ok"),
-            ev_asst("step three"),
-            ev_res("4", "ok"),
-            ev_asst("step four"),
-            ev_res("5", "ok"),
-            ev_asst("step five"),
-            ev_res("6", "ok"),
-            ev_asst("step six"),
-            ev_res("7", "ok"),
-            ev_asst("step seven"),
-            ev_res("8", "ok"),
-        ];
-        let refs: Vec<&Ev> = ev.iter().collect();
-        let caps = Caps {
-            result: 500,
-            text: 100,
-        };
-        // The keep window is two events. The seven assistant
-        // groups are droppable. Two drops remove the two oldest.
-        let items = compact_candidate(&refs, 2, 2, &caps, 20_000, &test_ptrs());
-        let flat = serde_json::to_string(&items).unwrap();
-        assert!(!flat.contains("step one"));
-        assert!(!flat.contains("step two"));
-        assert!(flat.contains("step three"));
-        assert!(flat.contains("step seven"));
-        assert_eq!(
-            flat.matches("step ").count() + flat.matches("step seven").count()
-                - flat.matches("step seven").count(),
-            5,
-            "the five newest step markers survive"
-        );
-    }
-
     /// Zero drops keep every step.
-    #[test]
-    fn compact_candidate_keeps_all_steps_with_zero_drops() {
-        let ev = [
-            Ev::User {
-                text: "task".into(),
-            },
-            ev_asst("step one"),
-            ev_res("1", "ok"),
-            ev_asst("step two"),
-            ev_res("2", "ok"),
-        ];
-        let refs: Vec<&Ev> = ev.iter().collect();
-        let items = compact_candidate(
-            &refs,
-            2,
-            0,
-            &Caps {
-                result: 500,
-                text: 100,
-            },
-            20_000,
-            &test_ptrs(),
-        );
-        let flat = serde_json::to_string(&items).unwrap();
-        assert!(flat.contains("step one"));
-        assert!(flat.contains("step two"));
-    }
-
     /// The drop count at its max, with the estimate still over the
     /// budget, ends the turn with the handoff.
-    #[test]
-    fn decide_form_exhausts_at_the_max_drops() {
-        let s = CompactState {
-            caps: Caps {
-                result: 500,
-                text: 100,
-            },
-            keep: 2,
-            drops: 5,
-            engaged_at: 0,
-            last_tokens: 90_000,
-            last_at: 4,
-            drops_at_last: 5,
-            per_group: 500,
-            boundary_seq: 0,
-        };
-        let meas: Vec<(usize, usize)> = vec![(4, 90_000)];
-        let (form, _persist) = decide_form()
-            .n_events(5)
-            .budget_tokens(50_000)
-            .measurements(&meas)
-            .state(s)
-            .base_caps(Caps {
-                result: 500,
-                text: 100,
-            })
-            .keep_events(24)
-            .max_drops(5)
-            .boundary_seq(0)
-            .call();
-        assert!(
-            matches!(&form, RequestForm::Exhausted { .. }),
-            "the max drop count with an over-budget estimate is the handoff"
-        );
-    }
-
     /// The per-event growth is the token delta over the event delta
     /// of the last two measurements. A shrunken request reads as
     /// zero growth.
-    #[test]
-    fn measured_growth_rate_reads_the_last_two_measurements() {
-        let m: Vec<(usize, usize)> =
-            vec![(0, 1_000), (1, 2_000), (2, 1_900), (3, 2_800), (4, 4_000)];
-        assert_eq!(
-            measured_growth_rate(&m, 0),
-            1_200,
-            "the last two measurements: 4000 - 2800 over one event"
-        );
-        let shrunk: Vec<(usize, usize)> = vec![(0, 9_000), (1, 7_000)];
-        assert_eq!(
-            measured_growth_rate(&shrunk, 0),
-            0,
-            "a shrunken request reads as zero growth"
-        );
-    }
-
     /// The prediction is the last measured input tokens plus one
     /// step of measured growth: the next request adds one turn.
-    #[test]
-    fn predict_tokens_adds_measured_growth() {
-        assert_eq!(
-            predict_tokens(Some((4, 1_000)), 500),
-            1_500,
-            "one appended step at 500 tokens"
-        );
-        assert_eq!(
-            predict_tokens(None, 500),
-            0,
-            "no measurement: the provider window is the backstop"
-        );
-    }
-
     /// A fresh session sends the full log while the measured
     /// estimate fits. The over-budget estimate engages the compact
     /// form once.
-    #[test]
-    fn decide_form_engages_on_over_budget_estimate() {
-        let m: Vec<(usize, usize)> = vec![(0, 10_000), (2, 12_000)];
-        assert!(
-            matches!(
-                decide_form()
-                    .n_events(2)
-                    .budget_tokens(30_000)
-                    .measurements(&m)
-                    .base_caps(Caps {
-                        result: 500,
-                        text: 100
-                    })
-                    .keep_events(24)
-                    .max_drops(100)
-                    .boundary_seq(0)
-                    .call()
-                    .0,
-                RequestForm::Full
-            ),
-            "the estimate fits: the full log"
-        );
-        let (form, persist) = decide_form()
-            .n_events(3)
-            .budget_tokens(10_000)
-            .measurements(&m)
-            .base_caps(Caps {
-                result: 500,
-                text: 100,
-            })
-            .keep_events(24)
-            .max_drops(100)
-            .boundary_seq(0)
-            .call();
-        assert!(
-            matches!(
-                &form,
-                RequestForm::Compact {
-                    keep: 24,
-                    drops: 0,
-                    ..
-                }
-            ),
-            "the over-budget estimate engages at the full keep window"
-        );
-        assert!(persist.is_some(), "the engagement persists");
-    }
-
     /// The compact candidate is byte-stable between runs on the
     /// same log: the cache property.
-    #[test]
-    fn compact_candidate_is_byte_stable_between_runs() {
-        let ev = [
-            Ev::User {
-                text: "task".into(),
-            },
-            ev_asst("step one"),
-            ev_res("1", "ok"),
-            Ev::User {
-                text: "more".into(),
-            },
-            ev_asst("step two"),
-            ev_res("2", "fine"),
-        ];
-        let refs: Vec<&Ev> = ev.iter().collect();
-        let caps = Caps {
-            result: 500,
-            text: 100,
-        };
-        let a = compact_candidate(&refs, 24, 0, &caps, 20_000, &test_ptrs());
-        let b = compact_candidate(&refs, 24, 0, &caps, 20_000, &test_ptrs());
-        assert_eq!(
-            serde_json::to_string(&a).unwrap(),
-            serde_json::to_string(&b).unwrap(),
-            "the same form re-renders byte-identical: the cache property"
-        );
-    }
-
     /// The state file round-trips. A corrupt file re-engages; the
     /// absent file is a fresh session.
-    #[test]
-    fn compact_state_round_trips_and_corrupt_reengages() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path();
-        // Absent: no state.
-        assert!(matches!(read_compact_state(path), StateLoad::Absent));
-        let s = CompactState {
-            caps: Caps {
-                result: 500,
-                text: 100,
-            },
-            keep: 12,
-            drops: 3,
-            engaged_at: 42,
-            last_tokens: 80_000,
-            last_at: 50,
-            drops_at_last: 3,
-            per_group: 120,
-            boundary_seq: 0,
-        };
-        write_compact_state(path, &s);
-        assert!(
-            matches!(read_compact_state(path), StateLoad::Found(st) if st == s),
-            "the state round-trips"
-        );
-        // Corrupt: the re-engage path.
-        std::fs::write(path.join("compact.json"), "not json").unwrap();
-        assert!(matches!(read_compact_state(path), StateLoad::Corrupt));
-    }
-
     /// Per-event item offsets: `offsets[i + 1]` starts the event
     /// after `i`; the final entry is the list end.
     #[test]
@@ -3071,48 +2063,6 @@ not json at all
     /// compaction re-engages fresh at the boundary index. The
     /// re-engage path is the `fresh_state` closure of main; the
     /// state loader exposes the boundary_seq field the check keys on.
-    #[test]
-    fn state_round_trip_keeps_the_boundary_seq() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = CompactState {
-            caps: Caps {
-                result: 500,
-                text: 100,
-            },
-            keep: 2,
-            drops: 3,
-            engaged_at: 4,
-            last_tokens: 80_000,
-            last_at: 50,
-            drops_at_last: 3,
-            per_group: 120,
-            boundary_seq: 17,
-        };
-        write_compact_state(dir.path(), &s);
-        match read_compact_state(dir.path()) {
-            StateLoad::Found(st) => {
-                assert_eq!(st, s, "the boundary_seq round-trips");
-            }
-            other => panic!("expected found state, got {other:?}"),
-        }
-        // A legacy state without the key loads as boundary_seq 0.
-        let path = dir.path().join("compact.json");
-        std::fs::write(
-            &path,
-            r#"{"v":2,"caps":{"result":500,"text":100},"keep":2,"drops":0,"engaged_at":0,"last_tokens":0,"last_at":0,"drops_at_last":0,"per_group":0}"#,
-        )
-        .unwrap();
-        match read_compact_state(dir.path()) {
-            StateLoad::Found(st) => {
-                assert_eq!(
-                    st.boundary_seq, 0,
-                    "a legacy state loads with the no-boundary marker"
-                );
-            }
-            other => panic!("expected found state, got {other:?}"),
-        }
-    }
-
     /// The two-prefix drop rule: the truncated pair goes out of every
     /// request form, like the schema-error pair (correction 60
     /// extended, docs/auto-compact-plan.md section 4.4).

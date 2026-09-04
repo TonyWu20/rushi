@@ -60,7 +60,7 @@ fn main() {
         }
         Command::Step { .. } => {
             signals::install();
-            step::do_step(&cfg, &session_dir);
+            step::do_step(&cfg, &session_dir, step::StepMode::Step);
         }
     }
 }

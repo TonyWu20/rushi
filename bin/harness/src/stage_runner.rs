@@ -382,6 +382,7 @@ impl StageRunner for SubprocessRunner {
                 .and_then(|s| s.as_u64()),
             tokens_before: v.get("tokens_before").and_then(|t| t.as_u64()),
             tokens_after: v.get("tokens_after").and_then(|t| t.as_u64()),
+            summary: v.get("summary").and_then(|s| s.as_str()).map(String::from),
         })
     }
 }

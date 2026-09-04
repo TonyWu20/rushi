@@ -40,12 +40,10 @@ tools_root = "tools"
 # The cap of the model request in input tokens. It matches the
 # context window of the active model (the [model] context_tokens,
 # 262144). `assemble` clamps it to the input budget: the window
-# minus max_output_tokens (229376). The sticky compact form
-# (correction 62) engages when the predicted input outgrows the
-# cap. The token-only decision compares the measured
-# usage.input_tokens growth against it. No char mechanism. No
-# chars-per-token rate. No char budget knob. The proactive compact
-# trigger is the design of docs/auto-compact-plan.md.
+# minus max_output_tokens (229376). The token-only decision compares
+# the measured usage.input_tokens growth against it. No char
+# mechanism. No chars-per-token rate. No char budget knob. The
+# proactive compact trigger is the design of docs/auto-compact-plan.md.
 context_budget_tokens = 262144
 read_limit = 2000
 read_max_line_length = 2000
@@ -56,23 +54,10 @@ tool_result_max_chars = 20000
 bash_max_output_bytes = 16000
 bash_timeout_default = 60
 bash_timeout_max = 300
-# Auto-compact knobs (docs/auto-compact-plan.md, correction 63).
-# The compact form freezes at the caps below and trims to the keep
-# window. The token budget engages the compact form once, at the
-# base caps below. After that the compact form is sticky: the caps
-# freeze, the keep window halves down to two, and the oldest step
-# groups drop out. Each over-budget reading moves one lever: a keep
-# halving, or a drop jump sized by the measured per-group savings.
-# The levers never move back. The compact region re-renders only
-# when a lever moves, so the request prefix stays byte-stable for
-# the provider prefix cache in between. The lever state persists in
-# the session dir as compact.json.
-#
-# The caps are the freeze values. They are coherent with the token
-# budget: the compact request must fit under it. The 8000/2000
-# values of the char era broke that coherence: the compact request
-# outgrew both the budget and the provider window.
-compact_keep_events = 24
+# The compact form caps. The compact request must fit under the
+# token budget. The 8000/2000 values of the char era broke that
+# coherence: the compact request outgrew both the budget and the
+# provider window.
 compact_result_chars = 500
 compact_text_chars = 200
 
@@ -83,15 +68,37 @@ compact_text_chars = 200
 # compact_reserve_tokens: the trigger sits at context_budget_tokens
 # minus the reserve.
 # compact_keep_tokens: the keep window of the compact cut.
-# compact_summary_max_tokens: the output cap of the summary call.
-# It defaults to 0.8 of the reserve.
 compact_enabled = true
 compact_reserve_tokens = 16384
 compact_keep_tokens = 20000
-compact_summary_max_tokens = 13107
+# The context-overflow strategy (docs/phase-2-plan.md 3.2). The
+# only shipped value is `compact`: in-session shadow compact. The
+# key is a seam for future strategies.
+compact_strategy = "compact"
+# The awaiting_approval wait bound in seconds. Absent: the loop
+# waits for the answer without limit. Set: on timeout the loop
+# synthesizes a deny tool_result and continues.
+# approval_timeout_s = 300
 # compact_reasoning_effort: optional. The summary call's reasoning
 # effort. A cheaper value cuts the summary latency on a local GPU.
 # Omitted: the session effort stands.
+
+# Lifecycle hook registration (docs/loop-lifecycle-hooks.md 4.1).
+# The on list is ordered. Each entry binds one hook command to one
+# window. The harness fires the hooks in order at each window.
+# timeout_ms bounds the hook lifetime; a timed-out hook is a
+# non-blocking failure (the window default applies).
+[hooks]
+timeout_ms = 30000
+# Example hook registrations (uncomment to enable):
+# [[hooks.on]]
+# window  = "exhausted.handle"
+# command = "harness-hook-compact"
+#
+# [[hooks.on]]
+# window  = "overflow.resolve"
+# command = "harness-hook-compact"
+# args    = []
 
 [system_prompt]
 # Borrowed from the pi coding agent default prompt.
