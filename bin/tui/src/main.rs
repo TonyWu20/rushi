@@ -85,6 +85,7 @@ fn key_input(k: &cevent::KeyEvent) -> Option<Key> {
             cevent::KeyCode::Char('c') => Some(Key::CtrlC),
             cevent::KeyCode::Char('e') => Some(Key::CtrlE),
             cevent::KeyCode::Char('j') => Some(Key::CtrlJ),
+            cevent::KeyCode::Char('k') => Some(Key::CtrlK),
             cevent::KeyCode::Char('o') => Some(Key::CtrlO),
             cevent::KeyCode::Char('t') => Some(Key::CtrlT),
             cevent::KeyCode::Char('x') => Some(Key::CtrlX),

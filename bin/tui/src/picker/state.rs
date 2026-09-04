@@ -7,7 +7,7 @@
 //!
 //! Keys the state machine handles:
 //! - type a char → edit the query
-//! - `j` / `k` or arrows → move the cursor
+//! - `Ctrl+J` / `Ctrl+K` or arrows → move the cursor
 //! - `PgUp` / `PgDn` → page
 //! - `Home` / `End` → jump
 //! - `Enter` → commit
@@ -303,8 +303,8 @@ impl PickerState {
                 self.close();
                 PickAction::Commit(idx)
             }
-            Key::Down | Key::Char('j') => self.move_down(count),
-            Key::Up | Key::Char('k') => self.move_up(count),
+            Key::Down | Key::CtrlJ => self.move_down(count),
+            Key::Up | Key::CtrlK => self.move_up(count),
             Key::PgDn => self.page_down(count),
             Key::PgUp => self.page_up(count),
             Key::Home => self.go_home(),
@@ -371,18 +371,18 @@ mod tests {
     #[test]
     fn move_down_clamps() {
         let mut s = open_picker(3);
-        s.press(&Key::Char('j'), 3, 5, 4);
+        s.press(&Key::CtrlJ, 3, 5, 4);
         assert_eq!(s.cursor(), 1);
-        s.press(&Key::Char('j'), 3, 5, 4);
+        s.press(&Key::CtrlJ, 3, 5, 4);
         assert_eq!(s.cursor(), 2);
-        s.press(&Key::Char('j'), 3, 5, 4);
+        s.press(&Key::CtrlJ, 3, 5, 4);
         assert_eq!(s.cursor(), 2, "clamped at last item");
     }
 
     #[test]
     fn move_up_from_top_stays() {
         let mut s = open_picker(3);
-        s.press(&Key::Char('k'), 3, 5, 4);
+        s.press(&Key::CtrlK, 3, 5, 4);
         assert_eq!(s.cursor(), 0, "stays at top");
     }
 

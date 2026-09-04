@@ -412,13 +412,12 @@ impl Editor {
         // Find the nearest `@` at or before the cursor (the last
         // `@` on the line up to the caret).
         let at_pos = chars[..col].iter().rposition(|&c| c == '@')?;
-        // The `@` must be at a word boundary: start of line or the
-        // preceding char is not a word char.
-        if at_pos > 0 {
-            let prev = chars[at_pos - 1];
-            if is_word_char(prev) {
-                return None;
-            }
+        // The `@` must be at start of line or preceded by whitespace.
+        // A preceding word or punctuation character means the `@` is
+        // part of a larger token (e.g. `user@domain`) and should not
+        // trigger the picker (docs/tui-file-picker.md section 5).
+        if at_pos > 0 && !chars[at_pos - 1].is_whitespace() {
+            return None;
         }
         let query: String = chars[at_pos + 1..col].iter().collect();
         Some((at_pos, query))
@@ -5167,11 +5166,12 @@ mod tests {
     }
 
     #[test]
-    fn at_token_at_word_start_is_detected() {
-        // "hello @src/m" — the `@` at col 6 follows a space, so it is
-        // at a word boundary. The query is the text up to the caret.
-        let e = ed_at_end("hello @src/m");
-        assert_eq!(e.at_token_info(), Some((6, "src/m".into())));
+    fn at_token_preceded_by_only_whitespace_is_detected() {
+        // "   @src/m" — the `@` at col 3 is preceded only by spaces,
+        // so it is a valid trigger. The query is the text up to the
+        // caret.
+        let e = ed_at_end("   @src/m");
+        assert_eq!(e.at_token_info(), Some((3, "src/m".into())));
     }
 
     #[test]
@@ -5189,6 +5189,14 @@ mod tests {
     }
 
     #[test]
+    fn at_token_after_word_chars_is_not_detected() {
+        // "hello@src/m" — the `@` at col 5 is glued to "hello" with no
+        // separator, so it is part of a larger token: no trigger.
+        let e = ed_at_end("hello@src/m");
+        assert_eq!(e.at_token_info(), None);
+    }
+
+    #[test]
     fn at_token_needs_insert_mode() {
         let mut e = ed_at_end("@src/main.rs");
         e.mode = Mode::Normal;
@@ -5198,22 +5206,33 @@ mod tests {
     #[test]
     fn at_token_query_is_the_text_between_at_and_caret() {
         // The caret mid-token: the query stops at the caret, not the
-        // end of the line. "abc @src/": the @ is at col 4, the caret
-        // at col 8 sits just past "src".
-        let mut e = ed("abc @src/xyz tail");
-        e.col = 8;
-        assert_eq!(e.at_token_info(), Some((4, "src".into())));
+        // end of the line. "  @src/xyz tail" with caret at col 6:
+        // the @ is at col 2, the caret sits just past "src".
+        let mut e = ed("  @src/xyz tail");
+        e.col = 6;
+        assert_eq!(e.at_token_info(), Some((2, "src".into())));
     }
 
     #[test]
     fn at_token_finds_last_at_before_caret() {
-        // Two tokens on the line: the nearest one to the caret wins.
+        // Two `@` tokens on the line: the nearest one to the caret wins.
+        // Both are valid: the first is at start-of-line, the second is
+        // preceded by a space.
         let mut e = ed("@a @b");
         e.col = 5; // caret past the second token
         assert_eq!(e.at_token_info(), Some((3, "b".into())));
-        // The caret just past the first token: the first token wins.
+        // The caret just past the first token: the first token is at
+        // col 0 (start of line) → valid.
         e.col = 2;
         assert_eq!(e.at_token_info(), Some((0, "a".into())));
+    }
+
+    #[test]
+    fn at_token_glued_to_word_is_not_detected() {
+        // "foo@b" — the `@` at col 3 is glued to "foo" (no whitespace
+        // before it), so it is part of a larger token: not a trigger.
+        let e = ed_at_end("foo@b");
+        assert_eq!(e.at_token_info(), None);
     }
 
     #[test]
