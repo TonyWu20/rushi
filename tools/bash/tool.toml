@@ -1,6 +1,6 @@
 [tool]
 description = "Run a shell command in the session working directory. Returns combined output and exit code."
-command = "bash"
+command = "harness-bash"
 args = []
 timeout_ms = 310000
 

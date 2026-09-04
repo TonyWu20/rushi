@@ -10,7 +10,7 @@ trap 'rm -rf "$TEST_DIR"' EXIT
 READ_BIN="$TOOLS_DIR/read/bin/read"
 WRITE_BIN="$TOOLS_DIR/write/bin/write"
 EDIT_BIN="$TOOLS_DIR/edit/bin/edit"
-BASH_BIN="$TOOLS_DIR/bash/bin/bash"
+BASH_BIN="$TOOLS_DIR/bash/bin/harness-bash"
 
 # Fallback to target/debug if bin/ not found
 if [ ! -f "$READ_BIN" ]; then
@@ -23,7 +23,7 @@ if [ ! -f "$EDIT_BIN" ]; then
   EDIT_BIN="$(cd "$SCRIPT_DIR/../target/debug" && pwd)/edit"
 fi
 if [ ! -f "$BASH_BIN" ]; then
-  BASH_BIN="$(cd "$SCRIPT_DIR/../target/debug" && pwd)/bash"
+  BASH_BIN="$(cd "$SCRIPT_DIR/../target/debug" && pwd)/harness-bash"
 fi
 
 PASSED=0

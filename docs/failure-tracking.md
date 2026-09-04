@@ -440,3 +440,56 @@ pending handoff. While those conditions hold, the three letters
 (and `h`) do not type in a typing mode. Left as is: the block is
 the feature, not a defect.
 
+## FT-013 — The `bash` tool binary shadows the system shell and
+deads every bash-script extension
+
+**Symptom:** The `statusline`, `frame`, and `notify` extensions die
+within seconds of TUI start. The extension log (the `TUI_EXT_LOG`
+seam) records `spawn`, `exit=2`, three respawns at the 1 s/2 s/4 s
+backoff, then `dead (budget spent)` for each. The `mermaid`
+extension (a native binary) stays alive. Observed 2026-09-04 in a
+shell where the direnv `.envrc` was active.
+
+**Root cause:** FT-007's `.envrc` puts `$PWD/target/debug` on
+`PATH` so `tui` and `harness` resolve. The same directory holds the
+harness tool binary `bash` (built by `tools/bash` into
+target/debug). In that shell, `bash` resolves to the Rust tool,
+not the system shell. The extension host spawns each
+bash-script extension via `execvp` of the manifest command with
+the manifest args (`bash statusline.sh`). The Rust tool rejects
+`statusline.sh` as an unexpected argument and exits 2. The host
+respawns with the same result and marks the extension dead after
+the budget. The `.envrc` itself is sound; it exposed a latent
+name collision.
+
+**Fix:** Renamed the tool binary from `bash` to `harness-bash`.
+The agent-facing tool name stays `bash` (the `tools/bash`
+directory and its dispatch name are unchanged).
+`tools/bash/Cargo.toml` builds `[[bin]] name = "harness-bash"`;
+`tools/bash/tool.toml` sets `command = "harness-bash"`. `route`
+(`bin/route/src/main.rs`) resolves the tool binary by the manifest
+`command` name: it probes the build output next to the route
+binary, then the tool's `bin/` copy, then a bare `PATH` lookup,
+regardless of whether the binary name equals the tool directory
+name. `scripts/tool-conformance.sh` and `docs/bash-tool.md`
+reference the new name. `target/debug` no longer contains a file
+named `bash`, so the `.envrc` `PATH` entry no longer shadows the
+system shell and the extension host's `execvp("bash")` reaches the
+real shell.
+
+**Verification:** With `target/debug` prepended to `PATH` (the
+`.envrc` condition), `bash` resolves to the system shell and
+`harness-bash` resolves to the tool binary. `cargo test --workspace`
+passes (497 tests). `scripts/tui-pty-smoke.py` under the same
+prepended `PATH` passes all 15 cases, including
+`ext-statusline-real`, `ext-statusline-repo`, and
+`ext-statusline-slowgit`.
+
+**Residual risk:** Any future tool binary named after a system
+utility shadows that utility for every process that inherits the
+`.envrc` `PATH`. The current tool set (`edit`, `list`, `read`,
+`write`, `log`, `model`, `parse`, `route`, `user`, `assemble`,
+`claim`, `compact`) collides with none of the utilities the
+reference extensions invoke (`bash`, `jq`, `git`, `awk`, `sed`,
+`mktemp`). Re-check at the next tool addition.
+
