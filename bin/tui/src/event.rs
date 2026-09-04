@@ -58,6 +58,11 @@ pub enum EventKind {
     /// The in-session auto-compact failed. The `last_user_seq` of
     /// the marker anchors the threshold trigger cooldown.
     CompactionFailed,
+    /// A user message was retracted by an edit (the user edited a
+    /// pending message; docs/user-message-editing.md). `target` is
+    /// the retracted message's `id`; `reason` is optional (v1:
+    /// `"user_edit"`).
+    UserMessageRetract,
     /// `type` value outside the known vocabulary. Render raw JSON.
     UnknownType,
     /// Known `type` but `v` outside [`SUPPORTED_VERSIONS`] (or missing).
@@ -84,6 +89,7 @@ impl EventKind {
         EventKind::CompactionStarted,
         EventKind::CompactionSummary,
         EventKind::CompactionFailed,
+        EventKind::UserMessageRetract,
     ];
 
     /// The wire `type` value for a semantic kind; `None` for fallback kinds.
@@ -102,6 +108,7 @@ impl EventKind {
             EventKind::CompactionStarted => "compaction_started",
             EventKind::CompactionSummary => "compaction_summary",
             EventKind::CompactionFailed => "compaction_failed",
+            EventKind::UserMessageRetract => "user_message_retract",
             EventKind::UnknownType | EventKind::UnsupportedVersion | EventKind::BadLine => {
                 return None
             }
@@ -125,6 +132,7 @@ impl EventKind {
             "compaction_started" => EventKind::CompactionStarted,
             "compaction_summary" => EventKind::CompactionSummary,
             "compaction_failed" => EventKind::CompactionFailed,
+            "user_message_retract" => EventKind::UserMessageRetract,
             _ => return None,
         })
     }
@@ -159,12 +167,15 @@ pub mod produce {
     /// loop. The queue field is absent: a missing field means
     /// `steer`, and old logs stay valid. The `follow` queue uses
     /// [`user_message_follow`].
+    /// An optional `id` (UUID v4) enables later retraction via
+    /// `user_message_retract` (docs/user-message-editing.md).
     pub fn user_message(content: &str) -> Event {
         Event::Json {
             obj: json!({
                 "v": 1,
                 "type": EventKind::UserMessage.as_wire().expect("semantic kind has a wire name"),
                 "ts": now_ts(),
+                "id": uuid::Uuid::new_v4().to_string(),
                 "content": content,
             }),
         }
@@ -181,8 +192,26 @@ pub mod produce {
                 "v": 1,
                 "type": EventKind::UserMessage.as_wire().expect("semantic kind has a wire name"),
                 "ts": now_ts(),
+                "id": uuid::Uuid::new_v4().to_string(),
                 "content": content,
                 "queue": "follow",
+            }),
+        }
+    }
+
+    /// `user_message_retract` event marking a previously sent
+    /// user message as retracted (docs/user-message-editing.md).
+    ///
+    /// `target` is the `id` of the user message to retract.
+    /// `reason` is optional; v1 uses `"user_edit"`.
+    pub fn user_message_retract(target: &str) -> Event {
+        Event::Json {
+            obj: json!({
+                "v": 1,
+                "type": EventKind::UserMessageRetract.as_wire().expect("semantic kind has a wire name"),
+                "ts": now_ts(),
+                "target": target,
+                "reason": "user_edit",
             }),
         }
     }
@@ -428,6 +457,7 @@ mod tests {
                         | EventKind::CompactionStarted
                         | EventKind::CompactionSummary
                         | EventKind::CompactionFailed
+                        | EventKind::UserMessageRetract
                 ),
                 "type {wire} fell through to fallback"
             );

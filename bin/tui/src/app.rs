@@ -56,6 +56,9 @@ pub enum Key {
     /// The picker preview-pane toggle (docs/tui-file-picker.md
     /// section 4.4).
     CtrlP,
+    /// Alt+Up: recall the pending message queue into the editor
+    /// (docs/user-message-editing.md).
+    AltUp,
     Esc,
     Quit,
     Left,
@@ -135,6 +138,18 @@ pub enum Action {
     /// value to the active model's config entry and flashes the
     /// change.
     CycleEffort,
+    /// Switch to a session by name (docs/tui-command-palette.md §7).
+    SwitchSession(String),
+    /// Set the reasoning effort to a specific value (palette `effort` item).
+    SetEffort(String),
+    /// Invoke an extension-owned command (docs/tui-command-palette.md §10).
+    InvokeExtCommand {
+        ext: String,
+        id: String,
+        value: Option<String>,
+    },
+    /// Bulk recall of pending user messages (docs/user-message-editing.md).
+    RecallQueue,
 }
 
 /// The oldest pending `approval_request` in the active session log.
@@ -265,6 +280,18 @@ pub struct App {
     /// position instead of re-detecting the token (which would
     /// fail if the user types another `@` into the query).
     picker_at: Option<(usize, usize)>,
+    /// The `:` command-palette state machine
+    /// (docs/tui-command-palette.md section 11).
+    palette_state: crate::palette::state::PaletteState,
+    /// Extension-provided palette commands, refreshed when a
+    /// `commands_list` reply lands or a command times out.
+    ext_commands: Vec<crate::palette::items::PaletteItem>,
+    /// The active model's current reasoning effort, used to mark
+    /// the current option in the palette `effort` item.
+    effort_current: String,
+    /// Set when the palette opens so the main loop can request
+    /// `commands` from extensions.
+    palette_cmd_requested: bool,
     /// Latest `ext_status` values, id to value, for the active
     /// session. Maintained incrementally: `set_active` builds it
     /// and each appended watch event updates it. A tick reads this
@@ -412,6 +439,10 @@ impl App {
             picker_source: None,
             picker_root: std::path::PathBuf::new(),
             picker_at: None,
+            palette_state: crate::palette::state::PaletteState::new(),
+            ext_commands: Vec::new(),
+            effort_current: "medium".to_string(),
+            palette_cmd_requested: false,
         }
     }
 
@@ -987,6 +1018,272 @@ impl App {
         self.picker_at = None;
     }
 
+    // ── command palette ────────────────────────────────────────
+
+    pub fn palette_state(&self) -> &crate::palette::state::PaletteState {
+        &self.palette_state
+    }
+
+    pub fn palette_state_mut(&mut self) -> &mut crate::palette::state::PaletteState {
+        &mut self.palette_state
+    }
+
+    /// Open the `:` command palette. The pending_name bar takes
+    /// priority: if it is active the palette does not open.
+    pub fn open_palette(&mut self) {
+        if self.pending_name.is_some() {
+            return;
+        }
+        self.palette_state.open(self.viewport.saturating_sub(4).max(5));
+        self.palette_cmd_requested = true;
+    }
+
+    /// The full un-rank palette item list (built-ins + extension commands).
+    pub fn palette_items(&self) -> Vec<crate::palette::items::PaletteItem> {
+        let mut items = crate::palette::items::builtins(&self.effort_current);
+        items.extend(self.ext_commands.iter().cloned());
+        items
+    }
+
+    /// The ranked palette items for the current stage and query.
+    pub fn palette_ranked(&self) -> Vec<crate::palette::items::PaletteItem> {
+        let state = &self.palette_state;
+        if state.stage == crate::palette::state::PaletteStage::SessionList {
+            let filter = state.filter_query();
+            let items: Vec<crate::palette::items::PaletteItem> = self
+                .sessions
+                .iter()
+                .enumerate()
+                .map(|(i, sid)| {
+                    let is_active = self.active.as_ref() == Some(sid);
+                    let running = self.loop_running(sid);
+                    let mut help = String::new();
+                    help.push_str(&format!("recency {} of {}\n", i + 1, self.sessions.len()));
+                    help.push_str(&format!(
+                        "active: {}\n",
+                        if is_active { "yes" } else { "no" }
+                    ));
+                    help.push_str(&format!(
+                        "loop: {}\n",
+                        if running { "running" } else { "stopped" }
+                    ));
+                    crate::palette::items::PaletteItem {
+                        id: sid.as_str().to_string(),
+                        label: sid.as_str().to_string(),
+                        kind: crate::palette::items::CmdKind::Goto,
+                        hint: if is_active { "active".to_string() } else { String::new() },
+                        help,
+                        options: Vec::new(),
+                        ext: None,
+                    }
+                })
+                .collect();
+            // Rank by the filter portion of the query (text after the goto prefix).
+            let labels: Vec<String> = items.iter().map(|i| i.label.clone()).collect();
+            let ranked = crate::picker::fuzzy::rank_fuzzy(&labels, filter);
+            ranked
+                .into_iter()
+                .map(|i| items[i].clone())
+                .collect()
+        } else {
+            let items = self.palette_items();
+            let labels: Vec<String> = items.iter().map(|i| {
+                format!("{} {}", i.label, i.hint)
+            })
+            .collect();
+            let query = state.filter_query();
+            let ranked = crate::picker::fuzzy::rank_fuzzy(&labels, query);
+            ranked
+                .into_iter()
+                .map(|i| items[i].clone())
+                .collect()
+        }
+    }
+
+    /// Handle the `Enter` key when the palette is open. Returns the
+    /// actions to execute (if any). The caller (press) dispatches
+    /// them through the main loop.
+    pub fn commit_palette(&mut self) -> Vec<Action> {
+        let state = self.palette_state();
+        let ranked = self.palette_ranked();
+        let cursor = state.cursor().min(ranked.len().saturating_sub(1));
+        let item = match ranked.get(cursor) {
+            Some(item) => item,
+            None => {
+                self.palette_state_mut().close();
+                return Vec::new();
+            }
+        };
+        use crate::palette::items::CmdKind;
+        match item.kind {
+            CmdKind::Goto => {
+                // Entering the session sub-list (Root stage only).
+                if state.stage == crate::palette::state::PaletteStage::Root {
+                    self.palette_state_mut().goto_session_list();
+                } else {
+                    // Session sub-list: switch session.
+                    self.palette_state_mut().close();
+                    return vec![Action::SwitchSession(item.id.clone())];
+                }
+                Vec::new()
+            }
+            CmdKind::Run => {
+                self.palette_state_mut().close();
+                match item.id.as_str() {
+                    "toggle-tools" => {
+                        self.tool_expanded = !self.tool_expanded;
+                        self.events_version += 1;
+                        vec![Action::ToggleToolExpand]
+                    }
+                    "toggle-thinking" => {
+                        self.thinking_shown = !self.thinking_shown;
+                        self.events_version += 1;
+                        vec![Action::ToggleThinking]
+                    }
+                    "expand-thinking" => {
+                        self.thinking_expanded = !self.thinking_expanded;
+                        self.events_version += 1;
+                        vec![Action::ToggleThinkingExpand]
+                    }
+                    "bn" => vec![Action::CycleSessions(1)],
+                    "bp" => vec![Action::CycleSessions(-1)],
+                    "new-session" => {
+                        self.start_naming();
+                        Vec::new()
+                    }
+                    "edit-queue" => vec![Action::RecallQueue],
+                    "e" => vec![Action::OpenEditor],
+                    "q" => vec![Action::Quit],
+                    _ => Vec::new(),
+                }
+            }
+            CmdKind::Set => {
+                // Pick the option at option_cursor.
+                let opts = &item.options;
+                let idx = state
+                    .option_cursor
+                    .min(opts.len().saturating_sub(1));
+                let value = opts.get(idx).map(|o| o.value.clone()).unwrap_or_default();
+                self.palette_state_mut().close();
+                match item.id.as_str() {
+                    "thinking-level" => vec![Action::SetEffort(value)],
+                    _ => Vec::new(),
+                }
+            }
+            CmdKind::Ext => {
+                let value = if item.options.is_empty() {
+                    None
+                } else {
+                    let opts = &item.options;
+                    let idx = state
+                        .option_cursor
+                        .min(opts.len().saturating_sub(1));
+                    opts.get(idx)
+                        .map(|o| o.value.clone())
+                };
+                let ext_name = item.ext.clone().unwrap_or_default();
+                // Extract the command id (part after the first dot).
+                let cmd_id = item.id.split('.').nth(1).unwrap_or(&item.id).to_string();
+                self.palette_state_mut().close();
+                vec![Action::InvokeExtCommand {
+                    ext: ext_name,
+                    id: cmd_id,
+                    value,
+                }]
+            }
+        }
+    }
+
+    pub fn set_ext_commands(&mut self, items: Vec<crate::palette::items::PaletteItem>) {
+        self.ext_commands = items;
+    }
+
+    pub fn drop_ext_commands(&mut self, ext_name: &str) {
+        self.ext_commands.retain(|i| i.ext.as_deref() != Some(ext_name));
+    }
+
+    pub fn set_effort_current(&mut self, effort: String) {
+        self.effort_current = effort;
+    }
+
+    /// Update the in-memory thinking level so the input-area border
+    /// colour reflects the new value immediately (docs/tui-thinking-
+    /// block.md section 4).
+    pub fn set_thinking_level(&mut self, level: u32) {
+        let value = serde_json::Value::from(level);
+        self.record_ext_status(THINKING_STATUS_ID, value, None);
+    }
+
+    pub fn palette_cmd_requested(&mut self) -> bool {
+        let requested = self.palette_cmd_requested;
+        self.palette_cmd_requested = false;
+        requested
+    }
+
+    /// Auto-enter the Goto sub-stage when the user types a space
+    /// after a Goto command label in the Root stage. This makes the
+    /// natural ":b <session-name>" flow work without a separate
+    /// Enter press (docs/tui-command-palette.md section 7).
+    pub fn maybe_autogoto(&mut self) {
+        let st = &self.palette_state;
+        if !st.open || st.stage != crate::palette::state::PaletteStage::Root {
+            return;
+        }
+        let query = st.query.clone();
+        let space_pos = match query.find(' ') {
+            Some(p) => p,
+            None => return,
+        };
+        let token = &query[..space_pos];
+        let items = crate::palette::items::builtins(&self.effort_current);
+        let is_goto = items.iter().any(|i| {
+            i.kind == crate::palette::items::CmdKind::Goto && i.label == token
+        });
+        if is_goto {
+            self.palette_state_mut().goto_session_list();
+        }
+    }
+
+    /// Bulk recall: load the combined text of all pending user
+    /// messages into the editor, move the cursor to the end, and
+    /// switch to insert mode (docs/user-message-editing.md).
+    /// Returns the ids of the retracted messages so the caller can
+    /// append `user_message_retract` events to the log.
+    pub fn recall_queue(&mut self) -> Vec<String> {
+        let pending: Vec<(String, String, Option<String>)> = self
+            .pending_user_messages()
+            .into_iter()
+            .map(|e| {
+                let queue = e.get_str("queue").unwrap_or("steer").to_string();
+                let content = e.get_str("content").unwrap_or("").to_string();
+                let id = e.get_str("id").map(String::from);
+                (queue, content, id)
+            })
+            .collect();
+        if pending.is_empty() {
+            self.flash("no pending messages to recall");
+            return Vec::new();
+        }
+        // Build the joined text with queue markers.
+        let blocks: Vec<String> = pending
+            .iter()
+            .map(|(queue, content, _)| format!("[{queue}] {content}"))
+            .collect();
+        let combined = blocks.join("\n\n");
+        let n = pending.len();
+        self.editor().set_text(&combined);
+        // Move the cursor to the end of the text.
+        let ed = self.editor();
+        let last_row = ed.lines.len().saturating_sub(1);
+        ed.row = last_row;
+        ed.col = ed.lines[last_row].chars().count();
+        ed.mode = crate::vim_editor::Mode::Insert;
+        self.flash(format!(
+            "recalled {n} queued message(s) into the editor"
+        ));
+        pending.into_iter().map(|(_, _, id)| id).filter_map(|id| id).collect()
+    }
+
     // ── draft / editor ──────────────────────────────────────────
 
     /// The message editor: multi-line textarea plus the vim modal
@@ -1106,9 +1403,18 @@ impl App {
             .iter()
             .rposition(|e| e.kind() == EventKind::AssistantMessage);
         let from = last_answered.map(|i| i + 1).unwrap_or(0);
+        let retracted: std::collections::HashSet<String> = self
+            .events
+            .iter()
+            .filter(|e| e.kind() == EventKind::UserMessageRetract)
+            .filter_map(|e| e.get_str("target").map(String::from))
+            .collect();
         self.events[from..]
             .iter()
-            .filter(|e| e.kind() == EventKind::UserMessage)
+            .filter(|e| {
+                e.kind() == EventKind::UserMessage
+                    && e.get_str("id").map(|id| !retracted.contains(id)).unwrap_or(true)
+            })
             .collect()
     }
 
@@ -1433,6 +1739,62 @@ impl App {
             }
             // Ctrl+C, Ctrl+R, and Tab fall through to the normal handler.
         }
+        // The `:` command palette owns its key table while open
+        // (docs/tui-command-palette.md).
+        if self.palette_state.open {
+            let items = self.palette_ranked();
+            let highlighted = if items.is_empty() { 0 } else {
+                let cursor = self.palette_state.cursor().min(items.len() - 1);
+                items[cursor].options.len()
+            };
+            let n = items.len();
+            // `q` is mapped to `Key::Quit` in main.rs. Inside the palette,
+            // `q` is a filter character (types into the query to match the
+            // quit command), not the quit gate. Normalize it to a char.
+            let palette_key = if key == Key::Quit {
+                Key::Char('q')
+            } else {
+                key
+            };
+            let pa = self.palette_state.press(
+                &palette_key,
+                n,
+                highlighted,
+                crate::picker::render::PREVIEW_PAGE,
+                crate::picker::render::PREVIEW_CUTOFF,
+            );
+            use crate::palette::state::PaletteAction;
+            match pa {
+                PaletteAction::Query => {
+                    // Auto-transition: when the user types a space
+                    // after a Goto item's label in Root stage, enter
+                    // the Goto sub-stage so the typed text filters
+                    // the session list (docs/tui-command-palette.md
+                    // section 7: "The typed text after b filters
+                    // the list").
+                    self.maybe_autogoto();
+                    return Vec::new();
+                }
+                PaletteAction::Move
+                | PaletteAction::OptionMove
+                | PaletteAction::ScrollPreview
+                | PaletteAction::TogglePreview
+                | PaletteAction::Nothing => {
+                    return Vec::new();
+                }
+                PaletteAction::Commit => {
+                    return self.commit_palette();
+                }
+                PaletteAction::DropSubStage => {
+                    // Stay open, back to root stage.
+                    return Vec::new();
+                }
+                PaletteAction::Closed => {
+                    // Palette closed; fall through to normal handling.
+                    return Vec::new();
+                }
+            }
+        }
         // The name input swallows editing keys while it is active.
         // Other keys (q, Ctrl+R, Tab, ...) fall through unchanged.
         if self.pending_name.is_some() {
@@ -1698,6 +2060,12 @@ impl App {
                 let _ = self.picker.toggle_preview(0, crate::picker::render::PREVIEW_CUTOFF);
                 Vec::new()
             }
+            Key::AltUp => {
+                // Bulk recall of pending user messages
+                // (docs/user-message-editing.md).
+                self.recall_queue();
+                Vec::new()
+            }
             Key::Wheel(delta) => {
                 // Wheel up scrolls back in history; wheel down chases
                 // the tail.
@@ -1773,6 +2141,16 @@ impl App {
                         self.flash(h);
                     }
                     self.flash("ss browses — clear the draft first");
+                    return Vec::new();
+                }
+                // `:` opens the command palette (docs/tui-command-palette.md).
+                // Only in normal mode; in insert mode `:` is a regular
+                // character typed into the draft.
+                if c == ':'
+                    && self.editor.mode() == Mode::Normal
+                    && self.pending_name.is_none()
+                {
+                    self.open_palette();
                     return Vec::new();
                 }
                 if let Some(h) = self.editor().press(Key::Char(c)) {
@@ -3222,5 +3600,103 @@ mod tests {
             1,
             "ctrl+k moves the cursor up one position"
         );
+    }
+
+    // ── command palette: `:b ` auto-goto session list ───────────
+
+    #[test]
+    fn palette_b_space_enters_session_list() {
+        let mut app = app_with(vec![], "s1");
+        app.set_sessions(vec![
+            SessionId::new("alpha"),
+            SessionId::new("beta"),
+            SessionId::new("gamma"),
+        ]);
+        app.editor().press(Key::Esc);
+        // Open the palette with `:`.
+        app.press(Key::Char(':'));
+        assert!(app.palette_state().open);
+        assert_eq!(
+            app.palette_state().stage,
+            crate::palette::state::PaletteStage::Root,
+            "palette starts in Root stage"
+        );
+        // Type 'b' to narrow to the Goto item.
+        app.press(Key::Char('b'));
+        assert_eq!(
+            app.palette_state().stage,
+            crate::palette::state::PaletteStage::Root,
+            "still in Root after typing 'b'"
+        );
+        // Type space to trigger auto-goto.
+        app.press(Key::Char(' '));
+        assert_eq!(
+            app.palette_state().stage,
+            crate::palette::state::PaletteStage::SessionList,
+            "typing space after 'b' enters SessionList"
+        );
+        // The query now has the "b " prefix recorded.
+        assert_eq!(app.palette_state().goto_prefix_len, 2);
+        // filter_query should return the empty string after trimming.
+        assert_eq!(app.palette_state().filter_query(), "");
+
+        // Now type a filter to narrow sessions.
+        app.press(Key::Char('b'));
+        assert_eq!(
+            app.palette_state().filter_query(),
+            "b",
+            "filter is the text after the 'b ' prefix"
+        );
+
+        // Esc drops back to Root.
+        app.press(Key::Esc);
+        assert_eq!(
+            app.palette_state().stage,
+            crate::palette::state::PaletteStage::Root,
+            "Esc in SessionList drops back to Root"
+        );
+        assert!(app.palette_state().open, "palette stays open");
+    }
+
+    #[test]
+    fn palette_b_filter_shows_matching_sessions() {
+        let mut app = app_with(vec![], "s1");
+        app.set_sessions(vec![
+            SessionId::new("alpha"),
+            SessionId::new("beta"),
+            SessionId::new("gamma"),
+        ]);
+        app.editor().press(Key::Esc);
+        app.press(Key::Char(':'));
+        app.press(Key::Char('b'));
+        app.press(Key::Char(' '));
+        // Type "al" to filter for "alpha".
+        app.press(Key::Char('a'));
+        app.press(Key::Char('l'));
+        let items = app.palette_ranked();
+        assert_eq!(items.len(), 1, "filter 'al' should match only alpha");
+        assert_eq!(items[0].id, "alpha");
+    }
+
+    #[test]
+    fn palette_q_key_types_into_query() {
+        let mut app = app_with(vec![], "s1");
+        app.editor().press(Key::Esc);
+        app.press(Key::Char(':'));
+        assert!(app.palette_state().open);
+        // `q` is mapped to Key::Quit in main.rs; in the palette it
+        // must type the character into the query, not trigger quit.
+        let result = app.press(Key::Quit);
+        assert!(result.is_empty(), "Key::Quit in palette should not quit");
+        assert_eq!(
+            app.palette_state().query,
+            "q",
+            "typing q should filter the palette query"
+        );
+        // Typing more: `q q` should not quit (the quit gate only
+        // fires outside the palette).
+        let result2 = app.press(Key::Quit);
+        assert!(result2.is_empty(), "second q should also just type");
+        assert_eq!(app.palette_state().query, "qq");
     }
 }

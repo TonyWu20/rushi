@@ -9,7 +9,7 @@ arg_style = "append_session"
 [model]
 api = "responses"
 max_output_tokens = 32768
-reasoning_effort = "xhigh"
+reasoning_effort = "low"
 
 [model.deepseek]
 model_id = "deepseek-v4-flash"
@@ -127,4 +127,4 @@ Guidelines:
 - Keep replies short. Show file paths clearly in your replies."""
 
 [model.Qwen3.8-27B-NVFP4-RTX5090-DFlash2]
-reasoning_effort = "max"
+reasoning_effort = "low"

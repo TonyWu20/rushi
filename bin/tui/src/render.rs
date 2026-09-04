@@ -487,6 +487,15 @@ fn event_lines<'a>(
                 dim,
             )));
         }
+        EventKind::UserMessageRetract => {
+            let target = e.get_str("target").unwrap_or("?");
+            let reason = e.get_str("reason").unwrap_or("");
+            let reason_part = if reason.is_empty() { String::new() } else { format!(" ({reason})") };
+            out.push(Line::from(Span::styled(
+                format!("{LABEL}[retracted] target={target}{reason_part}"),
+                dim,
+            )));
+        }
         EventKind::ExtStatus => {
             // Shared UI state: the transcript shows no row for the
             // event (docs/ui-extension.md section 5). The log keeps
@@ -2675,6 +2684,31 @@ pub fn draw(
             .layout(&layout)
             .previewer(&previewer)
             .hints(hints)
+            .palette(&palette)
+            .cursor(cursor)
+            .call();
+    }
+
+    // The `:` command-palette float (docs/tui-command-palette.md).
+    // Drawn last, over the transcript and input rows, just like the
+    // picker. The palette and the picker never coexist (section 12).
+    if app.palette_state().open {
+        let items = app.palette_ranked();
+        let show_preview = app.palette_state().preview_visible(
+            items.len(),
+            crate::picker::render::PREVIEW_CUTOFF,
+        );
+        let layout = crate::float::compute_float_layout(f.area(), show_preview);
+        let rows = layout.list.height.saturating_sub(2).max(1) as usize;
+        let palette = app.palette().clone();
+        let pstate = app.palette_state_mut();
+        pstate.visible = rows;
+        pstate.sync(items.len());
+        crate::palette::render::render_palette()
+            .f(f)
+            .state(pstate)
+            .items(&items)
+            .layout(&layout)
             .palette(&palette)
             .cursor(cursor)
             .call();

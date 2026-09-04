@@ -13,8 +13,22 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use frizbee::{Config, Matcher};
-
 use super::items::PickerItem;
+
+/// Synchronously rank `labels` against `query` using the shared
+/// frizbee ranker (docs/tui-command-palette.md section 11: the palette
+/// reuses this, no new ranker). Empty query returns all indices in
+/// original order.
+pub fn rank_fuzzy(labels: &[String], query: &str) -> Vec<usize> {
+    if query.is_empty() {
+        return (0..labels.len()).collect();
+    }
+    let mut m = Matcher::new(query, &Config::default());
+    m.match_list(labels)
+        .iter()
+        .map(|m| m.index as usize)
+        .collect()
+}
 
 /// An immutable snapshot of ranked items for one query.
 #[derive(Debug, Clone)]

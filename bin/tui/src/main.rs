@@ -14,7 +14,9 @@ mod config;
 mod editor;
 mod event;
 mod ext;
+mod float;
 mod highlight;
+mod palette;
 mod picker;
 mod port;
 mod port_file;
@@ -99,6 +101,11 @@ fn key_input(k: &cevent::KeyEvent) -> Option<Key> {
             _ => None,
         };
     }
+    if k.modifiers.contains(cevent::KeyModifiers::ALT)
+        && k.code == cevent::KeyCode::Up
+    {
+        return Some(Key::AltUp);
+    }
     match k.code {
         cevent::KeyCode::Char('q') => Some(Key::Quit),
         cevent::KeyCode::Char(c) => Some(Key::Char(c)),
@@ -120,11 +127,11 @@ fn key_input(k: &cevent::KeyEvent) -> Option<Key> {
     }
 }
 
-/// The effort values the reasoning-effort key cycles through
-/// (docs/tui-thinking-block.md section 4, the effort control).
+/// The thinking-level values the thinking-level key cycles through
+/// (docs/tui-thinking-block.md section 4, the thinking-level control).
 /// `none` turns thinking off. `minimal`/`low` share the low level
 /// bucket, and `max`/`xhigh` share the highest (docs/tui.md 7.2).
-const EFFORT_ORDER: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+const THINKING_LEVEL_ORDER: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /// The 0-4 level of one effort value, mirroring the bin/model
 /// mapping (docs/tui.md 7.2). The flash states the level so the
@@ -156,8 +163,7 @@ fn resolve_active_model_name(cfg: &TuiConfig) -> String {
 /// `[model]` table; a missing key defaults to `medium`; `off`
 /// normalizes to `none`.
 fn resolve_reasoning_effort(text: &str, active: &str) -> String {
-    let v: toml::Value = text
-        .parse()
+    let v: toml::Value = toml::from_str(text)
         .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
     let model_root = v
         .get("model")
@@ -180,32 +186,16 @@ fn resolve_reasoning_effort(text: &str, active: &str) -> String {
     }
 }
 
-/// Cycle the active model's reasoning effort to the next value and
-/// write it back to the config (docs/tui-thinking-block.md section
-/// 4, the effort control). The write-back is a targeted, comment-
-/// preserving text edit of the `[model.<active>]` table: the toml
-/// crate cannot round-trip comments, so the rest of the config
-/// survives verbatim. The per-model table is created when missing.
-/// Returns the new effort value.
-fn cycle_reasoning_effort(config_path: &std::path::Path, active: &str) -> Result<String, String> {
+/// Write a specific reasoning effort value into the active model's
+/// config entry (docs/tui-command-palette.md section 8). The write-
+/// back is a targeted, comment-preserving text edit of the
+/// `[model.<active>]` table. Returns the value written.
+fn set_effort(config_path: &std::path::Path, active: &str, value: &str) -> Result<String, String> {
     let text = std::fs::read_to_string(config_path)
         .map_err(|e| format!("cannot read config {}: {e}", config_path.display()))?;
-    let current = resolve_reasoning_effort(&text, active);
-    let pos = EFFORT_ORDER
-        .iter()
-        .position(|e| e.eq_ignore_ascii_case(&current))
-        .unwrap_or(3); // the default `medium` index
-    let next = EFFORT_ORDER[(pos + 1) % EFFORT_ORDER.len()];
-
-    // The section header, bare or quoted. The model name comes from
-    // the config the user wrote, so both forms must match.
     let headers = [format!("[model.{active}]"), format!("[model.\"{active}\"]")];
     let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
 
-    // The line index of the active table's header, or `None` when the
-    // table is absent (created below). While the loop runs, `in` is
-    // the open section's header index and `key_at` the index of a
-    // `reasoning_effort` line inside it.
     let is_header = |l: &str| headers.iter().any(|h| l.trim() == h);
     let mut section_open: Option<usize> = None;
     let mut key_at: Option<usize> = None;
@@ -228,21 +218,17 @@ fn cycle_reasoning_effort(config_path: &std::path::Path, active: &str) -> Result
     let mut out: Vec<String> = lines.clone();
     match (section_open, key_at) {
         (_, Some(k)) => {
-            // The key exists in the table: move the value in place.
-            out[k] = format!("reasoning_effort = \"{next}\"");
+            out[k] = format!("reasoning_effort = \"{value}\"");
         }
         (Some(s), None) => {
-            // The table exists without the key: add the key right
-            // after the header line.
-            out.insert(s + 1, format!("reasoning_effort = \"{next}\""));
+            out.insert(s + 1, format!("reasoning_effort = \"{value}\""));
         }
         (None, _) => {
-            // The table is absent: create it at the end of the file.
             if !out.is_empty() && !out.last().unwrap().trim().is_empty() {
                 out.push(String::new());
             }
             out.push(format!("[model.{active}]"));
-            out.push(format!("reasoning_effort = \"{next}\""));
+            out.push(format!("reasoning_effort = \"{value}\""));
         }
     }
     let mut new_text = out.join("\n");
@@ -251,7 +237,22 @@ fn cycle_reasoning_effort(config_path: &std::path::Path, active: &str) -> Result
     }
     std::fs::write(config_path, new_text)
         .map_err(|e| format!("cannot write config {}: {e}", config_path.display()))?;
-    Ok(next.to_string())
+    Ok(value.to_string())
+}
+
+/// Cycle the active model's reasoning effort to the next value and
+/// write it back to the config (docs/tui-thinking-block.md section
+/// 4, the effort control). Returns the new effort value.
+fn cycle_reasoning_effort(config_path: &std::path::Path, active: &str) -> Result<String, String> {
+    let text = std::fs::read_to_string(config_path)
+        .map_err(|e| format!("cannot read config {}: {e}", config_path.display()))?;
+    let current = resolve_reasoning_effort(&text, active);
+    let pos = THINKING_LEVEL_ORDER
+        .iter()
+        .position(|e| e.eq_ignore_ascii_case(&current))
+        .unwrap_or(3); // the default `medium` index
+    let next = THINKING_LEVEL_ORDER[(pos + 1) % THINKING_LEVEL_ORDER.len()];
+    set_effort(config_path, active, next)
 }
 
 fn main() {
@@ -336,6 +337,7 @@ fn main() {
         };
         app.set_active(id.clone(), events.clone());
         app.set_watch_rx(port.watch(&id, TailCursor::end()));
+        app.set_sessions(rt.block_on(port.list_sessions()).unwrap_or_default());
         // Reattach a live loop from an earlier TUI (FT-003): the
         // persistent probe marks the session running, so the status
         // bit shows the real state, not this process's memory.
@@ -346,6 +348,27 @@ fn main() {
         // resuming the most recent session.
         app.set_sessions(rt.block_on(port.list_sessions()).unwrap_or_default());
         app.start_naming();
+    }
+
+    // Restore the persisted thinking level for the active model from
+    // the config file. This must happen after set_active because
+    // set_active rebuilds ext_status_values from the session log,
+    // which would overwrite the config value with a stale value from
+    // the previous loop run.
+    if let Ok(cfg_text) = std::fs::read_to_string(&cfg.config_path) {
+        let active_model = resolve_active_model_name(&cfg);
+        let effort = resolve_reasoning_effort(&cfg_text, &active_model);
+        eprintln!(
+            "[tui] startup: model={active_model} effort={effort} level={}",
+            effort_level(&effort)
+        );
+        app.set_effort_current(effort.clone());
+        app.set_thinking_level(effort_level(&effort));
+    } else {
+        eprintln!(
+            "[tui] startup: config read failed ({}) — using defaults",
+            cfg.config_path.display()
+        );
     }
 
     let mut last_width: usize = 0;
@@ -431,6 +454,21 @@ fn main() {
                 }
                 ext::ExtItem::Skipped { ext: name, reason } => {
                     app.flash(format!("ext {name} skipped: {reason}"));
+                }
+                ext::ExtItem::CommandsListUpdated { .. } => {
+                    let items = host.command_items();
+                    app.set_ext_commands(items);
+                }
+                ext::ExtItem::InvokeReply { ext: name, req, ok, message } => {
+                    if ok {
+                        app.flash(format!("ext {name} (req {req}): {message}"));
+                    } else {
+                        app.flash(format!("ext {name} (req {req}) error: {message}"));
+                    }
+                }
+                ext::ExtItem::InvokeTimeout { ext: name } => {
+                    app.flash(format!("ext {name} invoke timed out — commands dropped"));
+                    app.drop_ext_commands(&name);
                 }
             }
         }
@@ -906,11 +944,90 @@ fn main() {
                     match cycle_reasoning_effort(&cfg.config_path, &active) {
                         Ok(next) => {
                             let lvl = effort_level(&next);
+                            app.set_thinking_level(lvl);
                             app.flash(format!(
-                                "reasoning effort → {next} (level {lvl}) — the border follows on the next step"
+                                "thinking level → {next} (level {lvl}) — the border follows on the next step"
                             ));
                         }
                         Err(e) => app.flash(e),
+                    }
+                }
+                Action::SetEffort(value) => {
+                    // Palette effort picker (docs/tui-command-palette.md
+                    // section 8): write the chosen value to the active
+                    // model's config entry.
+                    let active = resolve_active_model_name(&cfg);
+                    match set_effort(&cfg.config_path, &active, &value) {
+                        Ok(v) => {
+                            let lvl = effort_level(&v);
+                            app.set_thinking_level(lvl);
+                            app.flash(format!(
+                                "thinking level → {v} (level {lvl})"
+                            ));
+                        }
+                        Err(e) => app.flash(e),
+                    }
+                    // Update the palette's cached current effort so the
+                    // `*` marker stays correct on the next open.
+                    app.set_effort_current(value);
+                }
+                Action::SwitchSession(name) => {
+                    // The palette's session sub-list (docs/tui-command-
+                    // palette.md section 7): switch to the named session
+                    // without the cycle delta.
+                    let sid = SessionId::new(&name);
+                    let events = match rt.block_on(port.read_events(&sid)) {
+                        Ok(evs) => evs,
+                        Err(e) => {
+                            trace(
+                                &rt,
+                                &port,
+                                Some(&sid),
+                                "port",
+                                &format!("event read failed: {e}"),
+                            );
+                            app.flash(format!("cannot switch to {name}: {e}"));
+                            Vec::new()
+                        }
+                    };
+                    app.set_active(sid.clone(), events.clone());
+                    app.set_watch_rx(port.watch(&sid, TailCursor::end()));
+                    host.clear_replies();
+                    host.send_history(&events);
+                    resync_external_loop(&rt, &port, &mut app, &sid);
+                    app.flash(format!("switched to {name}"));
+                }
+                Action::InvokeExtCommand { ext, id, value } => {
+                    // Extension command (docs/tui-command-palette.md
+                    // section 10): send an invoke op to the owning
+                    // extension process.
+                    let req = host.request_invoke(&ext, &id, value.as_deref());
+                    match req {
+                        Some(req_id) => {
+                            app.flash(format!(
+                                "ext {ext}: {id} — pending (req {req_id})"
+                            ));
+                        }
+                        None => {
+                            app.flash(format!(
+                                "ext {ext}: {id} — extension not available"
+                            ));
+                        }
+                    }
+                }
+                Action::RecallQueue => {
+                    // Bulk recall of pending user messages
+                    // (docs/user-message-editing.md).
+                    let retracted_ids = app.recall_queue();
+                    if let Some(sid) = app.active().cloned() {
+                        for id in &retracted_ids {
+                            let ev = event::produce::user_message_retract(id);
+                            if let Err(e) = rt.block_on(port.append_event(&sid, &ev)) {
+                                app.flash(format!(
+                                    "failed to retract message {id}: {e}"
+                                ));
+                            }
+                        }
                     }
                 }
                 Action::Quit => {
@@ -957,6 +1074,13 @@ fn main() {
         host.pump_frame(&tick, &app.editor_mode_label());
         host.poll_transforms();
         host.poll_status();
+        host.poll_invokes();
+        // Request extension commands when the palette opens.
+        if app.palette_cmd_requested() {
+            let loop_running = app.active().map(|s| app.loop_running(s)).unwrap_or(false);
+            let session = app.active().map(|s| s.as_str());
+            host.request_commands(session, loop_running);
+        }
         // 4.6 The persistent loop probe, once a second (FT-003): it
         // flips the running bit when an external loop finishes, and
         // marks it when another TUI started a loop for this session.
@@ -1139,5 +1263,176 @@ mod guardrail {
                 );
             }
         }
+    }
+}
+
+// ── startup thinking-level tests ─────────────────────────────
+// These tests verify the fix for the startup bug where the
+// config-derived thinking level was ignored and the stale
+// session-log value (or the default "medium") persisted.
+
+#[cfg(test)]
+mod startup_effort_tests {
+    use crate::app::{App, THINKING_LEVELS, THINKING_STATUS_ID};
+    use crate::event::produce;
+    use crate::port::SessionId;
+    use super::{resolve_reasoning_effort, effort_level};
+
+    /// Build an `App` whose session log carries a stale `model_thinking`
+    /// event, mimicking the state `set_active` restores on resume.
+    fn app_with_stale_thinking(stale_level: u32) -> App {
+        let events = vec![
+            produce::user_message("hello"),
+            produce::ext_status(
+                THINKING_STATUS_ID,
+                serde_json::Value::from(stale_level),
+            ),
+        ];
+        let mut app = App::new();
+        app.set_active(SessionId::new("s1"), events);
+        let expected = if stale_level < THINKING_LEVELS {
+            stale_level
+        } else {
+            THINKING_LEVELS - 1
+        };
+        assert_eq!(app.thinking_level(), expected, "set_active restores the stale value");
+        app
+    }
+
+    /// Mimic the startup restore block in `main()`: resolve the effort
+    /// from config text, set both `effort_current` and `thinking_level`.
+    fn apply_startup_restore(app: &mut App, config_text: &str, active_model: &str) {
+        let effort = resolve_reasoning_effort(config_text, active_model);
+        app.set_effort_current(effort.clone());
+        app.set_thinking_level(effort_level(&effort));
+    }
+
+    /// Mirrors config-low.toml: global [model] has reasoning_effort = "low",
+    /// the quoted model-specific table has no reasoning_effort key.
+    const CONFIG_LOW_TOML: &str = r#"
+[model]
+api = "responses"
+max_output_tokens = 32768
+reasoning_effort = "low"
+
+[model."Qwen3.8-27B-NVFP4-RTX5090-DFlash2"]
+model_id = "Qwen3.8-27B-NVFP4-RTX5090-DFlash2"
+base_url = "http://127.0.0.1:30000"
+context_tokens = 262144
+
+[active]
+model = "Qwen3.8-27B-NVFP4-RTX5090-DFlash2"
+"#;
+
+    /// Mirrors config.toml: global [model] has reasoning_effort = "xhigh".
+    const CONFIG_XHIGH_TOML: &str = r#"
+[model]
+api = "responses"
+max_output_tokens = 32768
+reasoning_effort = "xhigh"
+
+[model."Qwen3.8-27B-NVFP4-RTX5090-DFlash2"]
+model_id = "Qwen3.8-27B-NVFP4-RTX5090-DFlash2"
+base_url = "http://127.0.0.1:30000"
+context_tokens = 262144
+
+[active]
+model = "Qwen3.8-27B-NVFP4-RTX5090-DFlash2"
+"#;
+
+    #[test]
+    fn low_config_overrides_stale_xhigh_log() {
+        let mut app = app_with_stale_thinking(4);
+        assert_eq!(app.thinking_level(), 4, "stale log value before restore");
+
+        apply_startup_restore(&mut app, CONFIG_LOW_TOML, "Qwen3.8-27B-NVFP4-RTX5090-DFlash2");
+
+        // The config value must beat the stale log value.
+        assert_eq!(app.thinking_level(), 1, "border level must match config");
+        // The palette item hint must show the config effort, not "medium".
+        let hint = app
+            .palette_items()
+            .iter()
+            .find(|i| i.id == "thinking-level")
+            .expect("thinking-level item exists")
+            .hint
+            .clone();
+        assert_eq!(hint, "low", "palette hint must reflect config effort");
+    }
+
+    #[test]
+    fn xhigh_config_overrides_stale_medium_log() {
+        let mut app = app_with_stale_thinking(2);
+        assert_eq!(app.thinking_level(), 2, "stale medium before restore");
+
+        apply_startup_restore(&mut app, CONFIG_XHIGH_TOML, "Qwen3.8-27B-NVFP4-RTX5090-DFlash2");
+
+        assert_eq!(app.thinking_level(), 4, "border level must match config");
+        let hint = app
+            .palette_items()
+            .iter()
+            .find(|i| i.id == "thinking-level")
+            .expect("thinking-level item exists")
+            .hint
+            .clone();
+        assert_eq!(hint, "xhigh", "palette hint must reflect config effort");
+    }
+
+    #[test]
+    fn effort_level_mapping_is_correct() {
+        assert_eq!(effort_level("none"), 0);
+        assert_eq!(effort_level("minimal"), 1);
+        assert_eq!(effort_level("low"), 1);
+        assert_eq!(effort_level("medium"), 2);
+        assert_eq!(effort_level("high"), 3);
+        assert_eq!(effort_level("xhigh"), 4);
+        assert_eq!(effort_level("max"), 4);
+        assert_eq!(effort_level("unknown"), 0);
+    }
+
+    #[test]
+    fn resolve_reasoning_effort_global_fallback() {
+        let toml = r#"
+[model]
+reasoning_effort = "low"
+
+[model.my-model]
+model_id = "my-model"
+"#;
+        let effort = resolve_reasoning_effort(toml, "my-model");
+        assert_eq!(effort, "low", "global fallback must work");
+    }
+
+    #[test]
+    fn resolve_reasoning_effort_model_specific_wins() {
+        let toml = r#"
+[model]
+reasoning_effort = "low"
+
+[model.my-model]
+reasoning_effort = "xhigh"
+"#;
+        let effort = resolve_reasoning_effort(toml, "my-model");
+        assert_eq!(effort, "xhigh", "per-model value must win");
+    }
+
+    #[test]
+    fn resolve_reasoning_effort_default_medium() {
+        let toml = r#"
+[model]
+api = "responses"
+"#;
+        let effort = resolve_reasoning_effort(toml, "some-model");
+        assert_eq!(effort, "medium", "default when no key exists");
+    }
+
+    #[test]
+    fn resolve_reasoning_effort_off_maps_to_none() {
+        let toml = r#"
+[model]
+reasoning_effort = "off"
+"#;
+        let effort = resolve_reasoning_effort(toml, "any-model");
+        assert_eq!(effort, "none");
     }
 }

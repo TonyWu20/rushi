@@ -1,13 +1,12 @@
-//! The picker body renderer and float layout (section 4.4 and 6).
+//! The picker body renderer (section 4.4 and 6).
 //!
 //! `render_picker` draws the picker body into a given `Rect`. It never
 //! decides where the `Rect` is: the container (the floating window in
 //! section 6) owns placement. This keeps the body reusable for a
 //! future inline container (section 6, Option A).
 //!
-//! The float layout is a function of the terminal size and the picker
-//! state. It flips orientation at a width threshold with no key press
-//! (section 6, "Orientation: wide and narrow").
+//! The float layout lives in `crate::float`, shared with the command
+//! palette (docs/tui-command-palette.md section 11).
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -20,37 +19,9 @@ use super::fuzzy::Snapshot;
 use super::preview::Previewer;
 use super::state::PickerState;
 
-/// The orientation of the float layout, a function of the float width
-/// (section 6, "Orientation: wide and narrow").
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Orientation {
-    /// List left, preview right.
-    Wide,
-    /// List top, preview bottom.
-    Narrow,
-    /// Preview dropped; list and input in one column.
-    TooNarrow,
-}
+// Re-export the shared float layout so existing imports keep working.
+pub use crate::float::{compute_float_layout, FloatLayout};
 
-/// The computed regions of the floating picker window.
-#[derive(Debug, Clone)]
-pub struct FloatLayout {
-    /// The outer float border.
-    pub float: Rect,
-    /// The result list region.
-    pub list: Rect,
-    /// The input bar region (the `@query` line plus hints).
-    pub input: Rect,
-    /// The preview pane region, `None` when it is hidden.
-    pub preview: Option<Rect>,
-    pub orientation: Orientation,
-}
-
-/// The float width at which the layout switches to wide (list and
-/// preview side by side). A config knob, not a hard constant.
-pub const WIDE_MIN: u16 = 80;
-/// The float width below which the preview drops out entirely.
-pub const FLOAT_MIN: u16 = 50;
 /// The result count below which the preview pane auto-hides so a short
 /// list keeps the full width (a `telescope` `preview_cutoff`
 /// behavior).
@@ -58,77 +29,6 @@ pub const PREVIEW_CUTOFF: usize = 4;
 /// The default height of the preview scroll page for `Ctrl+U` /
 /// `Ctrl+D`.
 pub const PREVIEW_PAGE: usize = 5;
-
-/// Compute the float layout from the terminal area and whether the
-/// preview pane should show. The orientation is a pure function of the
-/// float width: wide side-by-side, narrow stacked, or too narrow with
-/// no preview.
-pub fn compute_float_layout(term: Rect, show_preview: bool) -> FloatLayout {
-    let tw = term.width as usize;
-    let th = term.height as usize;
-    // Center a 60% box, floored at a minimum, capped at the terminal.
-    let fw = ((tw * 6) / 10).max(20).min(tw.saturating_sub(4));
-    let fh = ((th * 6) / 10).max(10).min(th.saturating_sub(4));
-    let x = term.x as usize + (tw.saturating_sub(fw)) / 2;
-    let y = term.y as usize + (th.saturating_sub(fh)) / 2;
-    let float = Rect::new(x as u16, y as u16, fw as u16, fh as u16);
-
-    // The interior, inside the 1-cell border.
-    let inner_w = float.width.saturating_sub(2);
-    let inner_h = float.height.saturating_sub(2);
-    let ix = float.x + 1;
-    let iy = float.y + 1;
-
-    // The input bar is one row at the bottom of the interior.
-    let input_h: u16 = 1;
-    let body_h = inner_h.saturating_sub(input_h);
-    let input = Rect::new(ix, iy + body_h, inner_w, input_h);
-
-    let orientation = if fw as u16 >= WIDE_MIN {
-        Orientation::Wide
-    } else if fw as u16 >= FLOAT_MIN {
-        Orientation::Narrow
-    } else {
-        Orientation::TooNarrow
-    };
-
-    let preview_wanted = show_preview && orientation != Orientation::TooNarrow;
-
-    let (list, preview) = if preview_wanted {
-        match orientation {
-            Orientation::Wide => {
-                let gap: u16 = 1;
-                let total_w = inner_w.saturating_sub(gap);
-                let list_w = total_w * 55 / 100;
-                let preview_w = total_w - list_w;
-                let list = Rect::new(ix, iy, list_w, body_h);
-                let preview = Rect::new(ix + list_w + gap, iy, preview_w, body_h);
-                (list, Some(preview))
-            }
-            _ => {
-                // Narrow: stack list above preview.
-                let gap: u16 = 1;
-                let total_h = body_h.saturating_sub(gap);
-                let list_h = total_h * 45 / 100;
-                let preview_h = total_h - list_h;
-                let list = Rect::new(ix, iy, inner_w, list_h);
-                let preview = Rect::new(ix, iy + list_h + gap, inner_w, preview_h);
-                (list, Some(preview))
-            }
-        }
-    } else {
-        let list = Rect::new(ix, iy, inner_w, body_h);
-        (list, None)
-    };
-
-    FloatLayout {
-        float,
-        list,
-        input,
-        preview,
-        orientation,
-    }
-}
 
 /// Draw the picker body into a pre-computed float layout. This
 /// function never decides where the float is: the container (the
@@ -162,7 +62,7 @@ pub fn render_picker<'frame>(
     let n = snapshot.items.len();
     let pending = if snapshot.settled { "" } else { " ·" };
     let title = format!(
-        "{} — @ {} — {} match{}{}",
+        "files ({}) — @ {} — {} match{}{}",
         layout.orientation.label(),
         snapshot.query,
         n,
@@ -309,22 +209,12 @@ fn render_preview(
     f.render_widget(Paragraph::new(lines).block(preview_block), *preview_rect);
 }
 
-impl Orientation {
-    /// A short label for the float title.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Wide => "files (wide)",
-            Self::Narrow => "files (narrow)",
-            Self::TooNarrow => "files",
-        }
-    }
-}
-
 // ── tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::float::Orientation;
     use crate::picker::items::PickerItem;
     use crate::picker::preview::FilePreviewer;
 
