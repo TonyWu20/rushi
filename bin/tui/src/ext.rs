@@ -73,7 +73,15 @@ pub struct Manifest {
     pub dir: PathBuf,
     /// The `ext.toml` path. Fail-loud errors name this file.
     pub manifest_path: PathBuf,
+    /// The raw `command` string from the manifest (used in error
+    /// messages and the debug log).
+    #[allow(dead_code)]
     pub command: String,
+    /// The resolved absolute executable path the host execs. A bare
+    /// name resolves on `PATH`; a relative path resolves against
+    /// [`Manifest::dir`]; an absolute path is used as-is.
+    /// See [`resolve_command`].
+    pub command_path: PathBuf,
     pub args: Vec<String>,
     /// Capability names; always a subset of [`CAPS`].
     pub caps: Vec<String>,
@@ -355,12 +363,15 @@ fn load_manifest(entry: &Path) -> Result<Manifest, ExtError> {
             "`tick_ms` must be positive",
         ));
     }
-    if !command_exists(command) {
-        return Err(ExtError::refuse(
-            &manifest_path,
-            &format!("command `{command}` not found"),
-        ));
-    }
+    let command_path = match resolve_command(entry, command) {
+        Some(p) => p,
+        None => {
+            return Err(ExtError::refuse(
+                &manifest_path,
+                &format!("command `{command}` not found"),
+            ));
+        }
+    };
     Ok(Manifest {
         name: entry
             .file_name()
@@ -370,6 +381,7 @@ fn load_manifest(entry: &Path) -> Result<Manifest, ExtError> {
         dir: entry.to_path_buf(),
         manifest_path,
         command: command.to_string(),
+        command_path,
         args: b.args,
         caps: b.caps,
         kinds: b.kinds,
@@ -389,14 +401,36 @@ fn is_valid_target(t: &str) -> bool {
     matches!(scope, "fence" | "inline") && !name.is_empty()
 }
 
-/// The command must exist: a plain name on `PATH`, or an absolute
-/// path to a file.
-fn command_exists(command: &str) -> bool {
+/// Resolve the manifest `command` to an absolute executable path.
+///
+/// - A bare command name (no `/`) is looked up on the TUI process's
+///   `PATH`; it must name a real file there.
+/// - A path (contains `/`) is used directly when absolute, or
+///   resolved against the manifest directory when relative. This lets
+///   a layer ship a bundled reference binary (e.g. `ui_extensions/
+///   mermaid`'s `target/debug/mermaid-ext`) and address it without
+///   putting a build dir on `PATH` (docs/ui-extension.md section 9:
+///   the reference layer ships one opt-in binary; the host resolves it).
+///
+/// Returns the absolute path when the command resolves to a real
+/// file, else `None` (fail-loud at scan, docs/ui-extension.md
+/// section 6). The caller names the file in the error.
+fn resolve_command(dir: &Path, command: &str) -> Option<PathBuf> {
     if command.contains('/') {
-        return Path::new(command).is_file();
+        let p = Path::new(command);
+        let resolved = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            dir.join(command)
+        };
+        resolved.is_file().then_some(resolved)
+    } else {
+        std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|d| d.join(command))
+                .find(|c| c.is_file())
+        })
     }
-    std::env::var_os("PATH")
-        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(command).is_file()))
 }
 
 /// One styled span from an extension reply. The host converts the
@@ -2201,29 +2235,53 @@ impl ExtChild {
 /// only fails on `String` to `CString` conversion of valid input.
 fn build_argv(m: &Manifest) -> Result<Vec<CString>, String> {
     let mut v: Vec<CString> = Vec::with_capacity(m.args.len() + 1);
-    v.push(CString::new(m.command.as_bytes()).map_err(|e| e.to_string())?);
+    let cmd_bytes: Vec<u8> = m.command_path.as_os_str().as_encoded_bytes().to_vec();
+    v.push(CString::new(cmd_bytes.as_slice()).map_err(|e| e.to_string())?);
     for a in &m.args {
         v.push(CString::new(a.as_bytes()).map_err(|e| e.to_string())?);
     }
     Ok(v)
 }
 
-/// The extension-host debug log. When the `TUI_EXT_LOG` env var is
-/// set, one line appends to that file per extension process event
-/// (spawn, death, respawn, stop). It is off by default.
+/// The extension-host debug log. One line per extension process event
+/// (spawn, death, respawn, stop) is appended to a log file.
+///
+/// The trace never writes to stderr: the TUI owns the terminal
+/// (alt-screen), and a raw write to stderr bypasses the renderer and
+/// pollutes the frame. The line format is `pid ms msg`.
 fn ext_log(msg: &str) {
-    let Ok(path) = std::env::var("TUI_EXT_LOG") else {
-        return;
-    };
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
     let line = format!("{} {} {}\n", std::process::id(), ms, msg);
+    let Some(path) = ext_log_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = f.write_all(line.as_bytes());
     }
+}
+
+/// The ext-host log file. `TUI_EXT_LOG` when set (the override, per
+/// docs/ui-extension.md section 7); otherwise the default
+/// `<cache>/tui/ext-host.log` under `$XDG_CACHE_HOME` or
+/// `$HOME/.cache`. `None` when neither resolves.
+fn ext_log_path() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("TUI_EXT_LOG") {
+        if !p.is_empty() {
+            return Some(std::path::PathBuf::from(p));
+        }
+    }
+    let cache = std::env::var_os("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|d| d.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")));
+    cache.map(|d| d.join("tui").join("ext-host.log"))
 }
 
 /// Spawn one extension generation. The child joins its own process
@@ -2524,6 +2582,38 @@ protocol_v = 1
         assert_eq!(m.transform, vec!["fence:mermaid"]);
         assert_eq!(m.append_types, vec!["ext_status"]);
         assert_eq!(m.args, vec!["echo", "hi"]);
+    }
+
+    #[test]
+    fn manifest_relative_command_resolves_against_manifest_dir() {
+        let dir = TempDir::new().unwrap();
+        // Create a fake binary at target/debug/my-ext inside the entry dir.
+        let ext_dir = dir.path().join("myext");
+        std::fs::create_dir_all(ext_dir.join("target").join("debug")).unwrap();
+        let bin_path = ext_dir.join("target").join("debug").join("my-ext");
+        std::fs::write(&bin_path, "#!/bin/sh\n").unwrap();
+        // Write manifest with a relative command path.
+        let ext_toml = "[ext]\ncommand = \"target/debug/my-ext\"\nprotocol_v = 1\n";
+        std::fs::write(ext_dir.join("ext.toml"), ext_toml).unwrap();
+        let m = load_manifest(&ext_dir).unwrap();
+        // The resolved command_path must be absolute and point to the binary.
+        assert!(m.command_path.is_absolute(), "resolved path must be absolute");
+        assert_eq!(m.command_path, bin_path,
+            "relative command resolves against the manifest dir");
+        assert!(m.command_path.is_file(), "resolved path points to a real file");
+    }
+
+    #[test]
+    fn manifest_relative_command_missing_binary_refuses() {
+        let dir = TempDir::new().unwrap();
+        let ext_dir = dir.path().join("ghost");
+        std::fs::create_dir_all(&ext_dir).unwrap();
+        let ext_toml = "[ext]\ncommand = \"target/debug/ghost-ext\"\nprotocol_v = 1\n";
+        std::fs::write(ext_dir.join("ext.toml"), ext_toml).unwrap();
+        let err = load_manifest(&ext_dir).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("ghost-ext"), "error names the command");
+        assert!(msg.contains("not found"), "error says not found");
     }
 
     #[test]
@@ -3704,5 +3794,38 @@ done
             "a session switch clears the reply cache"
         );
         host.stop();
+    }
+
+    // ── ext_log file sink (FT-016) ────────────────────────────────────
+
+    /// `ext_log` appends one `pid ms msg` line to the `TUI_EXT_LOG`
+    /// file and never touches stderr (FT-016). A single test mutates
+    /// the process-global `TUI_EXT_LOG` env var; both the path
+    /// resolution and the file write are verified in one place to
+    /// avoid a race with parallel tests.
+    #[test]
+    fn ext_log_writes_to_the_tui_ext_log_file() {
+        let dir = TempDir::new().unwrap();
+        let log = dir.path().join("ext-host.log");
+        std::env::set_var("TUI_EXT_LOG", log.as_os_str());
+
+        // The env override wins over the default cache path.
+        let p = ext_log_path().unwrap();
+        assert_eq!(p, log, "TUI_EXT_LOG wins over the default cache path");
+
+        ext_log("test-spawn");
+        let body = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            body.lines().any(|l| l.ends_with("test-spawn")),
+            "the trace line lands in the file: {body:?}"
+        );
+        // Every line is `pid ms msg`: three space-separated fields.
+        let l = body.lines().next().unwrap();
+        assert!(
+            l.split(' ').count() >= 3,
+            "the line is pid ms msg: {l:?}"
+        );
+
+        std::env::remove_var("TUI_EXT_LOG");
     }
 }

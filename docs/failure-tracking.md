@@ -550,3 +550,91 @@ where a helper computes a value and the UI displays it, the
 verification is the displayed value in the running TUI, not the
 shape of the code.
 
+## FT-015 — All `ui_extensions/` extensions dead: PATH shadowing and unresolved relative command
+
+**Symptom:** Every extension in the global `ui_extensions/` layer
+shows "restart budget exhausted" in the TUI status row. No status
+footer, no frame border coloring, no mermaid transform, no bell
+notifications. The TUI itself still renders the transcript and input
+box.
+
+**Root cause:** Two compounding issues.
+
+1. **Stale `target/release/bash` binary (FT-013 residual).**
+   Before the FT-013 rename, the harness tool crate built a binary
+   named `bash` into `target/release/`. The rename to
+   `harness-bash` stopped future builds from producing `bash`, but
+   the old binary was never cleaned up. The repo `.envrc` prepends
+   `target/release` to `PATH` for direnv shells. `execvp("bash", …)`
+   therefore found the stale harness tool instead of the system
+   shell. The harness tool rejected the script argument
+   (`statusline.sh`) and exited non-zero. All three bash-script
+   extensions (statusline, frame, notify) hit the 3-restart budget
+   and went dead.
+
+2. **Bare-name command in the mermaid manifest.** The `mermaid`
+   entry declared `command = "mermaid-ext"`, a bare name resolved on
+   `PATH`. Without the ext `target/debug` dirs on `PATH` (the
+   `.envrc` PATH entries are guarded by `[ -d … ]` and silently
+   degrade when the build is absent), discovery refused the whole
+   global layer with `command 'mermaid-ext' not found`, killing all
+   four extensions at scan time.
+
+**Fix:**
+
+- `bin/tui/src/ext.rs`: Replaced `command_exists` (PATH-only check)
+  with `resolve_command(dir, command)` that resolves relative paths
+  against the entry directory. `Manifest` gains a
+  `command_path: PathBuf` field (the resolved absolute path) that
+  `build_argv` passes to `execv`. A bare name still resolves on
+  `PATH`; a relative path resolves against the manifest directory;
+  an absolute path runs as-is.
+- `ui_extensions/mermaid/ext.toml`: Changed
+  `command = "mermaid-ext"` to
+  `command = "target/debug/mermaid-ext"`. The binary now resolves
+  relative to its own entry directory. No `PATH` export is needed
+  for the global layer.
+- Deleted the stale `target/release/bash` binary. The current
+  `tools/bash/Cargo.toml` builds `harness-bash`; the old `bash`
+  artifact was a build-time leftover from before the FT-013 rename.
+- `.envrc`: Removed the `ui_extensions/mermaid/target/debug` PATH
+  export (no longer needed). Kept the `ext-rs` exports, which still
+  use bare command names.
+
+**Verification:** A PTY run of the release TUI on session
+`port-goal-mode` with a clean `PATH` (no ext `target/debug` dirs)
+spawns all four extensions and all four stay alive for the full
+session. The `TUI_EXT_LOG` shows four `spawn` lines and zero
+`death` or `respawn` lines. The `tui-pty-smoke.py` suite passes
+all extension cases. 544 TUI unit tests pass.
+
+**Residual risk:** The `ext-rs/` layer still uses bare command
+names (`statusline-ext`, `tool_result-ext`, `notify-ext`) that
+resolve on `PATH`. A user who activates that layer via
+`[ext] dir` must put those dirs on `PATH` (via
+`scripts/ext-env.sh` or the `.envrc`). A future pass could convert
+those manifests to relative paths as well.
+
+## FT-016 — Ext-host stderr trace pollutes TUI rendering
+
+**Symptom:** While the TUI runs, the extension host writes `eprintln!`
+trace lines (`[ext-host] <pid> <msg>`) to stderr. Because the TUI owns
+the terminal in alt-screen mode, those raw stderr writes bypass the
+renderer and corrupt the displayed frame.
+
+**Root cause:** When the user requested that TUI extensions log their
+tracing, the agent added an unconditional `eprintln!` to `ext_log`
+(`bin/tui/src/ext.rs`). The original comment assumed the alt-screen
+does not capture stderr, so the lines would only appear in scrollback
+after exit. In practice the terminal emulator merges both streams into
+the visible viewport, so the trace interleaves with the TUI draw.
+
+**Fix:** `ext_log` no longer writes to stderr. It now appends each
+`pid ms msg` line to a log file. The path is `TUI_EXT_LOG` when set,
+otherwise the default `<XDG_CACHE_HOME|~/.cache>/tui/ext-host.log`.
+Write failures are dropped (the trace must not take the UI down).
+
+**Verification:** Unit test `ext_log_writes_to_the_tui_ext_log_file`
+in `bin/tui/src/ext.rs` passes. All 547 TUI unit tests pass. The
+`TUI_EXT_LOG` override remains available for post-hoc inspection.
+
