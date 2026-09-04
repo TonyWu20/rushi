@@ -236,15 +236,21 @@ pub fn body_rows(
     let command = Style::default().fg(palette.color(crate::color::Role::ToolCommand));
     let code = Style::default().fg(palette.color(crate::color::Role::Code));
     match tool {
-        "read" => read_body()
-            .value(value)
-            .cfg(cfg)
-            .hint(&hint)
-            .code(&code)
-            .palette(palette)
-            .expanded(expanded)
-            .width(width)
-            .call(),
+        "read" => {
+            let builder = read_body()
+                .value(value)
+                .cfg(cfg)
+                .hint(&hint)
+                .code(&code)
+                .palette(palette)
+                .expanded(expanded)
+                .width(width);
+            if let Some(ca) = call_args {
+                builder.call_args(ca).call()
+            } else {
+                builder.call()
+            }
+        }
         "write" => {
             let builder = write_body()
                 .value(value)
@@ -360,11 +366,15 @@ fn fold_hint(
 }
 
 /// The body rows of a `Read` result (the truncation request of
-/// docs/tui-tool-result-truncation.md section 1). The value is
-/// `{text, path, total_lines}`; the body is the compact read
-/// output: the line count, then the output-mode lines of the text.
-/// Collapsed, the preview shows `preview_lines` (8) lines of the
-/// text; expanded, up to the expanded cap.
+/// docs/tui-tool-result-truncation.md section 1). The log value
+/// carries `{text}` (the fuller tool shape adds `path` and
+/// `total_lines`); the body is the compact read output: the line
+/// count, then the output-mode lines of the text. Collapsed, the
+/// preview shows `preview_lines` (8) lines of the text; expanded,
+/// up to the expanded cap.
+/// The file path for language detection resolves `value.path`
+/// first, then the call argument `file_path` (the log stores the
+/// path in the call arguments, not the result value).
 /// The read tool prefixes each content line with its 1-based file
 /// line number (`"12: "`). Split that prefix off so the syntax
 /// highlighter only sees file content. Lines without a digit-colon
@@ -383,6 +393,7 @@ fn split_line_number(line: &str) -> (Option<&str>, &str) {
 #[builder]
 fn read_body(
     value: &serde_json::Value,
+    call_args: Option<&serde_json::Value>,
     cfg: &ToolDisplay,
     hint: &Style,
     code: &Style,
@@ -411,15 +422,23 @@ fn read_body(
             };
             let remaining = lines.len().saturating_sub(cap);
             // The shared syntax-highlight entry point: the language is
-            // detected from the read path in the result value; unknown
-            // types stay plain. This is the same engine the picker
-            // preview pane uses (docs/tui-file-picker.md section 9).
-            let path = value.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let lang = if path.is_empty() {
-                None
-            } else {
-                crate::highlight::language_from_path(path)
-            };
+            // detected from the read path; unknown types stay plain.
+            // This is the same engine the picker preview pane uses
+            // (docs/tui-file-picker.md section 9). The log stores the
+            // path in the call arguments (`file_path`), not the result
+            // value, so resolve value first, then the call arguments.
+            let path = value
+                .get("path")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    call_args
+                        .and_then(|a| a.get("file_path").or_else(|| a.get("path")))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_default();
+            let lang = crate::highlight::language_from_path(&path);
             let mut hl = crate::highlight::CodeHighlighter::new();
             for raw in lines.iter().take(cap) {
                 let (num, content) = split_line_number(raw);
@@ -1244,6 +1263,88 @@ mod tests {
                 .any(|(st, t)| t.contains("note") && *st == cmt)
         });
         assert!(found_cmt, "the comment is colored: {rows:?}");
+    }
+
+    #[test]
+    fn read_preview_highlights_from_call_args() {
+        // The log stores the read path in the call arguments, not the
+        // result value (the value carries only `text`). The language
+        // must still resolve from `call_args.file_path`.
+        let p = crate::color::Palette::builtin(crate::color::Level::Rgb);
+        let cfg = ToolDisplay::preset(Preset::Balanced);
+        let cfg = ToolDisplay {
+            read_mode: OutputMode::Preview,
+            ..cfg
+        };
+        let value = serde_json::json!({"text": "1: let x = 42; // note\n2: "});
+        let args =
+            serde_json::json!({"file_path": "/tmp/sample.rs"});
+        let rows = body_rows()
+            .tool("read")
+            .value(&value)
+            .call_args(&args)
+            .err(false)
+            .cfg(&cfg)
+            .palette(&p)
+            .expanded(false)
+            .width(80)
+            .call();
+        let shown = rows_text(&rows);
+        assert!(
+            shown.iter().any(|l| l.contains("let x = 42")),
+            "the first body row shows the rust line: {shown:?}"
+        );
+        // The keyword "let" gets the palette syntax-keyword color even
+        // though the value carries no `path` (the call args supply it).
+        let kw = p.style(crate::color::Role::SyntaxKeyword, Modifier::empty());
+        let found_kw = rows.iter().any(|row| {
+            row.iter()
+                .any(|(st, t)| t == "let" && *st == kw)
+        });
+        assert!(found_kw, "the 'let' keyword is colored from call args: {rows:?}");
+        let cmt = p.style(crate::color::Role::SyntaxComment, Modifier::DIM);
+        let found_cmt = rows.iter().any(|row| {
+            row.iter()
+                .any(|(st, t)| t.contains("note") && *st == cmt)
+        });
+        assert!(found_cmt, "the comment is colored from call args: {rows:?}");
+    }
+
+    #[test]
+    fn read_value_path_wins_over_call_args() {
+        // When the result value carries a `path`, it wins over the
+        // call argument: the value is the record for the read.
+        let p = crate::color::Palette::builtin(crate::color::Level::Rgb);
+        let cfg = ToolDisplay::preset(Preset::Balanced);
+        let cfg = ToolDisplay {
+            read_mode: OutputMode::Preview,
+            ..cfg
+        };
+        let value = serde_json::json!({
+            "text": "1: def f():\n2:     pass",
+            "path": "/tmp/a.py",
+        });
+        let args = serde_json::json!({"file_path": "/tmp/b.rs"});
+        let rows = body_rows()
+            .tool("read")
+            .value(&value)
+            .call_args(&args)
+            .err(false)
+            .cfg(&cfg)
+            .palette(&p)
+            .expanded(false)
+            .width(80)
+            .call();
+        // The python keyword "def" colors through the python family,
+        // not the rust keyword set: proves the value path won.
+        let kw = p.style(crate::color::Role::SyntaxKeyword, Modifier::empty());
+        let found_def = rows.iter().any(|row| {
+            row.iter().any(|(st, t)| t == "def" && *st == kw)
+        });
+        assert!(
+            found_def,
+            "python 'def' is a keyword: {rows:?}"
+        );
     }
 
     #[test]
