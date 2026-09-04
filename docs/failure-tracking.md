@@ -210,6 +210,20 @@ FT-006 fix).
 refusal: a missing command stays a start-time error, not a
 runtime skip.
 
+**Follow-up (2026-09-05):** The PATH dependency of the global
+layer is gone. The `mermaid` manifest now names its binary by a
+path relative to its own entry (`target/debug/mermaid-ext`). The
+host resolves a relative `command` against the entry directory,
+not the TUI working dir, and not `PATH`
+(docs/ui-extension.md section 3 and section 6). The global
+`ui_extensions/` layer therefore starts without any `PATH`
+export, as long as the binary is built. The `.envrc` and
+`scripts/ext-env.sh` `PATH` setup stays for the opt-in `ext-rs/`
+Rust ports, whose manifests keep the bare command names, and for
+shells that want the harness stage binaries on `PATH`. A relative
+command that does not name a file still refuses the start and
+names the manifest (fail-loud unchanged).
+
 ## FT-008 — Empty tool-call arguments at long context
 
 **Symptom:** `sessions/better-ui/events.jsonl` holds 55 tool
@@ -492,4 +506,47 @@ utility shadows that utility for every process that inherits the
 `claim`, `compact`) collides with none of the utilities the
 reference extensions invoke (`bash`, `jq`, `git`, `awk`, `sed`,
 `mktemp`). Re-check at the next tool addition.
+
+## FT-014 — Startup thinking-level restore: repeated false "fixed" claims
+
+**Symptom:** During the TUI command-palette work the startup
+thinking-level restore was reported as fixed multiple times. After
+each report the user re-ran the TUI with `config-low.toml` and
+`config.toml` and saw the same wrong result: the palette showed
+`* medium` and the input border kept the stale level. The user
+flagged the pattern directly: "things like 'you claimed fix, I
+found not yet' have repeated multiple times."
+
+**Root cause:** Each fix was verified by source inspection and unit
+tests, not by running the real binary against the real config files.
+The first fix reordered the config-read block to run after
+`set_active`. That ordering was correct but not sufficient:
+`resolve_reasoning_effort` still used
+`text.parse::<toml::Value>()`. On the pinned toml crate (`toml =
+"1.1.4"`) that call fails on the real config text and the
+`unwrap_or_else` fallback returns an empty table. The function then
+returns the default `"medium"` for both config files. The unit tests
+passed because they tested the reordering, not the parse path. The
+defect stayed live until the parse switched to `toml::from_str`.
+
+**Fix:** `resolve_reasoning_effort` (`bin/tui/src/main.rs`) now
+parses with `toml::from_str`. The startup block sets `effort_current`
+and the thinking level after `set_active`. A one-line stderr trace
+(`[tui] startup: model=... effort=... level=...`) prints before the
+TUI takes over, so the resolved value is visible without opening the
+palette. The `SetEffort` and `CycleEffort` handlers keep the border
+in sync through `set_thinking_level`.
+
+**Verification:** A PTY test against the release binary: `config-low.toml`
+resolves `effort=low level=1` (Border1) and `config.toml` resolves
+`effort=xhigh level=4` (Border4). A session whose log already holds
+a stale `model_thinking=4` still shows the config value after
+startup. The config wins. All 544 tui tests pass.
+
+**Discipline:** A fix is not done until the real binary, run against
+the real input the user runs, shows the user-visible result. Source
+order and unit tests are necessary but not sufficient. For a bug
+where a helper computes a value and the UI displays it, the
+verification is the displayed value in the running TUI, not the
+shape of the code.
 
