@@ -7,6 +7,9 @@
 //! See `docs/loop-lifecycle-hooks.md` for the full window list,
 //! decision vocabulary, and ABI.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use serde_json::Value;
 
 /// A named lifecycle window.
@@ -102,6 +105,55 @@ pub fn window_default(window: Window) -> &'static str {
     }
 }
 
+/// The blocking decision a window applies when a hook exits 2.
+///
+/// A hook that exits 2 aborts the window's default action
+/// (docs/loop-lifecycle-hooks.md section 4.3). The blocking word is
+/// per window: `tool.before` blocks the batch, `run.idle` stops the
+/// loop, `overflow.resolve` and `exhausted.handle` stop the strategy
+/// cycle, and `compact.before` cancels the compaction. Observation
+/// windows have no default action to abort.
+pub fn window_blocking_default(window: Window) -> Option<&'static str> {
+    match window {
+        Window::ToolBefore => Some("block"),
+        Window::RunIdle => Some("stop"),
+        Window::OverflowResolve | Window::ExhaustedHandle => Some("stop"),
+        Window::CompactBefore => Some("cancel"),
+        _ => None,
+    }
+}
+
+/// Fold the results of a window firing into the effective decision.
+///
+/// Order of precedence: the first explicit decision from a hook that
+/// did not fail, then the blocking default when any hook exited 2,
+/// then `None` for the window default. The second return is the
+/// payload of the chosen decision (null for the defaults).
+pub fn fold_decision(results: &[HookResult], window: Window) -> (Option<String>, Value) {
+    for r in results {
+        if !r.failed && r.decision.is_some() {
+            return (r.decision.clone(), r.payload.clone());
+        }
+    }
+    if results.iter().any(|r| r.blocking_default) {
+        if let Some(word) = window_blocking_default(window) {
+            return (Some(word.to_string()), Value::Null);
+        }
+    }
+    (None, Value::Null)
+}
+
+/// True when a hook in the results produced an explicit decision or
+/// a blocking default. Callers log the `hook.<window>` decision
+/// marker only in that case: a no-hooks run logs nothing, so the
+/// default path stays byte-identical (docs/loop-lifecycle-hooks.md
+/// section 11).
+pub fn decision_produced(results: &[HookResult]) -> bool {
+    results
+        .iter()
+        .any(|r| r.decision.is_some() || r.blocking_default)
+}
+
 /// Build the env pairs passed to hooks: `SESSION`, `SESSIONS_ROOT`,
 /// `CONFIG`, `HARNESS_PHASE`, `HARNESS_WINDOW`.
 pub fn hook_env(
@@ -130,13 +182,13 @@ pub fn fire_hooks(
     window: Window,
     stdin_payload: &Value,
     env: &[(&str, String)],
-    _timeout_ms: u64,
+    timeout_ms: u64,
 ) -> Vec<HookResult> {
     let input = serde_json::to_string(stdin_payload).unwrap_or_default();
     let mut results = Vec::new();
 
     for h in hooks.iter().filter(|h| h.window == window) {
-        let result = fire_one(h, &input, env);
+        let result = fire_one(h, &input, env, timeout_ms);
         results.push(result);
     }
 
@@ -144,13 +196,20 @@ pub fn fire_hooks(
 }
 
 /// Fire a single hook command and interpret its output.
+///
+/// `timeout_ms` bounds the hook lifetime: at the deadline the child
+/// is killed and the result is a failure that carries the timeout
+/// detail. A hook must never wedge the loop
+/// (docs/loop-lifecycle-hooks.md section 4.3). Zero means no bound.
 fn fire_one(
     h: &HookRegistration,
     input: &str,
     env: &[(&str, String)],
+    timeout_ms: u64,
 ) -> HookResult {
     use std::io::Write;
     use std::process::{Command, Stdio};
+    use std::time::Duration;
 
     let mut cmd = Command::new(&h.command);
     cmd.args(&h.args);
@@ -178,9 +237,32 @@ fn fire_one(
         let _ = stdin.write_all(input.as_bytes());
     }
 
+    // The watchdog kills the child at the deadline. It kills by pid,
+    // so it runs while the main thread owns the child. A kill that
+    // lands (a live child) sets the flag; a kill that misses (the
+    // hook already exited) leaves it clear.
+    let pid = child.id();
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let watchdog = if timeout_ms > 0 {
+        let flag = Arc::clone(&timed_out);
+        let pid = pid;
+        Some(std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(timeout_ms));
+            let killed = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+            if killed == 0 {
+                flag.store(true, Ordering::SeqCst);
+            }
+        }))
+    } else {
+        None
+    };
+
     let output = match child.wait_with_output() {
         Ok(o) => o,
         Err(e) => {
+            if let Some(w) = watchdog {
+                let _ = w.join();
+            }
             return HookResult {
                 decision: None,
                 payload: Value::Null,
@@ -190,6 +272,20 @@ fn fire_one(
             };
         }
     };
+
+    if let Some(w) = watchdog {
+        let _ = w.join();
+    }
+
+    if timed_out.load(Ordering::SeqCst) {
+        return HookResult {
+            decision: None,
+            payload: Value::Null,
+            blocking_default: false,
+            failed: true,
+            failure_detail: format!("hook timed out after {} ms", timeout_ms),
+        };
+    }
 
     let exit_code = output.status.code().unwrap_or(-1);
 
@@ -273,5 +369,82 @@ mod tests {
         assert_eq!(window_default(Window::ToolBefore), "proceed");
         assert_eq!(window_default(Window::RunIdle), "stop");
         assert_eq!(window_default(Window::CompactBefore), "proceed");
+    }
+
+    #[test]
+    fn blocking_defaults() {
+        assert_eq!(window_blocking_default(Window::ToolBefore), Some("block"));
+        assert_eq!(window_blocking_default(Window::OverflowResolve), Some("stop"));
+        assert_eq!(window_blocking_default(Window::ExhaustedHandle), Some("stop"));
+        assert_eq!(window_blocking_default(Window::RunIdle), Some("stop"));
+        assert_eq!(window_blocking_default(Window::CompactBefore), Some("cancel"));
+        assert_eq!(window_blocking_default(Window::ModelBefore), None);
+    }
+
+    #[test]
+    fn fold_prefers_the_first_explicit_decision() {
+        let results = vec![
+            HookResult {
+                decision: None,
+                payload: Value::Null,
+                blocking_default: false,
+                failed: false,
+                failure_detail: String::new(),
+            },
+            HookResult {
+                decision: Some("stop".to_string()),
+                payload: Value::Null,
+                blocking_default: false,
+                failed: false,
+                failure_detail: String::new(),
+            },
+        ];
+        let (d, _) = fold_decision(&results, Window::ExhaustedHandle);
+        assert_eq!(d.as_deref(), Some("stop"));
+    }
+
+    #[test]
+    fn fold_maps_exit_2_to_the_window_blocking_word() {
+        let results = vec![HookResult {
+            decision: None,
+            payload: Value::Null,
+            blocking_default: true,
+            failed: false,
+            failure_detail: String::new(),
+        }];
+        let (d, _) = fold_decision(&results, Window::ToolBefore);
+        assert_eq!(d.as_deref(), Some("block"));
+        let (d, _) = fold_decision(&results, Window::RunIdle);
+        assert_eq!(d.as_deref(), Some("stop"));
+    }
+
+    #[test]
+    fn fold_failed_hooks_yield_no_decision() {
+        let results = vec![HookResult {
+            decision: Some("stop".to_string()),
+            payload: Value::Null,
+            blocking_default: false,
+            failed: true,
+            failure_detail: "exit 3".to_string(),
+        }];
+        let (d, _) = fold_decision(&results, Window::ExhaustedHandle);
+        assert_eq!(d, None);
+    }
+
+    #[test]
+    fn a_slow_hook_times_out() {
+        let reg = HookRegistration {
+            window: Window::ToolBefore,
+            command: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), "sleep 5".to_string()],
+        };
+        let results = fire_hooks(&[reg], Window::ToolBefore, &Value::Null, &[], 200);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].failed, "the kill must mark the hook failed");
+        assert!(
+            results[0].failure_detail.contains("timed out"),
+            "{:#?}",
+            results[0]
+        );
     }
 }

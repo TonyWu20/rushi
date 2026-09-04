@@ -694,6 +694,7 @@ fn run_compaction(
         "first_kept_seq": first_kept_seq,
         "tokens_before": tokens_before,
         "tokens_after": tokens_after,
+        "summary": summary,
     });
     println!("{}", serde_json::to_string(&status).unwrap());
     std::process::exit(0);

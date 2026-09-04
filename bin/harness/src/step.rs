@@ -34,15 +34,32 @@ pub fn make_runner(cfg: &HarnessConfig) -> SubprocessRunner {
     )
 }
 
+/// How a caught signal exits the process (docs/phase-2-plan.md 4.7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepMode {
+    /// `harness step`: a caught signal exits with code 1.
+    Step,
+    /// `harness run`: a caught signal exits 143 (SIGTERM) or 130 (SIGINT).
+    Run,
+}
+
 /// One step. Exits 0 on any clean stop. Exits 1 on a hard failure.
-pub fn do_step(cfg: &HarnessConfig, session_dir: &Path) {
+///
+/// `mode` picks the signal exit code: `Step` exits 1 on a caught signal,
+/// `Run` exits 143 (SIGTERM) or 130 (SIGINT).
+pub fn do_step(cfg: &HarnessConfig, session_dir: &Path, mode: StepMode) {
     let runner = make_runner(cfg);
     let session = SessionDir {
         path: session_dir.to_path_buf(),
     };
 
+    // Resolve the model description once and reuse it for the
+    // `model_thinking` marker and the guard model id
+    // (docs/phase-2-plan.md section 4.3 step 2).
+    let describe = describe_model(cfg);
+
     // Step entry: publish `model_thinking` on-change before claim.
-    publish_model_thinking(cfg, session_dir);
+    publish_model_thinking(cfg, session_dir, &describe);
 
     let claim = match runner.claim(&session) {
         Ok(c) => c,
@@ -52,7 +69,11 @@ pub fn do_step(cfg: &HarnessConfig, session_dir: &Path) {
         }
     };
 
-    signals::check_and_exit(1);
+    // Fire the `step.start` observation window (docs/loop-lifecycle-hooks.md
+    // section 3.2), after claim and before the branch dispatch.
+    fire_step_start(cfg, &session, &claim);
+
+    check_signal(mode);
 
     match claim.state.as_str() {
         "idle" => {
@@ -62,7 +83,7 @@ pub fn do_step(cfg: &HarnessConfig, session_dir: &Path) {
                 return;
             }
             // Idle with follow-ups: drain one batch as a new turn.
-            run_awaiting_model(cfg, &runner, &session, &claim, true);
+            run_awaiting_model(cfg, &runner, &session, &claim, true, &describe, mode);
         }
         "exhausted" => {
             // Nothing owed. The handoff or in-session shadow compact
@@ -72,10 +93,10 @@ pub fn do_step(cfg: &HarnessConfig, session_dir: &Path) {
             run_awaiting_tool_result(cfg, &runner, &session, &claim);
         }
         "awaiting_model" => {
-            run_awaiting_model(cfg, &runner, &session, &claim, false);
+            run_awaiting_model(cfg, &runner, &session, &claim, false, &describe, mode);
         }
         "awaiting_approval" => {
-            run_awaiting_approval(cfg, &runner, &session, &claim);
+            run_awaiting_approval(cfg, &runner, &session, &claim, mode);
         }
         other => {
             eprintln!("harness: unknown claim state `{other}`");
@@ -83,30 +104,48 @@ pub fn do_step(cfg: &HarnessConfig, session_dir: &Path) {
         }
     }
 
-    signals::check_and_exit(1);
+    check_signal(mode);
+}
+
+/// Check for a caught signal and exit with the mode-appropriate code.
+/// `Step` exits 1; `Run` exits 143 (SIGTERM) or 130 (SIGINT).
+fn check_signal(mode: StepMode) {
+    match mode {
+        StepMode::Step => signals::check_and_exit(1),
+        StepMode::Run => signals::check_and_exit_for_run(),
+    }
+}
+
+/// Fire the `step.start` observation window (docs/loop-lifecycle-hooks.md
+/// section 3.2). Observation only, no decision.
+fn fire_step_start(
+    cfg: &HarnessConfig,
+    session: &SessionDir,
+    claim: &harness_common::stage::Claim,
+) {
+    let payload = serde_json::json!({
+        "window": "step.start",
+        "session": session.path.to_string_lossy(),
+        "claim_state": claim.state.as_str(),
+    });
+    let results = hooks::fire_hooks(
+        &cfg.hooks,
+        Window::StepStart,
+        &payload,
+        &hook_env(cfg, session, "step", Window::StepStart),
+        cfg.hooks_timeout_ms,
+    );
+    log_hook_window(cfg, session, "step.start", "", &results);
 }
 
 // ---------------------------------------------------------------------------
 // model_thinking marker
 // ---------------------------------------------------------------------------
 
-/// Publish `model_thinking` ext_status on-change.
-fn publish_model_thinking(cfg: &HarnessConfig, session_dir: &Path) {
-    let mut cmd = std::process::Command::new(&cfg.model_bin);
-    cmd.arg("--describe").arg("--config").arg(&cfg.config_path);
-    let out = match cmd.output() {
-        Ok(o) => o,
-        Err(_) => return,
-    };
-    if !out.status.success() {
-        return;
-    }
-    let describe: Value = match serde_json::from_slice(&out.stdout) {
-        Ok(v) => v,
-        Err(_) => return,
-    };
-    let level = match describe.get("thinking_level").and_then(|v| v.as_u64()) {
-        Some(l) if l <= 4 => l,
+/// Publish `model_thinking` ext_status on-change using a pre-resolved `Describe`.
+fn publish_model_thinking(cfg: &HarnessConfig, session_dir: &Path, describe: &Describe) {
+    let level = match describe.thinking_level {
+        l if (l as u64) <= 4 => l as u64,
         _ => return,
     };
 
@@ -254,11 +293,11 @@ fn run_awaiting_model(
     session: &SessionDir,
     claim: &harness_common::stage::Claim,
     inject_follow: bool,
+    describe: &Describe,
+    mode: StepMode,
 ) {
     publish_loop_phase(cfg, &session.path, "wait");
 
-    // Resolve model description once.
-    let describe = describe_model(cfg);
     let guard_model = describe.model_id.clone();
 
     // Proactive threshold check.
@@ -301,9 +340,9 @@ fn run_awaiting_model(
     }
 
     // The model retry loop.
-    let (output, terminal_logged) = model_retry_loop(cfg, runner, session, &mut request, &guard_model, &describe);
+    let (output, terminal_logged) = model_retry_loop(cfg, runner, session, &mut request, &guard_model, &describe, mode);
 
-    signals::check_and_exit(1);
+    check_signal(mode);
 
     // If a terminal error was already appended, do not parse or route.
     if terminal_logged {
@@ -341,7 +380,7 @@ fn run_awaiting_model(
                 })
             })
             .collect();
-        route_and_append(cfg, runner, session, &calls);
+        route_and_append(cfg, runner, session, &calls, mode);
     }
 }
 
@@ -458,20 +497,19 @@ fn fire_and_handle_exhausted(
         "window": "exhausted.handle",
         "session": session.path.to_string_lossy(),
         "active_model": describe.active,
+        "input_budget": cfg.input_budget,
+        "context_tokens": cfg.context_tokens,
     });
     let results = hooks::fire_hooks(
         &cfg.hooks,
         Window::ExhaustedHandle,
         &payload,
-        &hook_env(cfg, session),
+        &hook_env(cfg, session, "step", Window::ExhaustedHandle),
         cfg.hooks_timeout_ms,
     );
-    let decision = results
-        .iter()
-        .find(|r| r.decision.is_some() && !r.failed)
-        .and_then(|r| r.decision.clone())
+    let (decision_opt, _) = hooks::fold_decision(&results, Window::ExhaustedHandle);
+    let decision = decision_opt
         .unwrap_or_else(|| hooks::window_default(Window::ExhaustedHandle).to_string());
-
     log_hook_window(cfg, session, "exhausted.handle", &decision, &results);
 
     match decision.as_str() {
@@ -526,19 +564,43 @@ fn try_compact_with_hooks(
         &cfg.hooks,
         Window::CompactBefore,
         &payload,
-        &hook_env(cfg, session),
+        &hook_env(cfg, session, "step", Window::CompactBefore),
         cfg.hooks_timeout_ms,
     );
-    let decision = results
-        .iter()
-        .find(|r| r.decision.is_some() && !r.failed)
-        .and_then(|r| r.decision.clone())
+    let (decision_opt, payload_val) =
+        hooks::fold_decision(&results, Window::CompactBefore);
+    let decision = decision_opt
         .unwrap_or_else(|| hooks::window_default(Window::CompactBefore).to_string());
     log_hook_window(cfg, session, "compact.before", &decision, &results);
 
     if decision == "cancel" {
         eprintln!("harness: compact.before hook cancelled the compaction");
         return CompactStatus::noop();
+    }
+
+    if decision == "replace" {
+        // The hook supplies its own summary and boundary.
+        let summary = payload_val
+            .get("summary")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string();
+        let first_kept_seq = payload_val
+            .get("first_kept_seq")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1);
+        write_handoff(session, &summary);
+        // No compact binary ran on this path, so the loop appends the
+        // boundary marker itself.
+        append_compaction_summary(cfg, session, &summary, first_kept_seq, &reason);
+        eprintln!("harness: compact.before hook replaced the compaction");
+        return CompactStatus {
+            outcome: CompactOutcome::Compacted,
+            first_kept_seq: Some(first_kept_seq),
+            tokens_before: None,
+            tokens_after: None,
+            summary: Some(summary),
+        };
     }
 
     let opts = CompactOpts {
@@ -548,6 +610,12 @@ fn try_compact_with_hooks(
     };
     match runner.compact(session, &opts) {
         Ok(status) => {
+            // Write the handoff document (docs/phase-2-plan.md 3.5).
+            if status.outcome == CompactOutcome::Compacted {
+                if let Some(ref summary_text) = status.summary {
+                    write_handoff(session, summary_text);
+                }
+            }
             let status_str = match status.outcome {
                 CompactOutcome::Compacted => "compacted",
                 CompactOutcome::Noop => "noop",
@@ -563,7 +631,7 @@ fn try_compact_with_hooks(
                 &cfg.hooks,
                 Window::CompactAfter,
                 &payload2,
-                &hook_env(cfg, session),
+                &hook_env(cfg, session, "step", Window::CompactAfter),
                 cfg.hooks_timeout_ms,
             );
             status
@@ -616,6 +684,7 @@ fn model_retry_loop(
     request: &mut harness_common::stage::RequestFile,
     guard_model: &str,
     describe: &Describe,
+    mode: StepMode,
 ) -> (ModelOutput, bool) {
     let mut empty_attempts = 0usize;
     let mut model_err_retries = 0usize;
@@ -625,19 +694,20 @@ fn model_retry_loop(
     let terminal_logged = false;
 
     'outer: loop {
-        signals::check_and_exit(1);
+        check_signal(mode);
 
         // model.before observation window.
         let payload = serde_json::json!({
             "window": "model.before",
             "session": session.path.to_string_lossy(),
             "model": describe.model_id,
+            "projected_tokens": estimate_context(cfg, &session.path),
         });
         let _ = hooks::fire_hooks(
             &cfg.hooks,
             Window::ModelBefore,
             &payload,
-            &hook_env(cfg, session),
+            &hook_env(cfg, session, "step", Window::ModelBefore),
             cfg.hooks_timeout_ms,
         );
 
@@ -663,13 +733,14 @@ fn model_retry_loop(
             "window": "model.after",
             "session": session.path.to_string_lossy(),
             "stop_reason": last_output.json.get("stop_reason").cloned().unwrap_or(Value::Null),
+            "detail": last_output.json.get("detail").cloned().unwrap_or(Value::Null),
             "usage": last_output.json.get("usage").cloned().unwrap_or(Value::Null),
         });
         let _ = hooks::fire_hooks(
             &cfg.hooks,
             Window::ModelAfter,
             &payload,
-            &hook_env(cfg, session),
+            &hook_env(cfg, session, "step", Window::ModelAfter),
             cfg.hooks_timeout_ms,
         );
 
@@ -685,12 +756,31 @@ fn model_retry_loop(
             .unwrap_or("");
         let req_model = request.json.get("model").and_then(|m| m.as_str()).unwrap_or("");
 
-        // Fire overflow.resolve on overflow classification.
+        // Fire overflow.resolve on overflow classification. The
+        // decision (`stay_compact` or `stop`) decides whether the
+        // strategy cycle continues (docs/loop-lifecycle-hooks.md 3.4).
         let is_overflow = !req_model.is_empty()
             && req_model == guard_model
             && is_overflow(detail);
         if stop_reason == "error" && is_overflow {
-            fire_overflow_resolve(cfg, session, &describe.active);
+            let usage_val = last_output.json.get("usage").cloned().unwrap_or(Value::Null);
+            let ovf_decision = fire_overflow_resolve(
+                cfg,
+                session,
+                &describe.active,
+                stop_reason,
+                detail,
+                &usage_val,
+                !last_resort,
+            );
+            if ovf_decision == "stop" {
+                append_terminal_error(
+                    cfg,
+                    &session.path,
+                    "overflow.resolve hook stopped the strategy cycle",
+                );
+                return (last_output, true);
+            }
         }
 
         if stop_reason == "error" {
@@ -898,6 +988,7 @@ fn route_and_append(
     runner: &SubprocessRunner,
     session: &SessionDir,
     calls: &[ToolCallEvent],
+    mode: StepMode,
 ) {
     // tool.before decision window.
     let calls_json: Vec<Value> = calls
@@ -919,7 +1010,7 @@ fn route_and_append(
         &cfg.hooks,
         Window::ToolBefore,
         &payload,
-        &hook_env(cfg, session),
+        &hook_env(cfg, session, "step", Window::ToolBefore),
         cfg.hooks_timeout_ms,
     );
     log_hook_window(cfg, session, "tool.before", "", &results);
@@ -1010,7 +1101,7 @@ fn route_and_append(
 
             // Wait for the approval.
             if let Some(call) = blocked_call {
-                wait_for_approval(cfg, runner, session, &req_id, &call, &prompt);
+                wait_for_approval(cfg, runner, session, &req_id, &call, &prompt, mode);
             }
             return;
         }
@@ -1053,7 +1144,7 @@ fn fire_tool_after(
         &cfg.hooks,
         Window::ToolAfter,
         &after_payload,
-        &hook_env(cfg, session),
+        &hook_env(cfg, session, "step", Window::ToolAfter),
         cfg.hooks_timeout_ms,
     );
 }
@@ -1069,6 +1160,7 @@ fn wait_for_approval(
     request_id: &str,
     call: &ToolCallEvent,
     prompt: &str,
+    mode: StepMode,
 ) {
     let poll = std::time::Duration::from_millis(250);
     let deadline = cfg
@@ -1076,7 +1168,7 @@ fn wait_for_approval(
         .map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s));
 
     loop {
-        signals::check_and_exit(1);
+        check_signal(mode);
 
         if let Some(ans) = read_approval(session, request_id) {
             let decision = ans.get("decision").and_then(|d| d.as_str()).unwrap_or("deny");
@@ -1161,6 +1253,7 @@ fn run_awaiting_approval(
     runner: &SubprocessRunner,
     session: &SessionDir,
     _claim: &harness_common::stage::Claim,
+    mode: StepMode,
 ) {
     let path = session.path.join("events.jsonl");
     let Ok(data) = std::fs::read_to_string(&path) else {
@@ -1237,37 +1330,29 @@ fn run_awaiting_approval(
             .unwrap_or(Value::Null),
     };
 
-    wait_for_approval(cfg, runner, session, &req_id, &tc, &prompt);
+    wait_for_approval(cfg, runner, session, &req_id, &tc, &prompt, mode);
 }
 
 // ---------------------------------------------------------------------------
 // Shared helpers.
 // ---------------------------------------------------------------------------
 
-fn hook_env(
+/// The `HARNESS_*` env pairs for a hook invocation. `phase` is the
+/// harness subcommand (`step` or `run`); `window` is the exact window
+/// being fired so `HARNESS_WINDOW` always reports the real window
+/// (docs/loop-lifecycle-hooks.md section 4.2).
+pub fn hook_env(
     cfg: &HarnessConfig,
     session: &SessionDir,
+    phase: &'static str,
+    window: Window,
 ) -> Vec<(&'static str, String)> {
     hooks::hook_env(
         &session.path.to_string_lossy(),
         &cfg.sessions_root.to_string_lossy(),
         &cfg.config_path.to_string_lossy(),
-        "step",
-        Window::ToolBefore,
-    )
-}
-
-/// Hook env for the `run` loop's session-level windows.
-pub fn hook_env_for_run(
-    cfg: &HarnessConfig,
-    session: &SessionDir,
-) -> Vec<(&'static str, String)> {
-    hooks::hook_env(
-        &session.path.to_string_lossy(),
-        &cfg.sessions_root.to_string_lossy(),
-        &cfg.config_path.to_string_lossy(),
-        "run",
-        Window::SessionStart,
+        phase,
+        window,
     )
 }
 
@@ -1347,17 +1432,83 @@ fn log_hook_window(
 }
 
 /// Fire the `overflow.resolve` window on overflow classification.
-fn fire_overflow_resolve(cfg: &HarnessConfig, session: &SessionDir, active_model: &str) {
+///
+/// Carries the fields docs/loop-lifecycle-hooks.md section 3.4 names:
+/// `kind`, `stop_reason`, `detail`, `usage`, `input_budget`,
+/// `context_tokens`, and `can_recover`. Returns the folded decision:
+/// the first explicit decision, then the exit-2 blocking default
+/// (`stop`), then the window default (`stay_compact`).
+fn fire_overflow_resolve(
+    cfg: &HarnessConfig,
+    session: &SessionDir,
+    active_model: &str,
+    stop_reason: &str,
+    detail: &str,
+    usage: &Value,
+    can_recover: bool,
+) -> String {
     let payload = serde_json::json!({
         "window": "overflow.resolve",
         "session": session.path.to_string_lossy(),
         "active_model": active_model,
+        "kind": "overflow",
+        "stop_reason": stop_reason,
+        "detail": detail,
+        "usage": usage,
+        "input_budget": cfg.input_budget,
+        "context_tokens": cfg.context_tokens,
+        "can_recover": can_recover,
     });
-    let _ = hooks::fire_hooks(
+    let results = hooks::fire_hooks(
         &cfg.hooks,
         Window::OverflowResolve,
         &payload,
-        &hook_env(cfg, session),
+        &hook_env(cfg, session, "step", Window::OverflowResolve),
         cfg.hooks_timeout_ms,
     );
+    let (decision, _) = hooks::fold_decision(&results, Window::OverflowResolve);
+    let decision = decision
+        .unwrap_or_else(|| hooks::window_default(Window::OverflowResolve).to_string());
+    log_hook_window(cfg, session, "overflow.resolve", &decision, &results);
+    decision
+}
+
+/// Save the handoff document to `sessions/<n>/handoff.md`. The
+/// `compaction_summary` boundary event is appended by the `compact`
+/// binary itself, so the loop only persists the document here
+/// (docs/phase-2-plan.md 3.5, 4.3 step 5).
+fn write_handoff(
+    session: &SessionDir,
+    summary: &str,
+) {
+    if let Err(e) = std::fs::write(session.path.join("handoff.md"), summary) {
+        eprintln!("harness: cannot write handoff.md: {e}");
+    }
+}
+
+/// Append the `compaction_summary` boundary marker. Used only on the
+/// `replace` path, where a hook supplied its own summary and boundary
+/// and the `compact` binary did not run (docs/phase-2-plan.md 4.3).
+fn append_compaction_summary(
+    cfg: &HarnessConfig,
+    session: &SessionDir,
+    summary: &str,
+    first_kept_seq: u64,
+    reason: &CompactReason,
+) {
+    let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let reason_str = match reason {
+        CompactReason::Threshold => "threshold",
+        CompactReason::Overflow | CompactReason::LastResort => "overflow",
+    };
+    let event = serde_json::json!({
+        "v": 1,
+        "type": "compaction_summary",
+        "ts": ts,
+        "summary": summary,
+        "first_kept_seq": first_kept_seq,
+        "reason": reason_str,
+        "tokens_before": 0,
+    });
+    append_event(cfg, &session.path, &event);
 }

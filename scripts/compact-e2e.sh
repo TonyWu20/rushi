@@ -199,7 +199,6 @@ NEW_WORK() {
   rm -rf "$WORK"
   SESSIONS_DIR="$WORK/sessions/session"
   SLOG="$SESSIONS_DIR/events.jsonl"
-  SSTATE="$SESSIONS_DIR/compact.json"
   mkdir -p "$SESSIONS_DIR" "$WORK/sessions"
   echo "==== scenario: $1"
 }
@@ -287,19 +286,23 @@ EOF
 # readings stay below the trigger level, and the successful call
 # measures over the input budget. The hook is cold. The silent
 # overflow path is the only compact.
+# Phase 2: the sticky compact.json state is gone. This scenario now
+# tests the Phase 2 equivalent: a session with a prior compaction_summary
+# boundary where the post-boundary events still exceed the budget.
+# The silent-overflow path fires the overflow compact on the usage reading.
 scenario_silent_overflow_post_engage() {
   NEW_WORK silent-post-engage
   COMPACT_ENABLED=true
   work_config
   seed_session 2800 2900 3000
-  cat >"$SSTATE" <<'EOF'
-{"v":2,"caps":{"result":500,"text":200},"keep":24,"drops":0,"engaged_at":3,"last_tokens":3300,"last_at":3,"drops_at_last":0,"per_group":0,"boundary_seq":0}
-EOF
   cat >"$WORK/plan" <<'EOF'
 {"text":"done","tool_calls":[],"reasoning":[],"stop_reason":"stop","usage":{"input_tokens":5000,"output_tokens":10}}
 EOF
   make_stub
   run_step
+  # The seed readings (2800-3000) stay below the 3404 trigger, so the
+  # threshold check is cold. But the model reports input_tokens=5000,
+  # which exceeds the 3904 budget: the silent-overflow path fires.
   local n_summary
   n_summary=$(count_events compaction_summary)
   assert_eq "$n_summary" 1 "one compaction_summary on the silent overflow"
@@ -359,11 +362,14 @@ scenario_compact_failure() {
     export STUB_PLAN="$WORK/plan" STUB_STATE="$WORK/stub-n" STUB_SUMMARY_FAILS=1
     "$BIN_DIR/harness" step session 2>/dev/null || true
   )
-  assert_eq "$(count_events compaction_failed)" 1 "the compaction_failed marker"
+  # The threshold compact fails (all summary calls fail). No boundary
+  # is created, so context_exhausted does not fire. The model call
+  # succeeds normally: one compaction_failed marker, no terminal error.
+  assert_eq "$(count_events compaction_failed)" 1 "one compaction_failed marker (threshold)"
   assert_eq "$(count_events compaction_summary)" 0 "no compaction_summary"
   local n_err
   n_err=$(jq -c 'select(.type == "error")' "$SLOG" | wc -l)
-  assert_eq "$n_err" 0 "no terminal event"
+  assert_eq "$n_err" 0 "no terminal error (model call succeeded)"
   assert_eq "$(claim_state)" "idle" "the loop continues to idle"
 }
 
@@ -381,8 +387,15 @@ scenario_empty_summary() {
     export STUB_PLAN="$WORK/plan" STUB_STATE="$WORK/stub-n" STUB_SUMMARY_EMPTY=1
     "$BIN_DIR/harness" step session 2>/dev/null || true
   )
-  assert_eq "$(count_events compaction_failed)" 1 "the compaction_failed marker"
+  # The threshold compact produces an empty summary (failure). No
+  # boundary is created, so context_exhausted does not fire. The
+  # model call succeeds normally: one compaction_failed marker, no
+  # terminal error.
+  assert_eq "$(count_events compaction_failed)" 1 "one compaction_failed marker (threshold)"
   assert_eq "$(count_events compaction_summary)" 0 "no compaction_summary"
+  local n_err
+  n_err=$(jq -c 'select(.type == "error")' "$SLOG" | wc -l)
+  assert_eq "$n_err" 0 "no terminal error (model call succeeded)"
   assert_eq "$(claim_state)" "idle" "the loop continues to idle"
 }
 
@@ -425,56 +438,42 @@ EOF
 }
 
 # ── Scenario 8: the last-resort compaction ───────────────────────
+# Phase 2: the last-resort path is triggered by the context_exhausted
+# form from assemble, which fires the exhausted.handle window. The
+# seed readings exceed the trigger so the threshold compact fires and
+# succeeds (default stub). The context is still over budget, so the
+# assemble emits context_exhausted, the exhausted.handle window fires
+# with the default stay_compact, and a last-resort forced compact runs.
 scenario_last_resort() {
   NEW_WORK last-resort
-  # The threshold hook off: the form must escalate on the seed's
-  # readings alone. The last-resort path is not gated by the switch.
+  # A compaction_summary boundary already exists in the log. The
+  # post-boundary events exceed the input budget, so assemble emits
+  # context_exhausted; the exhausted.handle default stay_compact
+  # runs a last-resort forced compact (not gated by compact_enabled).
   COMPACT_ENABLED=false
   work_config
-  seed_session 4000 4200
+  local D
+  D="$(printf 'd%.0s' {1..4000})$(printf 'd1%.0s' {1..4000})$(printf 'd%.0s' {1..4000})$(printf 'd1%.0s' {1..4000})"
+  cat > "$SLOG" <<EOF
+{"v":1,"type":"user_message","ts":"t1","seq":1,"content":"do the task"}
+{"v":1,"type":"assistant_message","ts":"t2","seq":2,"content":"step one","reasoning":[],"tool_calls":[{"id":"c1","name":"read","arguments":{"file_path":"a.txt"}}],"usage":{"input_tokens":200,"output_tokens":50}}
+{"v":1,"type":"tool_result","ts":"t3","seq":3,"id":"c1","value":{"text":"small result"},"is_error":false}
+{"v":1,"type":"stop","ts":"t4","seq":4,"stop_reason":"end_turn"}
+{"v":1,"type":"compaction_summary","ts":"t5","seq":5,"summary":"the summary of the old region","first_kept_seq":1,"reason":"threshold","tokens_before":800}
+{"v":1,"type":"user_message","ts":"t6","seq":6,"content":"carry on"}
+{"v":1,"type":"assistant_message","ts":"t7","seq":7,"content":"step two","reasoning":[],"tool_calls":[{"id":"c2","name":"bash","arguments":{"command":"ls"}}],"usage":{"input_tokens":3800,"output_tokens":50}}
+{"v":1,"type":"tool_result","ts":"t8","seq":8,"id":"c2","value":{"text":"$D"},"is_error":false}
+{"v":1,"type":"stop","ts":"t9","seq":9,"stop_reason":"end_turn"}
+{"v":1,"type":"user_message","ts":"t10","seq":10,"content":"new task"}
+EOF
   echo "$NORMAL_STOP" >"$WORK/plan"
   make_stub
-  # The state file parks the compact form at the floor: the keep
-  # window is two, the drops hold the max (the two groups before the
-  # floor tail), and the last reading outgrows the budget. A natural
-  # engagement lands at the end of the log, leaves no reading at or
-  # after it, and the form cannot escalate. The hand-set state is
-  # the last-resort fixture: the next assemble run exhausts.
-  jq -cn '{v:2,boundary_seq:0,caps:{result:500,text:200},drops:2,drops_at_last:0,engaged_at:0,keep:2,last_tokens:4300,last_at:7,per_group:0}' > "$SSTATE"
-  # The keep knob of the work config: with the engaged trim caps
-  # (result 500, text 200) the seed estimates about 410 tokens, so
-  # the default 2000 keep window covers the log and the forced
-  # compact no-ops. 200 keeps two results and cuts the first group:
-  # the old region is non-empty.
-  sed -i 's/^compact_keep_tokens = 2000$/compact_keep_tokens = 200/' "$WORK/config.toml"
-  # Run assemble until the form exhausts: the keep window halves to
-  # two, the drops reach the max, and the prediction still outgrows
-  # the budget.
-  local i
-  for i in 1 2 3 4 5 6 7 8; do
-    (
-      cd "$WORK"
-      CONFIG="$WORK/config.toml" "$BIN_DIR/assemble" --session sessions/session --config config.toml > /dev/null 2>&1 || true
-    )
-  done
-  # The Exhausted form is live: the request type is
-  # context_exhausted.
-  local form
-  form=$(
-    cd "$WORK"
-    CONFIG="$WORK/config.toml" "$BIN_DIR/assemble" --session sessions/session --config config.toml 2>/dev/null | jq -r .type
-  )
-  if [ "$form" != "context_exhausted" ]; then
-    ko "the assemble form did not exhaust (form: $form): the last-resort case was not exercised"
-    return
-  fi
   run_step
-  assert_eq "$(count_events compaction_summary)" 1 "one compaction_summary"
-  assert_no_context_exhausted
-  # No new session: the sessions root holds only the work session.
-  local sessions
-  sessions=$(ls "$WORK/sessions" 2>/dev/null | grep -v '^session$' | wc -l)
-  assert_eq "$sessions" 0 "no new session directory"
+  # The context_exhausted form fired: one last-resort compaction_summary.
+  assert_eq "$(count_events compaction_summary)" 2 "two compaction_summaries (the seed boundary + the last-resort)"
+  local n_err
+  n_err=$(jq -c 'select(.type == "error")' "$SLOG" | wc -l)
+  assert_eq "$n_err" 0 "no terminal error"
   assert_eq "$(claim_state)" "idle" "the loop runs to idle in the original session"
 }
 

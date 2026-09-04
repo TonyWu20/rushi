@@ -137,6 +137,9 @@ pub struct CompactStatus {
     pub first_kept_seq: Option<u64>,
     pub tokens_before: Option<u64>,
     pub tokens_after: Option<u64>,
+    /// The handoff summary text (the LLM-written summary of the
+    /// shadowed region). Present only when the compact succeeded.
+    pub summary: Option<String>,
 }
 
 impl CompactStatus {
@@ -146,6 +149,7 @@ impl CompactStatus {
             first_kept_seq: None,
             tokens_before: None,
             tokens_after: None,
+            summary: None,
         }
     }
 }
