@@ -63,6 +63,11 @@ append_types = []
 protocol_v = 1
 ```
 
+- `command` — the executable. A bare name resolves on the TUI's
+  `PATH`. A relative path resolves against the entry directory.
+  An absolute path runs as-is. The host checks the target before
+  spawn and refuses a missing one
+- `args` — arguments to the command
 - `caps` — claimed capabilities
 - `kinds` — event types the host forwards. Default: all
 - `tick_ms` — cadence for `status`
@@ -199,6 +204,9 @@ where the core decides the sequence and an entry never claims a slot
 - validation fails loud at scan. A malformed manifest or a broken
   command refuses the start and names the file. A wrong entry is a
   misconfiguration, not a silent skip
+- a relative `command` path resolves against the entry directory,
+  not the TUI's working directory. A bundled reference binary lands
+  next to its `ext.toml` and needs no `PATH` export
 - the host owns lifecycle: spawn, restart budget, exit. An extension
   never restarts itself
 
@@ -217,10 +225,14 @@ where the core decides the sequence and an entry never claims a slot
 - A slow `transform` times out at 2 s. Fallback is the raw block
 - Tick cost note: a bash statusline that spawns `git` on every tick is
   expensive. The reference TTL-caches git calls at 3 s
-- Debug log: set `TUI_EXT_LOG=/path/log` and the host appends one
-  line per extension process event (spawn, death with exit code,
-  respawn, stop). The log is off unless the var is set (2026-09-04
-  pass, `ext_log` in `bin/tui/src/ext.rs`)
+- Debug log: the host appends one line per extension process event
+  (spawn, death with exit code, respawn, stop) to a log file,
+  never to stderr. The TUI owns the terminal; a raw stderr write
+  bypasses the renderer and pollutes the frame (FT-016). The path
+  is `TUI_EXT_LOG` when set, otherwise the default
+  `<cache>/tui/ext-host.log` under `$XDG_CACHE_HOME` or
+  `$HOME/.cache` (line format: `pid ms msg`; `ext_log` in
+  `bin/tui/src/ext.rs`)
 
 ## 8. Reference extensions, in order
 
@@ -241,7 +253,11 @@ where the core decides the sequence and an entry never claims a slot
   supervision
 - The default examples are scripts (`statusline`, `tool_result`).
   They add zero compiled binaries on a user machine
-- The `mermaid` example ships one opt-in Rust binary
+- The `mermaid` example ships one opt-in Rust binary. Its manifest
+  names the binary by a path relative to its entry
+  (`target/debug/mermaid-ext`), so the host resolves it without a
+  `PATH` export. Build it once in its directory
+  (`cargo build`)
 - A project carries only what it uses, in its own directory
 - No hot reload (decision). Pi accepts `/reload` only when idle.
   deepseek-harness also restarts for some changes, per user reports.
@@ -333,3 +349,37 @@ One consequence worth naming: their ordering is correctness, because
 entries need services in sequence. Ours is presentation, because
 inter-extension data flows through the log. That makes host-owned
 order easier to hold here than there.
+
+## Properties
+
+Lean-style invariants for this spec (see `lean-driven-development.md`).
+
+P1. fail-loud-manifest: given a malformed manifest or a broken command, observe the host refuse to start and name the offending file.
+P2. load-order: given a global and a project extension of one name, observe the project entry override and the first-listed kind owner win.
+P3. protocol-v: given an extension whose `protocol_v` mismatches the host, observe the host skip it and flash without starting it.
+P4. per-op-fallback: given a malformed extension reply, observe the TUI stay up and revert per op: lines to the built-in render, status to the last valid row, transformed to the raw block, append to a named reject.
+P5. append-whitelist: given an `append` for a type outside `append_types`, observe the host reject it with a flash. Whitelisted types are appended through the port.
+P6. restart-budget: given a repeatedly crashing extension, observe three restart attempts with 1 s, 2 s, and 4 s backoff, then a dead hint.
+P7. ext-status-cap: given more than 128 distinct `ext_status` ids, observe the host drop the oldest-updated id to hold the cap.
+
+## Verification
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | fail-loud-manifest | `manifest_bad_toml_refuses_with_the_file`, `manifest_broken_command_refuses_with_the_file` in `bin/tui/src/ext.rs` | proven |
+| P2 | load-order | `discovery_orders_layers_and_overrides_by_name`, `discovery_kind_owner_is_first_in_sequence` in `bin/tui/src/ext.rs` | proven |
+| P3 | protocol-v | `manifest_protocol_v_mismatch_marks_unsupported` in `bin/tui/src/ext.rs` | proven |
+| P4 | per-op-fallback | `lines_reply_replaces_the_builtin_render`, `lines_payload_validation` in `bin/tui/src/ext.rs` | proven |
+| P5 | append-whitelist | `append_whitelist_rejects_and_accepts` in `bin/tui/src/ext.rs` | proven |
+| P6 | restart-budget | `restart_budget_ends_in_dead`, `stop_kills_the_group` in `bin/tui/src/ext.rs` | proven |
+| P7 | ext-status-cap | `ext_statuses_drop_the_oldest_id_at_the_cap` in `bin/tui/src/app.rs` | proven |
+
+## Gate
+
+The acceptance commands. All must exit 0 for this spec to be proven.
+
+```
+cargo build
+cargo test
+scripts/tui-pty-smoke.py
+```
