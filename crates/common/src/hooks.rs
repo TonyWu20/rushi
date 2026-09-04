@@ -92,6 +92,10 @@ pub struct HookResult {
     pub failed: bool,
     /// The error detail when `failed` is true.
     pub failure_detail: String,
+    /// The registered hook command that produced this result.
+    /// The loop records it in the `hook_applied` marker when a
+    /// `model.before` transform lands (docs/loop-lifecycle-hooks.md 4.5).
+    pub command: String,
 }
 
 /// The default decision for a window when no hook answers.
@@ -101,6 +105,7 @@ pub fn window_default(window: Window) -> &'static str {
         Window::ToolBefore => "proceed",
         Window::RunIdle => "stop",
         Window::CompactBefore => "proceed",
+        Window::ModelBefore => "proceed",
         _ => "noop",
     }
 }
@@ -229,6 +234,7 @@ fn fire_one(
                 blocking_default: false,
                 failed: true,
                 failure_detail: format!("spawn {}: {e}", h.command),
+                command: h.command.clone(),
             };
         }
     };
@@ -269,6 +275,7 @@ fn fire_one(
                 blocking_default: false,
                 failed: true,
                 failure_detail: format!("wait {}: {e}", h.command),
+                command: h.command.clone(),
             };
         }
     };
@@ -284,6 +291,7 @@ fn fire_one(
             blocking_default: false,
             failed: true,
             failure_detail: format!("hook timed out after {} ms", timeout_ms),
+            command: h.command.clone(),
         };
     }
 
@@ -299,6 +307,7 @@ fn fire_one(
                     blocking_default: false,
                     failed: false,
                     failure_detail: String::new(),
+                    command: h.command.clone(),
                 }
             } else {
                 match serde_json::from_str::<Value>(&stdout) {
@@ -314,6 +323,7 @@ fn fire_one(
                             blocking_default: false,
                             failed: false,
                             failure_detail: String::new(),
+                            command: h.command.clone(),
                         }
                     }
                     Err(_) => HookResult {
@@ -322,6 +332,7 @@ fn fire_one(
                         blocking_default: false,
                         failed: true,
                         failure_detail: format!("hook produced non-JSON stdout: {stdout}"),
+                        command: h.command.clone(),
                     },
                 }
             }
@@ -332,6 +343,7 @@ fn fire_one(
             blocking_default: true,
             failed: false,
             failure_detail: String::new(),
+            command: h.command.clone(),
         },
         other => {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -341,6 +353,7 @@ fn fire_one(
                 blocking_default: false,
                 failed: true,
                 failure_detail: format!("exit {other}: {stderr}"),
+                command: h.command.clone(),
             }
         }
     }
@@ -390,6 +403,7 @@ mod tests {
                 blocking_default: false,
                 failed: false,
                 failure_detail: String::new(),
+                command: String::new(),
             },
             HookResult {
                 decision: Some("stop".to_string()),
@@ -397,6 +411,7 @@ mod tests {
                 blocking_default: false,
                 failed: false,
                 failure_detail: String::new(),
+                command: "harness-hook-x".to_string(),
             },
         ];
         let (d, _) = fold_decision(&results, Window::ExhaustedHandle);
@@ -411,6 +426,7 @@ mod tests {
             blocking_default: true,
             failed: false,
             failure_detail: String::new(),
+            command: "harness-hook-x".to_string(),
         }];
         let (d, _) = fold_decision(&results, Window::ToolBefore);
         assert_eq!(d.as_deref(), Some("block"));
@@ -426,6 +442,7 @@ mod tests {
             blocking_default: false,
             failed: true,
             failure_detail: "exit 3".to_string(),
+            command: String::new(),
         }];
         let (d, _) = fold_decision(&results, Window::ExhaustedHandle);
         assert_eq!(d, None);
@@ -446,5 +463,22 @@ mod tests {
             "{:#?}",
             results[0]
         );
+    }
+
+    #[test]
+    fn the_result_carries_the_hook_command() {
+        let reg = HookRegistration {
+            window: Window::ModelBefore,
+            command: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "echo '{\"decision\":\"transform\",\"payload\":{\"request\":{\"model\":\"m2\"}}}'".to_string(),
+            ],
+        };
+        let results = fire_hooks(&[reg], Window::ModelBefore, &Value::Null, &[], 5000);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].command, "/bin/sh");
+        assert_eq!(results[0].decision.as_deref(), Some("transform"));
+        assert!(results[0].payload.get("request").is_some());
     }
 }

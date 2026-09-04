@@ -63,10 +63,13 @@ harness point.
 Your harness already self-hosts this work. It is the loop itself. So the
 port is really a re-host of the loop, not a tool.
 
-**Verdict: Hard.** The tools and math are easy. The orchestration needs
-three new loop seams: per-turn prompt injection, an idle-continue
-signal, and a compaction veto. The last one maps to the `compact.before`
-hook window if it ever lands. Until Phase 2 ships, this is blocked.
+**Verdict: Ready.** The three loop seams (per-turn prompt injection,
+idle-continue, compaction veto) are now built into the `harness` loop:
+the `run.idle` window, the `compact.before` window, and the `tool.before`
+window all ship in Phase 2. The hook ABI, tool registration, approval
+round-trip, and event-log persistence are in place. Remaining work is
+application-level: the goal tools, hook binaries, and state file.
+See `docs/pi-goal-readiness.md` for the full readiness assessment.
 
 ### `rpiv-ask-user-question` (juicesharp)
 
@@ -285,39 +288,48 @@ They are loop features.
 Two infra pieces decide the whole set.
 
 1. **The lifecycle hook ABI.** This is the `tool.before` window and
-   its friends. It is named in `loop-lifecycle-hooks.md`. It is not
-   built. `bin/harness` and `crates/common` are spec only. Without it,
-   no hook-based extension can run.
-2. **The approval round-trip.** The TUI draws the banner. But no code
-   emits `approval_request`. No loop code waits for the answer. No
-   schema files exist. Without it, the agent cannot pause for a human
-   answer.
+   its friends. It is named in `loop-lifecycle-hooks.md`. It is built:
+   `crates/common/src/hooks.rs` holds the dispatcher and
+   `bin/harness` fires all 13 windows.
+2. **The approval round-trip.** The `approval_request` and `approval`
+   schema files exist in `schemas/events/v1/`, `bin/claim` derives the
+   `awaiting_approval` state, and `bin/harness` waits for the answer.
+   The agent can pause for a human answer.
 
-Both are on the Phase 2 path already. The hook ABI is in the revised
-`phase-2-plan.md` (section 3.3, the `hooks` module in stage 2) and
-`loop-lifecycle-hooks.md`. The approval round-trip is in the revised
-plan section 4.8 (the `awaiting_approval` state, the two schema
-files, the `tool.before` `approve` decision, and the
-`approval_timeout_s` config key). It lands in stage 3 of the plan.
-The `run.idle` window (plan section 4.9) addresses the `pi-goal`
-idle-continue need.
+Both were on the Phase 2 path. As of 2026-09-13 both are built:
+
+- The hook ABI is in `crates/common/src/hooks.rs` and fires from the
+  `harness` loop. All 13 windows (including `tool.before`,
+  `compact.before`, `model.before`, and `run.idle`) are wired and
+  gated by `scripts/model-before-transform-e2e.sh` and the compact
+  e2e suite.
+- The approval round-trip is in `bin/claim` (`awaiting_approval`
+  state), `bin/harness` (`run_awaiting_approval`), the two schema
+  files in `schemas/events/v1/`, and the `[limits].approval_timeout_s`
+  config key.
+
+The `run.idle` window (plan section 4.9) and the `model.before`
+transform path address the `pi-goal` idle-continue and per-turn
+prompt-injection needs. Both are built. `pi-goal` is now
+application-level porting work; see `docs/pi-goal-readiness.md`.
 
 ## 5. Suggested order
 
-Work the set from easy to hard. Each row builds on the last.
+Work the set from easy to hard. As of 2026-09-13 the Phase 2 loop is
+built: the hook ABI, the approval round-trip, the `run.idle` window,
+and the `model.before` transform path all ship in `harness`.
 
-1. Land the easy tool ports now. `pi-lynx` and `pi-terminal-browser`
+1. Land the easy tool ports. `pi-lynx` and `pi-terminal-browser`
    as `tools/` CLIs. No new infra needed.
-2. Build the Phase 2 hook ABI. This unlocks the `tool.before` window.
-3. Port `no-find-grep` and `no-bare-python` as one `tool.before` hook.
-   Add the block-reason reply to `route`.
-4. Port `agent-simple-english` as a `tool.before` and `session.start`
-   hook. Add the prompt-submit window.
-5. Port `pi-automode` as a `tool.before` hook with a classifier call.
-6. Close the approval round-trip. Then port `rpiv-ask-user-question`.
-7. Re-host `pi-goal` as loop features. This needs the three loop
-   seams. Do it last.
-8. Keep `pi-fff` in reserve. Its engine is native and its picker is
+2. Port `no-find-grep` and `no-bare-python` as one `tool.before`
+   hook. The block-reason reply is already in `route`.
+3. Port `agent-simple-english` as a `tool.before` and `session.start`
+   hook.
+4. Port `pi-automode` as a `tool.before` hook with a classifier call.
+5. Port `rpiv-ask-user-question` on the approval round-trip.
+6. Port `pi-goal` as application-level tools plus hooks. See
+   `docs/pi-goal-readiness.md`.
+7. Keep `pi-fff` in reserve. Its engine is native and its picker is
    covered. Port it only when the need returns.
 
 ## 6. Sources
