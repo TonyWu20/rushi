@@ -55,3 +55,51 @@ Commit `61cde02`:
   `[model.<active>]` in `config.toml` in place, comments kept,
   and creates the table when absent. The input-border color
   follows the new level.
+
+## Properties
+
+Lean-style invariants for this spec (see `lean-driven-development.md`).
+One property per non-trivial invariant. Each property is observable:
+given an input, an output guarantee.
+
+P1. reasoning-capture: given a model response that carries a
+    reasoning item, observe the item (content, id, status, summary)
+    is captured and the reasoning array is forwarded onto the
+    `assistant_message`.
+P2. reasoning-replay: given an `assistant_message` carrying
+    reasoning items, observe `bin/assemble` replays the items into
+    the next model request in the full form, and the compact form
+    drops them.
+P3. block-render: given an `assistant_message` with `reasoning`
+    content, observe the TUI renders a collapsible thinking block
+    above the message body in the thinking tone.
+P4. block-entries: given reasoning entries that are typed
+    `reasoning_text` and plain-text entries from older logs, observe
+    the block renders both.
+P5. toggle-controls: given the user presses Ctrl+T (collapse/expand),
+    Ctrl+X (show/hide), or Ctrl+L (cycle effort), observe the block
+    visibility and expansion state change and the input-border color
+    follows the new level.
+
+## Verification
+
+Each property maps to its proof. `proven` means the cited test or
+script exists and passes. `open` names the blocker and what unblocks
+it.
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | reasoning-capture | `chat_response_captures_reasoning_content`, `convert_to_chat_attaches_reasoning_content` in `bin/model/src/main.rs` | proven |
+| P2 | reasoning-replay | `full_items_send_reasoning_item_verbatim`, `compact_items_drop_reasoning` in `bin/assemble/src/main.rs` | proven |
+| P3 | block-render | `thinking_block_renders_above_the_assistant_message` in `bin/tui/src/render.rs` | proven |
+| P4 | block-entries | `thinking_text_accepts_typed_and_typeless_entries` in `bin/tui/src/render.rs` | proven |
+| P5 | toggle-controls | Blocked: no test drives the Ctrl+T / Ctrl+X / Ctrl+L key handlers. Unblock with a test that dispatches each key and asserts `thinking_expanded`, `thinking_shown`, and the config write-back | open |
+
+## Gate
+
+The acceptance commands. All must exit 0 for this spec to be proven.
+
+```
+cargo build
+cargo test
+```

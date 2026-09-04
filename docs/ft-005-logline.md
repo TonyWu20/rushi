@@ -172,3 +172,40 @@ appends to. Two live writers, by design of the current phase.
 - The three-way `LogLine` copy is a promotion candidate for a
   shared crate. Keep the copies in sync. Do not grow them in
   parallel.
+
+## Properties
+
+Lean-style invariants for this spec (see `lean-driven-development.md`).
+One property per non-trivial invariant. Each property is observable:
+given an input, an output guarantee.
+
+P1. complete-unit: given a `LogLine` value committed to a path,
+    observe the whole line plus its trailing newline in one locked
+    write.
+    
+P2. line-granular-concurrency: given two threads that commit 50
+    lines of 4 KB each to one file, observe 100 complete lines,
+    each parseable as JSON with intact payloads.
+    
+P3. no-wedge: given a writer that dies while holding the commit
+    lock, observe the lock free on the next commit.
+
+## Verification
+
+Each property maps to its proof. `proven` means the cited test exists
+and passes. `open` names the blocker and what unblocks it.
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | complete-unit | `commit_appends_one_complete_line_per_event` in `crates/common/src/logline.rs` | proven |
+| P2 | line-granular-concurrency | `concurrent_commits_stay_line_granular` in `crates/common/src/logline.rs` | proven |
+| P3 | no-wedge | Blocked: no test kills the holder and re-commits. Unblocked by a flock-release test that kills the holder, then asserts the next commit succeeds | open |
+
+## Gate
+
+The acceptance commands. All must exit 0 for this spec to be proven.
+
+```
+cargo build
+cargo test
+```

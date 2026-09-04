@@ -720,3 +720,52 @@ The test passed against the live API. Turn 2 reported `cached_tokens = 512 > 0`.
 All steps are complete. The harness runs end to end against the live DeepSeek API.
 
 This plan satisfies the spec. Each binary has one responsibility. The session log is the source of truth. Tools are subprocesses. The system prompt and tool schemas are fixed strings for prefix stability. The cache e2e test is the external-fact gate for the DeepSeek provider.
+
+## Properties
+
+Lean-style invariants for this spec (see `lean-driven-development.md`).
+One property per non-trivial invariant. Each property is observable:
+given an input, an output guarantee.
+
+P1. claim-state-projection: given a session log, observe `claim` report
+    the matching state (`idle`, `awaiting_model`, `awaiting_tool_result`,
+    or `exhausted`).
+P2. route-unknown-tool: given a `tool_call` naming a tool with no
+    manifest, observe a `tool_result` with `is_error` true and no
+    process spawn.
+P3. route-schema-reject: given tool arguments that fail schema
+    validation, observe a `tool_result` with `is_error` true and a
+    resend message, and no process spawn.
+P4. parse-truncated: given a model output with `stop_reason` length,
+    observe `tool_result` events marked `is_error` with a re-issue
+    message and no tool routing.
+P5. log-reject-partial: given a batch with one invalid event, observe
+    the whole batch rejected with a non-zero exit and no partial append.
+P6. cache-observable: given two consecutive turns sharing a prefix,
+    observe the second turn report `cached_tokens` greater than 0.
+
+## Verification
+
+Each property maps to its proof. `proven` means the cited test exists
+and passes. `open` names the blocker and what unblocks it.
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | claim-state-projection | `user_message_awaits_model`, `context_exhausted_reports_the_exhausted_state` in `bin/claim/src/main.rs` | proven |
+| P2 | route-unknown-tool | `not_run_outcome_carry_the_error_text` in `bin/route/src/main.rs` | proven |
+| P3 | route-schema-reject | `validate_args_lists_the_missing_required_fields`, `validate_args_flags_a_non_object_arguments_value` in `bin/route/src/main.rs` | proven |
+| P4 | parse-truncated | Blocked: no parse test drives the length-stop path. Unblocked by a parse test that feeds `stop_reason == length` and asserts the `is_error` tool results | open |
+| P5 | log-reject-partial | `missing_schema_file_rejects_the_type_as_unknown` in `bin/log/src/main.rs` proves rejection. Blocked: no test asserts no-partial-append on a mixed valid/invalid batch. Unblocked by such a test | open |
+| P6 | cache-observable | `scripts/cache-e2e.sh` (DEEPSEEK_API_KEY-gated) asserts a second-turn `cached_tokens > 0` | proven |
+
+## Gate
+
+The acceptance commands. All must exit 0 for this spec to be proven.
+
+```
+cargo build
+cargo test
+scripts/tool-conformance.sh
+# DEEPSEEK_API_KEY-gated:
+scripts/cache-e2e.sh
+```

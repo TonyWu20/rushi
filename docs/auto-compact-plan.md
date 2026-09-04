@@ -975,3 +975,41 @@ Spec-gap findings, all accepted:
   session. It compacts in-session and continues the original
   session. The handoff retires (sections 4.3, 4.4, 4.6, 5, 7).
   The `--force-handoff` mechanism of A6 retires with it.
+
+## Properties
+
+Lean-style invariants for this spec (see `lean-driven-development.md`).
+
+P1. threshold-trigger: given trigger-based readings above `context_budget_tokens - compact_reserve_tokens`, observe the compact fire.
+P2. cut-snap: given a cut point, observe it snap to a step-group boundary so a tool call and its result never split.
+P3. orphan-pull: given a cut that leaves a `user_message` as the last old-region event, observe it pull into the kept region.
+P4. empty-region-noop: given no old region to summarize, observe the compact exit 0 with no model call.
+P5. summary-fits-budget: given the drop cap, observe the summary request input stay within the input budget.
+P6. failure-marker: given a failed summary call, observe a `compaction_failed` marker with `last_user_seq`, no terminal event, and the loop continue in the current form.
+P7. silent-overflow: given a successful call whose input usage meets the input budget, observe compact only, with no model re-run.
+P8. overflow-retry: given a recoverable overflow or length stop, observe one `compact --reason overflow` then one model re-run. A second overflow runs the last-resort compact then a terminal `error`.
+P9. iterative-merge: given a prior `compaction_summary`, observe the next summary request carry the previous summary and its file-op lists.
+
+## Verification
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | threshold-trigger | `trigger_fires_above_level` in `crates/common/src/compact_math.rs`; `scenario_threshold` in `scripts/compact-e2e.sh` | proven |
+| P2 | cut-snap | `cut_snaps_to_the_group_start` in `crates/common/src/compact_math.rs` | proven |
+| P3 | orphan-pull | `cut_pulls_in_the_orphan_user` in `crates/common/src/compact_math.rs` | proven |
+| P4 | empty-region-noop | `cut_at_zero_is_the_empty_region` in `crates/common/src/compact_math.rs`; `summary_input_empty_region_is_the_ask_alone` in `bin/assemble/src/main.rs` | proven |
+| P5 | summary-fits-budget | `summary_input_drop_search_bounds_at_the_budget` in `bin/assemble/src/main.rs` | proven |
+| P6 | failure-marker | `scenario_compact_failure`, `scenario_empty_summary` in `scripts/compact-e2e.sh` | proven |
+| P7 | silent-overflow | `scenario_silent_overflow` in `scripts/compact-e2e.sh` | proven |
+| P8 | overflow-retry | `scenario_overflow`, `scenario_failed_retry` in `scripts/compact-e2e.sh` | proven |
+| P9 | iterative-merge | `scenario_iterative` in `scripts/compact-e2e.sh`; `summary_input_update_prompt_carries_the_previous_summary` in `bin/assemble/src/main.rs` | proven |
+
+## Gate
+
+The acceptance commands. All must exit 0 for this spec to be proven.
+
+```
+cargo build
+cargo test
+scripts/compact-e2e.sh
+```

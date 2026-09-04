@@ -342,3 +342,62 @@ reuses it without a wire-protocol break.
   shows the `cancel` event. No partial `assistant_message` is
   written. This is the same behavior as today: a killed model call
   leaves no `assistant_message` in the log.
+
+## Properties
+
+Lean-style invariants for this spec (see `lean-driven-development.md`).
+One property per non-trivial invariant. Each property is observable:
+given an input, an output guarantee.
+
+P1. delta-file-lines: given `bin/model` run with `--delta-file <path>`,
+    observe one JSON line per SSE delta written to that file in
+    arrival order, and the stdout JSON object is byte-identical to
+    the no-flag case.
+P2. flag-absent-unchanged: given `bin/model` run without
+    `--delta-file`, observe the behavior is unchanged and no side
+    file is created.
+P3. stream-file-lifecycle: given the `harness` spawns the model
+    stage, observe `sessions/<n>/.model-stream` exists and is empty
+    before the model call starts, and is gone after the call
+    returns, on success or error.
+P4. live-block: given the active session has a non-empty
+    `.model-stream` file, observe the TUI renders the accumulated
+    text in a live block below the transcript, and the block
+    clears when the matching `assistant_message` event arrives.
+P5. restart-midstream: given a TUI restart while a model call is
+    in progress, observe the TUI reads the stream file from byte 0
+    and shows the accumulated text.
+P6. error-clear: given a model-call error, observe the `harness`
+    deletes the stream file, the TUI clears its live block, and the
+    `error` event in the log is the authoritative record.
+P7. missing-file: given the session has no `.model-stream` file,
+    observe the TUI treats it as no live stream and draws no live
+    block.
+
+## Verification
+
+Each property maps to its proof. `proven` means the cited test or
+script exists and passes. `open` names the blocker and what unblocks
+it.
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | delta-file-lines | Blocked: `--delta-file` flag and delta writer are not implemented in `bin/model`. Unblock by implementing the flag and adding a test that the delta file lines match the SSE delta events and the stdout JSON is unchanged | open |
+| P2 | flag-absent-unchanged | Blocked: same as P1. Unblock with the existing e2e suite (`scripts/cache-e2e.sh`) run after the flag lands, confirming no side file appears | open |
+| P3 | stream-file-lifecycle | Blocked: `harness` stream-file create/delete is not implemented. Unblock by implementing the lifecycle in `bin/harness` and adding a test that the file exists between spawn and completion | open |
+| P4 | live-block | Blocked: TUI stream buffer and live-block render are not implemented. Unblock by implementing `StreamBuf` and the render path, plus a render test that the live block shows and clears | open |
+| P5 | restart-midstream | Blocked: same as P4. Unblock with a TUI test that a restart onto an existing stream file rebuilds the live block | open |
+| P6 | error-clear | Blocked: same as P3. Unblock with a test that a failed model call leaves no stream file and the TUI clears the block | open |
+| P7 | missing-file | Blocked: same as P4. Unblock with a TUI test that a session without a stream file draws no live block | open |
+
+## Gate
+
+Gate: blocked — the `--delta-file` streaming channel is not implemented (no `delta-file` or `.model-stream` code in `bin/model`, `bin/harness`, or `bin/tui`).
+
+The acceptance commands that will apply. All must exit 0 for this spec to be proven.
+
+```
+cargo build
+cargo test
+scripts/compact-e2e.sh
+```

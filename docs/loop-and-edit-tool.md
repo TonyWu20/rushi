@@ -461,3 +461,51 @@ ignored on success, exit code is 0/1.
 - sandboxing beyond process boundary + cwd
 - `list`/`glob`/`grep` tools — the first real episode that needs them is the
   trigger
+
+## Properties
+
+Lean-style invariants for this spec (see `lean-driven-development.md`).
+One property per non-trivial invariant. Each property is observable:
+given an input, an output guarantee.
+
+P1. read-pagination: given a file read with offset and limit, observe
+    the numbered window within the 2000-line, 50KB, and 2000-char caps
+    and a continuation footer.
+P2. read-byte-cap: given a file whose window exceeds the byte cap,
+    observe the cap footer and the kept lines stop at the cap.
+P3. edit-unique-match: given an edit where `old_string` matches once
+    and `replace_all` is false, observe the replacement applied and
+    `before`/`after` in the stdout.
+P4. edit-ambiguity: given an `old_string` with more than one match and
+    `replace_all` false, observe a non-zero exit naming the count.
+P5. truncated-no-execute: given a model response with `stop_reason`
+    length, observe the tool calls not run and tool results marked
+    `is_error` with a re-issue message.
+P6. prefix-stable: given unchanged session history, observe byte-identical
+    request prefixes across requests.
+
+## Verification
+
+Each property maps to its proof. `proven` means the cited test exists
+and passes. `open` names the blocker and what unblocks it.
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | read-pagination | `read: offset/limit pagination` in `scripts/tool-conformance.sh` | proven |
+| P2 | read-byte-cap | `read: 60KB byte cap` in `scripts/tool-conformance.sh` | proven |
+| P3 | edit-unique-match | `edit: unique match success` in `scripts/tool-conformance.sh` | proven |
+| P4 | edit-ambiguity | `edit: multiple matches error` in `scripts/tool-conformance.sh` | proven |
+| P5 | truncated-no-execute | Blocked: no parse test drives the `stop_reason == length` path. Unblocked by a parse test that feeds a length stop and asserts the `is_error` tool results | open |
+| P6 | prefix-stable | `scripts/cache-e2e.sh` (DEEPSEEK_API_KEY-gated) asserts the second turn reports `cached_tokens > 0` | proven |
+
+## Gate
+
+The acceptance commands. All must exit 0 for this spec to be proven.
+
+```
+cargo build
+cargo test
+scripts/tool-conformance.sh
+# DEEPSEEK_API_KEY-gated:
+scripts/cache-e2e.sh
+```

@@ -86,3 +86,44 @@ join the list). The `catppuccin macchiato` scheme carries the pi
 is the no-scheme default (the reference pi theme the user runs).
 The pi built-in `dark` theme is the fallback for an unset role in a
 user scheme table. Partial custom tables still overlay role by role.
+
+## Properties
+
+Lean-style invariants for this spec (see `lean-driven-development.md`).
+Each property is observable: given an input, an output guarantee.
+
+P1. role-completeness: given the built-in palette, observe every role in
+    the 38-role `Role` enum maps to a hex value.
+P2. capability-lowering: given a scheme hex value and an active
+    capability level, observe the color lower to that level.
+P3. custom-overlay: given a partial custom scheme table, observe unset
+    roles keep the built-in value and set roles use the custom value.
+P4. unknown-role-error: given a custom scheme table naming an unknown
+    role, observe a hard error at config load.
+P5. default-scheme: given no named scheme in the config, observe the TUI
+    load the `catppuccin macchiato` scheme.
+P6. named-scheme-select: given `[tui] color_scheme` naming a known
+    scheme, observe that scheme's role table resolve at the active level.
+
+## Verification
+
+Each property maps to its proof. `proven` means the cited test exists
+and passes. `open` names the blocker and what unblocks it.
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | role-completeness | `builtin_role_table_is_complete` in `bin/tui/src/color.rs` | proven |
+| P2 | capability-lowering | `lowering_quantizes_rgb_at_256`, `lowering_snaps_rgb_at_16` in `bin/tui/src/color.rs` | proven |
+| P3 | custom-overlay | `custom_scheme_overlays_the_builtins` in `bin/tui/src/color.rs` | proven |
+| P4 | unknown-role-error | `unknown_scheme_role_rejected` in `bin/tui/src/config.rs` | proven |
+| P5 | default-scheme | `no_scheme_default_is_the_macchiato_scheme` in `bin/tui/src/color.rs` | proven |
+| P6 | named-scheme-select | `color_scheme_selects_the_builtin_name` in `bin/tui/src/config.rs`, `named_scheme_resolves_at_the_level` in `bin/tui/src/color.rs` | proven |
+
+## Gate
+
+The acceptance commands. All must exit 0 for this spec to be proven.
+
+```
+cargo build
+cargo test -p tui
+```

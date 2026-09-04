@@ -296,3 +296,34 @@ The suite in `vim_editor.rs` ports the reference behavior:
   search; `Ctrl+C` without a session exits insert; `Ctrl+R` redoes
   before starting the loop; `Ctrl+U` kills the line in the idle
   composer and scrolls the log otherwise.
+
+## Properties
+
+Lean-style invariants for this spec (see `lean-driven-development.md`).
+
+P1. last-word-motion: given a single-word draft, observe `w` move to the word last character and stay at the buffer end.
+P2. inline-paste: given `dw` on an inner word then `p`, observe the deleted word paste inline after the cursor without opening a new line.
+P3. count-cancel: given a typed count then a plain `Esc`, observe the count and `g` prefix cancel so a later `dw` or `db` stays in range.
+P4. dot-repeat: given a recorded change, observe `.` replay the recorded keys and type the recorded insert text once.
+P5. arrow-map: given arrow, home, end, and delete in normal mode, observe they map to the vim motions `j`, `k`, `h`, `l`, `0`, `$`, and `x`.
+P6. no-cursor-dup: given the cursor on a character in a char-wise mode, observe the covered character render exactly once, with no duplicate to the right.
+
+## Verification
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | last-word-motion | `w_on_last_word_of_single_word_draft`, `w_on_last_char_of_last_word_stays_put` in `bin/tui/src/vim_editor.rs` | proven |
+| P2 | inline-paste | `dw_then_p_pastes_inline_after_cursor` in `bin/tui/src/vim_editor.rs` | proven |
+| P3 | count-cancel | `esc_in_normal_cancels_a_stale_count`, `stale_count_cannot_make_db_eat_a_line` in `bin/tui/src/vim_editor.rs` | proven |
+| P4 | dot-repeat | `dot_replays_the_recorded_keys`, `dot_repeats_insert_change` in `bin/tui/src/vim_editor.rs` | proven |
+| P5 | arrow-map | `arrows_map_to_vim_motions` in `bin/tui/src/vim_editor.rs` | proven |
+| P6 | no-cursor-dup | `on_char_cursor_does_not_duplicate_the_covered_char` in `bin/tui/src/render.rs` | proven |
+
+## Gate
+
+The acceptance commands. All must exit 0 for this spec to be proven.
+
+```
+cargo build
+cargo test
+```

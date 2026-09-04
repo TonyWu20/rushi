@@ -67,3 +67,49 @@ body tone moves from `#8f92ac` to the pi `toolOutput` value
 (`#cad3f5`), and the JSON token hexes move to the pi `syntax*`
 role values (`#cad3f5` keys, `#a6da95` strings, `#f5a97f`
 numbers and literals, `#939ab7` punctuation).
+
+## Properties
+
+Lean-style invariants for this spec (see `lean-driven-development.md`).
+Each property is observable: given an input, an output guarantee.
+
+P1. three-tones: given a terminal at any capability level, observe the
+    built-in palette paint three distinct tones: transcript prose,
+    tool output, and tool-call command text.
+P2. gray-elimination: given the built-in palette, observe no body text
+    role paint a single shared darkgray; the three tones are visually
+    distinct.
+P3. capability-lowering: given a tone color and the active capability
+    level, observe the tone quantize to that level's palette, with a
+    distinct 16-color swatch at the 16-color level.
+P4. color-override: given a `[tui] color` value, observe the TUI force
+    that capability level; absent the setting, observe detection from
+    `COLORTERM` and `TERM`.
+P5. unknown-level-rejection: given an unknown `[tui] color` value,
+    observe a hard error at config load.
+P6. json-highlight: given a tool-result body that is a complete JSON
+    document, observe the body tokens paint with the JSON syntax
+    roles.
+
+## Verification
+
+Each property maps to its proof. `proven` means the cited test exists
+and passes. `open` names the blocker and what unblocks it.
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | three-tones | `plain_text_palette`, `tool_output_palette`, `tool_command_palette` in `bin/tui/src/color.rs` | proven |
+| P2 | gray-elimination | `plain_text_palette`, `tool_output_palette`, `tool_command_palette` in `bin/tui/src/color.rs` | proven |
+| P3 | capability-lowering | `lowering_quantizes_rgb_at_256`, `lowering_snaps_rgb_at_16`, `lowering_keeps_rgb_at_truecolor` in `bin/tui/src/color.rs` | proven |
+| P4 | color-override | `cfg_override_table`, `detection_table` in `bin/tui/src/color.rs` | proven |
+| P5 | unknown-level-rejection | open: no test asserts that an unknown `[tui] color` value is rejected. Add a `color_unknown_level_rejected` test in `bin/tui/src/config.rs` that writes a config with `color = "bogus"` and asserts the load error mentions unknown value. | open |
+| P6 | json-highlight | `json_line_styles_keys_strings_numbers_literals`, `looks_like_json_only_accepts_complete_documents` in `bin/tui/src/highlight.rs` | proven |
+
+## Gate
+
+The acceptance commands. All must exit 0 for this spec to be proven.
+
+```
+cargo build
+cargo test -p tui
+```

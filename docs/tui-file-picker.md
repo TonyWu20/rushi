@@ -290,3 +290,58 @@ exercises the new surface.
   then the pane scrolls on `Ctrl+J`/`Ctrl+K` and `Ctrl+U`/`Ctrl+D`.
 - The multi-select and quickfix behavior from `telescope` is a later
   add, not day 0.
+
+## Properties
+
+Lean-style invariants for this spec (see `lean-driven-development.md`).
+Each property is observable: given an input, an output guarantee.
+
+P1. at-trigger: given an `@` typed in insert mode at the start of a
+    line or preceded only by whitespace, observe the picker open and
+    the text after `@` seed the query; given `@` preceded by a
+    non-whitespace character, observe no trigger.
+P2. enter-replaces: given a highlighted candidate and `Enter`, observe
+    the `@query` token in the draft replaced by the chosen path
+    prefixed with `@`, the picker close, and the caret placed at the
+    path end.
+P3. esc-closes: given `Esc` while the picker is open, observe the
+    picker close and the draft retain the typed `@` and query text.
+P4. zero-results: given a query that matches no candidate, observe
+    `Enter` keep the raw `@query` text in the draft unchanged.
+P5. fuzzy-ranking: given a partial query, observe candidates returned
+    in relevance order (fuzzy match), not filtered by exact prefix.
+P6. preview-cutoff: given the result count dropping below the cutoff
+    threshold, observe the preview pane hide and the list use full
+    width.
+P7. orientation: given a wide float (at least WIDE_MIN columns),
+    observe the list on the left and the preview on the right; given a
+    narrow float, observe the list on top and the preview below; given
+    a very narrow float (below MIN), observe the preview drop out.
+P8. git-source: given the working directory is inside a git repository,
+    observe the file list come from `git ls-files`; given a non-repo
+    directory, observe a plain directory walk.
+
+## Verification
+
+Each property maps to its proof. `proven` means the cited test exists
+and passes. `open` names the blocker and what unblocks it.
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | at-trigger | `at_token_preceded_by_only_whitespace_is_detected`, `at_token_at_line_start_is_detected`, `at_token_glued_to_word_is_not_detected` in `bin/tui/src/vim_editor.rs` | proven |
+| P2 | enter-replaces | `replace_at_token_swaps_in_the_value`, `replace_at_token_keeps_text_after_caret` in `bin/tui/src/vim_editor.rs`; `commit_returns_index_when_results` in `bin/tui/src/picker/state.rs` | proven |
+| P3 | esc-closes | `esc_closes_without_commit` in `bin/tui/src/picker/state.rs` | proven |
+| P4 | zero-results | `commit_with_zero_results_returns_none` in `bin/tui/src/picker/state.rs` | proven |
+| P5 | fuzzy-ranking | `query_filters_and_ranks`, `fuzzy_match_finds_partial` in `bin/tui/src/picker/fuzzy.rs` | proven |
+| P6 | preview-cutoff | `preview_cutoff_hides_pane` in `bin/tui/src/picker/render.rs`, `toggle_preview_flips_when_above_cutoff` in `bin/tui/src/picker/state.rs` | proven |
+| P7 | orientation | `wide_layout_splits_side_by_side`, `narrow_layout_stacks_vertically`, `too_narrow_drops_preview`, `orientation_flips_on_resize` in `bin/tui/src/float.rs` | proven |
+| P8 | git-source | `file_item_source_is_a_git_repo`, `file_item_source_non_git_walks` in `bin/tui/src/picker/items.rs` | proven |
+
+## Gate
+
+The acceptance commands. All must exit 0 for this spec to be proven.
+
+```
+cargo build
+cargo test -p tui
+```

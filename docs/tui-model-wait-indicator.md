@@ -308,3 +308,61 @@ The request item closes with a `Shipped` note.
 - A TUI restart mid-call restores the indicator.
 - The request item in `docs/tui_feature_requests_from_human.md`
   shows the `Shipped` note.
+
+## Properties
+
+Lean-style invariants for this spec (see `lean-driven-development.md`).
+One property per non-trivial invariant. Each property is observable:
+given an input, an output guarantee.
+
+P1. wait-state: given the last `loop_phase` value is `wait` and the
+    running bit is set, observe the title bit reads `[wait]` and the
+    working row shows `waiting for model · Ns`.
+P2. tools-state: given the last `loop_phase` value is `tools` and the
+    running bit is set, observe the title bit reads `[tools]` and the
+    working row shows `tools running · Ns`.
+P3. idle-state: given the running bit is clear, observe the title bit
+    reads `[idle]` and no working row draws.
+P4. unknown-fallback: given the running bit is set with no marker or a
+    value outside `wait` and `tools`, observe the title bit reads
+    `[running]` and the working row shows `Working...`.
+P5. wait-span-format: given a marker timestamp, observe `N` under
+    60 s shows as `Ns`, at 60 s and above shows as `Mm SSs`, a
+    negative span clamps to `0s`, and an unparseable timestamp drops
+    the span and keeps the label.
+P6. restart-rebuild: given a TUI restart onto a running session whose
+    log holds the marker, observe the state restores from the log on
+    the first draw without a new marker.
+P7. session-isolation: given two sessions holding different last
+    marker values, observe each session shows its own last value on
+    switch.
+P8. cap-drop: given more than 128 distinct ext_status ids preceding a
+    fresh `loop_phase` marker, observe the `loop_phase` marker still
+    renders and an older id's value is the one dropped.
+
+## Verification
+
+Each property maps to its proof. `proven` means the cited test or
+script exists and passes. `open` names the blocker and what unblocks
+it.
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | wait-state | `working_row_shows_the_wait` in `bin/tui/src/render.rs`, `loop_phase_value_and_ts_track_the_last_event` in `bin/tui/src/app.rs` | proven |
+| P2 | tools-state | `working_row_shows_the_tools_run` in `bin/tui/src/render.rs` | proven |
+| P3 | idle-state | `working_row_is_blank_when_idle` in `bin/tui/src/render.rs` | proven |
+| P4 | unknown-fallback | `working_row_shows_working_for_an_unknown_value`, `phase_state_table` in `bin/tui/src/render.rs` | proven |
+| P5 | wait-span-format | `wait_span_text_formats_and_clamps`, `working_row_drops_the_span_on_an_unparseable_ts` in `bin/tui/src/render.rs` | proven |
+| P6 | restart-rebuild | `loop_phase_restart_rebuilds_from_the_log` in `bin/tui/src/app.rs` | proven |
+| P7 | session-isolation | `loop_phase_session_switch_keeps_own_marker` in `bin/tui/src/app.rs` | proven |
+| P8 | cap-drop | `loop_phase_marker_survives_the_id_cap` in `bin/tui/src/app.rs` | proven |
+
+## Gate
+
+The acceptance commands. All must exit 0 for this spec to be proven.
+
+```
+cargo build
+cargo test
+scripts/cache-e2e.sh
+```

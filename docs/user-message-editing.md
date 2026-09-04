@@ -190,3 +190,32 @@ only affects messages the model has not yet consumed.
 - A `:undo` that re-appends the retracted text as a fresh
   `user_message`. Later add; the text is always recoverable from
   the log.
+
+## Properties
+
+Lean-style invariants for this spec (see `lean-driven-development.md`).
+
+P1. retract-append: given a recall of all pending messages, observe one `user_message_retract` per target appended before the replacement, keeping the log order consistent.
+P2. recall-edit: given a recall, observe the retracted text join into the editor with one block per original message and the queue label kept per block.
+P3. loop-skip-retracted: given a log where a `user_message` id is in the retracted set, observe `claim` and `assemble` treat it as not-pending, opening no follow-up and sending no model input.
+P4. re-derivation: given a retracted message, observe the TUI pending blocks exclude it so they match what the loop will consume.
+P5. send-cancels: given a recall then `Enter` on edited text, observe the edited `user_message` append and the retracted originals cancel. Given `Esc`, observe the retracts stand and the pending list empty.
+
+## Verification
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | retract-append | Blocked: the `user_message_retract` schema and TUI append exist, but no producer test appends a retract plus a corrected message. Unblock with the step-0 producer and consumer test in `bin/tui`. | open |
+| P2 | recall-edit | Blocked: no test asserts the joined-block editor load. Unblock with an `app.rs` test for the `RecallQueue` join. | open |
+| P3 | loop-skip-retracted | Blocked: `bin/claim` and `bin/assemble` do not yet skip retracted ids. Unblock when the step-1 skip logic lands with the unit tests in section 10. | open |
+| P4 | re-derivation | Blocked: the retracted-id skip in `bin/tui/src/app.rs` has no test. Unblock with a test that a retracted pending message does not render. | open |
+| P5 | send-cancels | Blocked: no test covers send-after-recall and Esc-after-recall. Unblock with an `app.rs` test. | open |
+
+## Gate
+
+Gate: blocked — the loop-side retract skip and the recall and re-derivation tests are not yet implemented.
+
+```
+cargo build
+cargo test
+```

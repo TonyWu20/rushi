@@ -229,3 +229,19 @@ If any section is missing, the proposal is incomplete.
 When a proposal is rejected as speculative, it is parked as an itch in
 `notes/itches.md` with the date and the triggering episode (if any). Three
 recorded episodes for the same itch convert it into a proposal.
+
+## P10. Spec-driven (Lean) gate
+
+Every framework change lands through the spec-driven workflow in
+`lean-driven-development.md`:
+
+1. The change cites its episode and states its properties (P1...Pn
+   invariants in input-to-output form).
+2. Each property gets a proof: a named test or e2e scenario.
+3. The gate commands in the spec's `## Gate` section pass before the
+   work is accepted. A clean gate with zero open properties is the
+   guarantee. An unproven property is an open row with a named
+   blocker, never an untracked gap.
+
+The property list is frozen before implementation. A property that
+changes after implementation started requires a new review pass.

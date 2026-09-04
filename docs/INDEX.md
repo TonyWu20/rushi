@@ -30,7 +30,8 @@ not built).
 
 | Doc                                           | Status              | Last updated | Purpose                                                                                                                                                    |
 | --------------------------------------------- | ------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `architecture.md`                             | Active              | 2026-08-25   | Hexagonal architecture, phase roadmap, tool contract, guardrails                                                                                           |
+| `architecture.md`                             | Active              | 2026-09-04   | Hexagonal architecture, phase roadmap, tool contract, guardrails. Lean sections: Properties P1-P8, Verification, Gate                                                                               |
+| `lean-driven-development.md`                  | Active              | 2026-09-04   | Lean-driven development workflow adapted to this repo: the Properties / Verification / Gate contract for spec docs, the no-unproven-claim rule, the build gate as acceptance authority, and the `scripts/verify-specs.sh` doc gate |
 | `auto-compact-plan.md`                        | Implemented       | 2026-09-03   | In-session auto-compaction: the `bin/compact` binary, the threshold trigger, the overflow and length-stop recovery in `step.sh`, the `context_exhausted` last-resort. Ported from the pi 0.84.2 compaction source. Reviewed, audited in three passes, and shipped: 12 e2e scenarios in `scripts/compact-e2e.sh`, correction 63 |
 | `auto-compact-plan-review.md`                 | Review              | 2026-09-02   | Design review of `auto-compact-plan.md`: every claim verified against the repo code, config, and the pi source                                              |
 | `auto-compact-plan-audit.md`                  | Review              | 2026-09-02   | Second audit: re-derives each accepted cut and safety argument from the code, not the plan wording                                                        |
@@ -107,12 +108,26 @@ Status legend:
 1. This file (`INDEX.md`).
 2. `architecture.md` — the shape of the system and where each binary sits.
 3. `refinement-policy.md` — the rules for any change you propose.
-4. `coding-conventions.md` — the standing code rules for the Rust.
-5. The spec for the feature you are working on (see the status
+4. `lean-driven-development.md` — the spec-driven workflow: properties
+   before code, a proof per property, the build gate as acceptance.
+5. `coding-conventions.md` — the standing code rules for the Rust.
+6. The spec for the feature you are working on (see the status
    column). UI extension work reads `ui-extension.md` with
-   `ui-extension-plan.md`.
-6. `spec-review-criteria.md` — check your spec against these before implementing.
-7. `SPEC_CONTRACT_TESTS.md` — how to split the implementer and tester roles.
+   `ui-extension-plan.md`. Every spec doc ends with its Properties,
+   Verification, and Gate sections.
+7. `spec-review-criteria.md` — check your spec against these before implementing.
+8. `SPEC_CONTRACT_TESTS.md` — how to split the implementer and tester roles.
+
+## The Lean gate
+
+The acceptance gate for a spec is the `## Gate` section at the end of
+the spec doc. The doc gate is `scripts/verify-specs.sh` (structure and
+cross-reference checks on the docs). The code gate is the command list
+in each Gate section: `cargo build`, `cargo test`, and the named e2e
+scripts. A clean gate with zero open properties is the guarantee.
+
+- `scripts/verify-specs.sh` — run before pushing doc changes. Exit 0
+  is clean; exit 1 names the failing doc and section.
 
 ## Maintenance rules
 
@@ -124,3 +139,8 @@ Status legend:
   leave it in place. Do not delete. Agents may need the history.
 - Keep this file under 150 lines. If it grows past that, split the
   doc inventory into a sub-index and keep only the state summary here.
+- New spec docs end with the three Lean sections (Properties,
+  Verification, Gate) per `lean-driven-development.md`. Run
+  `scripts/verify-specs.sh` before pushing. The property rows close
+  one by one as their proofs land; the gate command list must pass
+  before a feature is marked proven.

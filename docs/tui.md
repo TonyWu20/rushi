@@ -584,3 +584,37 @@ splits the queues: steer messages wake the loop at the next
   port). The six rescoped "never truncate" comments ship with
   the same pass (docs/tui-tool-result-truncation.md section 4).
 
+## Properties
+
+Lean-style invariants for this spec (see `lean-driven-development.md`).
+
+P1. unknown-event-fallback: given an event with an unrecognized `type`, observe the TUI render the raw type plus its JSON in order and not crash.
+P2. version-fallback: given an event with an unsupported `v`, observe the TUI render it raw and show a newer-version hint.
+P3. opaque-loop: given a config `[loop]` command, observe the TUI start and stop that command with no `turn.sh` or `claim` string in its source.
+P4. append-only-writes: given a typed input, observe the TUI append a `user_message`, `approval`, or `cancel` event and leave the log otherwise intact.
+P5. crash-survival: given a killed TUI process, observe the session log survive unchanged and the running loop continue as an orphan.
+P6. pending-derivation: given a log whose last event is a `user_message`, observe the TUI hold it pending until a later `assistant_message` arrives.
+
+## Verification
+
+Each property maps to its proof. `proven` means the cited test exists and passes.
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | unknown-event-fallback | `unknown_type_renders_raw_json_with_hint`, `malformed_line_renders_without_crash` in `bin/tui/src/render.rs` | proven |
+| P2 | version-fallback | `unsupported_version_renders_hint` in `bin/tui/src/render.rs` | proven |
+| P3 | opaque-loop | `storage_and_loop_strings_stay_behind_the_port`, `stage_names_are_not_strings_in_the_tui` in `bin/tui/src/main.rs` | proven |
+| P4 | append-only-writes | `ctrl_r_emits_the_spawn_intent`, `approval_keys_answer_only_when_pending` in `bin/tui/src/app.rs` | proven |
+| P5 | crash-survival | Blocked: no test kills the TUI and asserts the log stays intact and the loop stays live. Unblock with a process-supervision test. | open |
+| P6 | pending-derivation | `pending_user_messages_stop_at_the_last_answer` in `bin/tui/src/app.rs` | proven |
+
+## Gate
+
+The acceptance commands. All must exit 0 for this spec to be proven.
+
+```
+cargo build
+cargo test
+scripts/tui-pty-smoke.py
+```
+
