@@ -261,32 +261,33 @@ fn main() {
                                     .and_then(|c| c.as_str())
                                     .unwrap_or(&name_str)
                                     .to_string();
-                                // Resolve the tool binary. Prefer the cargo
-                                // build output (this binary's own directory),
-                                // then the tools/<name>/bin/ copy.
-                                let command = if raw_command == name_str {
-                                    let exe_dir = std::env::current_exe()
-                                        .ok()
-                                        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-                                    let candidates = [
-                                        exe_dir.as_ref().map(|d| d.join(&name_str)),
-                                        Some(tool_path.join("bin").join(&name_str)),
-                                    ];
-                                    candidates
-                                        .iter()
-                                        .flatten()
-                                        .find(|p| p.is_file())
-                                        .map(|p| p.to_string_lossy().to_string())
-                                        .unwrap_or_else(|| {
-                                            tool_path
-                                                .join("bin")
-                                                .join(&name_str)
-                                                .to_string_lossy()
-                                                .to_string()
-                                        })
+                                // Resolve the tool binary. The binary name is
+                                // the manifest `command` when it differs from
+                                // the tool dir name (e.g. `harness-bash` for
+                                // the `bash` tool, so the built binary never
+                                // shadows a system tool on PATH), otherwise the
+                                // tool dir name. Prefer the cargo build output
+                                // (this binary's own directory), then the
+                                // tools/<name>/bin/ copy, then a bare PATH
+                                // lookup.
+                                let binary_name = if raw_command == name_str {
+                                    name_str.clone()
                                 } else {
-                                    raw_command
+                                    raw_command.clone()
                                 };
+                                let exe_dir = std::env::current_exe()
+                                    .ok()
+                                    .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+                                let candidates = [
+                                    exe_dir.as_ref().map(|d| d.join(&binary_name)),
+                                    Some(tool_path.join("bin").join(&binary_name)),
+                                ];
+                                let command = candidates
+                                    .iter()
+                                    .flatten()
+                                    .find(|p| p.is_file())
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .unwrap_or(raw_command);
                                 let args_val = config
                                     .get("tool")
                                     .and_then(|t| t.get("args"))

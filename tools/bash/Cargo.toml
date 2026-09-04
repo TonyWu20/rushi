@@ -3,8 +3,13 @@ name = "bash"
 version = "0.1.0"
 edition = "2021"
 
+# The binary is named `harness-bash` (not `bash`) so that building this
+# crate into target/debug never shadows the system shell binary. Putting a
+# real `bash` on a PATH that .envrc/extension hosts inherit breaks every
+# bash-script extension (frame, notify, statusline). The agent-facing tool
+# name stays `bash` (see tool.toml and the tools/ directory name).
 [[bin]]
-name = "bash"
+name = "harness-bash"
 path = "src/main.rs"
 
 [dependencies]

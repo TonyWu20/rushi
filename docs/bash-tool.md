@@ -31,7 +31,7 @@ discovery. `bash` handles everything else.
 ```toml
 [tool]
 description = "Run a shell command in the session working directory. Returns combined output and exit code."
-command = "bash"
+command = "harness-bash"
 args = []
 timeout_ms = 310000
 
@@ -50,6 +50,11 @@ default = 60
 ```
 
 The tool name is the directory name. The manifest carries no `name` field.
+The `command` field names the tool's built binary. It is `harness-bash`
+(instead of `bash`) on purpose: the workspace builds that binary into
+`target/debug`, and `.envrc` puts `target/debug` on PATH for direnv
+shells; a binary named `bash` would shadow the system shell and break
+every extension that spawns `bash` (statusline, frame, notify).
 `timeout_ms` (310 s) exceeds the tool's own maximum command timeout
 (300 s) by a 10 s margin so the harness backstop never fires before the
 tool's internal timeout handler completes.
