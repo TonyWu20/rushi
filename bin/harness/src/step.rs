@@ -542,6 +542,60 @@ fn fire_and_handle_exhausted(
     }
 }
 
+/// Apply a `model.before` `transform` decision.
+///
+/// A valid transform replaces the request JSON with the hook's
+/// `request` object. The harness logs the `hook.model.before`
+/// decision marker and a `hook_applied` marker so the cache-break
+/// is visible (docs/loop-lifecycle-hooks.md 4.5). A transform
+/// without an object `request` field is a non-blocking failure:
+/// the log carries `hook.model.before.error` and the original
+/// request proceeds.
+fn apply_model_before_transform(
+    cfg: &HarnessConfig,
+    session: &SessionDir,
+    payload_val: &Value,
+    results: &[hooks::HookResult],
+    request: &mut harness_common::stage::RequestFile,
+) {
+    let new_request = match payload_val.get("request") {
+        Some(r) if r.is_object() => Some(r.clone()),
+        _ => None,
+    };
+    match new_request {
+        Some(r) => {
+            request.json = r;
+            log_hook_window(cfg, session, "model.before", "transform", results);
+            let applied_by = results
+                .iter()
+                .find(|r| r.decision.as_deref() == Some("transform"))
+                .map(|r| r.command.clone())
+                .unwrap_or_default();
+            let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let marker = serde_json::json!({
+                "v": 1,
+                "type": "ext_status",
+                "ts": ts,
+                "id": "hook_applied",
+                "value": applied_by,
+            });
+            append_event(cfg, &session.path, &marker);
+        }
+        None => {
+            let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let marker = serde_json::json!({
+                "v": 1,
+                "type": "ext_status",
+                "ts": ts,
+                "id": "hook.model.before.error",
+                "value": "transform payload missing an object `request` field",
+            });
+            append_event(cfg, &session.path, &marker);
+            log_hook_window(cfg, session, "model.before", "", results);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Compact with compact.before / compact.after hooks.
 // ---------------------------------------------------------------------------
@@ -696,20 +750,28 @@ fn model_retry_loop(
     'outer: loop {
         check_signal(mode);
 
-        // model.before observation window.
+        // model.before decision window
+        // (docs/loop-lifecycle-hooks.md 3.3, 4.5).
         let payload = serde_json::json!({
             "window": "model.before",
             "session": session.path.to_string_lossy(),
             "model": describe.model_id,
             "projected_tokens": estimate_context(cfg, &session.path),
+            "request": request.json,
         });
-        let _ = hooks::fire_hooks(
+        let results = hooks::fire_hooks(
             &cfg.hooks,
             Window::ModelBefore,
             &payload,
             &hook_env(cfg, session, "step", Window::ModelBefore),
             cfg.hooks_timeout_ms,
         );
+        let (decision, payload_val) = hooks::fold_decision(&results, Window::ModelBefore);
+        if decision.as_deref() == Some("transform") {
+            apply_model_before_transform(cfg, session, &payload_val, &results, request);
+        } else {
+            log_hook_window(cfg, session, "model.before", "", &results);
+        }
 
         let output = match runner.model(request) {
             Ok(o) => o,

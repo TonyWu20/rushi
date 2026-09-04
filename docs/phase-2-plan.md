@@ -280,7 +280,14 @@ gains a config key: the limits are named constants in the binary.
    the seam for future custom strategies. See
    `docs/loop-lifecycle-hooks.md` for the full window list and
    decision vocabulary.
-6. The model call, in the retry loop, with the exact current rules:
+6. The model call, in the retry loop, with the exact current rules.
+   Before each model spawn, the loop fires the `model.before` window
+   (`docs/loop-lifecycle-hooks.md` §3.3). The window carries the
+   session name, model id, projected token count, and the current
+   request JSON. A `transform` decision replaces the request with
+   the hook's `request` object; a `transform` without an object
+   `request` logs `hook.model.before.error` and the original request
+   proceeds. No-hooks path is byte-identical to today.
    - Binary crash or API failure: 2 retries, 3 s between. Then a
      terminal `error` event and a stop.
    - Overflow: the stop reason is `error` and the detail matches
@@ -682,6 +689,7 @@ output. The tables pin the observable behavior.
 | `awaiting_approval` crash | a log ending in an unanswered `approval_request` | `step` re-waits; no `route` until an answer arrives |
 | `run.idle` continue | a `run.idle` hook returns `continue` with a `message` | one `user_message` (`queue=follow`) appended, the loop continues |
 | `run.idle` default | no `run.idle` hook registered | exit 0, byte-identical to the no-hooks path |
+| `model.before` transform | a `model.before` hook returns `transform` with an object `request` payload | the model call receives the transformed request; one `hook.model.before` marker with value `transform`, one `hook_applied` marker; a `transform` without an object `request` logs `hook.model.before.error` and the original request proceeds; the no-hooks path logs no `hook.model.before` or `hook_applied` markers (the gate in `scripts/model-before-transform-e2e.sh`) |
 | parity | one fixture session through old `step.sh` and `harness step` | byte-identical `events.jsonl` |
 
 The parity row is the mutation gate: a dropped rule in the port

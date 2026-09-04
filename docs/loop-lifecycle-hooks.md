@@ -75,9 +75,16 @@ swappable blocking point in `docs/phase-2-plan-audit.md` section 2.2.
 
 ### 3.3 Model-call scope (per `model` spawn, inside the retry loop)
 
-- `model.before` — before the `model` spawn. Carries the request id,
-  the model id, and the projected token count. It can transform the
-  request. Keep the cache guard on any change.
+- `model.before` — before the `model` spawn. Carries the session
+  name, the model id, the projected token count, and the current
+  request JSON. One decision: `transform` (default: proceed
+  unchanged). A `transform` payload carries `request`: the full
+  replacement request object. The harness applies it, logs the
+  `hook.model.before` decision marker, and records a `hook_applied`
+  marker so the cache-break is visible (4.5). A `transform` without
+  an object `request` field is a non-blocking failure: the log
+  carries `hook.model.before.error` and the original request
+  proceeds. Keep the cache guard on any change.
 - `model.after` — after the `model` call. Carries `stop_reason`,
   `detail`, and `usage`. Observation. No decision.
 
@@ -232,7 +239,10 @@ section 4.
 
 A hook that mutates prompt content runs at `model.before`. The
 harness records a `hook_applied` marker so the cache-break is
-visible. The prompt prefix stays byte-stable for every other window.
+visible. The marker is an `ext_status` event with `id =
+"hook_applied"` and the value is the command of the hook that
+applied the transform. The prompt prefix stays byte-stable for every
+other window.
 
 ## 5. The overflow strategy as a plug-in
 
