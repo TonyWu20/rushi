@@ -1,2 +1,0 @@
-{"text":"","tool_calls":[{"id":"c9","name":"bash","arguments":{"command":"echo a truncated argument that the provider cut off mid-call"}}],"reasoning":[],"stop_reason":"length","usage":{"input_tokens":3800,"output_tokens":10}}
-{"text":"done","tool_calls":[],"reasoning":[],"stop_reason":"stop","usage":{"input_tokens":100,"output_tokens":10}}
