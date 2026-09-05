@@ -54,7 +54,7 @@ pub fn run(cfg: &HarnessConfig, session_dir: &Path) {
 
     // The turn loop.
     loop {
-        crate::step::do_step(cfg, &session_dir, StepMode::Run);
+        crate::step::do_step(cfg, session_dir, StepMode::Run);
 
         // Fire step.end (observation, after the step completes).
         fire_observation(cfg, &session, Window::StepEnd, &serde_json::json!({

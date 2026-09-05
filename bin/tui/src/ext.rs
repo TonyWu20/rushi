@@ -1547,7 +1547,7 @@ impl ExtHost {
     pub fn command_items(&self) -> Vec<crate::palette::items::PaletteItem> {
         let cache = self.inner.commands_cache.lock().unwrap();
         let mut out: Vec<crate::palette::items::PaletteItem> = Vec::new();
-        for (i, _entry) in cache.iter() {
+        for i in cache.keys() {
             let s = &self.inner.slots[*i];
             if !matches!(
                 *s.state.lock().unwrap(),
@@ -1602,7 +1602,7 @@ impl ExtHost {
                 },
             );
             // Remap the spans that pointed at the superseded request.
-            for (_key, req) in reg.span_reqs.iter_mut() {
+            for req in reg.span_reqs.values_mut() {
                 if *req == old {
                     *req = id;
                 }
