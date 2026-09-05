@@ -202,8 +202,13 @@ enum TailErr {
 
 /// Read newly appended bytes after `offset`, emit each complete line as
 /// a [`WatchItem::Event`], keep the unterminated tail in `carry`.
-/// When the channel is full, emitted lines stop and the next poll
-/// resumes where this one left off: no event is lost, none is re-emitted.
+///
+/// Invariant: `offset` is the file position just past the last byte
+/// *read* from the file, and `carry` holds the read-but-unemitted bytes,
+/// which occupy `[offset - carry.len(), offset)`. Each poll advances
+/// `offset` by the bytes actually read and never re-reads bytes already
+/// in `carry`, so a full channel (backpressure) or a mid-line torn read
+/// cannot duplicate or lose events.
 fn read_tail(
     path: &Path,
     offset: &mut u64,
@@ -221,10 +226,13 @@ fn read_tail(
         *offset = 0;
         carry.clear();
     }
-    // Alignment check: the log is append-only, so the byte just before the
-    // read position must be a newline (or the position must be 0). A file
-    // rewritten underneath the tailer breaks that; reread from the start.
-    if *offset > 0 {
+    // Alignment check: the log is append-only, so when we are at a clean
+    // line boundary (no partial bytes held in `carry`) the byte just
+    // before the read position must be a newline. A file rewritten
+    // underneath the tailer breaks that; reread from the start. While a
+    // partial line sits in `carry` the byte before `offset` is the
+    // partial's last byte, not a newline, so the check is skipped.
+    if *offset > 0 && carry.is_empty() {
         if let Ok(mut probe) = File::open(path) {
             if probe.seek(SeekFrom::Start(*offset - 1)).is_ok() {
                 let mut b = [0u8; 1];
@@ -236,67 +244,80 @@ fn read_tail(
         }
     }
     let want = len.saturating_sub(*offset);
-    if want == 0 {
+    // No new bytes and nothing held back: nothing to do this poll.
+    // When bytes sit in `carry` we still fall through and re-try them,
+    // so a full channel cannot strand complete lines while the file is
+    // static.
+    if want == 0 && carry.is_empty() {
         return Ok(());
     }
 
-    let mut file = match File::open(path) {
-        Ok(f) => f,
-        Err(e) => return Err(TailErr::Io(e)),
-    };
-    if file.seek(SeekFrom::Start(*offset)).is_err() {
-        // Race with removal; the next poll handles it.
-        return Ok(());
-    }
-    let mut buf = vec![0u8; (want.min(TAIL_CHUNK_BYTES)) as usize];
-    let mut read = 0u64;
-    while read < want {
-        let chunk = &mut buf[read as usize..];
-        let n = match file.read(chunk) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => n,
+    let old_offset = *offset;
+    // `fresh` holds only the bytes appended to the file since the last
+    // poll; `carry` already holds the earlier read-but-unemitted bytes.
+    let mut fresh: Vec<u8> = Vec::new();
+    if want > 0 {
+        let mut file = match File::open(path) {
+            Ok(f) => f,
+            Err(e) => return Err(TailErr::Io(e)),
         };
-        read += n as u64;
+        if file.seek(SeekFrom::Start(*offset)).is_err() {
+            // Race with removal; the next poll handles it.
+            return Ok(());
+        }
+        let mut buf = vec![0u8; (want.min(TAIL_CHUNK_BYTES)) as usize];
+        let mut cursor = 0usize;
+        while (cursor as u64) < want {
+            let chunk = &mut buf[cursor..];
+            let n = match file.read(chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            cursor += n;
+        }
+        fresh = buf[..cursor].to_vec();
     }
 
+    // `carry` spans `[carry_start, old_offset)` in the file; `candidate`
+    // is those bytes plus the freshly read ones, so candidate position `p`
+    // maps to file position `carry_start + p`.
+    let carry_start = old_offset.saturating_sub(carry.len() as u64);
     let mut candidate = carry.clone();
-    candidate.extend_from_slice(&buf[..read as usize]);
-    let base = *offset;
+    candidate.extend_from_slice(&fresh);
 
-    if let Some(nl) = candidate.iter().rposition(|b| *b == b'\n') {
-        let complete_end = nl + 1;
-        let mut pos = 0usize; // bytes of `complete` processed
-        let mut stopped = false;
-        for line in candidate[..complete_end].split_inclusive(|b| *b == b'\n') {
-            let line_end = pos + line.len();
-            let text = String::from_utf8_lossy(line);
-            if let Some(event) = Event::parse_line(&text) {
-                match tx.try_send(WatchItem::Event {
-                    event,
-                    cursor: TailCursor::at(base + line_end as u64),
-                }) {
-                    Ok(()) => pos = line_end,
-                    Err(_) => {
-                        stopped = true;
-                        break;
-                    }
-                }
-            } else {
-                // Blank line: skip it, but keep the offset moving.
-                pos = line_end;
+    // Position just past the last complete newline, or 0 when none.
+    let complete_end = candidate
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |nl| nl + 1);
+
+    // Walk the complete lines, emitting each. `emitted` is the candidate
+    // position just past the last line this poll got out; the rest stays
+    // in `carry` for the next poll. When the channel is full we stop at
+    // the first failed send and keep our place: no event is lost and no
+    // event is re-emitted, because `offset` advances past every read byte
+    // exactly once.
+    let mut emitted = 0usize;
+    for line in candidate[..complete_end].split_inclusive(|b| *b == b'\n') {
+        let line_end = emitted + line.len();
+        let text = String::from_utf8_lossy(line);
+        if let Some(event) = Event::parse_line(&text) {
+            match tx.try_send(WatchItem::Event {
+                event,
+                cursor: TailCursor::at(carry_start + line_end as u64),
+            }) {
+                Ok(()) => emitted = line_end,
+                Err(_) => break,
             }
-        }
-        if stopped {
-            *offset = base + pos as u64;
-            *carry = candidate[pos..].to_vec();
         } else {
-            *offset = base + complete_end as u64;
-            *carry = candidate[complete_end..].to_vec();
+            // Blank line: skip it, but keep the position moving.
+            emitted = line_end;
         }
-    } else {
-        // No complete line yet: remember everything, advance nothing.
-        *carry = candidate;
     }
+
+    // Advance past every byte read this poll, whatever was emitted.
+    *offset = old_offset + fresh.len() as u64;
+    *carry = candidate[emitted..].to_vec();
     Ok(())
 }
 
@@ -1673,5 +1694,80 @@ mod tests {
                 Err(e) => panic!("watcher stopped: {e:?}"),
             }
         }
+    }
+
+    // Regression: a burst of more events than the 256-slot watch channel
+    // (the real-workload case: a model turn that emits a tool-call/result
+    // storm) must not duplicate events or strand the transcript. While the
+    // consumer is slow the tailer backpressures, the held lines survive,
+    // and every event still lands exactly once, in order.
+    #[test]
+    fn watch_backpressure_burst_delivers_each_event_once() {
+        const N: usize = 300; // > TAIL_CAPACITY (256)
+        let c = make_cfg(false, None);
+        std::fs::create_dir_all(c.dir.path().join("sessions").join("burst")).unwrap();
+        let path = c.dir.path().join("sessions").join("burst").join("events.jsonl");
+
+        let sid = SessionId::new("burst");
+        let rx = c.port.watch(&sid, TailCursor::start());
+        std::thread::sleep(Duration::from_millis(200)); // tailer attaches
+
+        // One burst, larger than the channel. Each line is a user_message
+        // whose content names its index so order and duplication are both
+        // checkable.
+        for i in 0..N {
+            append_raw(
+                &path,
+                &format!(r#"{{"v":1,"type":"user_message","ts":"t","content":"line {i}"}}"#),
+            );
+        }
+
+        // Hold the receiver so the 256-slot channel fills: the tailer
+        // backpressures and holds its place rather than dropping events.
+        std::thread::sleep(Duration::from_millis(1200));
+
+        // Now drain everything. Every one of the N events must arrive,
+        // exactly once, in order, even though the channel was full and the
+        // file went idle while the tailer was backpressured.
+        let mut got: Vec<String> = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        let mut quiet_since: Option<std::time::Instant> = None;
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(WatchItem::Event { event, .. }) => {
+                    got.push(event.compact());
+                    quiet_since = None;
+                }
+                Ok(_) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let now = std::time::Instant::now();
+                    match quiet_since {
+                        Some(q)
+                            if got.len() == N && now.duration_since(q) >= Duration::from_millis(500) =>
+                        {
+                            break
+                        }
+                        _ => quiet_since = Some(now),
+                    }
+                }
+                Err(e) => panic!("watcher stopped: {e:?}"),
+            }
+        }
+
+        assert_eq!(
+            got.len(),
+            N,
+            "the burst must deliver exactly {N} events — no duplicates, no losses"
+        );
+        for (i, g) in got.iter().enumerate() {
+            // Match the quoted content so "line 42" cannot satisfy the
+            // check for index 4 (a prefix would make the order test vacuous).
+            let want = format!("\"line {i}\"");
+            assert!(
+                g.contains(&want),
+                "order broke at index {i}: {g}"
+            );
+        }
+        drop(rx);
     }
 }
