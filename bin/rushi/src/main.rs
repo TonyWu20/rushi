@@ -87,7 +87,12 @@ fn main() {
         }
 
         Command::Setup { locked } => {
-            if let Err(e) = setup::do_setup(locked) {
+            let project_dir = std::env::current_dir().unwrap_or_else(|e| {
+                eprintln!("rushi setup: cannot resolve CWD: {e}");
+                std::process::exit(1);
+            });
+            let kernel_dir = setup::resolve_kernel_tools_dir(&project_dir);
+            if let Err(e) = setup::do_setup(locked, &project_dir, &kernel_dir) {
                 eprintln!("rushi setup: {e}");
                 std::process::exit(1);
             }
