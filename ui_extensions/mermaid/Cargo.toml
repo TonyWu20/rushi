@@ -4,9 +4,10 @@
 # attaching it to the root.
 #
 # Build: `cargo build` here. The binary lands in
-# ./target/debug/mermaid-ext; put that directory on `PATH` so the
-# TUI host can resolve the `mermaid-ext` command from
-# ui_extensions/mermaid/ext.toml.
+# ./target/debug/mermaid-ext. The manifest addresses it by a path
+# relative to its own entry (`target/debug/mermaid-ext`); the host
+# resolves that against the entry directory, so no `PATH` export is
+# needed (docs/ui-extension.md section 3).
 
 [package]
 name = "mermaid-ext"
