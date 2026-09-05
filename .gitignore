@@ -1,5 +1,8 @@
 .pi/
 
+## Lean build output
+lean/.lake/
+
 ## Rust build output
 **/target/
 target
@@ -16,6 +19,16 @@ test.txt
 ## Python bytecode
 __pycache__/
 
-## Embedded reference repos (external checkouts; never part of the
-## distribution, so they must never be swept in by `git add -A`)
+## Scratch work area: ad-hoc probe scripts, one-off captures, and the
+## e2e suites' runtime output (scratch/e2e-*/). The e2e scripts
+## (scripts/*-e2e.sh) self-generate every file they use, so nothing in
+## here is a fixture; the tracked copies had also baked in machine-
+## local absolute paths. Ignore the whole area; anything worth keeping
+## gets promoted into scripts/ or docs/ (skill-remapped-to-os-apps.md
+## section 11).
+scratch/
+
+## Embedded reference repos (external checkouts under scratch/refs;
+## never part of the distribution, so they must never be swept in by
+## `git add -A`)
 scratch/refs/pi-vim
