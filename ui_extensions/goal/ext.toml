@@ -1,21 +1,20 @@
 # The `goal` commands extension for the TUI command palette
-# (docs/tui-command-palette.md section 10). Registers the pi-goal
-# port's user-facing commands: `goal`, `goal edit`, and `goal resume`
-# (docs/pi-goal-readiness.md, G2). The agent-facing tools
-# (`goal`, `goal_complete`, `goal_blocked`) live under `tools/`;
-# this extension is the user-facing entry point.
+# (docs/goal-ux.md). Registers user-facing goal commands:
+#   goal, goal_edit, goal_pause, goal_clear, goal_resume
 #
-# The host sends a `commands` op when the palette opens; this
-# extension replies with a `commands_list` for the three goal
-# commands.
+# Event-driven goal setting (docs/goal-ux.md §1.1, §1.8):
+# When the user selects `goal` or `goal_edit` from the palette, the
+# extension arms an in-memory flag. The next `user_message` event
+# forwarded by the TUI (via `kinds = ["user_message"]`) triggers a
+# direct write to `goal.json` — no agent round-trip needed.
 #
-# - `goal` and `goal edit` arm goal-mode: the extension appends an
-#   `ext_status` marker event to the session log so the model / hooks
-#   can detect that the next user message is a goal description.
-#   The user then types the goal text in the main input box and sends
-#   it normally.
-# - `goal resume` re-activates a previously blocked or completed goal
-#   by updating `goal.json` directly.
+# The `model.before` hook reads `goal.json` on every model call and
+# injects the cache-stable goal block (§1.1b/§1.1c).
+#
+# - `goal_pause` — sets `active = false` in goal.json; the loop stops
+#   at the next `run.idle` window (§1.4).
+# - `goal_clear` — deletes `goal.json` (irreversible, §1.4).
+# - `goal_resume` — re-activates a closed goal, resets counters (§1.4).
 #
 # Build: `cargo build` in this directory. The package is standalone
 # (not a member of the root workspace); the binary lands in
@@ -28,4 +27,5 @@
 command = "target/debug/goal-ext"
 caps = ["commands", "append"]
 append_types = ["ext_status"]
+kinds = ["user_message"]
 protocol_v = 1

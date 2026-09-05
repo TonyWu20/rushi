@@ -82,22 +82,26 @@ the goal instruction to the request `input` at every model call.
 The TUI command palette (`docs/tui-command-palette.md`) now supports
 extension-registered commands via the `commands` cap.
 `ui_extensions/goal/` is a standalone Rust extension that registers
-three user-facing commands in the TUI palette: `goal`, `goal edit`,
-and `goal resume`. The `goal` and `goal edit` commands arm goal mode
-by appending a `goal_armed` ext_status marker to the session log; the
-user then types the goal description in the main input box and sends
-it. The `harness-hook-goal-arm` hook (registered on `model.before`)
-detects the pending marker and injects an instruction into the model
-request telling it to call the `goal` tool with the user's message as
-the goal description. `goal resume` re-activates a blocked or
+five user-facing commands in the TUI palette: `goal`, `goal edit`,
+`goal pause`, `goal clear`, and `goal resume`. The `goal` and
+`goal edit` commands arm an in-memory flag in the TUI extension; the
+next `user_message` event (forwarded via `kinds = ["user_message"]`)
+triggers a direct write of `goal.json` in the session dir — no agent
+round-trip needed. `goal pause` sets `active = false`; `goal clear`
+deletes `goal.json`; `goal resume` re-activates a blocked or
 completed goal by rewriting `goal.json` directly, then the `run.idle`
-hook continues the loop. The agent-facing tools (`goal`,
-`goal_complete`, `goal_blocked`) remain under `tools/` and are
-invisible in the user-facing palette.
+hook continues the loop. The `model.before` hook
+(`harness-hook-goal-arm`) reads `goal.json` and appends a cache-stable
+goal block (objective + goal-mode rules + trust-boundary framing,
+ported from pi-goal's prompt template) to every model request while a
+goal is active. The agent-facing tools (`goal`, `goal_complete`,
+`goal_blocked`) remain under `tools/` and are invisible in the
+user-facing palette.
 
 **G3 — No conformance test for `run.idle` continue. Resolved (2026-07-04).**
-`scripts/run-idle-continue-e2e.sh` covers three scenarios (no-goal,
-budgeted-goal, closed-goal) with 9 assertions, all passing.
+`scripts/run-idle-continue-e2e.sh` covers nine scenarios (no-goal,
+active-goal, closed-goal, wrong-id, contradictory, paused,
+blocked-stops, cleared, block-stable) with 26 assertions, all passing.
 
 **G4 — No `input`-equivalent window.**
 pi-goal's `pi.on("input")` intercepts user input to clear recovery
@@ -119,35 +123,40 @@ and event-log persistence are in place.
 The application-level pieces are complete:
 
 - `crates/goal-state/` — `GoalState` over `goal.json` in the session
-  dir; supports `new/load/save/is_open/mark_complete/mark_blocked/
-  resume/edit_goal/budget_exhausted/remaining_budget/
-  continuation_prompt/read_last_assistant_output_tokens`.
+  dir; supports `new/load/save/is_open/pause/resume/
+  mark_complete/mark_blocked/edit_goal/build_continue_prompt/
+  build_goal_block/format_duration/format_token_count`.
+  No budget cap (user decision, docs/goal-ux.md §1.6).
 - `tools/goal/`, `tools/goal_complete/`, `tools/goal_blocked/` — CLI
   tools that read/write `goal.json` via `HARNESS_SESSION_DIR`. The
   `goal` tool edits an active goal in place when one exists, and
-  creates a fresh one otherwise.
+  creates a fresh one otherwise. `goal_complete` rejects
+  contradictory summaries (P9). `goal_blocked` records the block
+  reason.
 - `bin/hook-goal-idle/` — `run.idle` hook: continues the loop with a
-  `follow`-queue `user_message` when a goal is open; stops when closed
-  or budget exhausted.
-- `bin/hook-goal-compact/` — `compact.before` hook: preserves goal info
-  into the compaction window.
+  `follow`-queue `user_message` when a goal is open; stops when
+  closed. No budget check (§1.6).
+- `bin/hook-goal-compact/` — `compact.before` hook: always-allow
+  (no budget veto; §1.6).
 - `bin/hook-goal-tools/` — `tool.before` hook: blocks stale goal-tool
   calls (e.g. `goal_complete` when no goal is active).
-- `bin/hook-goal-arm/` — `model.before` hook: when a `goal_armed`
-  ext_status marker is pending (armed by the TUI extension and not yet
-  consumed by a `goal` tool_call), injects a goal-mode instruction
-  into the model request telling it to call the `goal` tool with the
-  user's message as the goal description.
-- `scripts/run-idle-continue-e2e.sh` — conformance e2e (9 assertions,
-  3 scenarios: no-goal, budgeted-goal, closed-goal).
+- `bin/hook-goal-arm/` — `model.before` hook: reads `goal.json`
+  (goal.json-driven, §1.1b) and appends the cache-stable goal block
+  (objective + goal-mode rules + trust-boundary framing) as the last
+  item in `request.input` while a goal is active. No log-derived
+  state (§1.1b); byte-stable across turns (P16/P17).
+- `bin/tui/` — TUI goal status: goal status line (goal text, elapsed
+  time, token count — no budget ratio, §1.7), goal-mode border
+  colour, `goal_armed` input-box title hint.
+- `scripts/run-idle-continue-e2e.sh` — conformance e2e (26 assertions,
+  9 scenarios: no-goal, active-goal, closed-goal, wrong-id,
+  contradictory, paused, blocked-stops, cleared, block-stable).
 - `ui_extensions/goal/` — TUI extension that registers `goal`,
-  `goal edit`, and `goal resume` in the command palette
-  (G2 resolution). `goal` and `goal edit` arm goal mode via a
-  `goal_armed` ext_status marker; the user types the goal description
-  in the main input box and sends it, and the `model.before` hook
-  (`bin/hook-goal-arm/`) injects the goal-mode instruction into the
-  model request. Standalone cargo package; build with `cargo build`
-  in its directory.
+  `goal edit`, `goal pause`, `goal clear`, and `goal resume` in the
+  command palette (G2 resolution). `goal` and `goal edit` set an
+  armed flag; the next `user_message` event triggers a direct write of
+  `goal.json` (no agent round-trip, §1.1/§1.8). Standalone cargo
+  package; build with `cargo build` in its directory.
 - Plumbing: `session_dir` added to `RouteEnv`, `route` accepts
   `--session-dir` and exports `HARNESS_SESSION_DIR`, four hooks
   registered in `config.toml` / `config-low.toml`, goal tools listed

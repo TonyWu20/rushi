@@ -177,6 +177,13 @@ pub trait SessionPort: Send + Sync {
     /// JSON Schema when the schema file exists (G3).
     async fn append_event(&self, session: &SessionId, event: &Event) -> Result<(), BusError>;
 
+    /// Resolve the on-disk directory backing a session
+    /// (docs/goal-ux.md section 1.7). The file-based implementation
+    /// maps it to `<sessions_root>/<session>`; a future daemon port
+    /// would return the daemon's working directory. The TUI uses this
+    /// to locate the session's `goal.json` for goal-state display.
+    fn session_dir(&self, session: &SessionId) -> Result<std::path::PathBuf, BusError>;
+
     /// Append one TUI trace record to the session trace log.
     ///
     /// The TUI writes its own errors and warnings to a trace a human

@@ -54,12 +54,6 @@ tool_result_max_chars = 20000
 bash_max_output_bytes = 16000
 bash_timeout_default = 60
 bash_timeout_max = 300
-# The compact form caps. The compact request must fit under the
-# token budget. The 8000/2000 values of the char era broke that
-# coherence: the compact request outgrew both the budget and the
-# provider window.
-compact_result_chars = 500
-compact_text_chars = 200
 
 # The in-session auto-compact (docs/auto-compact-plan.md).
 # compact_enabled is the kill switch: it gates the threshold hook
@@ -102,24 +96,24 @@ timeout_ms = 30000
 
 # Goal-continuation hooks (pi-goal port).
 [[hooks.on]]
-window  = "run.idle"
+window = "run.idle"
 command = "harness-hook-goal-idle"
-args    = []
+args = []
 
 [[hooks.on]]
-window  = "compact.before"
+window = "compact.before"
 command = "harness-hook-goal-compact"
-args    = []
+args = []
 
 [[hooks.on]]
-window  = "tool.before"
+window = "tool.before"
 command = "harness-hook-goal-tools"
-args    = []
+args = []
 
 [[hooks.on]]
-window  = "model.before"
+window = "model.before"
 command = "harness-hook-goal-arm"
-args    = []
+args = []
 
 [system_prompt]
 # Borrowed from the pi coding agent default prompt.
@@ -135,8 +129,8 @@ Available tools:
 - bash: Execute bash commands (builds, tests, git, file search).
 - list: List the files in a directory.
 - goal: Start a goal the loop pursues across turns.
-- goal_complete: Mark the active goal as complete.
-- goal_blocked: Mark the active goal as blocked with a reason.
+- goal_complete: Mark the active goal as complete. Requires the goal_id from the goal prompt.
+- goal_blocked: Mark the active goal as blocked with a reason. Requires the goal_id from the goal prompt.
 
 The project can add custom tools to the list above.
 
@@ -152,3 +146,6 @@ Guidelines:
 
 [model.Qwen3.8-27B-NVFP4-RTX5090-DFlash2]
 reasoning_effort = "max"
+
+[tui.tool_display]
+preset = "opencode"

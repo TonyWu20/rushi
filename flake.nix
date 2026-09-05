@@ -45,5 +45,17 @@
             export RUSHI_KERNEL="${rushi}"
           '';
         };
+
+        # Lean 4 shell for the formal-verification backstop (docs/lean-driven-development.md §8).
+        # Provides lean + lake + z3 on PATH. Run from the repo root:
+        #   nix develop --impure -I .#lean
+        # then `lake build` inside ./lean/ to check the spec + proofs.
+        devShells.lean = pkgs.mkShell {
+          packages = [ pkgs.lean4 pkgs.z3 ];
+          shellHook = ''
+            echo "Lean 4 dev shell: lean + lake + z3 on PATH."
+            echo "Check the formal spec + proofs with: cd lean && lake build"
+          '';
+        };
       });
 }

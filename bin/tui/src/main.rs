@@ -600,7 +600,14 @@ fn main() {
                         event::produce::user_message(&content)
                     };
                     match rt.block_on(port.append_event(&sid, &ev)) {
-                        Ok(()) => app.flash("message sent"),
+                        Ok(()) => {
+                            app.flash("message sent");
+                            // Clear the goal-armed flag: the message was
+                            // sent, so the goal extension will (or will not)
+                            // act on it via the forwarded event
+                            // (docs/goal-ux.md §1.8).
+                            app.set_goal_armed(false);
+                        }
                         Err(e) => {
                             trace(
                                 &rt,
@@ -1044,6 +1051,14 @@ fn main() {
                     let req = host.request_invoke(&ext, &id, value.as_deref());
                     match req {
                         Some(req_id) => {
+                            // For goal / goal_edit, arm the goal-armed
+                            // flag so the input box shows the persistent
+                            // hint and switches to Insert mode
+                            // (docs/goal-ux.md §1.8).
+                            if id == "goal" || id == "goal_edit" {
+                                app.set_goal_armed(true);
+                                app.editor().mode = crate::vim_editor::Mode::Insert;
+                            }
                             app.flash(format!(
                                 "ext {ext}: {id} — pending (req {req_id})"
                             ));
@@ -1091,6 +1106,13 @@ fn main() {
         // re-requests. The tick cadence is per extension; the main
         // loop drives the host because it owns the width, session,
         // and loop state.
+        // Refresh goal state from disk each tick (docs/goal-ux.md §1.7).
+        // Must happen before `tick` borrows `app` immutably.
+        if let Some(sid) = app.active().cloned() {
+            if let Ok(dir) = port.session_dir(&sid) {
+                app.refresh_goal(&dir);
+            }
+        }
         let width = term.size().map(|s| s.width as usize).unwrap_or(80);
         if width != last_width {
             // The re-request width is the transform budget: the

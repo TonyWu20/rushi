@@ -137,22 +137,6 @@ impl FileSessionPort {
         Ok(Some(format!("stopped external loop pid {pid}")))
     }
 
-    /// Reject session ids that could escape the sessions root.
-    fn session_dir(&self, session: &SessionId) -> Result<PathBuf, BusError> {
-        let name = session.as_str();
-        let p = Path::new(name);
-        if name.is_empty()
-            || p.is_absolute()
-            || p.components()
-                .any(|c| matches!(c, std::path::Component::ParentDir))
-        {
-            return Err(BusError::Io {
-                what: format!("invalid session id `{name}`"),
-            });
-        }
-        Ok(self.sessions_root.join(name))
-    }
-
     fn log_path(&self, session: &SessionId) -> Result<PathBuf, BusError> {
         Ok(self.session_dir(session)?.join(LOG_FILE))
     }
@@ -389,6 +373,21 @@ fn file_len_or_zero(path: &Path) -> u64 {
 }
 
 impl SessionPort for FileSessionPort {
+    fn session_dir(&self, session: &SessionId) -> Result<PathBuf, BusError> {
+        let name = session.as_str();
+        let p = Path::new(name);
+        if name.is_empty()
+            || p.is_absolute()
+            || p.components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(BusError::Io {
+                what: format!("invalid session id `{name}`"),
+            });
+        }
+        Ok(self.sessions_root.join(name))
+    }
+
     async fn list_sessions(&self) -> Result<Vec<SessionId>, BusError> {
         let root = self.sessions_root.clone();
         let res = tokio::task::spawn_blocking(move || {
