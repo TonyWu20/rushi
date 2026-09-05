@@ -2176,11 +2176,13 @@ dependencies = [
 name = "rushi"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "chrono",
  "clap",
  "libc",
  "regex",
  "rushi-common",
+ "serde",
  "serde_json",
  "tempfile",
  "toml 0.7.8",
