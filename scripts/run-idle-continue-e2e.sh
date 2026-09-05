@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The run.idle continue e2e (docs/loop-lifecycle-hooks.md 3.6;
-# docs/pi-goal-readiness.md G3). Drives `harness run` with a stub
+# docs/pi-goal-readiness.md G3). Drives `rushi run` with a stub
 # model and the compiled goal hooks. Asserts the goal-continuation
 # loop: a `continue` decision appends a `follow` user_message and the
 # loop keeps working; budget exhaustion marks the goal blocked and
@@ -116,7 +116,7 @@ run_harness() {
     export MODEL_BIN="$WORK/stub-model"
     export STUB_REQLOG="$WORK/reqlog"
     : >"$STUB_REQLOG"
-    timeout 120 "$BIN_DIR/harness" run session
+    timeout 120 "$BIN_DIR/rushi" run session
   ) >/dev/null 2>&1
   true
 }

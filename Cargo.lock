@@ -98,7 +98,7 @@ dependencies = [
  "bon",
  "chrono",
  "clap",
- "harness-common",
+ "rushi-common",
  "serde_json",
  "tempfile",
  "toml 0.7.8",
@@ -309,7 +309,7 @@ name = "claim"
 version = "0.1.0"
 dependencies = [
  "clap",
- "harness-common",
+ "rushi-common",
  "serde_json",
 ]
 
@@ -385,7 +385,7 @@ dependencies = [
  "bon",
  "chrono",
  "clap",
- "harness-common",
+ "rushi-common",
  "serde_json",
  "tempfile",
  "toml 0.7.8",
@@ -914,31 +914,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "harness"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "clap",
- "harness-common",
- "libc",
- "regex",
- "serde_json",
- "tempfile",
- "toml 0.7.8",
-]
-
-[[package]]
-name = "harness-common"
-version = "0.1.0"
-dependencies = [
- "glob",
- "libc",
- "serde_json",
- "tempfile",
- "toml 0.7.8",
-]
-
-[[package]]
 name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1464,7 +1439,7 @@ name = "log"
 version = "0.1.0"
 dependencies = [
  "clap",
- "harness-common",
+ "rushi-common",
  "serde_json",
  "tempfile",
 ]
@@ -2190,8 +2165,33 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "clap",
- "harness-common",
+ "rushi-common",
  "serde",
+ "serde_json",
+ "tempfile",
+ "toml 0.7.8",
+]
+
+[[package]]
+name = "rushi"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "libc",
+ "regex",
+ "rushi-common",
+ "serde_json",
+ "tempfile",
+ "toml 0.7.8",
+]
+
+[[package]]
+name = "rushi-common"
+version = "0.1.0"
+dependencies = [
+ "glob",
+ "libc",
  "serde_json",
  "tempfile",
  "toml 0.7.8",
@@ -3016,10 +3016,10 @@ dependencies = [
  "clap",
  "crossterm",
  "frizbee",
- "harness-common",
  "libc",
  "ratatui",
  "regex",
+ "rushi-common",
  "serde",
  "serde_json",
  "tempfile",
@@ -3093,7 +3093,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "clap",
- "harness-common",
+ "rushi-common",
  "serde_json",
  "tempfile",
  "toml 0.7.8",

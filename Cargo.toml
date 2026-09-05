@@ -9,7 +9,7 @@ members = [
     "bin/route",
     "bin/log",
     "bin/user",
-    "bin/harness",
+    "bin/rushi",
     "bin/hook-compact",
     "bin/hook-handoff",
     "bin/hook-goal-idle",
@@ -25,7 +25,7 @@ members = [
     "tools/list",
     "tools/bash",
     "bin/tui",
-    "crates/common",
+    "crates/rushi",
     "crates/goal-state",
 ]
 

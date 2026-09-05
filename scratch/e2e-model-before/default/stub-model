@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -u
+if [[ "${1:-}" == "--describe" ]]; then
+  echo '{"active":"stub","model_id":"stub-model","reasoning_effort":"none","thinking_level":"off"}'
+  exit 0
+fi
+req=$(cat)
+printf '%s\n' "$req" >>"${STUB_REQLOG:-/dev/null}"
+echo '{"text":"done","tool_calls":[],"reasoning":[],"stop_reason":"stop","usage":{"input_tokens":10,"output_tokens":10}}'

@@ -1,6 +1,6 @@
 #![deny(clippy::todo, clippy::unimplemented, clippy::unreachable)]
 
-use harness_common::logline::LogLine;
+use rushi_common::logline::LogLine;
 
 use clap::Parser;
 use std::collections::HashMap;

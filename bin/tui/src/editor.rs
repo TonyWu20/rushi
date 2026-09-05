@@ -50,7 +50,7 @@ pub fn editor_command() -> Option<String> {
 
 /// A scratch file, unique per process, under the temp dir.
 pub fn scratch_file() -> PathBuf {
-    std::env::temp_dir().join(format!("harness-tui-edit-{}.txt", std::process::id()))
+    std::env::temp_dir().join(format!("rushi-tui-edit-{}.txt", std::process::id()))
 }
 
 /// Open the editor on `initial` and return the edited text.

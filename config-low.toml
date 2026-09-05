@@ -2,7 +2,7 @@
 # The TUI never sees the internals of this command; it starts it,
 # streams its output, and stops it on request.
 [loop]
-command = "harness"
+command = "rushi"
 args = ["run"]
 arg_style = "append_session"
 

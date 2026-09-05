@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -u
+payload=$(cat)
+req=$(jq -c '.request // {}' <<<"$payload")
+jq -cn --argjson req "$req" '{
+  decision: "transform",
+  payload: {
+    request: ($req | .input = (
+      [{"type":"message","role":"user","content":"goal-hook: continue the active goal"}]
+      + (.input // [])))
+  }
+}'
