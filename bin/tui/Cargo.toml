@@ -21,7 +21,7 @@ libc = "0.2"
 bon = { workspace = true }
 frizbee = "0.13"
 uuid = { version = "1", features = ["v4"] }
-harness-common = { path = "../../crates/common" }
+rushi-common = { path = "../../crates/rushi" }
 
 [dev-dependencies]
 tempfile = "3"

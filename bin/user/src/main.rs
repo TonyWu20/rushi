@@ -1,8 +1,8 @@
 #![deny(clippy::todo, clippy::unimplemented, clippy::unreachable)]
 
 use clap::Parser;
-use harness_common::event_validation;
-use harness_common::logline::LogLine;
+use rushi_common::event_validation;
+use rushi_common::logline::LogLine;
 use std::fs;
 use std::io::{self, Read};
 use std::path::PathBuf;

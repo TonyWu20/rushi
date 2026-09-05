@@ -1,7 +1,7 @@
 #![deny(clippy::todo, clippy::unimplemented, clippy::unreachable)]
 
 use clap::Parser;
-use harness_common::event_validation;
+use rushi_common::event_validation;
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;

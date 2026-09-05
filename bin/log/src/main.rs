@@ -1,7 +1,7 @@
 #![deny(clippy::todo, clippy::unimplemented, clippy::unreachable)]
 
-use harness_common::event_validation;
-use harness_common::logline::LogLine;
+use rushi_common::event_validation;
+use rushi_common::logline::LogLine;
 
 use clap::Parser;
 use std::fs;
@@ -76,7 +76,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use harness_common::event_validation;
+    use rushi_common::event_validation;
 
     fn repo_schema_dir() -> std::path::PathBuf {
         // The tests run from the crate dir; the schemas live at the

@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::SyncSender;
 use std::time::Duration;
 
-use harness_common::logline::LogLine;
+use rushi_common::logline::LogLine;
 
 /// Session log file name. A storage detail; never referenced above the port.
 const LOG_FILE: &str = "events.jsonl";
@@ -404,11 +404,11 @@ impl SessionPort for FileSessionPort {
             let dir_str = dir.to_str().ok_or_else(|| BusError::Io {
                 what: format!("schemas dir is not valid UTF-8: {}", dir.display()),
             })?;
-            let schemas = harness_common::event_validation::load_schemas(dir_str);
+            let schemas = rushi_common::event_validation::load_schemas(dir_str);
             // Skip validation when the event type has no schema in the set
             // (P1b: additive types need no schema to flow through the TUI).
             if schemas.iter().any(|(t, _)| t == ty) {
-                harness_common::event_validation::validate_value(&obj, &schemas)
+                rushi_common::event_validation::validate_value(&obj, &schemas)
                     .map_err(|e| BusError::InvalidEvent {
                         reason: format!("does not match schema: {e}"),
                     })?;
@@ -1409,12 +1409,12 @@ mod tests {
             .expect("a produced event has an object")
             .clone();
         assert!(
-            harness_common::event_validation::validate_against_schema(&produced_obj, &schema),
+            rushi_common::event_validation::validate_against_schema(&produced_obj, &schema),
             "producer envelope must match the repo schema: {produced_obj:?}"
         );
         let missing_value = serde_json::json!({"v":1,"type":"ext_status","ts":"t","id":"vim_mode"});
         assert!(
-            !harness_common::event_validation::validate_against_schema(&missing_value, &schema),
+            !rushi_common::event_validation::validate_against_schema(&missing_value, &schema),
             "a missing `value` must fail the repo schema"
         );
     }

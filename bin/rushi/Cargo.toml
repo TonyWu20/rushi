@@ -1,0 +1,20 @@
+[package]
+name = "rushi"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "rushi"
+path = "src/main.rs"
+
+[dependencies]
+rushi-common = { path = "../../crates/rushi" }
+serde_json = "1.0"
+toml = "0.7"
+libc = "0.2"
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+
+[dev-dependencies]
+tempfile = "3"

@@ -32,7 +32,7 @@ TS1=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 echo "{\"v\":1,\"type\":\"user_message\",\"ts\":\"$TS1\",\"content\":\"Read config.toml and tell me the model name.\"}" > "$SESSION_DIR/events.jsonl"
 
 # Run turn 1 (will call model API, parse, route, log)
-"$BIN_DIR/harness" step "$SESSION"
+"$BIN_DIR/rushi" step "$SESSION"
 
 # The step publishes the loop phase as an ext_status marker
 # (docs/tui-model-wait-indicator.md). The session log must hold at
@@ -60,7 +60,7 @@ echo "{\"v\":1,\"type\":\"user_message\",\"ts\":\"$TS2\",\"content\":\"What was 
 TURN2_CACHED=0
 for i in 1 2 3 4 5; do
   echo "Retry $i..."
-  "$BIN_DIR/harness" step "$SESSION"
+  "$BIN_DIR/rushi" step "$SESSION"
 
   # Check cached_tokens in turn 2
   TURN2_CACHED=$(jq -r 'select(.type == "assistant_message") | .usage.cached_tokens // 0' "$SESSION_DIR/events.jsonl" | tail -1)

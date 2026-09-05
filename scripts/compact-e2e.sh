@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The auto-compact e2e suite (docs/auto-compact-plan.md section 5).
-# It drives `harness step` with a scriptable stub model binary and asserts
+# It drives `rushi step` with a scriptable stub model binary and asserts
 # the marker shapes on the session event log.
 #
 # The stub model reads the request JSON from stdin. Summary calls
@@ -146,9 +146,9 @@ run_step() {
     export STUB_PLAN="$WORK/plan" STUB_STATE="$WORK/stub-n"
     export STUB_REQLOG="${STUB_REQLOG:-$WORK/reqlog}"
     if [[ -n "${STEP_DEBUG:-}" ]]; then
-      "$BIN_DIR/harness" step session
+      "$BIN_DIR/rushi" step session
     else
-      "$BIN_DIR/harness" step session 2>/dev/null
+      "$BIN_DIR/rushi" step session 2>/dev/null
     fi
     true
   )
@@ -360,7 +360,7 @@ scenario_compact_failure() {
     cd "$WORK"
     export CONFIG="$WORK/config.toml" MODEL_BIN="$WORK/stub-model"
     export STUB_PLAN="$WORK/plan" STUB_STATE="$WORK/stub-n" STUB_SUMMARY_FAILS=1
-    "$BIN_DIR/harness" step session 2>/dev/null || true
+    "$BIN_DIR/rushi" step session 2>/dev/null || true
   )
   # The threshold compact fails (all summary calls fail). No boundary
   # is created, so context_exhausted does not fire. The model call
@@ -385,7 +385,7 @@ scenario_empty_summary() {
     cd "$WORK"
     export CONFIG="$WORK/config.toml" MODEL_BIN="$WORK/stub-model"
     export STUB_PLAN="$WORK/plan" STUB_STATE="$WORK/stub-n" STUB_SUMMARY_EMPTY=1
-    "$BIN_DIR/harness" step session 2>/dev/null || true
+    "$BIN_DIR/rushi" step session 2>/dev/null || true
   )
   # The threshold compact produces an empty summary (failure). No
   # boundary is created, so context_exhausted does not fire. The

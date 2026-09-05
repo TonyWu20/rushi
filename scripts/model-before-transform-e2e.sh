@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The model.before transform e2e (docs/loop-lifecycle-hooks.md 3.3, 4.5).
-# Drives `harness step` with a scriptable stub model and a jq-based
+# Drives `rushi step` with a scriptable stub model and a jq-based
 # model.before hook. Asserts the transform decision, the `hook_applied`
 # marker, the malformed-payload failure path, and the byte-identical
 # no-hooks default.
@@ -135,7 +135,7 @@ run_step() {
     export MODEL_BIN="$WORK/stub-model"
     export STUB_REQLOG="$WORK/reqlog"
     : >"$STUB_REQLOG"
-    "$BIN_DIR/harness" step session
+    "$BIN_DIR/rushi" step session
   ) >/dev/null 2>&1
   true
 }

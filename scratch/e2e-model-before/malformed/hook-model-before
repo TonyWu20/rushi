@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -u
+cat > /dev/null
+echo '{"decision":"transform"}'

@@ -9,7 +9,7 @@
 //! new session directory.
 //!
 //! The trigger math and the chars/4 estimator are the shared
-//! `harness_common::compact_math` module (docs/phase-2-plan.md
+//! `rushi_common::compact_math` module (docs/phase-2-plan.md
 //! section 6).
 
 use bon::builder;
@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use clap::Parser;
-use harness_common::compact_math::{self, Caps, Ev};
+use rushi_common::compact_math::{self, Caps, Ev};
 use serde_json::Value;
 
 /// The one-shot auto-compaction call. It exits 0 with a status JSON on
