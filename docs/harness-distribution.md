@@ -333,6 +333,37 @@ string field, checked once at setup; not a versioning scheme) would
 let setup reject an incompatible tool. This is a future constraint,
 not a current gap.
 
+## 14. Rename plan
+
+`rushi` names the distribution: the totem. The totem is the
+Unix-philosophy pipeline — the event log, the one-shot tool
+contract, the pipe-and-exit-code ABI. It is not any one component.
+The TUI is Tier 2 (swappable front-end, §1 above) and keeps its
+own name.
+
+| Current | Target | Role |
+|---|---|---|
+| `bin/harness` | `bin/rushi` | The totem. Loop engine and composition root. Gains `setup` and `tui` subcommands (§3). The binary a user installs and invokes. |
+| `bin/tui` | `bin/tui` (unchanged) | Tier-2 front-end. Launched by `rushi tui` (or inlined later). A different front-end can replace it without renaming anything. |
+| `crates/common` (crate `harness-common`) | `crates/rushi` (crate `rushi-common`) | Shared kernel types, event vocabulary, `SessionPort`. Crate name follows the distribution name. |
+| `config.toml` | `rushi.toml` (user-edited manifest) + `config.toml` (generated) | The user edits `rushi.toml`; `rushi setup` generates `config.toml` from it (§5, §7). |
+
+What does **not** get renamed:
+
+- `bin/tui` stays `tui`. It is a front-end, not the totem.
+- Stage binaries (`claim`, `assemble`, `model`, `parse`, `route`,
+  `log`, `compact`) keep their names. They are one-shot CLIs whose
+  names describe the stage, not the distribution.
+- `tools/`, `ui_extensions/`, and the `tool.toml` manifest format
+  are unchanged.
+- The repo directory (`rust-unix-harness`) is a separate, optional
+  rename; it does not have to track the binary name.
+
+Mechanical blast radius: the crate rename touches every
+`Cargo.toml` that depends on `harness-common` (~10 files) and the
+workspace root. The binary rename touches `.envrc`, the flake, and
+any script that spawns `harness` by name.
+
 ## Properties
 
 P1. kernel-on-path: given `rushi` installed to `$PREFIX/bin`, observe
