@@ -32,13 +32,15 @@
 use bon::builder;
 use ratatui::style::{Color, Modifier, Style};
 
-/// The tool-result presets of the port (docs/tui-tool-display-port.md
-/// section 2). The `opencode` preset is the default: results stay
-/// collapsed.
+/// The tool-result presets of the port
+/// (docs/tui-tool-display-port.md section 2). The `opencode` preset
+/// is the default: read content shows a syntax-highlighted preview,
+/// search stays hidden, bash collapses to the first 10 lines.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Preset {
-    /// The default preset: read hidden, search hidden, bash
-    /// collapsed to the first 10 lines.
+    /// The default preset: read shows a syntax-highlighted
+    /// preview, search hidden, bash collapsed to the first 10
+    /// lines.
     OpenCode,
     /// Compact summaries: read line count, search match total, bash
     /// line count.
@@ -146,7 +148,7 @@ impl ToolDisplay {
     pub fn preset(p: Preset) -> Self {
         match p {
             Preset::OpenCode => Self {
-                read_mode: OutputMode::Hidden,
+                read_mode: OutputMode::Preview,
                 search_mode: SearchMode::Hidden,
                 bash_mode: OutputMode::Preview,
                 preview_lines: 8,
@@ -1070,7 +1072,7 @@ mod tests {
     #[test]
     fn preset_value_tables() {
         let o = ToolDisplay::preset(Preset::OpenCode);
-        assert_eq!(o.read_mode, OutputMode::Hidden);
+        assert_eq!(o.read_mode, OutputMode::Preview);
         assert_eq!(o.search_mode, SearchMode::Hidden);
         assert_eq!(o.bash_mode, OutputMode::Preview);
         assert_eq!(o.preview_lines, 8);
@@ -1164,11 +1166,17 @@ mod tests {
             .expanded(false)
             .width(80)
             .call();
-        // The hidden mode of opencode: no preview lines, a hint.
+        // The opencode preset now previews read content (8 lines)
+        // with syntax highlighting; the fold hint states the rest.
         let texts = rows_text(&rows);
+        let shown = texts
+            .iter()
+            .filter(|l| l.starts_with("line "))
+            .count();
+        assert_eq!(shown, 8, "the preview shows 8 lines: {texts:?}");
         assert!(
-            texts.iter().any(|t| t.contains("50 lines hidden")),
-            "{texts:?}"
+            texts.iter().any(|t| t.contains("42 more lines")),
+            "the fold hint states the remainder: {texts:?}"
         );
         // The preview mode of the balanced preset shows 8 lines.
         let cfg = ToolDisplay::preset(Preset::Balanced);
@@ -1523,8 +1531,8 @@ mod tests {
         // when the global expand is on.
         let p = crate::color::Palette::builtin(crate::color::Level::Rgb);
         let cfg = ToolDisplay::preset(Preset::OpenCode);
-        // read hidden by default in opencode: collapsed shows the
-        // hint, expanded shows the body lines.
+        // read previews by default in opencode: collapsed shows the
+        // body lines (up to the cap), expanded shows the full body.
         let value = serde_json::json!({"text": "a\nb\nc\nd", "total_lines": 4});
         let collapsed = rows_text(&body_rows()
             .tool("read")
@@ -1535,10 +1543,12 @@ mod tests {
             .expanded(false)
             .width(80)
             .call());
-        assert!(
-            collapsed.iter().any(|l| l.contains("4 lines hidden")),
-            "collapsed hidden mode keeps the hint: {collapsed:?}"
-        );
+        let shown = collapsed
+            .iter()
+            .filter(|l| l.starts_with('a') || l.starts_with('b')
+                || l.starts_with('c') || l.starts_with('d'))
+            .count();
+        assert_eq!(shown, 4, "all four lines fit in the preview: {collapsed:?}");
         let expanded = rows_text(&body_rows()
             .tool("read")
             .value(&value)

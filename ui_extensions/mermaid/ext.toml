@@ -10,11 +10,12 @@
 #
 # Build: `cargo build` in this directory. The package is standalone
 # (not a member of the root workspace); the binary lands in
-# ./target/debug/mermaid-ext. Put that directory on `PATH` so the
-# host can resolve the `mermaid-ext` command.
+# ./target/debug/mermaid-ext. The host resolves the relative path
+# against this entry's directory (docs/ui-extension.md section 6), so
+# no `PATH` export is required for the global layer.
 
 [ext]
-command = "mermaid-ext"
+command = "target/debug/mermaid-ext"
 caps = ["transform"]
 transform = ["fence:mermaid"]
 protocol_v = 1
