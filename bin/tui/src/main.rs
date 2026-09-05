@@ -133,6 +133,46 @@ fn key_input(k: &cevent::KeyEvent) -> Option<Key> {
 /// bucket, and `max`/`xhigh` share the highest (docs/tui.md 7.2).
 const THINKING_LEVEL_ORDER: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
+/// TUI process diagnostic log. One `pid ms msg` line appended to a
+/// log file, never to stderr: after `TermGuard::init` the TUI owns
+/// the terminal (alt-screen), and a raw stderr write bypasses the
+/// renderer and corrupts the frame (FT-016). The path is `TUI_LOG`
+/// when set, otherwise the XDG cache default `<cache>/tui/tui.log`
+/// under `$XDG_CACHE_HOME` or `$HOME/.cache`. Write failures are
+/// dropped (the log must not take the UI down).
+fn tui_log(msg: &str) {
+    let Some(path) = tui_log_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let line = format!("{} {} {msg}\n", std::process::id(), ms);
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+/// The TUI diagnostic log file. `TUI_LOG` when set, otherwise the
+/// XDG cache default `<cache>/tui/tui.log`.
+fn tui_log_path() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("TUI_LOG") {
+        if !p.is_empty() {
+            return Some(std::path::PathBuf::from(p));
+        }
+    }
+    let cache = std::env::var_os("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|d| d.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")));
+    cache.map(|d| d.join("tui").join("tui.log"))
+}
+
 /// The 0-4 level of one effort value, mirroring the bin/model
 /// mapping (docs/tui.md 7.2). The flash states the level so the
 /// input-area border color matches what the next step publishes.
@@ -299,7 +339,7 @@ fn main() {
     ) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("tui: {e}");
+            tui_log(&format!("palette config failed: {e}"));
             std::process::exit(1);
         }
     };
@@ -358,17 +398,17 @@ fn main() {
     if let Ok(cfg_text) = std::fs::read_to_string(&cfg.config_path) {
         let active_model = resolve_active_model_name(&cfg);
         let effort = resolve_reasoning_effort(&cfg_text, &active_model);
-        eprintln!(
-            "[tui] startup: model={active_model} effort={effort} level={}",
+        tui_log(&format!(
+            "startup model={active_model} effort={effort} level={}",
             effort_level(&effort)
-        );
+        ));
         app.set_effort_current(effort.clone());
         app.set_thinking_level(effort_level(&effort));
     } else {
-        eprintln!(
-            "[tui] startup: config read failed ({}) — using defaults",
+        tui_log(&format!(
+            "startup config read failed ({}); using defaults",
             cfg.config_path.display()
-        );
+        ));
     }
 
     let mut last_width: usize = 0;
@@ -1101,7 +1141,7 @@ fn main() {
                 "render",
                 &format!("draw failed: {e}"),
             );
-            eprintln!("tui: draw failed: {e}");
+            tui_log(&format!("draw failed: {e}"));
             break;
         }
         if let Some(pos) = cursor {
@@ -1204,7 +1244,7 @@ fn edit_in_terminal(
     match result {
         Ok(text) => Some(text),
         Err(e) => {
-            eprintln!("tui: {e}");
+            tui_log(&format!("editor failed: {e}"));
             None
         }
     }
@@ -1434,5 +1474,53 @@ reasoning_effort = "off"
 "#;
         let effort = resolve_reasoning_effort(toml, "any-model");
         assert_eq!(effort, "none");
+    }
+}
+
+// ── tui_log tests (FT-017) ──────────────────────────────────────
+
+#[cfg(test)]
+mod tui_log_tests {
+    use super::tui_log;
+    use tempfile::TempDir;
+
+    /// `TUI_LOG` wins over the cache default and the line lands in
+    /// the file. One test owns the process-global `TUI_LOG` var.
+    /// Keep it that way to avoid a race with parallel tests.
+    #[test]
+    fn tui_log_writes_to_the_tui_log_file() {
+        let dir = TempDir::new().unwrap();
+        let log = dir.path().join("tui.log");
+        std::env::set_var("TUI_LOG", log.as_os_str());
+
+        // The env override wins over the default cache path.
+        let p = super::tui_log_path().unwrap();
+        assert_eq!(p, log, "TUI_LOG wins over the default cache path");
+
+        tui_log("startup model=m effort=high level=3");
+        let body = std::fs::read_to_string(&log).unwrap();
+        let l = body.lines().next().unwrap();
+        // The line is `pid ms msg` with the msg carrying the text.
+        let msg = l.split(' ').skip(2).collect::<Vec<_>>().join(" ");
+        assert_eq!(msg, "startup model=m effort=high level=3");
+    }
+
+    /// `TermGuard::init` call, so no raw stderr write may follow
+    /// that point in `main.rs`. Diagnostics append to the log file
+    /// instead. The pattern is split so this test source does not
+    /// trip its own scan.
+    #[test]
+    fn no_stderr_writes_after_the_terminal_takeover() {
+        let src =
+            std::fs::read_to_string("src/main.rs").expect("tests run from the crate root");
+        let at = src
+            .find("let _guard = TermGuard::init()")
+            .expect("the terminal takeover call exists");
+        let after = &src[at..];
+        let pat = ["eprint", "ln!"].concat();
+        assert!(
+            !after.contains(&pat),
+            "main.rs writes raw stderr after the terminal takeover (FT-017)"
+        );
     }
 }
