@@ -79,6 +79,9 @@ pub struct RouteEnv {
     pub tool_log: Option<PathBuf>,
     /// Max chars for legacy inline results.
     pub tool_result_max_chars: usize,
+    /// The session directory. Passed to tools as `HARNESS_SESSION_DIR`
+    /// so goal tools can read/write `goal.json` in the session dir.
+    pub session_dir: Option<PathBuf>,
 }
 
 /// A tool result event produced by `route`.

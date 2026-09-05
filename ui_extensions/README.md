@@ -16,11 +16,25 @@ tests).
 | `tool_result/` | bash | `render` | moved to `ui_extensions-demos/tool_result/` (the 2026-09-03 user report: the ext reply replaced the built-in box, and the fold key had no effect on the read and edit results). The demo: a styled header plus the body in one muted tone; a body that is a complete JSON document gets JSON syntax highlighting (2026-09-02: stop the gray abuse, docs/tui-color-tones.md section 4; the no-truncation rule rescopes to message content only, docs/tui-tool-result-truncation.md section 4 — the built-in render folds tool bodies, this reply protocol does not yet). Opt in with an `[ext] dir` pointing at a layer that carries it |
 | `notify/` | bash | `notify` | bell and OSC for finished turns, tmux client-tty fallback, burst suppression on history resend |
 | `mermaid/` | Rust | `transform` | `fence:mermaid` code blocks rendered as Unicode art by a Rust binary (stage 3) |
+| `goal/` | Rust | `commands` | Registers `goal`, `goal edit`, `goal resume` in the TUI command palette. `goal` and `goal edit` arm a `goal_armed` `ext_status` marker; the user then types the goal text in the main input box and sends, the `model.before` hook (`harness-hook-goal-arm`) injects the instruction, and the agent's `goal` tool writes `goal.json` in the session dir. `goal resume` re-activates a blocked/completed goal by updating `goal.json` directly. `goal_complete`/`goal_blocked` are agent-side tools, not user commands |
 
 The bash references add no compiled binary on a user machine. The
-`mermaid` entry is a standalone cargo package (not a member of the
-root workspace). Put the reference binaries on `PATH` so the host
-can resolve their commands:
+`mermaid` and `goal` entries are standalone cargo packages (not
+members of the root workspace). Their manifests name the binary by a
+path relative to their own entry (`target/debug/mermaid-ext`,
+`target/debug/goal-ext`), so the host resolves them against the entry
+directory without a `PATH` export. Build each once with `cargo build`
+in its directory:
+
+```sh
+cd ui_extensions/mermaid && cargo build
+cd ui_extensions/goal && cargo build
+```
+
+The global layer then loads with no `PATH` setup: the host resolves
+the relative command path against the entry dir (docs/ui-extension.md
+section 6). The `ext-rs/` Rust ports still resolve their binaries on
+`PATH`; use the script to add their build dirs:
 
 ```sh
 # bash / sh / zsh

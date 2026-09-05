@@ -12,6 +12,13 @@ members = [
     "bin/harness",
     "bin/hook-compact",
     "bin/hook-handoff",
+    "bin/hook-goal-idle",
+    "bin/hook-goal-compact",
+    "bin/hook-goal-tools",
+    "bin/hook-goal-arm",
+    "tools/goal",
+    "tools/goal_complete",
+    "tools/goal_blocked",
     "tools/read",
     "tools/write",
     "tools/edit",
@@ -19,6 +26,7 @@ members = [
     "tools/bash",
     "bin/tui",
     "crates/common",
+    "crates/goal-state",
 ]
 
 [workspace.dependencies]

@@ -1,0 +1,13 @@
+[tool]
+description = "Mark the active goal as complete. Call this when the goal is done; the loop will stop continuing it."
+command = "goal_complete"
+args = []
+timeout_ms = 5000
+
+[tool.schema]
+type = "object"
+
+[tool.schema.properties]
+[tool.schema.properties.summary]
+type = "string"
+description = "Optional summary of what was accomplished"

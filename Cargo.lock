@@ -862,6 +862,39 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
+name = "goal"
+version = "0.1.0"
+dependencies = [
+ "goal-state",
+ "serde_json",
+]
+
+[[package]]
+name = "goal-state"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "goal_blocked"
+version = "0.1.0"
+dependencies = [
+ "goal-state",
+ "serde_json",
+]
+
+[[package]]
+name = "goal_complete"
+version = "0.1.0"
+dependencies = [
+ "goal-state",
+ "serde_json",
+]
+
+[[package]]
 name = "h2"
 version = "0.4.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -943,6 +976,37 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 name = "hook-compact"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "hook-goal-arm"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "hook-goal-compact"
+version = "0.1.0"
+dependencies = [
+ "goal-state",
+ "serde_json",
+]
+
+[[package]]
+name = "hook-goal-idle"
+version = "0.1.0"
+dependencies = [
+ "goal-state",
+ "serde_json",
+]
+
+[[package]]
+name = "hook-goal-tools"
+version = "0.1.0"
+dependencies = [
+ "goal-state",
  "serde_json",
 ]
 
