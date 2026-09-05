@@ -900,6 +900,7 @@ name = "goal_complete"
 version = "0.1.0"
 dependencies = [
  "goal-state",
+ "regex",
  "serde_json",
 ]
 
@@ -967,7 +968,9 @@ dependencies = [
 name = "hook-goal-arm"
 version = "0.1.0"
 dependencies = [
+ "goal-state",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -984,6 +987,7 @@ version = "0.1.0"
 dependencies = [
  "goal-state",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -3094,6 +3098,7 @@ dependencies = [
  "clap",
  "crossterm",
  "frizbee",
+ "goal-state",
  "libc",
  "notify",
  "ratatui",

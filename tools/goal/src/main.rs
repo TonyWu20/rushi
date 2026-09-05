@@ -21,10 +21,6 @@ fn main() {
         fail("Missing required field: goal.");
     }
 
-    let budget_tokens = args
-        .get("budget_tokens")
-        .and_then(|b| b.as_u64());
-
     let session_dir = match session_dir() {
         Some(d) => d,
         None => fail("HARNESS_SESSION_DIR is not set; cannot write goal.json."),
@@ -37,7 +33,7 @@ fn main() {
             existing.edit_goal(&goal);
             existing
         }
-        _ => GoalState::new(&goal, budget_tokens),
+        _ => GoalState::new(&goal),
     };
     state.active = true;
 

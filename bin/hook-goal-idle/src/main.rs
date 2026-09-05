@@ -2,10 +2,16 @@
 //!
 //! Registered on the `run.idle` window. When the loop is about to stop
 //! on an idle claim, this hook checks whether a goal is still open.
-//! If the goal is active and its token budget is not exhausted, it
-//! returns a `continue` decision with a continuation prompt so the loop
-//! keeps working toward the goal. Otherwise it returns `{}` and the
-//! loop stops.
+//! If the goal is `active` and not `blocked`/`completed`, it
+//! increments the iteration counter, updates token accounting
+//! (informational only — no budget cap, docs/goal-ux.md §1.6),
+//! and returns a `continue` decision with a continuation prompt so
+//! the loop keeps working toward the goal.
+//!
+//! Termination comes from user controls (§1.6):
+//!   - `goal_complete` closes the goal
+//!   - `goal_blocked` closes the goal
+//!   - `goal pause` / `goal clear` (TUI) stop the loop
 //!
 //! Decision contract (docs/loop-lifecycle-hooks.md §4.3):
 //! - exit 0 + `{}` → no decision, the loop stops (window default)
@@ -49,32 +55,29 @@ fn main() {
         }
     };
 
-    // A completed or blocked goal stops the loop.
+    // A completed, blocked, or paused goal stops the loop.
     if !goal.is_open() {
         println!("{{}}");
         return;
     }
 
-    // Token accounting (docs/pi-goal-readiness.md): advance the
-    // goal's used_tokens by the output_tokens of the most recent
-    // assistant message, then persist. This is what makes the loop
-    // terminate when the budget is exhausted.
+    // Token accounting (informational only, docs/goal-ux.md §1.6):
+    // advance used_tokens by the output_tokens of the most recent
+    // assistant message. This drives the TUI status line, never the
+    // loop.
     let events_path = session_dir.join("events.jsonl");
     if let Some(usage) = GoalState::read_last_assistant_output_tokens(&events_path) {
         goal.add_used(usage);
     }
+
+    // Increment the continuation counter (docs/goal-ux.md §2: used
+    // only by the logged continuation message and the TUI display,
+    // never by the injected goal block).
+    goal.iteration += 1;
+
     let _ = goal.save(&session_dir);
 
-    if goal.budget_exhausted() {
-        // Budget is gone: close the goal as blocked so the user sees
-        // why it stopped, then let the loop stop.
-        goal.mark_blocked("token budget exhausted");
-        let _ = goal.save(&session_dir);
-        println!("{{}}");
-        return;
-    }
-
-    let prompt = goal.continuation_prompt();
+    let prompt = goal.build_continue_prompt();
     let resp = serde_json::json!({
         "decision": "continue",
         "payload": {
@@ -110,7 +113,65 @@ fn print_help() {
     println!("Window: run.idle");
     println!("Input (stdin): window JSON with keys window, session, last_assistant_message_id");
     println!("Output (stdout):");
-    println!("  {{}}  — stop the loop (no goal, closed goal, or exhausted budget)");
+    println!("  {{}}  — stop the loop (no goal, goal not active, or goal closed)");
     println!("  {{\"decision\":\"continue\",\"payload\":{{\"message\":\"...\"}}}} — keep going");
     println!("Exit codes: 0 = ok");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// P10: active goal → continue with continuation prompt.
+    #[test]
+    fn test_active_goal_continues() {
+        let dir = TempDir::new().unwrap();
+        let mut g = GoalState::new("fix the bug");
+        g.iteration = 3;
+        g.save(dir.path()).unwrap();
+
+        let loaded = GoalState::load(dir.path()).unwrap();
+        assert!(loaded.is_open());
+
+        // Simulate what main() does: increment, save, build prompt.
+        let mut g2 = loaded;
+        g2.iteration += 1;
+        let prompt = g2.build_continue_prompt();
+        assert!(prompt.contains("continuation #4"), "{prompt}");
+        assert!(prompt.contains("fix the bug"), "{prompt}");
+    }
+
+    /// P11: no active goal → stop.
+    #[test]
+    fn test_no_active_goal_stops() {
+        let dir = TempDir::new().unwrap();
+        assert!(GoalState::load(dir.path()).is_none());
+
+        // Also test a paused goal (active = false).
+        let mut g = GoalState::new("test");
+        g.active = false;
+        g.save(dir.path()).unwrap();
+        let loaded = GoalState::load(dir.path()).unwrap();
+        assert!(!loaded.is_open());
+    }
+
+    #[test]
+    fn test_no_budget_stop() {
+        // P10: even with a very high used_tokens, the goal continues.
+        let dir = TempDir::new().unwrap();
+        let mut g = GoalState::new("big goal");
+        g.used_tokens = 999_999_999;
+        g.iteration = 100;
+        g.save(dir.path()).unwrap();
+
+        let loaded = GoalState::load(dir.path()).unwrap();
+        assert!(loaded.is_open());
+        // No budget_exhausted() method anymore — the loop never stops
+        // on token count.
+        let mut g2 = loaded;
+        g2.iteration += 1;
+        let prompt = g2.build_continue_prompt();
+        assert!(prompt.contains("continuation #101"), "{prompt}");
+    }
 }

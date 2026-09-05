@@ -1,5 +1,5 @@
 [tool]
-description = "Start a goal that the loop pursues across turns. The agent keeps working until the goal is completed or blocked."
+description = "Start a goal that the loop pursues across turns. The agent keeps working until the goal is completed or blocked. There is no token budget."
 command = "goal"
 args = []
 timeout_ms = 5000
@@ -12,7 +12,3 @@ required = ["goal"]
 [tool.schema.properties.goal]
 type = "string"
 description = "Description of the goal to pursue"
-
-[tool.schema.properties.budget_tokens]
-type = "integer"
-description = "Optional token budget cap. When the budget is exhausted the loop stops continuing the goal."

@@ -1489,6 +1489,82 @@ fn working_row(app: &App, running: bool, now: &chrono::DateTime<chrono::Utc>) ->
     Line::from(vec![frame, body])
 }
 
+/// Format a token count for display (ported from pi-goal
+/// `formatTokenCount`): 12400 → "12.4k", 1200000 → "1.2M".
+fn format_token_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+/// Format a duration in seconds as a compact human-readable string
+/// (ported from pi-goal `formatDuration`): 34s, 2m 34s, 1h 2m.
+fn format_duration(secs: i64) -> String {
+    if secs <= 0 {
+        return "0s".to_string();
+    }
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        let m = secs / 60;
+        let s = secs % 60;
+        if s == 0 {
+            format!("{m}m")
+        } else {
+            format!("{m}m {s}s")
+        }
+    } else {
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        if m == 0 {
+            format!("{h}h")
+        } else {
+            format!("{h}h {m}m")
+        }
+    }
+}
+
+/// The goal status line shown between the working row and the input
+/// box when a goal is active (docs/goal-ux.md §1.7).
+///
+/// Format: `⚡ "goal text" · 2m 34s · 12.4k`
+fn goal_status_line(
+    goal: &goal_state::GoalState,
+    now: &chrono::DateTime<chrono::Utc>,
+) -> Line<'static> {
+    // Parse opened_at: "t+<secs>s" format.
+    let opened_secs: i64 = goal
+        .opened_at
+        .as_deref()
+        .and_then(|ts| {
+            ts.strip_prefix("t+")
+                .and_then(|rest| rest.strip_suffix('s'))
+                .and_then(|n| n.parse::<i64>().ok())
+        })
+        .unwrap_or(0);
+
+    let now_secs = now.timestamp();
+    let elapsed = (now_secs - opened_secs).max(0);
+
+    let text = format!(
+        " ⚡ \"{}\" · {} · {}",
+        goal.goal,
+        format_duration(elapsed),
+        format_token_count(goal.used_tokens),
+    );
+
+    Line::from(Span::styled(
+        text,
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
 /// The status/help row content as terminal lines (one per row).
 ///
 /// The TUI flash wins; then the status extension row (its lines or
@@ -2082,6 +2158,7 @@ fn input_box_title(
     frame: &Option<crate::ext::FrameSpec>,
     border_color: Color,
     browse_prompt: Option<&str>,
+    goal_armed: bool,
 ) -> Line<'static> {
     // The browse command line owns the title while it is open
     // (docs/tui-conversation-browsing.md sections 4.4 and 7.3):
@@ -2099,6 +2176,16 @@ fn input_box_title(
     if let Some(prompt) = editor.command_line_label() {
         Line::from(Span::styled(
             prompt,
+            Style::default()
+                .fg(Color::Black)
+                .bg(border_color)
+                .add_modifier(Modifier::BOLD),
+        ))
+    } else if goal_armed {
+        // Persistent hint while the user is typing the goal text
+        // (docs/goal-ux.md §1.8).
+        Line::from(Span::styled(
+            " goal armed — type your goal, Enter to send ",
             Style::default()
                 .fg(Color::Black)
                 .bg(border_color)
@@ -2186,6 +2273,20 @@ pub fn draw(
             Style::default().fg(warning_fg),
         ));
     }
+    // Goal status bit (docs/goal-ux.md §1.7): shown when a goal is
+    // active, in the success color.
+    let goal_active = app
+        .goal_state()
+        .as_ref()
+        .is_some_and(|g| g.is_open());
+    if goal_active {
+        status_bits.push(Span::styled(
+            " [goal] ",
+            Style::default()
+                .fg(success_fg)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
 
     let title_left = Line::from(vec![Span::styled(
         format!("Session: {session_label}"),
@@ -2193,7 +2294,14 @@ pub fn draw(
     )]);
     let block = Block::bordered()
         .title(title_left)
-        .title(Line::from(status_bits).right_aligned());
+        .title(Line::from(status_bits).right_aligned())
+        // Goal active: use the success accent for the main border
+        // (docs/goal-ux.md §1.7).
+        .border_style(if goal_active {
+            Style::default().fg(success_fg)
+        } else {
+            Style::default()
+        });
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -2249,6 +2357,11 @@ pub fn draw(
     // input box shifts one row at the loop start/stop transition,
     // like the `pi` working indicator.
     if running {
+        constraints.push(Constraint::Length(1));
+    }
+    // Goal status line (docs/goal-ux.md §1.7): one row between the
+    // working row and the input box, shown only when a goal is active.
+    if goal_active {
         constraints.push(Constraint::Length(1));
     }
     constraints.push(Constraint::Length(input_area_h));
@@ -2445,6 +2558,16 @@ pub fn draw(
         row += 1;
     }
 
+    // Goal status line (docs/goal-ux.md §1.7): shown between the
+    // working row and the input box while a goal is active.
+    if goal_active {
+        if let Some(ref g) = *app.goal_state() {
+            let now = chrono::Utc::now();
+            f.render_widget(Paragraph::new(goal_status_line(g, &now)), rows[row]);
+            row += 1;
+        }
+    }
+
     // input area: a bordered, rounded-corner box showing two (or the
     // frame spec's) editor lines, colored by the thinking level. The
     // frame extension may override the border style, label, and
@@ -2481,12 +2604,15 @@ pub fn draw(
     } else {
         None
     };
+    // Capture goal_armed as a bool before the mutable borrow of app.editor()
+    let goal_armed = app.goal_armed();
     let title = input_box_title(
         &*app.editor(),
         &mode_label,
         &frame,
         border_color,
         browse_prompt.as_deref(),
+        goal_armed,
     );
     let input_block = Block::bordered()
         .border_type(border_type)
@@ -3002,11 +3128,11 @@ mod tests {
         // host keeps its modal-state render in the box title.
         let e = command_line_editor();
         let frame = frame_with_label("[COMMAND]");
-        let title = input_box_title(&e, "[COMMAND]", &frame, Color::DarkGray, None);
+        let title = input_box_title(&e, "[COMMAND]", &frame, Color::DarkGray, None, false);
         assert_eq!(title.to_string(), "/ab\u{2588}");
         // No frame label: the prompt still shows (the built-in case).
         let none: Option<crate::ext::FrameSpec> = None;
-        let title = input_box_title(&e, "[COMMAND]", &none, Color::DarkGray, None);
+        let title = input_box_title(&e, "[COMMAND]", &none, Color::DarkGray, None, false);
         assert_eq!(title.to_string(), "/ab\u{2588}");
     }
 
@@ -3018,7 +3144,7 @@ mod tests {
         let e = command_line_editor();
         let frame = frame_with_label("[COMMAND]");
         let title =
-            input_box_title(&e, "[COMMAND]", &frame, Color::DarkGray, Some("/err"));
+            input_box_title(&e, "[COMMAND]", &frame, Color::DarkGray, Some("/err"), false);
         assert_eq!(title.to_string(), "/err\u{2588}");
     }
 
@@ -3030,11 +3156,11 @@ mod tests {
         e.set_text("abc");
         e.press(crate::app::Key::Esc); // normal mode
         let frame = frame_with_label("[COMMAND]");
-        let title = input_box_title(&e, "[NORMAL]", &frame, Color::DarkGray, None);
+        let title = input_box_title(&e, "[NORMAL]", &frame, Color::DarkGray, None, false);
         assert_eq!(title.to_string(), "[COMMAND]");
         // No frame label: the built-in mode label shows.
         let none: Option<crate::ext::FrameSpec> = None;
-        let title = input_box_title(&e, "[NORMAL]", &none, Color::DarkGray, None);
+        let title = input_box_title(&e, "[NORMAL]", &none, Color::DarkGray, None, false);
         assert_eq!(title.to_string(), "[NORMAL]");
     }
 
