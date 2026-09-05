@@ -23,6 +23,7 @@ IN_SCOPE=(
   "auto-compact-plan.md"
   "bash-tool.md"
   "ft-005-logline.md"
+  "goal-ux.md"
   "harness-distribution.md"
   "handoff-strategy.md"
   "loop-and-edit-implementation.md"
