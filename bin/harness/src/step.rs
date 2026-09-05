@@ -337,6 +337,16 @@ fn run_awaiting_model(
         }
         // Reassemble after the in-session compact and fall through to the model retry loop.
         reassemble(runner, session, &mut request, false);
+
+        // If the reassembled request is still a context_exhausted form the
+        // compact did not shrink the context enough; do not feed a
+        // non-request JSON to the model binary.  Log a terminal error and
+        // stop the step.
+        if request.json.get("type").and_then(|t| t.as_str()) == Some("context_exhausted") {
+            let msg = "context still exhausted after in-session compact; stopping";
+            append_terminal_error(cfg, &session.path, msg);
+            return;
+        }
     }
 
     // The model retry loop.
