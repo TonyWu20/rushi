@@ -208,10 +208,10 @@ pub fn render_loop_config(manifest: &RushiManifest) -> String {
 
 // ─── Setup orchestration ────────────────────────────────────────────
 
-/// Run `rushi setup` in the current directory.
+/// Run `rushi setup` against `project_dir`.
 ///
-/// - Reads `rushi.toml` from `cwd`.
-/// - Resolves which tools to copy from the kernel install.
+/// - Reads `rushi.toml` from `project_dir`.
+/// - Resolves which tools to copy from `kernel_tools_dir`.
 /// - Materializes `tools/<name>/` for each missing kernel tool.
 /// - Writes `rushi.lock` (or verifies in `--locked` mode).
 /// - Writes `.envrc`.
@@ -219,8 +219,8 @@ pub fn render_loop_config(manifest: &RushiManifest) -> String {
 ///
 /// In `--locked` mode, reads `rushi.lock` and verifies the kernel
 /// commit matches; fails on stale or missing lock.
-pub fn do_setup(locked: bool) -> Result<()> {
-    let cwd = std::env::current_dir().context("cannot resolve CWD")?;
+pub fn do_setup(locked: bool, project_dir: &Path, kernel_tools_dir: &Path) -> Result<()> {
+    let cwd = project_dir;
     let manifest_path = cwd.join("rushi.toml");
 
     if !manifest_path.exists() {
@@ -232,8 +232,6 @@ pub fn do_setup(locked: bool) -> Result<()> {
 
     let manifest = RushiManifest::from_path(&manifest_path)?;
 
-    // Determine the kernel tools directory.
-    let kernel_tools_dir = resolve_kernel_tools_dir();
     let kernel_tools = if kernel_tools_dir.exists() {
         list_tool_dirs(&kernel_tools_dir)?
     } else {
@@ -356,8 +354,8 @@ pub fn do_setup(locked: bool) -> Result<()> {
 /// Locate the kernel tools directory. Resolution order:
 /// 1. `$RUSHI_KERNEL` env var (explicit kernel root)
 /// 2. `../tools` relative to the `rushi` binary (side-by-side install)
-/// 3. `tools/` in the current directory (dev checkout)
-fn resolve_kernel_tools_dir() -> PathBuf {
+/// 3. `tools/` in `project_dir` (dev checkout)
+pub fn resolve_kernel_tools_dir(project_dir: &Path) -> PathBuf {
     if let Ok(kernel_dir) = std::env::var("RUSHI_KERNEL") {
         return PathBuf::from(kernel_dir).join("tools");
     }
@@ -371,7 +369,7 @@ fn resolve_kernel_tools_dir() -> PathBuf {
             }
         }
     }
-    PathBuf::from("tools")
+    project_dir.join("tools")
 }
 
 /// List tool directory names in a tools root (dirs containing a
@@ -584,5 +582,147 @@ mod tests {
         };
         let text = render_loop_config(&m);
         assert!(!text.contains("compact_reserve_tokens"));
+    }
+
+    // ── Materialization tests (P2, P6, P7) ──────────────────────────
+
+    /// Build a fake kernel dir with the given tool names.
+    fn make_kernel(tmp: &std::path::Path, tools: &[&str]) -> std::path::PathBuf {
+        let kdir = tmp.join("kernel").join("tools");
+        for t in tools {
+            let td = kdir.join(t);
+            std::fs::create_dir_all(&td).unwrap();
+            std::fs::write(td.join("tool.toml"), "[tool]\ndescription = \"test\"\n")
+                .unwrap();
+            std::fs::write(td.join(t), "fn main() {}\n").unwrap();
+        }
+        kdir
+    }
+
+    fn make_project(tmp: &std::path::Path, enabled: &[&str]) -> std::path::PathBuf {
+        let pdir = tmp.join("project");
+        std::fs::create_dir_all(&pdir).unwrap();
+        let toml = format!(
+            "[tools]\nenabled = [{}]\n",
+            enabled
+                .iter()
+                .map(|t| format!("\"{}\"", t))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        std::fs::write(pdir.join("rushi.toml"), toml).unwrap();
+        pdir
+    }
+
+    fn tool_names_in(dir: &Path) -> BTreeSet<String> {
+        if !dir.exists() {
+            return BTreeSet::new();
+        }
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name() != "tool.toml")
+            .filter_map(|e| {
+                e.path()
+                    .join("tool.toml")
+                    .exists()
+                    .then(|| e.file_name().to_string_lossy().into_owned())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn p2_materialized_set_equals_declared() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kdir = make_kernel(tmp.path(), &["read", "write", "edit", "list", "bash"]);
+        let pdir = make_project(tmp.path(), &["read", "bash"]);
+
+        do_setup(false, &pdir, &kdir).unwrap();
+
+        let materialized = tool_names_in(&pdir.join("tools"));
+        assert_eq!(
+            materialized,
+            tool_set(&["bash", "read"]),
+            "only declared tools should be materialized"
+        );
+        assert!(pdir.join("rushi.lock").exists(), "lock file written");
+        assert!(pdir.join(".envrc").exists(), ".envrc written");
+        assert!(
+            pdir.join("config.toml").exists(),
+            "config.toml generated"
+        );
+    }
+
+    #[test]
+    fn p6_idempotent_setup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kdir = make_kernel(tmp.path(), &["read", "write", "bash"]);
+        let pdir = make_project(tmp.path(), &["read", "write", "bash"]);
+
+        do_setup(false, &pdir, &kdir).unwrap();
+
+        // User adds a project-local tool between runs.
+        let local_tool = pdir.join("tools").join("mytool");
+        std::fs::create_dir_all(&local_tool).unwrap();
+        std::fs::write(local_tool.join("tool.toml"), "[tool]\ndescription = \"mine\"\n")
+            .unwrap();
+
+        let before = std::fs::read_to_string(pdir.join("tools").join("read").join("read")).unwrap();
+
+        do_setup(false, &pdir, &kdir).unwrap();
+
+        // Kernel tools unchanged (byte-identical).
+        let after = std::fs::read_to_string(pdir.join("tools").join("read").join("read")).unwrap();
+        assert_eq!(before, after, "kernel tool not overwritten");
+
+        // Project tool survives.
+        assert!(
+            local_tool.join("tool.toml").exists(),
+            "project tool survived second setup"
+        );
+    }
+
+    #[test]
+    fn p7_local_masks_kernel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kdir = make_kernel(tmp.path(), &["read", "write"]);
+        let pdir = make_project(tmp.path(), &["read", "write"]);
+
+        // Pre-create a local `read` with different content (a project override).
+        let local_read = pdir.join("tools").join("read");
+        std::fs::create_dir_all(&local_read).unwrap();
+        std::fs::write(local_read.join("tool.toml"), "[tool]\ndescription = \"local override\"\n")
+            .unwrap();
+        std::fs::write(&local_read.join("read"), "// local read\n").unwrap();
+
+        do_setup(false, &pdir, &kdir).unwrap();
+
+        // The local override must be untouched.
+        let content = std::fs::read_to_string(local_read.join("read")).unwrap();
+        assert_eq!(content, "// local read\n", "local tool not overwritten");
+    }
+
+    #[test]
+    fn p10_missing_tool_fails_explicitly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kdir = make_kernel(tmp.path(), &["read"]);
+        let pdir = make_project(tmp.path(), &["read", "nonexistent"]);
+
+        let err = do_setup(false, &pdir, &kdir).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("nonexistent"),
+            "error names the missing tool: {msg}"
+        );
+        // No partial tools/ dir: the bail happens before any copy.
+        assert!(
+            !pdir.join("tools").exists()
+                || tool_names_in(&pdir.join("tools")).is_empty(),
+            "no partial tools/ dir on failure"
+        );
+        assert!(
+            !pdir.join("rushi.lock").exists(),
+            "no lock file written on failure"
+        );
     }
 }

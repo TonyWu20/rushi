@@ -1,6 +1,10 @@
 # Rushi: distribution and per-project setup
 
-Status: Spec, not yet built (2026-09-13). Design only. No code yet.
+Status: Core built (2026-09-05). The `rushi` binary, `rushi setup`,
+the `rushi.toml` manifest, `rushi.lock`, `flake.nix`, and
+`install.sh` are in. P2, P6, P7, and P10 are proven by unit tests in
+`bin/rushi/src/setup.rs`. Remaining: the external-source fetch
+(`[[external]]` path) and the open e2e proofs.
 
 Seeded by a portability gap. The harness resolves its tools by local
 PATH exports (the `.envrc` in the tree). It cannot run from another
@@ -403,15 +407,15 @@ Setup does not skip the tool or leave a partial `tools/` dir.
 | P# | Property | Proof | Status |
 |----|----------|-------|--------|
 | P1 | kernel-on-path | e2e: install to a scratch `$PREFIX`, run `rushi` from a second directory | open |
-| P2 | declarative-registration | test: give a manifest, assert the materialized `tools/` set equals the declared set | open |
+| P2 | declarative-registration | `setup::tests::p2_materialized_set_equals_declared` in `bin/rushi/src/setup.rs` | proven |
 | P3 | per-project-isolation | e2e: two fixture projects with disjoint selections, each resolves only its own tools | open |
-| P4 | no-nix-required | e2e: a cargo-only container, run `install.sh`, complete the P1 turn | open |
+| P4 | no-nix-required | `scripts/install-e2e.sh` covers the install half. The P1 turn on a cargo-only box is unproven | open |
 | P5 | nix-primary | e2e: the flake devShell places `rushi` on PATH and completes the P1 turn. The on-PATH set equals the `install.sh` on-PATH set | open |
-| P6 | idempotent-setup | test: two `rushi setup` runs, assert `tools/` is byte-identical and project-authored tools stay untouched | open |
-| P7 | tool-shadow | e2e: with a local `tools/read/` override, a session call to `read` runs the local binary, not the kernel one. A second `rushi setup` leaves the local dir untouched | open |
+| P6 | idempotent-setup | `setup::tests::p6_idempotent_setup`: two runs, kernel tools byte-identical, project-authored tool untouched | proven |
+| P7 | tool-shadow | setup half: `setup::tests::p7_local_masks_kernel`. Call half inherited from skill-remapped P1 (path registration, `scripts/tool-conformance.sh`) | proven |
 | P8 | tool-promise | e2e: a session calls every declared tool. Every call resolves and executes. No call returns a not-found error | open |
 | P9 | reproducible-setup | e2e: two boxes share `rushi.toml` and `rushi.lock`. `rushi setup --locked` on each produces byte-identical `tools/`. A kernel update without a lock refresh makes `--locked` fail | open |
-| P10 | explicit-failure | e2e: a `rushi.toml` names a tool from a private repo. The user has no access. `rushi setup` fails with an error naming the tool and the git error. No partial `tools/` dir | open |
+| P10 | explicit-failure | `setup::tests::p10_missing_tool_fails_explicitly`: the error names the tool; no partial `tools/` dir. A private-repo fetch is the same missing-tool path | proven |
 
 Inherited from skill-remapped-to-os-apps.md (not re-proven here):
 self-doc (P2 there), catalog (P3 there), no-prompt-mutation (P4 there),
@@ -434,14 +438,18 @@ Lean is an optional backstop, not the gate.
 
 ## Gate
 
-Gate: blocked. The `rushi` binary, the manifest schema, and `rushi
-setup` are not built. Prerequisites are named per property. P6 and P7
-gate the tool-shadow rule. P8 gates the tool-promise invariant. P9
-gates reproducibility. P10 gates explicit failure on fetch errors. `rushi setup` materializes the full declared
-set. Every promised tool resolves to a working binary. `rushi.lock`
-pins the resolved source state. Restrictions on what the agent may
-invoke are expressed through `tool.before` hooks, not through the
-distribution layer.
+Gate: partially open. The `rushi` binary, the manifest schema, and
+`rushi setup` are built. P2, P6, P7, and P10 are proven by unit
+tests in `bin/rushi/src/setup.rs`. Remaining open properties:
+P1 and P4 need a turn-completion e2e on a scratch install (stub model
++ PTY smoke). P3 needs two fixture projects. P5 needs a Nix build of
+the flake on a flake-managed box. P8 needs a session that calls every
+declared tool. P9 needs two boxes. External-source fetch
+(the `[[external]]` lock path) is not yet implemented.
+`rushi setup` materializes the full declared set. Every promised tool
+resolves to a working binary. `rushi.lock` pins the resolved source
+state. Restrictions on what the agent may invoke are expressed through
+`tool.before` hooks, not through the distribution layer.
 
 ```
 cargo build
