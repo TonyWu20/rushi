@@ -46,8 +46,11 @@ struct Op {
     op: Option<String>,
     #[serde(default)]
     req: Option<u64>,
+    /// The command id for `invoke` ops (a string like "goal") or the
+    /// event index for `event` ops (a u64). Kept as a generic Value
+    /// so both wire shapes deserialize without a type error.
     #[serde(default)]
-    id: Option<String>,
+    id: Option<serde_json::Value>,
     #[serde(default)]
     value: Option<String>,
     #[serde(default)]
@@ -204,7 +207,10 @@ fn main() {
                 let Some(req) = op.req else {
                     continue;
                 };
-                let id = op.id.as_deref().unwrap_or("");
+                let Some(id_val) = &op.id else {
+                    continue;
+                };
+                let id = id_val.as_str().unwrap_or("");
                 let (ok, message, arm) = handle_invoke(
                     id,
                     op.value.as_deref(),
