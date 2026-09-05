@@ -711,6 +711,91 @@ fn user_event_rides(
     )
 }
 
+/// Estimate the token cost of one projected event for the context
+/// budget check. Tool results are capped at `result_cap` chars to
+/// mirror the full-form clip. Reasoning items are counted by their
+/// JSON-serialized size (the same payload the request carries).
+fn estimate_ev_tokens(ev: &Ev, result_cap: usize) -> u64 {
+    let chars = match ev {
+        Ev::User { text } => text.chars().count() as u64,
+        Ev::Assistant {
+            text, calls, reasoning, ..
+        } => {
+            let t = text.chars().count() as u64;
+            let c: u64 = calls
+                .iter()
+                .map(|c| c.args_str.chars().count() as u64)
+                .sum();
+            let r: u64 = reasoning
+                .iter()
+                .map(|r| {
+                    serde_json::to_string(r)
+                        .map(|s| s.chars().count() as u64)
+                        .unwrap_or(0)
+                })
+                .sum();
+            t + c + r
+        }
+        Ev::ToolResult { text, .. } => {
+            let total = text.chars().count() as u64;
+            std::cmp::min(total, result_cap as u64)
+        }
+    };
+    chars / 4
+}
+
+/// Estimate the input-token cost of the assembled request for the
+/// context-budget gate.  Anchors on the last provider-measured
+/// `usage.input_tokens` so that the structural overhead of the
+/// serialized JSON (system prompt, tool schemas, etc.) is already
+/// accounted for.  Only the trailing events that appear *after* the
+/// last measurement are estimated at ~4 chars/token.
+///
+/// When no measured anchor exists (e.g. first turn before any
+/// assistant response), the function falls back to a plain
+/// chars/4-of-everything heuristic plus the framing-item size.
+fn estimate_request_tokens(
+    kept_events: &[&Ev],
+    framing: &Option<serde_json::Value>,
+    result_cap: usize,
+) -> u64 {
+    // Find the last assistant event that carries a measured usage.
+    let last_meas_idx = kept_events.iter().rposition(|ev| {
+        matches!(ev, Ev::Assistant { usage_input: Some(_), .. })
+    });
+
+    let (anchor, trailing_start) = match last_meas_idx {
+        Some(idx) => {
+            let measured = match kept_events[idx] {
+                Ev::Assistant { usage_input: Some(m), .. } => *m as u64,
+                _ => 0,
+            };
+            (measured, idx + 1)
+        }
+        None => (0u64, 0usize),
+    };
+
+    // Estimate trailing events that were not part of the anchored
+    // request.  In the None case the whole log is "trailing".
+    let mut trailing: u64 = 0;
+    for ev in &kept_events[trailing_start..] {
+        trailing += estimate_ev_tokens(ev, result_cap);
+    }
+
+    // Add the framing item's cost when it is present and the anchor
+    // did not already cover it (i.e. no anchor, or the framing was
+    // added after the anchored request was sent).
+    if last_meas_idx.is_none() {
+        if let Some(f) = framing {
+            if let Some(content) = f.get("content").and_then(|c| c.as_str()) {
+                trailing += content.chars().count() as u64 / 4;
+            }
+        }
+    }
+
+    anchor + trailing
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -1115,10 +1200,12 @@ fn main() {
     // the harness handles it (docs/phase-2-plan.md 4.3 step 5).
     let request = make_request(&items);
     if boundary.is_some() {
-        let est_tokens = serde_json::to_string(&request)
-            .map(|s| s.chars().count() / 4)
-            .unwrap_or(0);
-        if est_tokens > budget_tokens {
+        let est_tokens = estimate_request_tokens(
+            &sel_events,
+            &framing,
+            tool_result_max_chars,
+        );
+        if est_tokens > budget_tokens as u64 {
             let exhausted = serde_json::json!({
                 "v": 1,
                 "type": "context_exhausted",
