@@ -24,6 +24,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::SyncSender;
 use std::time::Duration;
 
+use notify::{RecursiveMode, RecommendedWatcher, Watcher};
+
 use rushi_common::logline::LogLine;
 
 /// Session log file name. A storage detail; never referenced above the port.
@@ -42,6 +44,9 @@ const LOOP_LOCK_FILE: &str = ".loop.lock";
 const TAIL_INTERVAL: Duration = Duration::from_millis(250);
 /// How often the tailer retries a missing log file.
 const TAIL_RETRY_INTERVAL: Duration = Duration::from_millis(500);
+/// Fallback tick when no inotify signal arrives: bounds recreate and
+/// rare inotify-gap detection. An idle tailer wakes at most this often.
+const NOTIFY_FALLBACK_INTERVAL: Duration = Duration::from_secs(1);
 /// Tailer channel capacity: when full, the tailer keeps its place and
 /// the next poll resumes. The tailer thread is one per active session;
 /// it exits when it next tries to send after the receiver is dropped,
@@ -156,6 +161,12 @@ impl FileSessionPort {
 /// One session log tailer: reads complete lines after a byte offset,
 /// keeps the unterminated tail between polls, survives truncation and
 /// removal of the log file, and never blocks the reader.
+///
+/// Wake source is the `tail -f` mechanism: an inotify watcher (via
+/// `notify`) fires on file activity, so appends drain as fast as the
+/// consumer reads them. A periodic fallback tick covers recreate and
+/// rare inotify gaps; when the inotify backend is unavailable the
+/// tailer degrades to plain interval polling.
 fn tail_session(path: PathBuf, start: TailCursor, tx: SyncSender<WatchItem>) {
     let mut offset: u64 = match start.offset() {
         Some(n) => n,
@@ -164,15 +175,31 @@ fn tail_session(path: PathBuf, start: TailCursor, tx: SyncSender<WatchItem>) {
     let mut carry: Vec<u8> = Vec::new();
     let mut present = path.exists();
 
+    // inotify wake source. The unbounded channel queues activity
+    // signals; the tailer blocks on it with a bounded fallback tick.
+    // `None` means the backend was unavailable: poll on the fixed
+    // interval instead.
+    let (notify_tx, notify_rx) = std::sync::mpsc::channel::<notify::Result<notify::Event>>();
+    let mut watcher: Option<RecommendedWatcher> = match notify::recommended_watcher(notify_tx) {
+        Ok(w) => Some(w),
+        Err(_) => None,
+    };
+    if let Some(w) = watcher.as_mut() {
+        register_watches(w, &path);
+    }
+
     loop {
-        // When the receiver is dropped, a `try_send` below reports a
-        // disconnected channel and the loop exits on that error path.
-        // (This std has no `SyncSender::is_closed`.)
         match read_tail(&path, &mut offset, &mut carry, &tx) {
             Ok(()) => {
                 if !present {
                     present = true;
                     let _ = tx.try_send(WatchItem::Resumed);
+                    // The log reappeared under a new inode; the inotify
+                    // watch still points at the dead inode, so
+                    // re-register it.
+                    if let Some(w) = watcher.as_mut() {
+                        register_watches(w, &path);
+                    }
                 }
             }
             Err(TailErr::NotFound) => {
@@ -191,7 +218,43 @@ fn tail_session(path: PathBuf, start: TailCursor, tx: SyncSender<WatchItem>) {
                 continue;
             }
         }
-        std::thread::sleep(TAIL_INTERVAL);
+
+        // Wait for the next wake: an inotify activity signal, the
+        // fallback tick, or (no inotify) a fixed poll interval. While
+        // lines are held back by backpressure we tick on the short
+        // interval so a draining consumer catches up; otherwise we
+        // sleep on the long fallback to keep idle CPU near zero.
+        if watcher.is_some() {
+            let tick = if carry.is_empty() {
+                NOTIFY_FALLBACK_INTERVAL
+            } else {
+                TAIL_INTERVAL
+            };
+            match notify_rx.recv_timeout(tick) {
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    // The inotify backend thread exited; degrade to
+                    // interval polling so tailing still makes progress.
+                    watcher = None;
+                }
+            }
+        } else {
+            std::thread::sleep(TAIL_INTERVAL);
+        }
+    }
+}
+
+/// Register the inotify watches a tailer needs: the log file (appends
+/// and truncates) and its parent directory (create and delete of the
+/// log), both non-recursive. Registration failures are ignored — the
+/// fallback tick still makes progress.
+fn register_watches(w: &mut RecommendedWatcher, path: &Path) {
+    let _ = w.watch(path, RecursiveMode::NonRecursive);
+    if let Some(parent) = path.parent() {
+        if parent != path {
+            let _ = w.watch(parent, RecursiveMode::NonRecursive);
+        }
     }
 }
 
@@ -1767,6 +1830,49 @@ mod tests {
                 g.contains(&want),
                 "order broke at index {i}: {g}"
             );
+        }
+        drop(rx);
+    }
+
+    // When an inotify (or FSEvents) backend is available, a file append
+    // should be delivered well before the 1 s fallback tick. This test
+    // verifies that the event-driven wake path actually works: the event
+    // must arrive within 500 ms of the append, which is half the fallback
+    // interval.
+    #[test]
+    fn watch_inotify_append_delivered_before_fallback_tick() {
+        let c = make_cfg(false, None);
+        let path = c.dir.path().join("sessions").join("speed").join("events.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"v":1,"type":"user_message","ts":"t","content":"init"}
+"#,
+        )
+        .unwrap();
+
+        let sid = SessionId::new("speed");
+        let rx = c.port.watch(&sid, TailCursor::end());
+        std::thread::sleep(Duration::from_millis(200)); // let tailer attach
+
+        let t0 = std::time::Instant::now();
+        append_raw(
+            &path,
+            r#"{"v":1,"type":"user_message","ts":"t","content":"fast"}"#,
+        );
+        match rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(WatchItem::Event { event, .. }) => {
+                let elapsed = t0.elapsed();
+                assert!(
+                    elapsed < Duration::from_millis(500),
+                    "append should be delivered in <500 ms via inotify, took {elapsed:?}"
+                );
+                assert!(event.compact().contains("\"fast\""), "{:?}", event.compact());
+            }
+            Ok(other) => panic!("expected Event, got {other:?}"),
+            Err(e) => panic!(
+                "event not delivered within 500 ms: {e:?} — inotify wake may not be active"
+            ),
         }
         drop(rx);
     }
