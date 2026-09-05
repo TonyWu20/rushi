@@ -1316,7 +1316,7 @@ impl App {
         self.flash(format!(
             "recalled {n} queued message(s) into the editor"
         ));
-        pending.into_iter().map(|(_, _, id)| id).filter_map(|id| id).collect()
+        pending.into_iter().filter_map(|(_, _, id)| id).collect()
     }
 
     // ── draft / editor ──────────────────────────────────────────
@@ -3358,7 +3358,7 @@ mod tests {
         // the first visible line col 0, the view does not move.
         let mut app = browse_gated_app();
         assert!(app.press(Key::Char('s')).is_empty());
-        assert!(app.browse_ref().active() == false, "the first s only arms");
+        assert!(!app.browse_ref().active(), "the first s only arms");
         assert!(app.press(Key::Char('s')).is_empty());
         assert!(app.browse_ref().active(), "the second s enters browse");
         assert_eq!(app.scroll(), 0, "the view does not move on entry");

@@ -2257,6 +2257,7 @@ name = "rushi"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bon",
  "chrono",
  "clap",
  "libc",

@@ -18,20 +18,20 @@ use rushi_common::stage::{
 use crate::classifier::is_overflow;
 use crate::config::HarnessConfig;
 use crate::signals;
-use crate::stage_runner::SubprocessRunner;
+use crate::stage_runner::{new_subprocess_runner, SubprocessRunner};
 
 /// Create a `SubprocessRunner` from the resolved config.
 pub fn make_runner(cfg: &HarnessConfig) -> SubprocessRunner {
-    SubprocessRunner::new(
-        cfg.config_path.clone(),
-        cfg.schemas_dir.clone(),
-        cfg.model_bin.clone(),
-        cfg.compact_bin.clone(),
-        cfg.assemble_bin.clone(),
-        cfg.route_bin.clone(),
-        cfg.claim_bin.clone(),
-        cfg.parse_bin.clone(),
-    )
+    new_subprocess_runner()
+        .config_path(cfg.config_path.clone())
+        .schemas_dir(cfg.schemas_dir.clone())
+        .model_bin(cfg.model_bin.clone())
+        .compact_bin(cfg.compact_bin.clone())
+        .assemble_bin(cfg.assemble_bin.clone())
+        .route_bin(cfg.route_bin.clone())
+        .claim_bin(cfg.claim_bin.clone())
+        .parse_bin(cfg.parse_bin.clone())
+        .call()
 }
 
 /// How a caught signal exits the process (docs/phase-2-plan.md 4.7).
@@ -331,7 +331,7 @@ fn run_awaiting_model(
 
     // context_exhausted form: fire exhausted.handle window.
     if request.json.get("type").and_then(|t| t.as_str()) == Some("context_exhausted") {
-        let should_continue = fire_and_handle_exhausted(cfg, runner, session, &describe);
+        let should_continue = fire_and_handle_exhausted(cfg, runner, session, describe);
         if !should_continue {
             return;
         }
@@ -350,7 +350,7 @@ fn run_awaiting_model(
     }
 
     // The model retry loop.
-    let (output, terminal_logged) = model_retry_loop(cfg, runner, session, &mut request, &guard_model, &describe, mode);
+    let (output, terminal_logged) = model_retry_loop(cfg, runner, session, &mut request, &guard_model, describe, mode);
 
     check_signal(mode);
 
@@ -444,7 +444,6 @@ fn estimate_context(cfg: &HarnessConfig, session_dir: &Path) -> u64 {
         return 0;
     };
     let caps = rushi_common::compact_math::Caps {
-        result: Some(cfg.compact_result_chars),
         text: Some(cfg.compact_text_chars),
     };
 

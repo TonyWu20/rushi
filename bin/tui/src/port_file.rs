@@ -164,10 +164,7 @@ fn tail_session(path: PathBuf, start: TailCursor, tx: SyncSender<WatchItem>) {
     // `None` means the backend was unavailable: poll on the fixed
     // interval instead.
     let (notify_tx, notify_rx) = std::sync::mpsc::channel::<notify::Result<notify::Event>>();
-    let mut watcher: Option<RecommendedWatcher> = match notify::recommended_watcher(notify_tx) {
-        Ok(w) => Some(w),
-        Err(_) => None,
-    };
+    let mut watcher: Option<RecommendedWatcher> = notify::recommended_watcher(notify_tx).ok();
     if let Some(w) = watcher.as_mut() {
         register_watches(w, &path);
     }
@@ -778,6 +775,7 @@ fn loop_lock_is_free(session_dir: &Path) -> bool {
     let Ok(file) = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(false)
         .open(&lock_path)
     else {
         // Cannot open the lock file (e.g. session dir missing). No

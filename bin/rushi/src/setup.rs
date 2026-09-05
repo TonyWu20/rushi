@@ -233,7 +233,7 @@ pub fn do_setup(locked: bool, project_dir: &Path, kernel_tools_dir: &Path) -> Re
     let manifest = RushiManifest::from_path(&manifest_path)?;
 
     let kernel_tools = if kernel_tools_dir.exists() {
-        list_tool_dirs(&kernel_tools_dir)?
+        list_tool_dirs(kernel_tools_dir)?
     } else {
         eprintln!(
             "warning: kernel tools dir not found at {}; using empty set",
@@ -270,15 +270,16 @@ pub fn do_setup(locked: bool, project_dir: &Path, kernel_tools_dir: &Path) -> Re
             );
         }
         let lock = RushiLock::from_path(&lock_path)?;
-        let expected_commit = kernel_tools_dir
+        let expected_commit = if kernel_tools_dir
             .join(".rushi_commit")
             .exists()
-            .then(|| {
-                std::fs::read_to_string(kernel_tools_dir.join(".rushi_commit"))
-                    .map(|s| s.trim().to_string())
-                    .unwrap_or_default()
-            })
-            .unwrap_or_default();
+        {
+            std::fs::read_to_string(kernel_tools_dir.join(".rushi_commit"))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         if !expected_commit.is_empty() && lock.lock.kernel_commit != expected_commit {
             anyhow::bail!(
                 "--locked: rushi.lock pins kernel_commit {} but the installed kernel is {}. \
@@ -305,12 +306,12 @@ pub fn do_setup(locked: bool, project_dir: &Path, kernel_tools_dir: &Path) -> Re
             let dst = local_tools_dir.join(name);
             if !dst.exists() {
                 copy_dir_recursive(&src, &dst)?;
-                eprintln!("setup: copied {} → tools/{}", name, "");
+                eprintln!("setup: copied {} → tools/", name);
             }
         }
 
         // Write the lock file.
-        let kernel_commit = read_kernel_commit(&kernel_tools_dir);
+        let kernel_commit = read_kernel_commit(kernel_tools_dir);
         let lock = RushiLock {
             lock: LockMeta {
                 version: "0.1".into(),
@@ -693,7 +694,7 @@ mod tests {
         std::fs::create_dir_all(&local_read).unwrap();
         std::fs::write(local_read.join("tool.toml"), "[tool]\ndescription = \"local override\"\n")
             .unwrap();
-        std::fs::write(&local_read.join("read"), "// local read\n").unwrap();
+        std::fs::write(local_read.join("read"), "// local read\n").unwrap();
 
         do_setup(false, &pdir, &kdir).unwrap();
 

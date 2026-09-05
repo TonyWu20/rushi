@@ -1322,9 +1322,9 @@ mod tests {
         let line0 = b.line_col().0;
         // A new event lands: the total rises, the view does not follow.
         texts.push("line 100".into());
-        let mut view = v(&texts, 24, &mut scroll);
+        let view = v(&texts, 24, &mut scroll);
         let before = *view.scroll;
-        b.sync(101, 24, &mut view.scroll, true);
+        b.sync(101, 24, view.scroll, true);
         assert_eq!(b.line_col().0, line0, "the cursor pins to its line");
         assert_eq!(*view.scroll, before, "the view does not follow the growth");
     }
@@ -1335,7 +1335,7 @@ mod tests {
         let g = bar_geometry(1000, 24, 500, None).unwrap();
         assert_eq!(g.thumb_h, 1, "the thumb height is max(1, 24*24/1000)");
         assert_eq!(g.tail_cell, 23);
-        let step = (1000 + 24 - 1) / 24;
+        let step = 1000usize.div_ceil(24);
         assert_eq!(
             (1000 - 500 - 1) / step,
             g.thumb_top + g.thumb_h - 1,
@@ -1356,7 +1356,7 @@ mod tests {
     #[test]
     fn bar_cursor_marker_sits_on_the_cursor_line() {
         let g = bar_geometry(100, 24, 0, Some(99)).unwrap();
-        let step = (100 + 24 - 1) / 24;
+        let step = 100usize.div_ceil(24);
         assert_eq!(
             g.cursor_cell,
             Some(99 / step),
@@ -1579,15 +1579,15 @@ mod tests {
         let mut scroll = 50usize;
         let mut b = entered(&texts, 24, &mut scroll);
         b.line = 48;
-        let mut view = v(&texts, 24, &mut scroll);
+        let view = v(&texts, 24, &mut scroll);
         let before = *view.scroll;
         // The pane narrows, the wrap reflows, no event lands:
         // `grew = false`, the view re-centers (section 4.7).
-        b.sync(120, 24, &mut view.scroll, false);
+        b.sync(120, 24, view.scroll, false);
         assert_ne!(*view.scroll, before, "the rewrap re-centers the view");
         // An event growth keeps the view put (section 4.6).
         let kept = *view.scroll;
-        b.sync(121, 24, &mut view.scroll, true);
+        b.sync(121, 24, view.scroll, true);
         assert_eq!(*view.scroll, kept, "the event growth does not follow");
     }
 
@@ -1599,8 +1599,8 @@ mod tests {
         let mut scroll = 50usize;
         let mut b = entered(&texts, 24, &mut scroll);
         b.line = 48;
-        let mut view = v(&texts, 16, &mut scroll);
-        b.sync(100, 16, &mut view.scroll, false);
+        let view = v(&texts, 16, &mut scroll);
+        b.sync(100, 16, view.scroll, false);
         assert_eq!(*view.scroll, 48, "the view re-centers on the cursor");
     }
 }

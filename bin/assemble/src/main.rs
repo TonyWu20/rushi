@@ -91,7 +91,6 @@ struct Call {
 /// Truncation caps for the compact form of old events.
 #[derive(Clone, Copy, PartialEq, Debug)]
 struct Caps {
-    result: usize,
     text: usize,
 }
 
@@ -331,47 +330,14 @@ fn trim_chars(s: &str, limit: usize, pointer: &str) -> String {
     )
 }
 
-/// Clip a tool result to at most `limit` chars, keeping the head
-/// and the tail. Mark the elided middle with a clip marker and the
-/// pointer to the full record.
-fn clip_full(s: &str, limit: usize, pointer: &str) -> String {
-    let (head, tail, total, elided, head_len, tail_start) = head_tail_cut(s, limit);
-    if elided == 0 {
-        return head;
-    }
-    let tail_len = tail.chars().count();
-    format!(
-        "{head}\n[tool result clipped: {total} chars total; head {head_len} + tail {tail_len} kept, {elided} elided (chars {head_len}-{tail_start}). {pointer}]\n{tail}"
-    )
-}
-
 /// Where the full record of a trimmed piece lives, as seen from the
-/// tool working directory. A trimmed result or text never dies: the
-/// marker points at the file that still holds the full body.
+/// tool working directory. A trimmed text never dies: the marker
+/// points at the file that still holds the full body.
 struct LogPointers {
-    tool_log: Option<String>,
     event_log: Option<String>,
-    tool_log_ids: HashSet<String>,
 }
 
 impl LogPointers {
-    /// The pointer of a trimmed tool result. A call id with a tool
-    /// log record points at that record, with the fetch command. An
-    /// id without a record (a legacy inline body) points at the
-    /// event log.
-    fn tool_result_pointer(&self, id: &str) -> String {
-        if let Some(path) = &self.tool_log {
-            if self.tool_log_ids.contains(id) {
-                return format!(
-                    "Full result: {path} (call id {id}; fetch: jq -c 'select(.id == \"{id}\")' {path})"
-                );
-            }
-        }
-        format!(
-            "Full result: {} (tool_result event, call id {id})",
-            self.event_label()
-        )
-    }
     /// The pointer of a trimmed call argument: the tool_call event.
     fn call_args_pointer(&self, id: &str) -> String {
         format!(
@@ -399,7 +365,6 @@ impl LogPointers {
 fn log_pointers(
     session_dir: &str,
     cwd: Option<&str>,
-    tool_texts: &HashMap<String, String>,
 ) -> LogPointers {
     let base = if Path::new(session_dir).is_absolute() {
         cwd.filter(|c| Path::new(c).is_absolute())
@@ -409,15 +374,8 @@ fn log_pointers(
     } else {
         session_dir.to_string()
     };
-    let tool_log = if Path::new(session_dir).join("tools.jsonl").exists() {
-        Some(format!("{base}/tools.jsonl"))
-    } else {
-        None
-    };
     LogPointers {
-        tool_log,
         event_log: Some(format!("{base}/events.jsonl")),
-        tool_log_ids: tool_texts.keys().cloned().collect(),
     }
 }
 
@@ -526,9 +484,7 @@ fn drop_pair_ids(events: &[&Ev], split: usize) -> HashSet<String> {
 /// Model input items for one event, full form.
 fn full_items(
     ev: &Ev,
-    clip_chars: usize,
     drop_pairs: &HashSet<String>,
-    ptrs: &LogPointers,
 ) -> Vec<serde_json::Value> {
     match ev {
         Ev::User { text } => vec![serde_json::json!({
@@ -572,11 +528,10 @@ fn full_items(
             if drop_pairs.contains(id) {
                 return Vec::new();
             }
-            let out = clip_full(text, clip_chars, &ptrs.tool_result_pointer(id));
             vec![serde_json::json!({
                 "type": "function_call_output",
                 "call_id": id,
-                "output": out
+                "output": text
             })]
         }
     }
@@ -607,7 +562,7 @@ fn compact_items(
     ptrs: &LogPointers,
 ) -> Vec<serde_json::Value> {
     match ev {
-        Ev::User { .. } => full_items(ev, 0, drop_pairs, ptrs),
+        Ev::User { .. } => full_items(ev, drop_pairs),
         Ev::Assistant { text, calls, .. } => {
             let mut items = vec![serde_json::json!({
                 "type": "message",
@@ -634,7 +589,7 @@ fn compact_items(
             vec![serde_json::json!({
                 "type": "function_call_output",
                 "call_id": id,
-                "output": trim_chars(text, caps.result, &ptrs.tool_result_pointer(id))
+                "output": text
             })]
         }
     }
@@ -648,7 +603,6 @@ fn build_items_off(
     events: &[&Ev],
     keep: usize,
     caps: &Caps,
-    clip_chars: usize,
     drop_pairs: &HashSet<String>,
     ptrs: &LogPointers,
 ) -> (Vec<serde_json::Value>, Vec<usize>) {
@@ -660,7 +614,7 @@ fn build_items_off(
         let ev_items = if i < split {
             compact_items(ev, caps, drop_pairs, ptrs)
         } else {
-            full_items(ev, clip_chars, drop_pairs, ptrs)
+            full_items(ev, drop_pairs)
         };
         items.extend(ev_items);
     }
@@ -678,11 +632,10 @@ fn build_items(
     events: &[&Ev],
     keep: usize,
     caps: &Caps,
-    clip_chars: usize,
     drop_pairs: &HashSet<String>,
     ptrs: &LogPointers,
 ) -> Vec<serde_json::Value> {
-    build_items_off(events, keep, caps, clip_chars, drop_pairs, ptrs).0
+    build_items_off(events, keep, caps, drop_pairs, ptrs).0
 }
 
 /// The delivery-queue gate of the user event (docs/tui-pending-user-
@@ -712,10 +665,10 @@ fn user_event_rides(
 }
 
 /// Estimate the token cost of one projected event for the context
-/// budget check. Tool results are capped at `result_cap` chars to
-/// mirror the full-form clip. Reasoning items are counted by their
-/// JSON-serialized size (the same payload the request carries).
-fn estimate_ev_tokens(ev: &Ev, result_cap: usize) -> u64 {
+/// budget check. Tool results count their full length. Reasoning
+/// items are counted by their JSON-serialized size (the same payload
+/// the request carries).
+fn estimate_ev_tokens(ev: &Ev) -> u64 {
     let chars = match ev {
         Ev::User { text } => text.chars().count() as u64,
         Ev::Assistant {
@@ -736,10 +689,7 @@ fn estimate_ev_tokens(ev: &Ev, result_cap: usize) -> u64 {
                 .sum();
             t + c + r
         }
-        Ev::ToolResult { text, .. } => {
-            let total = text.chars().count() as u64;
-            std::cmp::min(total, result_cap as u64)
-        }
+        Ev::ToolResult { text, .. } => text.chars().count() as u64,
     };
     chars / 4
 }
@@ -757,7 +707,6 @@ fn estimate_ev_tokens(ev: &Ev, result_cap: usize) -> u64 {
 fn estimate_request_tokens(
     kept_events: &[&Ev],
     framing: &Option<serde_json::Value>,
-    result_cap: usize,
 ) -> u64 {
     // Find the last assistant event that carries a measured usage.
     let last_meas_idx = kept_events.iter().rposition(|ev| {
@@ -779,7 +728,7 @@ fn estimate_request_tokens(
     // request.  In the None case the whole log is "trailing".
     let mut trailing: u64 = 0;
     for ev in &kept_events[trailing_start..] {
-        trailing += estimate_ev_tokens(ev, result_cap);
+        trailing += estimate_ev_tokens(ev);
     }
 
     // Add the framing item's cost when it is present and the anchor
@@ -847,10 +796,6 @@ fn main() {
     } else {
         toml::Value::Table(toml::map::Map::new())
     };
-    let tool_result_max_chars: usize =
-        val_int(&limits, "tool_result_max_chars").unwrap_or(20000) as usize;
-    let compact_result_chars: usize =
-        val_int(&limits, "compact_result_chars").unwrap_or(500) as usize;
     let compact_text_chars: usize = val_int(&limits, "compact_text_chars").unwrap_or(200) as usize;
     // A cheaper effort for the summary call on a local GPU. The
     // session reasoning_effort is the default when unset.
@@ -888,25 +833,12 @@ fn main() {
     };
 
     // The per-session tool log holds the full tool bodies. The event
-    // log's slim tool_result index points into it by call id
-    // (docs/tool-log-design_from_human.md). Legacy logs have no tool
-    // log: the index text stands in for the body.
+    // log's slim tool_result index points into it by call id.
     let tool_texts = tool_log_texts(&PathBuf::from(&args.session));
 
-    // Where the model finds a full record after a trim or a clip:
-    // the per-session tool log when the session has one, else the
-    // event log's inline body (legacy). The paths resolve against
-    // the tool working directory.
-    let ptrs = log_pointers(&args.session, cwd.as_deref(), &tool_texts);
-    match &ptrs.tool_log {
-        Some(path) => system_prompt.push_str(&format!(
-            "\n\nFull tool records: the session tool log {path} holds the full output of every tool call, one JSON line per call id. Trimmed and clipped results in the input point back to it. Fetch one record with the bash tool: jq -c 'select(.id == \"<call id>\")' {path}"
-        )),
-        None => system_prompt.push_str(&format!(
-            "\n\nFull tool records: the session event log {} inlines the full body of each tool_result event, keyed by call id. Trimmed results in the input point back to it.",
-            ptrs.event_log.as_deref().unwrap_or("events.jsonl")
-        )),
-    }
+    // Where the model finds a full record after a trim:
+    // the event log. The paths resolve against the tool working directory.
+    let ptrs = log_pointers(&args.session, cwd.as_deref());
 
     // Parse events into projections. The 1-based log sequence of
     // every projected event rides alongside it, with the same
@@ -1127,7 +1059,6 @@ fn main() {
             }
         };
         let base_caps = Caps {
-            result: compact_result_chars,
             text: compact_text_chars,
         };
         let cut = projected_seqs
@@ -1184,8 +1115,7 @@ fn main() {
     let mut items = build_items(
         &sel_events,
         sel_events.len(),
-        &Caps { result: 0, text: 0 },
-        tool_result_max_chars,
+        &Caps { text: 0 },
         &drop_pairs,
         &ptrs,
     );
@@ -1203,7 +1133,6 @@ fn main() {
         let est_tokens = estimate_request_tokens(
             &sel_events,
             &framing,
-            tool_result_max_chars,
         );
         if est_tokens > budget_tokens as u64 {
             let exhausted = serde_json::json!({
@@ -1269,14 +1198,14 @@ fn summary_input_request(
         chosen = d;
         let sel = drop_oldest_groups(old, &droppable, d);
         let drop_pairs = drop_pair_ids(&sel, sel.len());
-        let items = build_items(&sel, 0, caps, 0, &drop_pairs, ptrs);
+        let items = build_items(&sel, 0, caps, &drop_pairs, ptrs);
         if estimate(&items) <= input_budget {
             break;
         }
     }
     let sel = drop_oldest_groups(old, &droppable, chosen);
     let drop_pairs = drop_pair_ids(&sel, sel.len());
-    let items = build_items(&sel, 0, caps, 0, &drop_pairs, ptrs);
+    let items = build_items(&sel, 0, caps, &drop_pairs, ptrs);
     let mut input = items.to_vec();
     input.push(serde_json::json!({
         "type": "message",
@@ -1339,13 +1268,10 @@ mod tests {
     }
 
     /// Test pointers: a tool log with one record, the event log
-    /// always. Call id `c1` has a tool log record; the rest fall
-    /// back to the inline event log.
+    /// always. The event log path is the only pointer now.
     fn test_ptrs() -> LogPointers {
         LogPointers {
-            tool_log: Some("sessions/s/tools.jsonl".to_string()),
             event_log: Some("sessions/s/events.jsonl".to_string()),
-            tool_log_ids: HashSet::from(["c1".to_string()]),
         }
     }
 
@@ -1451,13 +1377,13 @@ not json at all
         };
         let mut drop: HashSet<String> = HashSet::new();
         drop.insert("bad".to_string());
-        let items = full_items(&ev, 20000, &drop, &test_ptrs());
+        let items = full_items(&ev, &drop);
         // The dropped call is gone; its call id appears nowhere.
         let s = items.iter().map(|i| i.to_string()).collect::<String>();
         assert!(!s.contains("\"bad\""), "the failed call must be out: {s}");
         assert!(s.contains("\"ok\""), "the clean call stays: {s}");
         // Its result goes out too.
-        let res = full_items(&ev_schema_error("bad"), 20000, &drop, &test_ptrs());
+        let res = full_items(&ev_schema_error("bad"), &drop);
         assert!(res.is_empty(), "the failed result must be out");
     }
 
@@ -1480,7 +1406,6 @@ not json at all
         let items = compact_items(
             &ev,
             &Caps {
-                result: 50,
                 text: 20,
             },
             &HashSet::new(),
@@ -1553,8 +1478,7 @@ not json at all
         let out = build_items(
             &refs,
             refs.len(),
-            &Caps { result: 0, text: 0 },
-            20000,
+            &Caps { text: 0 },
             &drops,
             &test_ptrs(),
         );
@@ -1568,7 +1492,6 @@ not json at all
 
     fn caps() -> Caps {
         Caps {
-            result: 50,
             text: 20,
         }
     }
@@ -1592,59 +1515,19 @@ not json at all
     }
 
     #[test]
-    fn clip_full_keeps_head_and_tail_and_points_at_the_full_record() {
-        let out = clip_full(&"x".repeat(30), 10, "FULL");
-        assert_eq!(
-            out.chars().take(5).collect::<String>(),
-            "xxxxx",
-            "the head must survive"
-        );
-        assert!(
-            out.ends_with(&"x".repeat(5)),
-            "the tail must survive: {out}"
-        );
-        assert!(
-            out.contains(
-                "[tool result clipped: 30 chars total; head 5 + tail 5 kept, 20 elided (chars 5-25). FULL]"
-            ),
-            "{out}"
-        );
-    }
-
-    #[test]
-    fn clip_full_keeps_whole_multibyte_chars() {
-        // 4000 box-drawing chars, a 100-char clip: 50 head + 50 tail.
-        // The cut works in char units, so no partial char anywhere.
-        let s = "\u{2500}".repeat(4000);
-        let out = clip_full(&s, 100, "FULL");
-        assert_eq!(
-            out.chars().take(50).collect::<String>(),
-            "\u{2500}".repeat(50)
-        );
-        assert!(
-            out.ends_with(&"\u{2500}".repeat(50)),
-            "the tail must survive"
-        );
-        assert!(
-            out.contains(
-                "[tool result clipped: 4000 chars total; head 50 + tail 50 kept, 3900 elided (chars 50-3950). FULL]"
-            ),
-            "the marker must name the gap and its span: {out}"
-        );
-    }
-
-    #[test]
     fn keep_all_when_window_covers_log() {
         let events = [ev_res("a", "one"), ev_res("b", "two")];
         let refs: Vec<&Ev> = events.iter().collect();
-        let items = build_items(&refs, 10, &caps(), 20000, &HashSet::new(), &test_ptrs());
+        let items = build_items(&refs, 10, &caps(), &HashSet::new(), &test_ptrs());
         // No compact marker, no clip marker, plain outputs.
         assert!(!items.iter().any(|i| i.to_string().contains("compacted")));
         assert_eq!(items.len(), 2);
     }
 
+    /// Old tool results pass through in full even in the compact
+    /// form. No elision marker is emitted.
     #[test]
-    fn compact_marks_old_keeps_recent_full() {
+    fn compact_tool_results_are_full() {
         let mut events = Vec::new();
         for i in 0..30 {
             events.push(ev_res(&format!("id{i}"), &"R".repeat(400)));
@@ -1654,30 +1537,16 @@ not json at all
             &refs,
             4,
             &Caps {
-                result: 50,
                 text: 20,
             },
-            20000,
             &HashSet::new(),
             &test_ptrs(),
         );
+        // Old tool results are no longer compacted; full body passes through.
         let first = &items[0];
-        let last = items.last().unwrap();
         let s = first.to_string();
-        assert!(
-            s.contains("[compacted: 400 chars total; head 25 + tail 25 kept, 350 elided (chars 25-375)."),
-            "the marker must name the elided middle and its span: {s}"
-        );
-        assert!(
-            s.contains("Full result: sessions/s/events.jsonl (tool_result event, call id id0)"),
-            "a legacy id points at the event log: {s}"
-        );
-        let r25 = "R".repeat(25);
-        assert!(
-            s.contains(&format!("\"output\":\"{r25}\\n[compacted:")),
-            "the head and the tail must survive around the marker: {s}"
-        );
-        assert!(!last.to_string().contains("compacted"));
+        assert!(!s.contains("compacted"), "no compacted marker on tool results: {s}");
+        assert!(s.contains(&"R".repeat(400)), "the full 400-char body must be present");
         assert_eq!(items.len(), 30);
     }
 
@@ -1690,76 +1559,13 @@ not json at all
             ev_res("a", &"R".repeat(400)),
         ];
         let refs: Vec<&Ev> = events.iter().collect();
-        let items = build_items(&refs, 0, &caps(), 20000, &HashSet::new(), &test_ptrs());
+        let items = build_items(&refs, 0, &caps(), &HashSet::new(), &test_ptrs());
         assert!(items[0].to_string().contains("do the task"));
-        assert!(items[1].to_string().contains("compacted"));
+        assert!(!items[1].to_string().contains("compacted"), "tool results are no longer compacted");
     }
 
-    /// A compacted tool result with a tool log record points at that
-    /// record: the path, the call id, and the fetch command. The
-    /// head and the tail of the result survive around the marker.
-    #[test]
-    fn compact_tool_result_points_at_the_tool_log_record() {
-        let ev = ev_res("c1", &"R".repeat(400));
-        let items = compact_items(
-            &ev,
-            &Caps {
-                result: 50,
-                text: 20,
-            },
-            &HashSet::new(),
-            &test_ptrs(),
-        );
-        let out = items[0]["output"].as_str().unwrap();
-        let r25 = "R".repeat(25);
-        assert!(out.starts_with(&r25), "the head must survive: {out}");
-        assert!(out.ends_with(&r25), "the tail must survive: {out}");
-        assert!(
-            out.contains("Full result: sessions/s/tools.jsonl (call id c1; fetch: jq -c 'select(.id == \"c1\")' sessions/s/tools.jsonl)"),
-            "the pointer must name the path, the id, and the fetch: {out}"
-        );
-    }
-
-    /// A compacted tool result without a tool log record points at
-    /// the inline event log (legacy shape).
-    #[test]
-    fn compact_tool_result_falls_back_to_the_event_log_pointer() {
-        let ev = ev_res("z9", &"R".repeat(400));
-        let items = compact_items(
-            &ev,
-            &Caps {
-                result: 50,
-                text: 20,
-            },
-            &HashSet::new(),
-            &test_ptrs(),
-        );
-        let s = items[0].to_string();
-        assert!(
-            s.contains("Full result: sessions/s/events.jsonl (tool_result event, call id z9)"),
-            "{s}"
-        );
-    }
-
-    /// The clip in the full pass keeps head and tail and points at
-    /// the tool log record, like the compact form.
-    #[test]
-    fn clipped_full_result_points_at_the_tool_log_record() {
-        let ev = ev_res("c1", &"R".repeat(400));
-        let items = full_items(&ev, 50, &HashSet::new(), &test_ptrs());
-        let out = items[0]["output"].as_str().unwrap();
-        let r25 = "R".repeat(25);
-        assert!(out.starts_with(&r25), "the head must survive: {out}");
-        assert!(out.ends_with(&r25), "the tail must survive: {out}");
-        assert!(
-            out.contains("[tool result clipped: 400 chars total; head 25 + tail 25 kept, 350 elided (chars 25-375)."),
-            "{out}"
-        );
-        assert!(
-            out.contains("Full result: sessions/s/tools.jsonl (call id c1"),
-            "{out}"
-        );
-    }
+    /// The compact form still trims assistant text and call args
+    /// (only tool results are now full).
     #[test]
     fn assistant_compact_shrinks_text_and_args() {
         let ev = Ev::Assistant {
@@ -1775,7 +1581,6 @@ not json at all
         let items = compact_items(
             &ev,
             &Caps {
-                result: 50,
                 text: 20,
             },
             &HashSet::new(),
@@ -1814,9 +1619,7 @@ not json at all
                 })],
                 usage_input: None,
             },
-            20000,
             &HashSet::new(),
-            &test_ptrs(),
         );
         // Order: reasoning, assistant message, function_call.
         assert_eq!(items.len(), 3);
@@ -1864,7 +1667,6 @@ not json at all
                 usage_input: None,
             },
             &Caps {
-                result: 50,
                 text: 20,
             },
             &HashSet::new(),
@@ -1926,10 +1728,8 @@ not json at all
             &refs,
             10,
             &Caps {
-                result: 50,
                 text: 20,
             },
-            20000,
             &HashSet::new(),
             &test_ptrs(),
         );
@@ -1995,7 +1795,6 @@ not json at all
             .model("m")
             .max_out_cap(2048)
             .caps(&Caps {
-                result: 500,
                 text: 100,
             })
             .input_budget(1_000_000)
@@ -2039,7 +1838,6 @@ not json at all
             .max_out_cap(2048)
             .effort("low")
             .caps(&Caps {
-                result: 500,
                 text: 100,
             })
             .input_budget(1_000_000)
@@ -2072,7 +1870,7 @@ not json at all
                     name: "bash".to_string(),
                     args_str: format!(
                         "{{\"command\": \"{}\"}}",
-                        &big
+                        big
                     ),
                 }],
                 reasoning: vec![],
@@ -2088,7 +1886,6 @@ not json at all
             .model("m")
             .max_out_cap(2048)
             .caps(&Caps {
-                result: 500,
                 text: 100,
             })
             .input_budget(6000)
@@ -2121,7 +1918,6 @@ not json at all
             .model("m")
             .max_out_cap(2048)
             .caps(&Caps {
-                result: 500,
                 text: 100,
             })
             .input_budget(1_000_000)
@@ -2177,8 +1973,7 @@ not json at all
         let out = build_items(
             &refs,
             refs.len(),
-            &Caps { result: 0, text: 0 },
-            20000,
+            &Caps { text: 0 },
             &drops,
             &test_ptrs(),
         );
@@ -2209,8 +2004,7 @@ not json at all
             &build_items(
                 &out,
                 out.len(),
-                &Caps { result: 0, text: 0 },
-                20000,
+                &Caps { text: 0 },
                 &HashSet::new(),
                 &test_ptrs(),
             ),

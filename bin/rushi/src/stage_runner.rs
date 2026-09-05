@@ -21,6 +21,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use serde_json::Value;
+use bon::builder;
 
 use rushi_common::stage::{
     AssembleOpts, Claim, CompactOutcome, CompactOpts, CompactReason, CompactStatus,
@@ -59,28 +60,27 @@ pub struct SubprocessRunner {
     parse_bin: PathBuf,
 }
 
-impl SubprocessRunner {
-    /// Create a new `SubprocessRunner`.
-    pub fn new(
-        config_path: PathBuf,
-        schemas_dir: PathBuf,
-        model_bin: PathBuf,
-        compact_bin: PathBuf,
-        assemble_bin: PathBuf,
-        route_bin: PathBuf,
-        claim_bin: PathBuf,
-        parse_bin: PathBuf,
-    ) -> Self {
-        Self {
-            config_path,
-            schemas_dir,
-            model_bin,
-            compact_bin,
-            assemble_bin,
-            route_bin,
-            claim_bin,
-            parse_bin,
-        }
+/// Create a new `SubprocessRunner`.
+#[builder]
+pub fn new_subprocess_runner(
+    config_path: PathBuf,
+    schemas_dir: PathBuf,
+    model_bin: PathBuf,
+    compact_bin: PathBuf,
+    assemble_bin: PathBuf,
+    route_bin: PathBuf,
+    claim_bin: PathBuf,
+    parse_bin: PathBuf,
+) -> SubprocessRunner {
+    SubprocessRunner {
+        config_path,
+        schemas_dir,
+        model_bin,
+        compact_bin,
+        assemble_bin,
+        route_bin,
+        claim_bin,
+        parse_bin,
     }
 }
 
@@ -181,7 +181,7 @@ impl StageRunner for SubprocessRunner {
             pending_tool_calls: v
                 .get("pending_tool_calls")
                 .and_then(|a| a.as_array())
-                .map(|a| a.clone())
+                .cloned()
                 .unwrap_or_default(),
             pending_follow_ups: v
                 .get("pending_follow_ups")

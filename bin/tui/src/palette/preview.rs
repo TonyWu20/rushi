@@ -67,11 +67,7 @@ fn option_list(
         } else {
             " "
         };
-        let text = if item.kind == CmdKind::Ext {
-            format!("{mark} {}", opt.value)
-        } else {
-            format!("{mark} {}", opt.value)
-        };
+        let text = format!("{mark} {}", opt.value);
         out.push(vec![(style, text)]);
     }
     if item.help.is_empty() {
