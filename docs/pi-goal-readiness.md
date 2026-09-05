@@ -1,6 +1,7 @@
 # pi-goal port readiness
 
-Status: Investigation (2026-09-13).
+Status: Ported (2026-07-04). The pi-goal extension is implemented as a
+harness extension per the OS + Applications model.
 
 Answers one question: are we ready to port `pi-goal` as a harness
 extension, per the mapping in `pi-extension-port-investigation.md`
@@ -39,25 +40,24 @@ Two reference hook binaries exist: `bin/hook-compact` (compact
 strategy) and `bin/hook-handoff` (reserved handoff seam). They
 demonstrate the exact pattern a goal hook would follow.
 
-## 3. What remains (application-level, not infra)
+## 3. What was built (application-level)
 
-The infrastructure blockers are resolved. The remaining work is
-porting the pi-goal application logic onto the existing seams.
-Each item is a new file or a small set of files; none requires a
-change to the harness loop or hook ABI.
+The infrastructure blockers are resolved. The following application-level
+pieces are now implemented:
 
 | Item | Lands where | Size |
 |---|---|---|
-| `tools/goal_complete/` CLI + `tool.toml` | `tools/` | Small |
-| `tools/goal_blocked/` CLI + `tool.toml` | `tools/` | Small |
-| Goal state file (`sessions/<n>/goal.json`) + read/write | Shared module under `crates/common` or a new `crates/goal-state` | Medium |
-| `run.idle` hook binary (read goal state, inspect last assistant message, return `continue` + prompt or `stop`) | `bin/hook-goal-idle/` | Medium |
-| `compact.before` hook binary (veto compaction when goal budget is low) | `bin/hook-goal-compact/` | Small |
+| `tools/goal/` CLI + `tool.toml` (start or edit goal) | `tools/goal/` | Small |
+| `tools/goal_complete/` CLI + `tool.toml` | `tools/goal_complete/` | Small |
+| `tools/goal_blocked/` CLI + `tool.toml` | `tools/goal_blocked/` | Small |
+| Goal state file (`sessions/<n>/goal.json`) + read/write | `crates/goal-state/` | Medium |
+| `run.idle` hook binary (continue loop when goal open) | `bin/hook-goal-idle/` | Medium |
+| `compact.before` hook binary (preserve goal across compaction) | `bin/hook-goal-compact/` | Small |
 | `tool.before` hook binary (block stale goal tool calls) | `bin/hook-goal-tools/` | Small |
-| `session.start` / `session.end` hooks (restore / checkpoint goal state) | Can fold into the above hook binaries via window dispatch | Small |
-| Token / budget accounting | `crates/common` or goal-state module | Medium |
-| User-facing goal start (the `/goal` command) | See gap G2 | Open |
-| Conformance test: `run.idle` continue row from plan §8 | `scripts/` | Small |
+| `model.before` hook binary (inject goal-mode instruction) | `bin/hook-goal-arm/` | Small |
+| Token / budget accounting | `crates/goal-state/` (budget_tokens, used_tokens) | Medium |
+| User-facing goal commands (`goal`, `goal edit`, `goal resume`) | `ui_extensions/goal/` | Done |
+| Conformance test: `run.idle` continue e2e | `scripts/run-idle-continue-e2e.sh` | Done |
 
 ## 4. Gaps
 
@@ -78,23 +78,26 @@ payload).
 The pi-goal case works on top of this: a continuation hook prepends
 the goal instruction to the request `input` at every model call.
 
-**G2 — No `/goal` user-facing command.**
-The TUI command palette is spec-only
-(`docs/tui-command-palette.md`, status "Spec, not yet built").
-Without it the user cannot type `/goal …` in the TUI.
+**G2 — No `/goal` user-facing command. Resolved (2026-07-04).**
+The TUI command palette (`docs/tui-command-palette.md`) now supports
+extension-registered commands via the `commands` cap.
+`ui_extensions/goal/` is a standalone Rust extension that registers
+three user-facing commands in the TUI palette: `goal`, `goal edit`,
+and `goal resume`. The `goal` and `goal edit` commands arm goal mode
+by appending a `goal_armed` ext_status marker to the session log; the
+user then types the goal description in the main input box and sends
+it. The `harness-hook-goal-arm` hook (registered on `model.before`)
+detects the pending marker and injects an instruction into the model
+request telling it to call the `goal` tool with the user's message as
+the goal description. `goal resume` re-activates a blocked or
+completed goal by rewriting `goal.json` directly, then the `run.idle`
+hook continues the loop. The agent-facing tools (`goal`,
+`goal_complete`, `goal_blocked`) remain under `tools/` and are
+invisible in the user-facing palette.
 
-Workaround options (no TUI change):
-- A `goal` tool under `tools/` that the model calls when the user
-  types a goal as a plain message. The tool writes `goal.json`.
-- A standalone CLI the user runs outside the TUI.
-
-Both fit the OS + Applications model. The TUI command palette
-(`commands` cap in `ext.rs`) is the long-term home.
-
-**G3 — No conformance test for `run.idle` continue.**
-Plan §8 lists a `run.idle` continue row, but `scripts/` has no
-corresponding test. The window fires correctly (verified in
-`run_loop.rs`), but a fixture test would pin the behavior.
+**G3 — No conformance test for `run.idle` continue. Resolved (2026-07-04).**
+`scripts/run-idle-continue-e2e.sh` covers three scenarios (no-goal,
+budgeted-goal, closed-goal) with 9 assertions, all passing.
 
 **G4 — No `input`-equivalent window.**
 pi-goal's `pi.on("input")` intercepts user input to clear recovery
@@ -107,20 +110,51 @@ workaround) or the future command palette.
 
 ## 5. Verdict
 
-**Ready.** The three loop seams that blocked the pi-goal port are
-all built and tested: `run.idle` (idle-continue), `compact.before`
-(compaction veto), and `model.before` (per-turn prompt
-transformation). The hook ABI, tool registration, approval
-round-trip, and event-log persistence are in place. The remaining
-work is application-level: write the goal tools, the hook
-binaries, and the state file. No loop-level or ABI change is
-required.
+**Ported (2026-07-04).** The three loop seams that blocked the pi-goal
+port are all built and tested: `run.idle` (idle-continue),
+`compact.before` (compaction veto), and `model.before` (per-turn prompt
+transformation). The hook ABI, tool registration, approval round-trip,
+and event-log persistence are in place.
 
-The remaining gaps are small. G2 (no `/goal` TUI command) has a
-working workaround: a `goal` tool under `tools/` or a standalone
-CLI. G3 is a test-hygiene item: add the `run.idle` conformance
-fixture. G4 is a non-issue: goal state is file-based, so clearing
-stale state is a hook-side concern.
+The application-level pieces are complete:
+
+- `crates/goal-state/` — `GoalState` over `goal.json` in the session
+  dir; supports `new/load/save/is_open/mark_complete/mark_blocked/
+  resume/edit_goal/budget_exhausted/remaining_budget/
+  continuation_prompt/read_last_assistant_output_tokens`.
+- `tools/goal/`, `tools/goal_complete/`, `tools/goal_blocked/` — CLI
+  tools that read/write `goal.json` via `HARNESS_SESSION_DIR`. The
+  `goal` tool edits an active goal in place when one exists, and
+  creates a fresh one otherwise.
+- `bin/hook-goal-idle/` — `run.idle` hook: continues the loop with a
+  `follow`-queue `user_message` when a goal is open; stops when closed
+  or budget exhausted.
+- `bin/hook-goal-compact/` — `compact.before` hook: preserves goal info
+  into the compaction window.
+- `bin/hook-goal-tools/` — `tool.before` hook: blocks stale goal-tool
+  calls (e.g. `goal_complete` when no goal is active).
+- `bin/hook-goal-arm/` — `model.before` hook: when a `goal_armed`
+  ext_status marker is pending (armed by the TUI extension and not yet
+  consumed by a `goal` tool_call), injects a goal-mode instruction
+  into the model request telling it to call the `goal` tool with the
+  user's message as the goal description.
+- `scripts/run-idle-continue-e2e.sh` — conformance e2e (9 assertions,
+  3 scenarios: no-goal, budgeted-goal, closed-goal).
+- `ui_extensions/goal/` — TUI extension that registers `goal`,
+  `goal edit`, and `goal resume` in the command palette
+  (G2 resolution). `goal` and `goal edit` arm goal mode via a
+  `goal_armed` ext_status marker; the user types the goal description
+  in the main input box and sends it, and the `model.before` hook
+  (`bin/hook-goal-arm/`) injects the goal-mode instruction into the
+  model request. Standalone cargo package; build with `cargo build`
+  in its directory.
+- Plumbing: `session_dir` added to `RouteEnv`, `route` accepts
+  `--session-dir` and exports `HARNESS_SESSION_DIR`, four hooks
+  registered in `config.toml` / `config-low.toml`, goal tools listed
+  in both system prompts.
+- Bug fix: `hooks.rs` watchdog now uses `recv_timeout` instead of a
+  bare `sleep`, so a fast-exiting hook no longer blocks for the full
+  `timeout_ms` before the main thread can continue.
 
 The port is the next natural application build on the harness, in
 the spirit of `skill-remapped-to-os-apps.md`: tools on the path,

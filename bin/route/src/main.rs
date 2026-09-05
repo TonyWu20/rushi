@@ -33,6 +33,11 @@ struct Args {
     /// legacy inline full-text event stays.
     #[arg(long)]
     tool_log: Option<PathBuf>,
+
+    /// The session directory (passed to tool subprocesses as
+    /// `HARNESS_SESSION_DIR`). Goal tools use it to locate `goal.json`.
+    #[arg(long)]
+    session_dir: Option<PathBuf>,
 }
 
 /// One tool call's outcome, either a run or a not-run error.
@@ -404,6 +409,9 @@ fn main() {
         let mut cmd = Command::new(command);
         if let Some(ref cwd) = args.cwd {
             cmd.current_dir(cwd);
+        }
+        if let Some(ref session_dir) = args.session_dir {
+            cmd.env("HARNESS_SESSION_DIR", session_dir);
         }
         let mut child = match cmd
             .args(
@@ -814,6 +822,7 @@ mod tests {
             tool_result_max_chars: 20000,
             cwd: None,
             tool_log: Some(log_path.clone()),
+            session_dir: None,
         };
         let o = run_outcome();
         let ev = emit_result(&o, "t", "c9", &args);

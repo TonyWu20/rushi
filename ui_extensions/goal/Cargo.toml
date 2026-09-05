@@ -1,0 +1,27 @@
+# The `goal` commands extension for the TUI command palette
+# (docs/tui-command-palette.md section 10). Standalone cargo package
+# (not a member of the root workspace): the empty `[workspace]` table
+# stops cargo from attaching it to the root, like the mermaid ext.
+#
+# Build: `cargo build` in this directory. The binary lands in
+# ./target/debug/goal-ext. The manifest addresses it by a path
+# relative to its own entry; the host resolves that against the entry
+# directory (docs/ui-extension.md section 6), so no `PATH` export is
+# required for the global layer.
+
+[package]
+name = "goal-ext"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[[bin]]
+name = "goal-ext"
+path = "src/main.rs"
+
+[dependencies]
+goal-state = { path = "../../crates/goal-state" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"

@@ -247,25 +247,37 @@ fn fire_one(
     // so it runs while the main thread owns the child. A kill that
     // lands (a live child) sets the flag; a kill that misses (the
     // hook already exited) leaves it clear.
+    //
+    // The watchdog waits on a channel with recv_timeout rather than a
+    // bare sleep, so the join returns immediately when the child
+    // finishes early instead of blocking for the full timeout.
     let pid = child.id();
     let timed_out = Arc::new(AtomicBool::new(false));
-    let watchdog = if timeout_ms > 0 {
+    let (mut stop_tx, watchdog) = if timeout_ms > 0 {
         let flag = Arc::clone(&timed_out);
-        let pid = pid;
-        Some(std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(timeout_ms));
-            let killed = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
-            if killed == 0 {
-                flag.store(true, Ordering::SeqCst);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
+                Ok(()) => {}
+                Err(_) => {
+                    let killed = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+                    if killed == 0 {
+                        flag.store(true, Ordering::SeqCst);
+                    }
+                }
             }
-        }))
+        });
+        (Some(tx), Some(handle))
     } else {
-        None
+        (None, None)
     };
 
     let output = match child.wait_with_output() {
         Ok(o) => o,
         Err(e) => {
+            if let Some(tx) = &mut stop_tx {
+                let _ = tx.send(());
+            }
             if let Some(w) = watchdog {
                 let _ = w.join();
             }
@@ -280,6 +292,9 @@ fn fire_one(
         }
     };
 
+    if let Some(tx) = &mut stop_tx {
+        let _ = tx.send(());
+    }
     if let Some(w) = watchdog {
         let _ = w.join();
     }

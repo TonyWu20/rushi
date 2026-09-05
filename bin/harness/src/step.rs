@@ -1452,6 +1452,7 @@ fn route_batch(
         cwd,
         tool_log: Some(session.path.join("tools.jsonl")),
         tool_result_max_chars: 20000,
+        session_dir: Some(session.path.clone()),
     };
     runner.route(calls, &env).unwrap_or_else(|e| {
         eprintln!("harness: route failed: {e}");

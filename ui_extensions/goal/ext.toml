@@ -1,0 +1,31 @@
+# The `goal` commands extension for the TUI command palette
+# (docs/tui-command-palette.md section 10). Registers the pi-goal
+# port's user-facing commands: `goal`, `goal edit`, and `goal resume`
+# (docs/pi-goal-readiness.md, G2). The agent-facing tools
+# (`goal`, `goal_complete`, `goal_blocked`) live under `tools/`;
+# this extension is the user-facing entry point.
+#
+# The host sends a `commands` op when the palette opens; this
+# extension replies with a `commands_list` for the three goal
+# commands.
+#
+# - `goal` and `goal edit` arm goal-mode: the extension appends an
+#   `ext_status` marker event to the session log so the model / hooks
+#   can detect that the next user message is a goal description.
+#   The user then types the goal text in the main input box and sends
+#   it normally.
+# - `goal resume` re-activates a previously blocked or completed goal
+#   by updating `goal.json` directly.
+#
+# Build: `cargo build` in this directory. The package is standalone
+# (not a member of the root workspace); the binary lands in
+# ./target/debug/goal-ext. The manifest addresses it by a path
+# relative to its own entry; the host resolves that against the entry
+# directory (docs/ui-extension.md section 6), so no `PATH` export is
+# required for the global layer.
+
+[ext]
+command = "target/debug/goal-ext"
+caps = ["commands", "append"]
+append_types = ["ext_status"]
+protocol_v = 1

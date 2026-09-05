@@ -63,13 +63,14 @@ harness point.
 Your harness already self-hosts this work. It is the loop itself. So the
 port is really a re-host of the loop, not a tool.
 
-**Verdict: Ready.** The three loop seams (per-turn prompt injection,
-idle-continue, compaction veto) are now built into the `harness` loop:
-the `run.idle` window, the `compact.before` window, and the `tool.before`
-window all ship in Phase 2. The hook ABI, tool registration, approval
-round-trip, and event-log persistence are in place. Remaining work is
-application-level: the goal tools, hook binaries, and state file.
-See `docs/pi-goal-readiness.md` for the full readiness assessment.
+**Status: Ported (2026-07-04).** The goal tools (`tools/goal/`,
+`tools/goal_complete/`, `tools/goal_blocked/`), the goal-state crate
+(`crates/goal-state/`), the four hook binaries
+(`bin/hook-goal-idle/`, `bin/hook-goal-compact/`,
+`bin/hook-goal-tools/`, `bin/hook-goal-arm/`), the TUI command-palette
+extension (`ui_extensions/goal/`), and the conformance e2e
+(`scripts/run-idle-continue-e2e.sh`) are all built and tested.
+See `docs/pi-goal-readiness.md` for the full assessment.
 
 ### `rpiv-ask-user-question` (juicesharp)
 

@@ -291,6 +291,9 @@ impl StageRunner for SubprocessRunner {
         if let Some(tool_log) = &env.tool_log {
             cmd.arg("--tool-log").arg(tool_log);
         }
+        if let Some(session_dir) = &env.session_dir {
+            cmd.arg("--session-dir").arg(session_dir);
+        }
         cmd.arg("--tool-result-max-chars")
             .arg(env.tool_result_max_chars.to_string());
 
