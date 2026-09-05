@@ -638,3 +638,31 @@ Write failures are dropped (the trace must not take the UI down).
 in `bin/tui/src/ext.rs` passes. All 547 TUI unit tests pass. The
 `TUI_EXT_LOG` override remains available for post-hoc inspection.
 
+
+## FT-017 — Main-process diagnostic writes pollute the TUI frame
+
+**Symptom:** At TUI startup the line
+`[tui] startup: model=... effort=... level=...` printed on the
+terminal and corrupted the alt-screen frame. Two more raw
+`eprintln!` calls in the post-takeover path (palette-config error,
+draw failure, editor failure) had the same defect.
+
+**Root cause:** The startup trace from FT-014 was written with
+`eprintln!`. After `TermGuard::init` the TUI owns the terminal.
+A raw stderr write bypasses the renderer and lands inside the
+alt-screen frame.
+
+**Fix:** A new `tui_log` function in `bin/tui/src/main.rs`
+appends one `pid ms msg` line to a log file, never to stderr.
+The path is `TUI_LOG` when set, otherwise
+`<XDG_CACHE_HOME|~/.cache>/tui/tui.log`. The startup trace, the
+palette-config error, the draw failure, and the editor failure all
+call `tui_log`. The two pre-takeover CLI errors (config load,
+ext discovery) keep `eprintln!` because the terminal is not yet
+owned. A guardrail test scans `main.rs` after the
+`TermGuard::init` call and fails if any `eprintln!` reappears.
+
+**Verification:** Unit tests `tui_log_writes_to_the_tui_log_file`
+and `no_stderr_writes_after_the_terminal_takeover` in
+`bin/tui/src/main.rs` pass. All 549 TUI unit tests pass.
+Restart the TUI to load the rebuilt binary.
