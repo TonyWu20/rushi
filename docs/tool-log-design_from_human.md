@@ -63,19 +63,13 @@ trackable and replayable from the log.
 - The tool log lives in the session dir: `tools.jsonl` next to
   `events.jsonl`. A session that replays carries its tool activity
   with it. No global tree.
-- `assemble` feeds the full body to the model, read from the tool log.
-  No summary of the body. Correction 61 trims it head and tail:
-  the compact caps and the full-pass clip keep the first half of
-  the cap as the head and the rest as the tail. The marker names
-  the elided middle and its exact character span (e.g.
-  `chars 25-375` for a 400-char body cut to 50) and points at the
-  full record: the `tools.jsonl`
-  path, the call id, and a `jq` fetch command. A session without
-  the log points at the inline event log instead. The system prompt
-  carries the `Full tool records` block with the fetch recipe, so
-  the model retrieves the body from disk when it needs more than
-  the preview. Legacy fallback: a session without the log gets the
-  index text.
+- `assemble` feeds the full body to the model, read from the tool
+  log (or the inline event text when the log is absent). No summary,
+  no clip, no trim. The event log stays the source of truth for the
+  conversation; the tool log is the source of truth for tool
+  activity. The slim index in `events.jsonl` keeps the TUI view
+  light. `Legacy fallback: a session without the log gets the inline
+  event text.`
 - The slim `tool_result` points into the tool log by file name
   (`tool_log`) and by call id lookup (`id`). The record list is in
   order; a re-run of a pending call appends the new record for the

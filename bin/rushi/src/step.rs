@@ -7,6 +7,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use rushi_common::compact_math::{self, TriggerBase};
 use rushi_common::event_validation;
 use rushi_common::hooks::{self, Window};
 use rushi_common::logline::LogLine;
@@ -458,7 +459,6 @@ fn estimate_context(cfg: &HarnessConfig, session_dir: &Path) -> u64 {
         return 0;
     };
     let caps = rushi_common::compact_math::Caps {
-        result: None,
         text: Some(cfg.compact_text_chars),
     };
 
@@ -493,13 +493,27 @@ fn estimate_context(cfg: &HarnessConfig, session_dir: &Path) -> u64 {
     let est: u64 = events[idx + 1..]
         .iter()
         .map(|v| {
-            rushi_common::compact_math::est_tokens(
-                &rushi_common::compact_math::project_event(v),
-                &caps,
-            )
+            compact_math::est_tokens(&compact_math::project_event(v), &caps)
         })
         .sum();
-    measured + est
+    let mut est = measured + est;
+
+    // Pi-parity base (`compact_trigger_base = "context_budget"`): the
+    // trigger may sit above the input budget, where the request is in
+    // the trim form and the measured reading reads shrunken. Add the
+    // full-form estimate of the kept region so the trigger sees the
+    // real context size instead of starving on shrunken readings.
+    if cfg.compact_trigger_base == TriggerBase::ContextBudget {
+        let boundary = events.iter().rposition(|v| {
+            v.get("type").and_then(|t| t.as_str()) == Some("compaction_summary")
+        });
+        let region = &events[boundary.map(|i| i + 1).unwrap_or(0)..];
+        let evs: Vec<compact_math::Ev> =
+            region.iter().map(compact_math::project_event).collect();
+        est = est.max(compact_math::full_form_estimate(&evs, &caps));
+    }
+
+    est
 }
 
 // ---------------------------------------------------------------------------
@@ -939,7 +953,7 @@ fn model_retry_loop(
             {
                 if !req_model.is_empty()
                     && req_model == guard_model
-                    && measured >= cfg.input_budget
+                    && measured >= cfg.compact_overflow_budget()
                 {
                     if cfg.compact_enabled {
                         let _ = try_compact_with_hooks(

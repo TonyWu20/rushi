@@ -45,7 +45,6 @@ pub struct Call {
 /// Caps for the estimator. `None` means no cap.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Caps {
-    pub result: Option<u64>,
     pub text: Option<u64>,
 }
 
@@ -74,13 +73,7 @@ pub fn est_tokens(ev: &Ev, caps: &Caps) -> u64 {
             };
             text_chars + call_cap + reasoning_chars
         }
-        Ev::Result { chars, .. } => {
-            if let Some(cap) = caps.result {
-                std::cmp::min(*chars, cap)
-            } else {
-                *chars
-            }
-        }
+        Ev::Result { chars, .. } => *chars,
     };
     chars / 4
 }
@@ -108,6 +101,63 @@ pub fn estimate_context(
 /// `current` is the result of `estimate_context`.
 pub fn trigger_fired(current: u64, trigger_level: u64) -> bool {
     current > trigger_level
+}
+
+/// The base of the compact trigger level (`compact_trigger_base`).
+///
+/// `InputBudget` is the default. The trigger sits at
+/// `input_budget - reserve`, one reserve below the trim budget.
+/// The LLM compaction leads, the trim form is the backstop.
+///
+/// `ContextBudget` is the pi-parity base. The trigger sits at
+/// `context_budget - reserve`, above the input budget. The trigger
+/// estimate must use the full-form context, or the shrunken
+/// (trim-form) readings starve the LLM compaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TriggerBase {
+    /// `input_budget - reserve` (default).
+    #[default]
+    InputBudget,
+    /// `context_budget - reserve` (pi parity).
+    ContextBudget,
+}
+
+impl TriggerBase {
+    /// Parse the `compact_trigger_base` config value.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "input_budget" => Some(Self::InputBudget),
+            "context_budget" => Some(Self::ContextBudget),
+            _ => None,
+        }
+    }
+
+    /// The config string form.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InputBudget => "input_budget",
+            Self::ContextBudget => "context_budget",
+        }
+    }
+}
+
+/// The trigger level from a base: `base - reserve`. A zero reserve
+/// inverts the trigger; it clamps to one below the base.
+pub fn trigger_level_for(base: u64, reserve: u64) -> u64 {
+    if reserve == 0 {
+        base.saturating_sub(1)
+    } else {
+        base.saturating_sub(reserve)
+    }
+}
+
+/// The full-form context estimate: the chars/4 sum of the projected
+/// events. The measured readings read the (clamped) request. In the
+/// trim form that reading is shrunken. The full form is the context
+/// the compact actually replaces. Use it as the trigger estimate when
+/// the trigger base is the full context budget.
+pub fn full_form_estimate(evs: &[Ev], caps: &Caps) -> u64 {
+    evs.iter().map(|e| est_tokens(e, caps)).sum()
 }
 
 /// The backward cut walk. Given the kept events (from the boundary to
@@ -156,19 +206,12 @@ pub fn find_cut(kept: &[Ev], keep_tokens: u64, caps: &Caps) -> usize {
 
 /// The estimated tokens after the compact: the handoff document plus
 /// the kept events in the full form.
-pub fn est_tokens_after(kept: &[Ev], handoff_doc: &str, clip: u64) -> u64 {
+pub fn est_tokens_after(kept: &[Ev], handoff_doc: &str) -> u64 {
     let framing: u64 = handoff_doc.chars().count() as u64 / 4 + 64;
-    let full_caps = Caps {
-        result: Some(clip),
-        text: None,
-    };
+    let full_caps = Caps { text: None };
     let mut total = framing;
     for ev in kept.iter() {
-        if let Ev::Result { chars, .. } = ev {
-            total += std::cmp::min(*chars, clip) / 4;
-        } else {
-            total += est_tokens(ev, &full_caps);
-        }
+        total += est_tokens(ev, &full_caps);
     }
     total
 }
@@ -179,10 +222,9 @@ pub fn est_tokens_after(kept: &[Ev], handoff_doc: &str, clip: u64) -> u64 {
 pub fn post_compact_sanity(
     kept: &[Ev],
     handoff_doc: &str,
-    clip: u64,
     trigger_level: u64,
 ) -> bool {
-    est_tokens_after(kept, handoff_doc, clip) > trigger_level
+    est_tokens_after(kept, handoff_doc) > trigger_level
 }
 
 /// Project a raw event JSON value into the `Ev` estimator shape.
@@ -314,7 +356,6 @@ mod tests {
     #[test]
     fn est_tokens_mirrors_the_assemble_estimator() {
         let caps = Caps {
-            result: Some(500),
             text: Some(100),
         };
         assert_eq!(est_tokens(&ev_user(&"a".repeat(400)), &caps), 100);
@@ -334,11 +375,9 @@ mod tests {
             reasoning_chars: 1000,
         };
         assert_eq!(est_tokens(&ev, &caps), 250);
-        assert_eq!(est_tokens(&ev_res("1", &"c".repeat(4000)), &caps), 125);
-        let full = Caps {
-            result: None,
-            text: None,
-        };
+        // Tool results are no longer capped: full char count is used.
+        assert_eq!(est_tokens(&ev_res("1", &"c".repeat(4000)), &caps), 1000);
+        let full = Caps::default();
         assert_eq!(est_tokens(&ev_res("1", &"c".repeat(4000)), &full), 1000);
     }
 
@@ -353,7 +392,6 @@ mod tests {
             ev_res("2", &"y".repeat(4000)),
         ];
         let caps = Caps {
-            result: Some(1000),
             text: None,
         };
         let cut = find_cut(&kept, 150, &caps);
@@ -368,7 +406,6 @@ mod tests {
             ev_res("1", &"x".repeat(4000)),
         ];
         let caps = Caps {
-            result: Some(1000),
             text: None,
         };
         let cut = find_cut(&kept, 10, &caps);
@@ -378,10 +415,7 @@ mod tests {
     #[test]
     fn cut_at_zero_is_the_empty_region() {
         let kept = vec![ev_user("task"), ev_asst("step one")];
-        let caps = Caps {
-            result: None,
-            text: None,
-        };
+        let caps = Caps::default();
         assert_eq!(find_cut(&kept, 1_000_000, &caps), 0);
     }
 
@@ -390,6 +424,39 @@ mod tests {
         assert!(trigger_fired(1000, 999));
         assert!(!trigger_fired(999, 1000));
         assert!(!trigger_fired(1000, 1000));
+    }
+
+    #[test]
+    fn trigger_level_for_subtracts_the_reserve() {
+        assert_eq!(trigger_level_for(229376, 16384), 212992);
+        assert_eq!(trigger_level_for(262144, 16384), 245760);
+    }
+
+    #[test]
+    fn trigger_level_for_a_zero_reserve_clamps() {
+        assert_eq!(trigger_level_for(100, 0), 99);
+        assert_eq!(trigger_level_for(1, 0), 0);
+    }
+
+    #[test]
+    fn trigger_base_parses_the_config_values() {
+        assert_eq!(TriggerBase::parse("input_budget"), Some(TriggerBase::InputBudget));
+        assert_eq!(TriggerBase::parse("context_budget"), Some(TriggerBase::ContextBudget));
+        assert_eq!(TriggerBase::parse("other"), None);
+        assert_eq!(TriggerBase::default(), TriggerBase::InputBudget);
+        assert_eq!(TriggerBase::InputBudget.as_str(), "input_budget");
+        assert_eq!(TriggerBase::ContextBudget.as_str(), "context_budget");
+    }
+
+    #[test]
+    fn full_form_estimate_sums_the_projected_events() {
+        let caps = Caps::default();
+        let evs = vec![
+            ev_user(&"a".repeat(400)),
+            ev_res("1", &"x".repeat(4000)),
+        ];
+        assert_eq!(full_form_estimate(&evs, &caps), 100 + 1000);
+        assert_eq!(full_form_estimate(&[], &caps), 0);
     }
 
     #[test]
@@ -405,6 +472,6 @@ mod tests {
         let kept = vec![ev_user(&"a".repeat(400))];
         // Handoff doc that's big enough to push past the trigger.
         let big_handoff = "x".repeat(8000);
-        assert!(post_compact_sanity(&kept, &big_handoff, 20000, 100));
+        assert!(post_compact_sanity(&kept, &big_handoff, 100));
     }
 }
