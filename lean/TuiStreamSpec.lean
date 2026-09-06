@@ -31,6 +31,11 @@ The invariants (P1…P6) are stated as theorems and proven. The Lean kernel
 re-checks every proof; a clean build with zero `sorry` is the guarantee
 that the spec is internally consistent. See docs/lean-driven-development.md
 §8.
+
+Differential random testing: `lean/TuiStreamDrt.lean` is a pure CLI
+executable over this spec's reference renderer; `bin/tui-stream-drt`
+is its Rust mirror. The DRT regression gate runs via `lean-verify`
+`op=drt` (docs/tui-streaming-response.md "Gate").
 -/
 
 

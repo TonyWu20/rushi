@@ -16,6 +16,7 @@
 # Specs checked:
 #   RushiSpec.lean    — the `rushi setup` tool-set resolver
 #   TuiStreamSpec.lean — streaming render of the model response
+#   TuiViewportSpec.lean — viewport-based scrollback invariants
 #
 # Exit 0 = clean, 1 = build failed.
 
@@ -23,7 +24,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SPEC="$ROOT/lean"
-SPECS=(RushiSpec.lean TuiStreamSpec.lean)
+SPECS=(RushiSpec.lean TuiStreamSpec.lean TuiViewportSpec.lean)
 
 if command -v lean >/dev/null 2>&1; then
   # Already in the devShell; LEAN_PATH should already include Mathlib.

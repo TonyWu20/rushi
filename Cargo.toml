@@ -24,7 +24,9 @@ members = [
     "tools/edit",
     "tools/list",
     "tools/bash",
+    "tools/lean-verify",
     "bin/tui",
+    "bin/tui-stream-drt",
     "crates/rushi",
     "crates/goal-state",
 ]
