@@ -198,6 +198,11 @@ fn tail_session(path: PathBuf, start: TailCursor, tx: SyncSender<WatchItem>) {
                 std::thread::sleep(TAIL_RETRY_INTERVAL);
                 continue;
             }
+            Err(TailErr::Disconnected) => {
+                // The receiver was dropped (session switch or TUI exit).
+                // Stop the tailer thread so it does not leak.
+                break;
+            }
         }
 
         // Wait for the next wake: an inotify activity signal, the
@@ -239,9 +244,13 @@ fn register_watches(w: &mut RecommendedWatcher, path: &Path) {
     }
 }
 
+#[derive(Debug)]
 enum TailErr {
     NotFound,
     Io(std::io::Error),
+    /// The receiver of the watch channel was dropped; the tailer
+    /// thread must stop.
+    Disconnected,
 }
 
 /// Read newly appended bytes after `offset`, emit each complete line as
@@ -351,7 +360,10 @@ fn read_tail(
                 cursor: TailCursor::at(carry_start + line_end as u64),
             }) {
                 Ok(()) => emitted = line_end,
-                Err(_) => break,
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    return Err(TailErr::Disconnected);
+                }
+                Err(std::sync::mpsc::TrySendError::Full(_)) => break,
             }
         } else {
             // Blank line: skip it, but keep the position moving.
@@ -1872,5 +1884,61 @@ mod tests {
             ),
         }
         drop(rx);
+    }
+
+    #[test]
+    fn tailer_thread_exits_when_receiver_dropped() {
+        let c = make_cfg(false, None);
+        std::fs::create_dir_all(c.dir.path().join("sessions").join("leak")).unwrap();
+        let path = c.dir.path().join("sessions").join("leak").join("events.jsonl");
+        std::fs::write(&path, "").unwrap();
+
+        let sid = SessionId::new("leak");
+        let rx = c.port.watch(&sid, TailCursor::start());
+        std::thread::sleep(Duration::from_millis(200));
+
+        // Drop the receiver: the tailer thread should detect the
+        // disconnected channel on its next read_tail call and exit.
+        drop(rx);
+
+        // Append a line so the tailer wakes up and attempts try_send,
+        // which returns Disconnected, causing the thread to break out.
+        append_raw(
+            &path,
+            r#"{"v":1,"type":"user_message","ts":"t","content":"x"}"#,
+        );
+
+        // Wait for the tailer thread to notice the disconnect. The
+        // fallback tick is 1 s (NOTIFY_FALLBACK_INTERVAL); give it a
+        // generous margin so the test is not flaky on slow CI.
+        std::thread::sleep(Duration::from_millis(2000));
+        // If the tailer leaked, there is no observable signal from the
+        // outside (no join handle), so we rely on the unit-level check
+        // in `read_tail_returns_disconnected` below for the actual
+        // assertion. This test documents the end-to-end path.
+    }
+
+    #[test]
+    fn read_tail_returns_disconnected_when_receiver_dropped() {
+        let c = make_cfg(false, None);
+        std::fs::create_dir_all(c.dir.path().join("sessions").join("dc")).unwrap();
+        let path = c.dir.path().join("sessions").join("dc").join("events.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"v":1,"type":"user_message","ts":"t","content":"x"}
+"#,
+        )
+        .unwrap();
+
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        drop(rx);
+
+        let mut offset: u64 = 0;
+        let mut carry = Vec::new();
+        let res = read_tail(&path, &mut offset, &mut carry, &tx);
+        assert!(
+            matches!(res, Err(TailErr::Disconnected)),
+            "expected Disconnected, got {res:?}"
+        );
     }
 }

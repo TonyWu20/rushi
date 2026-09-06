@@ -29,7 +29,7 @@ use ratatui::style::{Color, Modifier, Style};
 use bon::builder;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
 use std::io::{BufRead, BufWriter, Write};
 use std::os::fd::FromRawFd;
@@ -63,6 +63,63 @@ const DEFAULT_TICK_MS: u64 = 1000;
 const INITIAL_STATUS_GRACE: Duration = Duration::from_secs(10);
 /// The capability names a manifest may list.
 pub const CAPS: &[&str] = &["render", "status", "transform", "append", "notify", "frame", "commands"];
+/// Cap on the number of cached extension line-replies per slot. The
+/// render layer only displays the last `TRANSCRIPT_EVENT_CAP` events,
+/// so keeping more than a multiple of that in memory is wasted. The
+/// cache evicts its oldest entry when it reaches this cap, so an
+/// active stream (the newest entry) is never wiped. This prevents
+/// unbounded growth in long-running sessions.
+const LINES_CACHE_CAP: usize = 4096;
+
+/// Bounded event-id → lines cache with FIFO eviction. `map` gives the
+/// render hot path O(1) lookup; `order` records insertion order so an
+/// overflow evicts the oldest entry instead of wiping the cache. The
+/// newest entry is the live in-progress stream under streaming render;
+/// FIFO eviction never touches it. A re-upsert of an existing key
+/// updates the value in place and keeps its position in `order`, so
+/// streaming chunks cost one hash write and no reorder.
+#[derive(Default)]
+struct LinesCache {
+    map: HashMap<u64, Vec<ExtLine>>,
+    order: VecDeque<u64>, // oldest → newest
+}
+
+impl LinesCache {
+    fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+    /// Insert or update one entry. A new key evicts the oldest entry
+    /// at the cap; an existing key is updated in place.
+    fn upsert(&mut self, id: u64, lines: Vec<ExtLine>) {
+        if !self.map.contains_key(&id) {
+            if self.map.len() >= LINES_CACHE_CAP {
+                if let Some(old) = self.order.pop_front() {
+                    self.map.remove(&old);
+                }
+            }
+            self.order.push_back(id);
+        }
+        self.map.insert(id, lines);
+    }
+    fn get(&self, id: &u64) -> Option<&Vec<ExtLine>> {
+        self.map.get(id)
+    }
+    fn clear(&mut self) {
+        self.map.clear();
+        self.order.clear();
+    }
+    #[allow(dead_code)]
+    fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+    #[allow(dead_code)]
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+}
 
 /// One parsed and validated `ext.toml` (docs/ui-extension.md section 3).
 #[derive(Debug, Clone)]
@@ -980,8 +1037,10 @@ struct SlotShared {
     /// the host never blocks on a stuck extension.
     pub send_tx: mpsc::SyncSender<String>,
     pub send_rx: Mutex<Option<mpsc::Receiver<String>>>,
-    /// Valid `lines` replies, keyed by event id.
-    pub lines_cache: Mutex<HashMap<u64, Vec<ExtLine>>>,
+    /// Valid `lines` replies, keyed by event id. FIFO-bounded by
+    /// [`LINES_CACHE_CAP`]: overflow evicts the oldest entry so a
+    /// live in-progress stream (the newest entry) is never wiped.
+    pub lines_cache: Mutex<LinesCache>,
     /// The last valid `status` reply (G5: a bad reply keeps it).
     pub last_status: Mutex<Option<Vec<ExtLine>>>,
     /// The last valid `frame` reply (G5: a bad reply keeps it).
@@ -1065,7 +1124,7 @@ impl ExtHost {
                     stdin: Mutex::new(None),
                     send_tx,
                     send_rx: Mutex::new(Some(send_rx)),
-                    lines_cache: Mutex::new(HashMap::new()),
+                    lines_cache: Mutex::new(LinesCache::new()),
                     last_status: Mutex::new(None),
                     last_frame: Mutex::new(None),
                     last_status_reply: Mutex::new(None),
@@ -1974,7 +2033,10 @@ impl HostInner {
                 if slot.dead.load(Ordering::SeqCst) {
                     return;
                 }
-                cache.insert(id, lines.clone());
+                // Bounded FIFO eviction: when full the oldest entry is
+                // dropped. The live stream is always the newest entry,
+                // so it is never evicted by overflow.
+                cache.upsert(id, lines.clone());
                 drop(cache);
                 self.replies_version.fetch_add(1, Ordering::SeqCst);
                 let _ = self.out_tx.try_send(ExtItem::LinesCached {
