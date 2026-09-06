@@ -77,7 +77,7 @@ the linked doc.
       grid tables. Shipped in the 2026-09-02 pass. Detail:
       `docs/tui-markdown-render.md`.
 - [x] The TUI colors accept a custom scheme. Use `catppuccin
-      macchiato` as the first internal color scheme. Shipped in
+macchiato` as the first internal color scheme. Shipped in
       the 2026-09-03 pass. Detail:
       `docs/tui-color-scheme.md`.
 - [x] Truncate the tool result box overflow, never wrap it.
@@ -225,3 +225,21 @@ the linked doc.
 
 - [ ] Accept `ctrl+z` the standard keybinding that send our tui to
       background jobs in the shell.
+- [ ] The current markdown table rendering of the messages cannot correctly
+      distinguish if `|` is used as the table column marker or written as part of the
+      text or code, e.g. the closure syntax in Rust `.map(|e| ...)`/`.unwrap_or(|e| ...)`
+- [ ] Stream rendering of the model response.
+- [ ] Remove `assistant`, `user`, `tool:xxx` markers. Remove the indent of
+      messages. Wrap the user message with the same box used for tool results.
+- [ ] When in browse mode, updates from model response should not flush the
+      screen to the latest position of the conversation.
+- [x] The `@` picker respects `.gitignore` by default, but sometimes the
+      human needs to point at ignored files or directories (e.g. a
+      specific session in `@sessions`). Shipped 2026-09-06: `Ctrl+I`
+      in the picker cycles the file scope — default (hidden and
+      git-ignored excluded) → show git-ignored → also show hidden →
+      back to default on the third press. `FileScope` in
+      `bin/tui/src/picker/items.rs`, the state cycle in
+      `bin/tui/src/picker/state.rs` (P9). In a standard terminal
+      `Ctrl+I` is the same byte as `Tab` (0x09), so the picker binds
+      `Tab` to the cycle too. Detail: `docs/tui-file-picker.md`.

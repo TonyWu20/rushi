@@ -31,7 +31,72 @@ pub trait ItemSource {
     fn items(&self) -> Vec<PickerItem>;
 }
 
-/// The day-0 source: the working tree's files, honoring `.gitignore`.
+/// How much of the working tree the file source shows. Cycled with
+/// `Ctrl+I` while the picker is open (docs/tui-file-picker.md P9).
+///
+/// - `Standard` (the default): in a git repo, tracked files plus
+///   untracked-but-not-ignored files; otherwise a plain walk that
+///   skips hidden entries and build/dependency directories.
+/// - `IncludeIgnored`: also shows git-ignored files (in a git repo)
+///   or build/dependency directories (in a plain walk).
+/// - `IncludeHidden`: also shows hidden (dot) files. In a git repo
+///   the git listings already report hidden tracked and untracked
+///   files, so this step mostly widens the ignored set; in a plain
+///   walk it is the dot-entry step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FileScope {
+    #[default]
+    Standard,
+    IncludeIgnored,
+    IncludeHidden,
+}
+
+impl FileScope {
+    /// The next scope in the `Ctrl+I` cycle: standard → show
+    /// ignored → show hidden → back to standard.
+    pub fn next(&self) -> Self {
+        match self {
+            Self::Standard => Self::IncludeIgnored,
+            Self::IncludeIgnored => Self::IncludeHidden,
+            Self::IncludeHidden => Self::Standard,
+        }
+    }
+
+    /// Whether git-ignored files (or, in a plain walk, build/
+    /// dependency directories) are included.
+    pub fn includes_ignored(self) -> bool {
+        !matches!(self, Self::Standard)
+    }
+
+    /// Whether hidden (dot) entries are included.
+    pub fn includes_hidden(self) -> bool {
+        matches!(self, Self::IncludeHidden)
+    }
+
+    /// The short title tag for a non-default scope, shown in the
+    /// float title so the widened set is visible at a glance.
+    pub fn tag(self) -> Option<&'static str> {
+        match self {
+            Self::Standard => None,
+            Self::IncludeIgnored => Some("ignored shown"),
+            Self::IncludeHidden => Some("hidden shown"),
+        }
+    }
+
+    /// The flash-line description of the scope, used when the user
+    /// cycles with `Ctrl+I`.
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Standard => "scope: default (hidden and git-ignored excluded)",
+            Self::IncludeIgnored => "scope: showing git-ignored files",
+            Self::IncludeHidden => "scope: showing hidden files too",
+        }
+    }
+}
+
+/// The day-0 source: the working tree's files, honoring `.gitignore`
+/// by default. The `Ctrl+I` scope cycle (docs/tui-file-picker.md
+/// P9) widens the set past the default.
 ///
 /// Uses `git ls-files` when a repo is present, a plain walk otherwise
 /// (section 4.1 / section 7).
@@ -51,14 +116,19 @@ impl FileItemSource {
         &self.root
     }
 
-    /// Collect files under an arbitrary search root. Labels stay
-    /// relative to the base root when a file is under it (the day-0
-    /// case and `../` navigation); otherwise labels are absolute
-    /// paths, which is what path queries outside the base produce.
-    pub fn collect_in(&self, root: &std::path::Path) -> Vec<PickerItem> {
+    /// Collect files under an arbitrary search root at a given scope.
+    /// Labels stay relative to the base root when a file is under it
+    /// (the day-0 case and `../` navigation); otherwise labels are
+    /// absolute paths, which is what path queries outside the base
+    /// produce.
+    pub fn collect_in(
+        &self,
+        root: &std::path::Path,
+        scope: FileScope,
+    ) -> Vec<PickerItem> {
         let base = self.root.clone();
         if is_git_repo(root) {
-            git_ls_files(root)
+            git_ls_files(root, scope)
                 .into_iter()
                 .map(|p| {
                     let abs = root.join(&p);
@@ -66,7 +136,7 @@ impl FileItemSource {
                 })
                 .collect()
         } else {
-            walk_files(root)
+            walk_files(root, scope)
                 .into_iter()
                 .map(|abs| self.file_item(&abs, &base))
                 .collect()
@@ -89,7 +159,7 @@ impl ItemSource for FileItemSource {
     }
 
     fn items(&self) -> Vec<PickerItem> {
-        self.collect_in(&self.root)
+        self.collect_in(&self.root, FileScope::Standard)
     }
 }
 
@@ -166,11 +236,15 @@ fn is_git_repo(root: &std::path::Path) -> bool {
     }
 }
 
-/// Run `git ls-files` (tracked) and `git ls-files --others --exclude-standard`
-/// (untracked, not ignored) to build a combined list.
-fn git_ls_files(root: &std::path::Path) -> Vec<String> {
+/// Run `git ls-files` (tracked) and `git ls-files --others
+/// --exclude-standard` (untracked, not ignored) to build a combined
+/// list. At `IncludeIgnored` or `IncludeHidden` scope the
+/// `--others --ignored` set (target/, sessions/, …) is added too.
+/// A capped output keeps an arbitrary repo responsive: the same cap
+/// as the plain walk.
+fn git_ls_files(root: &std::path::Path, scope: FileScope) -> Vec<String> {
     let mut out = Vec::new();
-    // Tracked files.
+    // Tracked files (hidden tracked files included).
     if let Ok(output) = std::process::Command::new("git")
         .arg("ls-files")
         .current_dir(root)
@@ -190,25 +264,56 @@ fn git_ls_files(root: &std::path::Path) -> Vec<String> {
             out.extend(text.lines().filter(|l| !l.is_empty()).map(|l| l.to_string()));
         }
     }
+    // The cycled-in scope: untracked files that ARE git-ignored.
+    if scope.includes_ignored() {
+        if let Ok(output) = std::process::Command::new("git")
+            .args([
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+            ])
+            .current_dir(root)
+            .output()
+        {
+            if let Ok(text) = String::from_utf8(output.stdout) {
+                out.extend(
+                    text.lines()
+                        .filter(|l| !l.is_empty())
+                        .map(|l| l.to_string()),
+                );
+            }
+        }
+    }
     out.sort();
     out.dedup();
+    out.truncate(MAX_WALK_FILES);
     out
 }
 
-/// Plain directory walk (non-git repos). Skips hidden directories and
-/// common build/dependency directories. Capped so an arbitrary root
-/// (e.g. `/` from an absolute path query) stays responsive.
+/// Plain directory walk (non-git repos). The scope controls what is
+/// skipped: `Standard` skips hidden directories/files and common
+/// build/dependency directories; `IncludeIgnored` adds the
+/// build/dependency directories; `IncludeHidden` also walks dot
+/// entries (the `.git` internals are never enumerated). Capped so an
+/// arbitrary root (e.g. `/` from an absolute path query) stays
+/// responsive.
 const MAX_WALK_DEPTH: usize = 12;
 const MAX_WALK_FILES: usize = 20_000;
 
-fn walk_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+fn walk_files(root: &std::path::Path, scope: FileScope) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
-    walk(root, 0, &mut out);
+    walk(root, 0, scope, &mut out);
     out.sort();
     out
 }
 
-fn walk(dir: &std::path::Path, depth: usize, out: &mut Vec<std::path::PathBuf>) {
+fn walk(
+    dir: &std::path::Path,
+    depth: usize,
+    scope: FileScope,
+    out: &mut Vec<std::path::PathBuf>,
+) {
     if depth >= MAX_WALK_DEPTH || out.len() >= MAX_WALK_FILES {
         return;
     }
@@ -219,12 +324,21 @@ fn walk(dir: &std::path::Path, depth: usize, out: &mut Vec<std::path::PathBuf>) 
         let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        // Skip hidden dirs and common build/dependency dirs.
-        if name.starts_with('.') || name == "target" || name == "node_modules" {
+        // The `.git` internals are never enumerated, at any scope.
+        if name == ".git" {
+            continue;
+        }
+        // Hidden entries are skipped unless the scope includes them.
+        if !scope.includes_hidden() && name.starts_with('.') {
+            continue;
+        }
+        // Build/dependency dirs are the non-git "ignored" set:
+        // skipped unless the scope includes ignored.
+        if !scope.includes_ignored() && (name == "target" || name == "node_modules") {
             continue;
         }
         if path.is_dir() {
-            walk(&path, depth + 1, out);
+            walk(&path, depth + 1, scope, out);
         } else if out.len() < MAX_WALK_FILES {
             out.push(path);
         }
@@ -236,6 +350,24 @@ fn walk(dir: &std::path::Path, depth: usize, out: &mut Vec<std::path::PathBuf>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fixture root for the plain-walk path (P8): a writable
+    /// directory with no `.git` in any ancestor. `std::env::temp_dir()`
+    /// is clean on a normal host, but some sandboxes carry a stray
+    /// `.git` into /tmp; the home dir is the fallback.
+    fn non_git_fixture(name: &str) -> Option<std::path::PathBuf> {
+        let mut bases = vec![std::env::temp_dir()];
+        if let Ok(home) = std::env::var("HOME") {
+            bases.push(std::path::PathBuf::from(home));
+        }
+        for base in bases {
+            let dir = base.join(name);
+            if std::fs::create_dir_all(&dir).is_ok() && !is_git_repo(&dir) {
+                return Some(dir);
+            }
+        }
+        None
+    }
 
     #[test]
     fn file_item_source_is_a_git_repo() {
@@ -253,7 +385,7 @@ mod tests {
             .map(|s| s.success())
             .unwrap_or(false);
         let src = FileItemSource::new(tmp.clone());
-        let items = src.collect_in(src.base());
+        let items = src.collect_in(src.base(), FileScope::Standard);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"src/main.rs"), "src/main.rs should be found");
         assert!(labels.contains(&"README.md"), "README.md should be found");
@@ -278,18 +410,25 @@ mod tests {
 
     #[test]
     fn file_item_source_non_git_walks() {
-        // Use a temp dir that is not a git repo.
-        let tmp = std::env::temp_dir().join("picker_test_walk");
-        let _ = std::fs::create_dir_all(&tmp);
-        let _ = std::fs::write(tmp.join("hello.txt"), "hello");
-        let _ = std::fs::write(tmp.join("world.rs"), "fn main() {}");
-        // Create a .git dir to make it NOT a git repo? No, we want the
-        // walk path. Remove .git if present.
-        let git_dir = tmp.join(".git");
-        let _ = std::fs::remove_dir_all(&git_dir);
+        // Use a fixture dir with no `.git` in any ancestor, so the
+        // plain walk path is taken (P8).
+        let tmp = match non_git_fixture("picker_test_walk") {
+            Some(t) => t,
+            None => {
+                eprintln!(
+                    "skipped: every candidate base has a .git ancestor; \
+                     cannot exercise the plain-walk path"
+                );
+                return;
+            }
+        };
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("hello.txt"), "hello").unwrap();
+        std::fs::write(tmp.join("world.rs"), "fn main() {}").unwrap();
 
         let src = FileItemSource::new(tmp.clone());
-        let items = src.collect_in(src.base());
+        let items = src.collect_in(src.base(), FileScope::Standard);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"hello.txt"));
         assert!(labels.contains(&"world.rs"));
@@ -353,26 +492,169 @@ mod tests {
 
     #[test]
     fn collect_in_labels_files_outside_base_as_absolute() {
-        let tmp = std::env::temp_dir().join("picker_test_reroot");
+        let tmp = match non_git_fixture("picker_test_reroot") {
+            Some(t) => t,
+            None => {
+                eprintln!(
+                    "skipped: every candidate base has a .git ancestor; \
+                     cannot exercise the plain-walk path"
+                );
+                return;
+            }
+        };
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("b")).unwrap();
         std::fs::write(tmp.join("b/x.txt"), "x").unwrap();
         // A source based at `a` listing files under `b`: the file is
         // not under the base, so its label is the absolute path.
         let src = FileItemSource::new(tmp.join("a"));
-        let items = src.collect_in(&tmp.join("b"));
+        let items = src.collect_in(&tmp.join("b"), FileScope::Standard);
         let labels: Vec<String> = items.iter().map(|i| i.label.clone()).collect();
         assert!(
             labels.contains(&tmp.join("b/x.txt").to_string_lossy().into_owned()),
             "sibling file should be labeled absolute: {labels:?}"
         );
         // Files under the base keep relative labels.
-        let items = src.collect_in(src.base());
+        let items = src.collect_in(src.base(), FileScope::Standard);
         let labels: Vec<String> = items.iter().map(|i| i.label.clone()).collect();
         assert!(
             labels.iter().all(|l| !l.starts_with('/')),
             "files under the base stay relative: {labels:?}"
         );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn file_scope_cycles_standard_to_ignored_to_hidden() {
+        let s = FileScope::Standard;
+        assert_eq!(s.next(), FileScope::IncludeIgnored);
+        assert_eq!(FileScope::IncludeIgnored.next(), FileScope::IncludeHidden);
+        assert_eq!(FileScope::IncludeHidden.next(), FileScope::Standard);
+        assert_eq!(FileScope::default(), FileScope::Standard);
+    }
+
+    #[test]
+    fn walk_scope_controls_hidden_and_build_dirs() {
+        // Drives the walk directly (no git detection), so the scope
+        // semantics are hermetic no matter what `.git` entries the
+        // environment carries.
+        let tmp = std::env::temp_dir().join("picker_test_scope_walk");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("visible")).unwrap();
+        std::fs::write(tmp.join("visible/main.txt"), "x").unwrap();
+        std::fs::create_dir_all(tmp.join(".hidden_dir")).unwrap();
+        std::fs::write(tmp.join(".hidden_dir/secret.txt"), "x").unwrap();
+        std::fs::write(tmp.join(".env"), "x").unwrap();
+        std::fs::create_dir_all(tmp.join("target")).unwrap();
+        std::fs::write(tmp.join("target/out.bin"), "x").unwrap();
+
+        let names = |scope: FileScope| -> Vec<String> {
+            walk_files(&tmp, scope)
+                .into_iter()
+                .map(|p| p.strip_prefix(&tmp).unwrap().to_string_lossy().into_owned())
+                .collect()
+        };
+
+        let standard = names(FileScope::Standard);
+        assert!(standard.contains(&"visible/main.txt".to_string()));
+        assert!(
+            !standard.iter().any(|l| l.starts_with('.')),
+            "standard skips dot entries: {standard:?}"
+        );
+        assert!(
+            !standard.iter().any(|l| l.starts_with("target/")),
+            "standard skips build dirs: {standard:?}"
+        );
+
+        let ignored = names(FileScope::IncludeIgnored);
+        assert!(
+            ignored.iter().any(|l| l.starts_with("target/")),
+            "IncludeIgnored adds build dirs: {ignored:?}"
+        );
+        assert!(
+            !ignored.iter().any(|l| l.starts_with('.')),
+            "IncludeIgnored still skips dot entries: {ignored:?}"
+        );
+
+        let all = names(FileScope::IncludeHidden);
+        assert!(
+            all.iter().any(|l| l == ".env"),
+            "IncludeHidden adds dot files: {all:?}"
+        );
+        assert!(
+            all.iter().any(|l| l.starts_with(".hidden_dir/")),
+            "IncludeHidden adds dot dirs: {all:?}"
+        );
+        assert!(
+            all.iter().any(|l| l.starts_with("target/")),
+            "IncludeHidden keeps the build dirs: {all:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn git_scope_includes_ignored_and_hidden_files() {
+        // Self-contained git repo with an ignored dir (the sessions/
+        // case: the user wants `@sessions` to reach session files).
+        let tmp = std::env::temp_dir().join("picker_test_scope_git");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::create_dir_all(tmp.join("src")).unwrap();
+        std::fs::write(tmp.join("src/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(tmp.join(".gitignore"), "ignored/\n").unwrap();
+        let git_ok = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&tmp)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !git_ok {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return;
+        }
+        std::fs::create_dir_all(tmp.join("ignored")).unwrap();
+        std::fs::write(tmp.join("ignored/session.md"), "s\n").unwrap();
+        std::fs::create_dir_all(tmp.join(".hid")).unwrap();
+        std::fs::write(tmp.join(".hid/notes.md"), "n\n").unwrap();
+        let src = FileItemSource::new(tmp.clone());
+        let base = src.base();
+
+        let standard: Vec<String> = src
+            .collect_in(base, FileScope::Standard)
+            .into_iter()
+            .map(|i| i.label)
+            .collect();
+        assert!(standard.contains(&"src/main.rs".to_string()));
+        assert!(
+            !standard.iter().any(|l| l.starts_with("ignored/")),
+            "standard hides git-ignored files: {standard:?}"
+        );
+
+        let ignored: Vec<String> = src
+            .collect_in(base, FileScope::IncludeIgnored)
+            .into_iter()
+            .map(|i| i.label)
+            .collect();
+        assert!(
+            ignored.iter().any(|l| l.starts_with("ignored/")),
+            "IncludeIgnored shows git-ignored files: {ignored:?}"
+        );
+
+        let all: Vec<String> = src
+            .collect_in(base, FileScope::IncludeHidden)
+            .into_iter()
+            .map(|i| i.label)
+            .collect();
+        assert!(
+            all.iter().any(|l| l.starts_with(".hid/")),
+            "IncludeHidden shows hidden untracked files: {all:?}"
+        );
+        assert!(
+            all.iter().any(|l| l.starts_with("ignored/")),
+            "IncludeHidden keeps the ignored set: {all:?}"
+        );
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

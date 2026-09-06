@@ -61,13 +61,21 @@ pub fn render_picker<'frame>(
     let border_style = Style::default().fg(accent);
     let n = snapshot.items.len();
     let pending = if snapshot.settled { "" } else { " ·" };
+    // The cycled file scope (docs/tui-file-picker.md P9) tags the
+    // title so the widened set is visible at a glance.
+    let scope_tag = state
+        .scope
+        .tag()
+        .map(|t| format!(" · {t}"))
+        .unwrap_or_default();
     let title = format!(
-        "files ({}) — @ {} — {} match{}{}",
+        "files ({}) — @ {} — {} match{}{}{}",
         layout.orientation.label(),
         snapshot.query,
         n,
         if n == 1 { "" } else { "es" },
-        pending
+        pending,
+        scope_tag
     );
     let block = Block::bordered()
         .border_type(BorderType::Rounded)

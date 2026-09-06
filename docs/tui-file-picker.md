@@ -4,7 +4,15 @@ Status: Implemented 2026-09-03 (day-0 scope). The request lives in
 `docs/tui_feature_requests_from_human.md` (the 2026-09-08 item).
 Library research lives in `docs/tui-file-picker-research.md`.
 Sections 4 to 8 are the design and the build plan. Section 6 names
-the open decision for the human.
+the open decision for the human. The `Ctrl+I` file-scope cycle
+(section 4.1, P9) landed 2026-09-06: the picker starts with the
+default scope (hidden and git-ignored files excluded) and each
+`Ctrl+I` press cycles it wider — show git-ignored, then also show
+hidden — until a third press returns to the default. In a standard
+terminal `Ctrl+I` and `Tab` are the same key (both send byte 0x09,
+which crossterm parses as `KeyCode::Tab`), so the picker binds `Tab`
+to the cycle too; the `Ctrl+I` mapping stays for terminals that
+report it distinctly (e.g. the kitty keyboard protocol).
 
 ## 1. Request
 
@@ -69,8 +77,22 @@ parts. Each part has one job.
   source lists files. A later symbol source lists symbols. The trait
   is the extension point for new sources.
 - `FileItemSource`: the first `ItemSource`. It walks the working tree
-  and honors `.gitignore`. It uses `git ls-files` when a repo is
-  present, and a plain walk otherwise.
+  and honors `.gitignore` by default. It uses `git ls-files` when a
+  repo is present, and a plain walk otherwise.
+- `FileScope` (section P9): how much of the tree the source shows.
+  Three values, cycled by `Ctrl+I` while the picker is open — in a
+  standard terminal `Tab` is the same key (both send byte 0x09, which
+  crossterm parses as `KeyCode::Tab`), so `Tab` cycles the scope too:
+  `Standard` (the default — in a git repo: tracked plus untracked,
+  not-ignored files; in a plain walk: everything except dot entries
+  and build/dependency directories), `IncludeIgnored` (also the
+  git-ignored set — in a plain walk, the build/dependency
+  directories), and `IncludeHidden` (also the dot entries). In a git
+  repo the git listings already report hidden tracked and untracked
+  files, so `IncludeHidden` only adds what the ignored step did not
+  already cover. The scope lives on the picker state, resets to
+  `Standard` on open and close, and a cycled press makes the app
+  re-enumerate the current search root and re-rank the live query.
 
 ### 4.2 Match (`picker/match.rs`)
 
@@ -87,12 +109,16 @@ parts. Each part has one job.
 ### 4.3 State (`picker/state.rs`)
 
 - `PickerState`: a pure state machine. It holds the query string,
-  the open flag, the cursor index, and the visible window.
+  the open flag, the cursor index, the visible window, and the file
+  scope (P9).
 - It is crossterm-free. Tests drive it directly, like `app.rs` and
   `browse.rs` do today.
 - Keys: type to edit the query, `Ctrl+J` / `Ctrl+K` or arrows to
   move, `PgUp` / `PgDn` to page, `Home` / `End` to jump, `Enter` to
-  commit, `Esc` to close.
+  commit, `Esc` to close, `Ctrl+U` / `Ctrl+D` to scroll the preview
+  pane, `Ctrl+P` to toggle the preview pane, and `Ctrl+I` / `Tab` to
+  cycle the file scope (P9; in a standard terminal the two are the
+  same key — byte 0x09).
 
 ### 4.4 Body render and preview (`picker/render.rs`,
 `picker/preview.rs`)
@@ -142,6 +168,19 @@ a symbol picker share all four.
   plain `j`/`k` free for typing into the query.
 - The picker only opens on a freshly typed `@`; a stale `@` left in
   the draft after a previous pick or dismiss does not re-trigger it.
+- `Ctrl+I` cycles the file scope while the picker is open
+  (P9): default (hidden and git-ignored files excluded) → show
+  git-ignored → also show hidden → back to default. Each press
+  re-enumerates the current search root at the new scope and
+  re-ranks the live query. A flash line names the new mode, and the
+  float title carries a scope tag while a widened scope is active.
+  The scope resets to the default every time the picker opens or
+  closes. In a standard terminal `Ctrl+I` and `Tab` are the same
+  key (both send byte 0x09, which crossterm parses as
+  `KeyCode::Tab`), so the binding is `Tab` — pressing the physical
+  `Tab` key (i.e. `Ctrl+I`) cycles the scope. The `Ctrl+I` mapping
+  (`KeyCode::Char('i')` + `CONTROL`) stays for terminals that report
+  it distinctly (e.g. the kitty keyboard protocol).
 
 ## 6. Display decision (settled: floating)
 
@@ -320,6 +359,17 @@ P7. orientation: given a wide float (at least WIDE_MIN columns),
 P8. git-source: given the working directory is inside a git repository,
     observe the file list come from `git ls-files`; given a non-repo
     directory, observe a plain directory walk.
+P9. scope-cycle: given the picker is open at the default scope,
+    observe the first scope-cycle press advance the scope to "show
+    git-ignored" and the item list re-enumerated with the ignored
+    files included; given a second press, observe the scope advance
+    to "also show hidden"; given a third press, observe the scope
+    return to the default (hidden and git-ignored excluded). The
+    cycle is driven by `Ctrl+I` — in a standard terminal the same
+    press arrives as `Tab` (byte 0x09, parsed by crossterm as
+    `KeyCode::Tab`), so both `Ctrl+I` and `Tab` drive it. Given the
+    picker closed, observe a scope-cycle press do nothing. Observe
+    the scope reset to the default on every picker open.
 
 ## Verification
 
@@ -336,6 +386,7 @@ and passes. `open` names the blocker and what unblocks it.
 | P6 | preview-cutoff | `preview_cutoff_hides_pane` in `bin/tui/src/picker/render.rs`, `toggle_preview_flips_when_above_cutoff` in `bin/tui/src/picker/state.rs` | proven |
 | P7 | orientation | `wide_layout_splits_side_by_side`, `narrow_layout_stacks_vertically`, `too_narrow_drops_preview`, `orientation_flips_on_resize` in `bin/tui/src/float.rs` | proven |
 | P8 | git-source | `file_item_source_is_a_git_repo`, `file_item_source_non_git_walks` in `bin/tui/src/picker/items.rs` | proven |
+| P9 | scope-cycle | `ctrl_i_cycles_the_scope_and_returns_recollect`, `tab_cycles_the_scope_like_ctrl_i`, `scope_starts_standard_and_resets_on_open_and_close`, `ctrl_i_does_nothing_when_closed`, `tab_does_nothing_when_closed` in `bin/tui/src/picker/state.rs`; `file_scope_cycles_standard_to_ignored_to_hidden`, `walk_scope_controls_hidden_and_build_dirs`, `git_scope_includes_ignored_and_hidden_files` in `bin/tui/src/picker/items.rs`; `ctrl_i_recollects_picker_items_under_new_scope`, `tab_recollects_picker_items_under_new_scope`, `ctrl_i_surfaces_git_ignored_session_files` in `bin/tui/src/app.rs`; `tab_maps_to_key_tab`, `ctrl_i_maps_to_key_ctrl_i` in `bin/tui/src/main.rs` | proven |
 
 ## Gate
 
