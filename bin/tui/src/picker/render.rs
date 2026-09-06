@@ -119,6 +119,37 @@ pub fn render_picker<'frame>(
     *cursor = Some((caret.min(max_x), layout.input.y));
 }
 
+/// Shorten a result-list label to fit `max_chars` characters (P10 in
+/// `docs/tui-file-picker.md`).
+///
+/// For a path label that has directory levels, the leading levels are
+/// collapsed into a `...` prefix so the tail of the path stays
+/// visible (`.../a/b/src/app.rs`): the largest suffix of path
+/// components that fits with the `.../` prefix is kept. A label that
+/// fits is returned unchanged. A label without directory levels, or
+/// one still too wide with only `.../` plus the file name, falls
+/// back to the plain head truncation with a trailing `…`.
+pub fn abbreviate_path(label: &str, max_chars: usize) -> String {
+    if label.chars().count() <= max_chars {
+        return label.to_string();
+    }
+    // Empty components (a leading `/` on absolute labels) carry no
+    // directory, so they never count as a level to collapse.
+    let comps: Vec<&str> = label.split('/').filter(|c| !c.is_empty()).collect();
+    if comps.len() >= 2 {
+        // Growing suffixes: the first (smallest start index) that
+        // fits with the `.../` prefix is the largest tail that fits.
+        for start in 0..comps.len() {
+            let candidate = format!(".../{}", comps[start..].join("/"));
+            if candidate.chars().count() <= max_chars {
+                return candidate;
+            }
+        }
+    }
+    let head: String = label.chars().take(max_chars.saturating_sub(1)).collect();
+    format!("{head}…")
+}
+
 fn render_list(
     f: &mut Frame,
     state: &PickerState,
@@ -151,12 +182,12 @@ fn render_list(
             } else {
                 Style::default().fg(palette.color(crate::color::Role::PlainText))
             };
-            let truncated = if item.label.chars().count() > max_chars {
-                let head: String = item.label.chars().take(max_chars.saturating_sub(1)).collect();
-                format!("{head}…")
-            } else {
-                item.label.clone()
-            };
+            // P10: when the path label is too wide for the list
+            // column, collapse the leading directory levels into a
+            // `...` prefix so the tail of the path stays visible
+            // (docs/tui-file-picker.md P10). The budget follows the
+            // column, which differs with the preview pane on or off.
+            let truncated = abbreviate_path(&item.label, max_chars);
             Line::from(vec![
                 Span::styled(marker, marker_style),
                 Span::styled(truncated, label_style),
@@ -357,5 +388,147 @@ mod tests {
         assert!(joined.contains("src/file_000"), "the top result shows");
         assert!(joined.contains("results"), "the list pane title shows");
         assert!(cursor.is_some());
+    }
+
+    // ── P10: long-path abbreviation (`abbreviate_path`) ─────────────
+
+    #[test]
+    fn abbrev_keeps_fitting_labels_unchanged() {
+        assert_eq!(abbreviate_path("a/b/src/app.rs", 14), "a/b/src/app.rs", "an exact fit is unchanged");
+        assert_eq!(abbreviate_path("a/b/src/app.rs", 20), "a/b/src/app.rs");
+        assert_eq!(abbreviate_path("file.rs", 8), "file.rs");
+    }
+
+    #[test]
+    fn abbrev_collapses_leading_parent_levels() {
+        // The P10 example: the largest tail that fits the column is
+        // kept, the dropped parent levels become a `...` prefix.
+        assert_eq!(
+            abbreviate_path("x/y/z/a/b/src/app.rs", 18),
+            ".../a/b/src/app.rs"
+        );
+        // A 74-char path at the 47-char preview-on column budget
+        // collapses the leading levels; the tail stays visible.
+        let long = "very/long/path/segment/that/goes/way/beyond/any/sane/terminal/width/app.rs";
+        assert_eq!(
+            abbreviate_path(long, 47),
+            ".../way/beyond/any/sane/terminal/width/app.rs"
+        );
+        // A tighter column collapses more levels.
+        assert_eq!(
+            abbreviate_path(long, 30),
+            ".../sane/terminal/width/app.rs"
+        );
+    }
+
+    #[test]
+    fn abbrev_handles_absolute_labels() {
+        // A leading `/` is not a directory level: the result must not
+        // gain a doubled `.../` prefix.
+        assert_eq!(
+            abbreviate_path("/home/user/proj/src/app.rs", 19),
+            ".../proj/src/app.rs"
+        );
+    }
+
+    #[test]
+    fn abbrev_falls_back_to_head_truncation() {
+        // No directory levels: plain head truncation with a trailing
+        // ellipsis, as before P10.
+        assert_eq!(
+            abbreviate_path("averyveryverylongfilename.txt", 10),
+            "averyvery…"
+        );
+        // Directory levels exist, but even `.../` plus the file name
+        // is wider than the budget: the head truncation still wins.
+        assert_eq!(
+            abbreviate_path("ab/veryverylongfilename.txt", 10),
+            "ab/veryve…"
+        );
+    }
+
+    #[test]
+    fn render_picker_abbreviates_long_paths_in_narrow_list_column() {
+        let palette = crate::color::Palette::builtin(crate::color::Level::detect());
+        let long = "very/long/path/segment/that/goes/way/beyond/any/sane/terminal/width/app.rs";
+        let snap = Snapshot {
+            items: vec![
+                PickerItem {
+                    label: long.to_string(),
+                    value: long.to_string(),
+                    payload: "/repo/app.rs".into(),
+                },
+                PickerItem {
+                    label: "src/file_001.rs".into(),
+                    value: "src/file_001.rs".into(),
+                    payload: "/repo/src/file_001.rs".into(),
+                },
+            ],
+            query: "app".into(),
+            settled: true,
+        };
+        let previewer = FilePreviewer::new(50);
+
+        // Preview pane ON: the list column is 51 wide, a 47-char
+        // budget. The 74-char path collapses its leading levels.
+        let layout = compute_float_layout(Rect::new(0, 0, 160, 40), true);
+        let mut state = PickerState::new();
+        state.open("app", 5);
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 40)).expect("backend");
+        let mut cursor = None;
+        let _ = term.draw(|f| {
+            render_picker()
+                .f(f)
+                .state(&mut state)
+                .snapshot(&snap)
+                .layout(&layout)
+                .previewer(&previewer)
+                .hints("esc close")
+                .palette(&palette)
+                .cursor(&mut cursor)
+                .call();
+        });
+        let joined: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            joined.contains(".../way/beyond/any/sane/terminal/width/app.rs"),
+            "with the preview pane on the narrow list column collapses the leading levels: {joined:?}"
+        );
+
+        // Preview pane OFF: the list column is 94 wide, a 90-char
+        // budget. The full 74-char path fits and shows unabbreviated.
+        let layout = compute_float_layout(Rect::new(0, 0, 160, 40), false);
+        let mut state = PickerState::new();
+        state.open("app", 5);
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 40)).expect("backend");
+        let mut cursor = None;
+        let _ = term.draw(|f| {
+            render_picker()
+                .f(f)
+                .state(&mut state)
+                .snapshot(&snap)
+                .layout(&layout)
+                .previewer(&previewer)
+                .hints("esc close")
+                .palette(&palette)
+                .cursor(&mut cursor)
+                .call();
+        });
+        let joined: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            joined.contains(long),
+            "with the preview pane off the full path fits the column and shows unabbreviated: {joined:?}"
+        );
     }
 }

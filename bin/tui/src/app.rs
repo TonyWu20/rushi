@@ -3833,7 +3833,7 @@ mod tests {
             "the tailer must not grow the Vec past the cap"
         );
         assert_eq!(
-            app.events()[0].get_str("content").as_deref(),
+            app.events()[0].get_str("content"),
             Some("y"),
             "the oldest (x) lines drop first"
         );

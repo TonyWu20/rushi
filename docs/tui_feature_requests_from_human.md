@@ -243,3 +243,12 @@ macchiato` as the first internal color scheme. Shipped in
       `bin/tui/src/picker/state.rs` (P9). In a standard terminal
       `Ctrl+I` is the same byte as `Tab` (0x09), so the picker binds
       `Tab` to the cycle too. Detail: `docs/tui-file-picker.md`.
+- [x] When a file path in the `@` picker result list is too long to
+      fit the column, trim the leading parent directory levels and
+      replace them with `...` so the tail of the path stays visible
+      (e.g. `.../a/b/src/app.rs`), with the preview pane on or off.
+      Shipped 2026-09-06: `abbreviate_path` in
+      `bin/tui/src/picker/render.rs` — the list column keeps the
+      largest suffix of the path that fits the column budget, and
+      the budget follows the column width, which differs with the
+      preview pane on or off (P10 in `docs/tui-file-picker.md`).
