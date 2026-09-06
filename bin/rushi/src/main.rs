@@ -16,6 +16,7 @@ mod run_loop;
 mod signals;
 mod stage_runner;
 mod step;
+mod stream_channel;
 mod setup;
 
 use clap::{Parser, Subcommand};

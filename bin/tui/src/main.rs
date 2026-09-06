@@ -523,7 +523,16 @@ fn main() {
         // sat in the queue and the UI looked hung. Draining keeps
         // keys responsive (docs/tui_feature_requests_from_human.md).
         let mut evs: Vec<cevent::Event> = Vec::new();
-        match cevent::poll(Duration::from_millis(100)) {
+        // While a response is streaming, tick at 16 ms (about 60 FPS)
+        // so the paced stream release renders at a smooth frame rate
+        // (docs/tui-streaming-response.md section 6.5); the idle 100 ms
+        // wait is enough otherwise.
+        let poll_to = if app.stream_live() {
+            Duration::from_millis(16)
+        } else {
+            Duration::from_millis(100)
+        };
+        match cevent::poll(poll_to) {
             Ok(true) => {
                 // Read pending events until the queue is empty.
                 // Use a 1 ms poll, not 0: with crossterm's
@@ -1113,7 +1122,20 @@ fn main() {
             if let Ok(dir) = port.session_dir(&sid) {
                 app.refresh_goal(&dir);
             }
+            // The live model stream channel (docs/tui-streaming-response.md
+            // section 6.2): poll the loop-owned file only while the loop
+            // runs; a dead loop settles the live block (no stale block,
+            // P5).
+            match port.model_stream_path(&sid) {
+                Ok(path) if app.loop_running(&sid) => app.refresh_stream(&path),
+                _ => app.clear_stream(),
+            }
         }
+        // Release the queued stream content at the per-frame pace
+        // before the draw (docs/tui-streaming-response.md section
+        // 6.5): a few characters per frame instead of whole deltas,
+        // so the text advances at a smooth frame rate.
+        app.pump_stream_pacing();
         let width = term.size().map(|s| s.width as usize).unwrap_or(80);
         if width != last_width {
             // The re-request width is the transform budget: the

@@ -4,7 +4,9 @@
 //! The stage CLIs (matched to the existing binaries):
 //! - `claim --session <dir>`
 //! - `assemble --session <dir> --config <cfg> [--inject-follow]`
-//! - `model --config <cfg>` (the request JSON on stdin)
+//! - `model --config <cfg> [--delta-file <path>]` (the request JSON on
+//!   stdin; the optional stream channel is docs/tui-streaming-response.md
+//!   section 4.1)
 //! - `parse --config <cfg>` (the model output JSON on stdin)
 //! - `route --tools <dir> [--cwd <dir>] [--tool-log <path>]
 //!   [--tool-result-max-chars N]` (tool_call events on stdin, one
@@ -16,7 +18,7 @@
 //! signal path can cancel it (docs/phase-2-plan.md 4.7).
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -210,7 +212,11 @@ impl StageRunner for SubprocessRunner {
         Ok(RequestFile { json: v })
     }
 
-    fn model(&self, request: &RequestFile) -> Result<ModelOutput, StageError> {
+    fn model(
+        &self,
+        request: &RequestFile,
+        delta_file: Option<&Path>,
+    ) -> Result<ModelOutput, StageError> {
         let stdin_text = serde_json::to_string(&request.json)
             .map_err(|e| StageError::Other {
                 name: "model",
@@ -218,6 +224,12 @@ impl StageRunner for SubprocessRunner {
             })?;
         let mut cmd = Command::new(&self.model_bin);
         cmd.arg("--config").arg(&self.config_path);
+        // The stream channel (docs/tui-streaming-response.md section 5.2):
+        // the loop owns the file; the model truncates it at start and
+        // appends one JSON line per SSE delta. Omitted when `None`.
+        if let Some(p) = delta_file {
+            cmd.arg("--delta-file").arg(p);
+        }
         let v = run_json(&mut cmd, &stdin_text, "model")?;
         Ok(ModelOutput { json: v })
     }

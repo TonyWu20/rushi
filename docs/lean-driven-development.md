@@ -187,3 +187,42 @@ at the end: `No behavioral properties; design discussion only.`
 - `coding-conventions.md` — the standing code rules. The `bon`
   builder rule and the type-system guarantees are part of the "kernel"
   that re-checks every proof step.
+
+## 8. Real Lean backstop
+
+This repo has a real Lean 4 kernel check, not just the adapted
+workflow above. The Lean kernel re-checks the invariants of every
+formal spec under `lean/`.
+
+- **The Lean specs.**
+  - `lean/RushiSpec.lean` mirrors the resolver in
+    `bin/rushi/src/setup.rs` (`classify`, `step`, `resolve`) and
+    states invariants as theorems.
+  - `lean/TuiStreamSpec.lean` is a forward spec for the TUI feature
+    request "Stream rendering of the model response"
+    (`docs/tui_feature_requests_from_human.md`). It models the
+    streaming renderer state machine and proves its invariants.
+  Both use core Lean only (no Mathlib), so the build is hermetic
+  and needs no network.
+- **The devShell.** `flake.nix` defines `devShells.lean`
+  (Lean 4.30.0 + Z3). Enter it with
+  `nix develop .#lean` from the repo root.
+- **The gate.** `scripts/lean-gate.sh` runs the Lean compiler over
+  every spec in `lean/`. Exit 0 = every proof re-checked by the
+  kernel. It is an optional backstop, not part of the main gate
+  (`scripts/verify-specs.sh`), matching the stance in
+  `docs/harness-distribution.md`.
+- **Pinned toolchain.** `lean/lean-toolchain` pins
+  `leanprover/lean4:v4.30.0`, matching the flake's `pkgs.lean4`.
+  The Lean project uses core Lean only (no Mathlib), so the build
+  is hermetic and needs no network.
+
+Running the backstop:
+
+```bash
+scripts/lean-gate.sh
+# or, step by step:
+nix develop .#lean
+cd lean && lean RushiSpec.lean TuiStreamSpec.lean
+```
+

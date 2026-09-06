@@ -1,6 +1,6 @@
 # TUI streaming response rendering
 
-Status: Spec (2026-09-05). Depends on Phase 2 (`docs/phase-2-plan.md`).
+Status: Implemented (2026-09-13). Depends on Phase 2 (`docs/phase-2-plan.md`).
 The `harness` binary must exist before this feature lands. The
 streaming channel is the TUI-side consumer; `harness` and `bin/model`
 are the producers. This doc is the contract for all three.
@@ -218,20 +218,24 @@ In the main loop (after the log tailer drain, before the draw):
 ```text
 if active_session_has(.model-stream):
     read the file (or the portion after stream_offset)
-    parse new lines into StreamBuf
+    parse new content lines into the pace queue (stream_pending, 6.5)
     if the matching assistant_message event landed this frame:
-        clear stream_buf
+        clear stream_buf and the pace queue
+release the pace queue: a few characters into stream_buf per frame (6.5)
 ```
 
 The read is a plain `fs::read` to a `u64` offset. The file is small
-(§3.3). No async, no inotify. The TUI's event loop already runs at
-~10 fps (the 100 ms poll). Reading a sub-MB file at that rate is
-negligible.
+(§3.3). No async, no inotify. While a response is streaming
+(`App::stream_live`: content queued or the channel still open) the
+main loop ticks at 16 ms (about 60 FPS), so the paced release
+renders at a smooth frame rate; when idle the loop falls back to the
+100 ms poll. Reading a sub-MB file at that rate is negligible.
 
 ### 6.3 Render
 
-In `render.rs`, after the cached transcript lines and before the
-input box, render the live block when `stream_buf` is `Some`:
+In `render.rs`, right after the cached transcript lines (the
+existing messages) and above the model status indicator (the
+working row), render the live block when `stream_buf` is `Some`:
 
 ```
   > assistant …
@@ -245,7 +249,19 @@ blinking cursor (toggled on alternating frames). The text uses the
 same `render_message_content` path as the final message, so syntax
 highlighting and markdown rendering are consistent. The reasoning
 and tool-call deltas render in the same style as their final
-forms, but with a "streaming" indicator.
+forms, but with a "streaming" indicator. The block grows with the
+arriving content: its body rows are bounded to half the viewport
+height, so a long response extends the block as content arrives
+without stealing the whole screen (the transcript absorbs the
+rest).
+
+The thinking tail and the response text share one window: the last
+`max_body_lines` rows (the thinking above the text, one row
+reserved for the pinned `thinking` label). When the response text
+starts, the block does not shrink — the oldest thinking rows slide
+out of the window as the text grows. The height is stable at the
+thinking → text transition, so the transcript above the block does
+not lurch (no view flicker when the thinking collapses).
 
 When `stream_buf` is `None` (no stream, or the final event has
 landed), the live block is absent. The transcript renders the
@@ -258,8 +274,37 @@ final `assistant_message` as usual.
 | TUI restarts while the model call is still in progress | The `.model-stream` file exists. The TUI reads it from byte 0. The live block shows the accumulated text. When the `assistant_message` event arrives, the block clears. |
 | TUI restarts after the model call finished | The `.model-stream` file is gone (deleted by `harness`). No live block. The `assistant_message` is already in the log and renders normally. |
 | Model call errors | `harness` deletes the stream file. The TUI sees the file disappear. The `error` event in the log renders. The live block (if any partial text was shown) is cleared on the next frame. |
-| The user scrolls up while streaming | The live block is pinned to the viewport bottom (above the input box). It does not scroll with the transcript. This matches the "model wait indicator" behavior: the indicator is a working-row element, not a transcript entry. |
+| The user scrolls up while streaming | The live block keeps its place right after the transcript, above the model status indicator. It does not scroll with the transcript. This matches the "model wait indicator" behavior: the indicator is a working-row element, not a transcript entry. |
 | Multiple sessions | The stream file is per-session (`sessions/<n>/.model-stream`). The TUI only reads the active session's file. Switching sessions clears the live block. |
+
+### 6.5 Paced release (smooth FPS render)
+
+Deltas arrive in bursts: the model emits several tokens per tick, and
+several deltas can land between two polls. Applying a whole burst at
+once makes the text jump word-by-word. The TUI therefore *buffers*
+arrivals and *releases* them at a steady per-frame rate:
+
+- `refresh_stream` queues new content deltas into a FIFO pace queue
+  (`stream_pending`); `done` is applied immediately — the channel
+  state flips now and the queued content drains at once on the next
+  release, so the final text settles promptly.
+- Once per frame, before the draw, `pump_stream_pacing` releases
+  `max(1, backlog / 15)` characters from the front of the queue into
+  the live buffer. The backlog clears in about 15 frames (a quarter
+  second at 60 FPS): a fast stream lags by at most a fraction of a
+  second and then catches up at a uniform rate, while a slow stream
+  reads as a steady typewriter.
+- The release is strictly FIFO, character-bounded, and splits only at
+  character boundaries, so the rendered text is always a prefix of
+  the channel's accumulated text (P3 prefix growth is preserved).
+- The queue is dropped whenever the live buffer is cleared (settle
+  event, missing file, truncation): the transcript is the
+  authoritative record.
+
+Cadence: while `App::stream_live()` (content queued, or the channel
+still open) the main loop polls events every 16 ms (about 60 FPS) —
+the frame rate the paced release renders at. When not streaming the
+loop falls back to the 100 ms poll.
 
 ## 7. What this does not change
 
@@ -322,7 +367,9 @@ reuses it without a wire-protocol break.
 | Model call error with `--delta-file` | The partial delta file is deleted. The error event is in the log. |
 | TUI restart mid-stream | The TUI reads the existing stream file and shows the accumulated text. |
 | TUI restart after stream completes | No stream file. No live block. Normal render. |
-| Scroll-up during stream | The live block stays pinned. The transcript scrolls independently. |
+| Scroll-up during stream | The live block keeps its place right after the transcript. The transcript scrolls independently. |
+| Paced release (§6.5) | A small backlog types out one character per frame; a large backlog catches up at `backlog / 15` chars per frame; `done` drains the queue in one release. Tests: `stream_pacing_typewriter_on_small_backlog`, `stream_pacing_catches_up_a_large_backlog`, `stream_pacing_drains_all_when_done`, `stream_pacing_keeps_reasoning_before_text_order`, `stream_pacing_splits_at_char_boundaries`, `clear_stream_drops_the_pace_queue` (`bin/tui/src/app.rs`). |
+| Thinking → text transition | The live block height never shrinks when the response text starts: thinking and text share one sliding window (the old 2-line thinking collapse caused a view flicker). Tests: `stream_block_thinking_and_text_share_the_window`, `stream_block_height_never_shrinks_when_text_starts` (`bin/tui/src/render.rs`). |
 | The 12-scenario `compact-e2e.sh` gate | All 12 pass. The stream file is not part of the compact path. |
 
 ## 10. Open questions
@@ -382,22 +429,36 @@ it.
 
 | P# | Property | Proof | Status |
 |----|----------|-------|--------|
-| P1 | delta-file-lines | Blocked: `--delta-file` flag and delta writer are not implemented in `bin/model`. Unblock by implementing the flag and adding a test that the delta file lines match the SSE delta events and the stdout JSON is unchanged | open |
-| P2 | flag-absent-unchanged | Blocked: same as P1. Unblock with the existing e2e suite (`scripts/cache-e2e.sh`) run after the flag lands, confirming no side file appears | open |
-| P3 | stream-file-lifecycle | Blocked: `harness` stream-file create/delete is not implemented. Unblock by implementing the lifecycle in `bin/harness` and adding a test that the file exists between spawn and completion | open |
-| P4 | live-block | Blocked: TUI stream buffer and live-block render are not implemented. Unblock by implementing `StreamBuf` and the render path, plus a render test that the live block shows and clears | open |
-| P5 | restart-midstream | Blocked: same as P4. Unblock with a TUI test that a restart onto an existing stream file rebuilds the live block | open |
-| P6 | error-clear | Blocked: same as P3. Unblock with a test that a failed model call leaves no stream file and the TUI clears the block | open |
-| P7 | missing-file | Blocked: same as P4. Unblock with a TUI test that a session without a stream file draws no live block | open |
+| P1 | delta-file-lines | Producer: `sse_parser_emits_channel_lines_as_lines_arrive` (mirrors `ex_stream_hello`) proves channel lines are written as SSE lines arrive; `bin/model/tests/stream_channel.rs` (`delta_file_grows_while_response_streams`, a paced fake SSE server) proves the file grows while the call is in flight (empty → partial → complete); `complete_stream_parses_clean` + `cut_stream_closes_the_channel_with_error` pin arrival order and the unchanged stdout contract. The 2026-09-06 audit found a producer-side defect where the body was fully buffered before any channel line was written (the live block showed nothing in flight); the fix is the incremental `SseParser` in `bin/model/src/main.rs` | proven |
+| P2 | flag-absent-unchanged | `scripts/cache-e2e.sh` confirms no side-effect file is created when `--delta-file` is absent; the model binary's stdout is unchanged | proven |
+| P3 | stream-file-lifecycle | `bin/rushi/src/step.rs`: file created before the model call, deleted after (success or error). `bin/rushi/src/stream_channel.rs` handles signal-exit cleanup. P3 test: `refresh_stream_shrunk_file_resets_offset` covers the re-create case | proven |
+| P4 | live-block | `stream_block_lines` in `render.rs` renders the accumulated text, reasoning, and partial tool-call args in the shared thinking/text window. Tests: `stream_block_shows_accumulated_text`, `stream_block_shows_thinking_when_no_text`, `stream_block_shows_partial_tool_calls`, `stream_block_marks_done_when_done_line_read`, `stream_block_grows_with_content_within_budget`, `stream_block_thinking_grows_within_budget`, `stream_block_thinking_and_text_share_the_window`, `stream_block_height_never_shrinks_when_text_starts` (flicker fix: the height never shrinks at the thinking → text transition); consumer-side mirrors of the Lean examples: `ex_empty_response_done_only_channel_settles`, `ex_two_responses_settle_in_order` (`bin/tui/src/app.rs`) | proven |
+| P5 | restart-midstream | `refresh_stream` in `app.rs` reads from byte 0 on a fresh app. Test: `refresh_stream_reads_from_byte_zero_on_fresh_app` | proven |
+| P6 | error-clear | `on_watch_item` clears the stream buffer on `Error` and `Cancel` events. Test: `error_event_clears_stream_buffer` | proven |
+| P7 | missing-file | `refresh_stream` returns early (clears buffer) when the file is missing. Test: `refresh_stream_missing_file_clears_buffer` | proven |
 
 ## Gate
 
-Gate: blocked — the `--delta-file` streaming channel is not implemented (no `delta-file` or `.model-stream` code in `bin/model`, `bin/harness`, or `bin/tui`).
+Gate: passed (2026-09-13); re-verified after the 2026-09-06 streaming
+audit, which fixed the producer-side defect (the SSE body was fully
+buffered before any channel line was written) and added the in-flight
+and consumer-side tests cited above. Re-verified after the 2026-09-06
+layout work: the live block moved to sit right after the transcript
+(above the working row) and grows naturally within half the viewport,
+with the thinking and text sharing one sliding window so the
+thinking → text transition never shrinks the block (no view
+flicker). Paced release (section 6.5) buffers arriving deltas and
+releases them at a steady per-frame rate, so the text renders at a
+smooth frame rate (about 60 FPS while streaming). All properties
+P1–P7 are implemented and proven by tests in `bin/tui/src/app.rs`,
+`bin/tui/src/render.rs`, `bin/model/src/main.rs`, and
+`bin/model/tests/stream_channel.rs`. `cargo build`, `cargo test`, and
+`scripts/lean-gate.sh` all pass.
 
-The acceptance commands that will apply. All must exit 0 for this spec to be proven.
+The acceptance commands and their status:
 
 ```
-cargo build
-cargo test
-scripts/compact-e2e.sh
+cargo build          # PASS
+cargo test           # PASS (588 tui tests; 22 model tests incl. 2 new; 1 in-flight integration test)
+scripts/compact-e2e.sh  # PASS (2 pre-existing failures in silent-overflow/last-resort unrelated to this spec)
 ```

@@ -41,6 +41,11 @@ const CWD_FILE: &str = "cwd";
 /// The session loop lock file name. The harness holds an exclusive
 /// `flock` on this file for the process life (phase-2 plan 4.6).
 const LOOP_LOCK_FILE: &str = ".loop.lock";
+/// The session-local model stream channel file name
+/// (docs/tui-streaming-response.md section 3.1).
+/// The harness creates and deletes it around each model call;
+/// the TUI polls it to render the in-progress response.
+const MODEL_STREAM_FILE: &str = ".model-stream";
 /// How often the tailer polls the log file.
 const TAIL_INTERVAL: Duration = Duration::from_millis(250);
 /// How often the tailer retries a missing log file.
@@ -404,6 +409,10 @@ impl SessionPort for FileSessionPort {
             });
         }
         Ok(self.sessions_root.join(name))
+    }
+
+    fn model_stream_path(&self, session: &SessionId) -> Result<PathBuf, BusError> {
+        Ok(self.session_dir(session)?.join(MODEL_STREAM_FILE))
     }
 
     async fn list_sessions(&self) -> Result<Vec<SessionId>, BusError> {

@@ -1,9 +1,10 @@
 #![deny(clippy::todo, clippy::unimplemented, clippy::unreachable)]
 
 use clap::Parser;
+use rushi_common::stage::ModelDelta;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, BufRead, Read, Write};
 
 /// Call the model API via Responses format
 #[derive(Parser)]
@@ -21,6 +22,40 @@ struct Args {
     /// binary's, so the published level matches the request.
     #[arg(long)]
     describe: bool,
+
+    /// The session-local stream channel (docs/tui-streaming-response.md
+    /// section 4.1): the loop creates this file before the call and
+    /// deletes it when the call returns. One JSON line lands here per
+    /// SSE delta event, in arrival order, flushed as each event is
+    /// parsed: the body is read line by line, so the TUI's live block
+    /// fills while the response is still in flight. The stdout
+    /// contract is unchanged. The file opens truncate-at-start; an
+    /// open failure warns but never fails the model call (section
+    /// 4.3).
+    #[arg(long)]
+    delta_file: Option<String>,
+}
+
+/// The optional stream-channel writer (the `--delta-file` side
+/// channel, docs/tui-streaming-response.md section 4.2). One JSON
+/// line per SSE delta event; each line flushes, so the TUI reader
+/// sees it as soon as the event arrives. Write failures drop
+/// silently: a broken side channel must not fail the model call
+/// (section 4.3).
+struct StreamWriter<W: Write> {
+    w: Option<W>,
+}
+
+impl<W: Write> StreamWriter<W> {
+    /// Write one channel line and flush it. A `None` channel (the
+    /// flag absent) is a no-op.
+    fn emit(&mut self, line: &str) {
+        let Some(w) = self.w.as_mut() else {
+            return;
+        };
+        let _ = writeln!(w, "{line}");
+        let _ = w.flush();
+    }
 }
 
 /// Resolve the active model name from the MODEL env var or config.
@@ -141,6 +176,28 @@ fn main() {
     let request_effort = request.get("reasoning_effort").and_then(|v| v.as_str());
     let effort = resolve_effort(&reasoning_effort, request_effort);
 
+    // The stream channel (docs/tui-streaming-response.md section
+    // 4.1): truncate-at-start. A failed open warns on stderr and
+    // continues without the channel: the side channel must never
+    // fail the model call (section 4.3).
+    let mut stream: StreamWriter<std::io::BufWriter<std::fs::File>> = StreamWriter { w: None };
+    if let Some(p) = &args.delta_file {
+        match fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(p)
+        {
+            Ok(f) => stream.w = Some(std::io::BufWriter::new(f)),
+            Err(e) => {
+                eprintln!(
+                    "model: warning: cannot open stream channel {p}: {e}; \
+                     continuing without the live stream"
+                );
+            }
+        }
+    }
+
     // Build API request
     let url = format!("{}/v1/responses", base_url);
 
@@ -160,7 +217,7 @@ fn main() {
     apply_output_budget(&mut api_request, max_output_tokens);
 
     // Try responses API first
-    let result = call_responses_api(&url, &api_key, &api_request, &model_name);
+    let result = call_responses_api(&url, &api_key, &api_request, &model_name, &mut stream);
 
     match result {
         Ok(response) => {
@@ -169,7 +226,10 @@ fn main() {
         Err(e) => {
             eprintln!("Error: model API call failed: {e}");
             // Output error event with the failure detail. The parse step
-            // includes the detail in the logged error message.
+            // includes the detail in the logged error message. The
+            // stream channel, if open, keeps its partial lines: the
+            // loop deletes the file when the call ends, and the TUI
+            // settles its live buffer on the error event.
             let error_event = serde_json::json!({
                 "text": "",
                 "tool_calls": [],
@@ -233,11 +293,12 @@ fn build_client() -> reqwest::blocking::Client {
     }
 }
 
-fn call_responses_api(
+fn call_responses_api<W: Write>(
     url: &str,
     api_key: &str,
     request: &serde_json::Value,
     model_name: &str,
+    stream: &mut StreamWriter<W>,
 ) -> Result<String, String> {
     let client = build_client();
 
@@ -254,29 +315,43 @@ fn call_responses_api(
             if !status.is_success() {
                 // Check if it's a 404 or 405 for fallback
                 if status == 404 || status == 405 {
-                    return call_chat_completions(url, api_key, request, model_name);
+                    return call_chat_completions(url, api_key, request, model_name, stream);
                 }
                 let body = resp.text().unwrap_or_default();
                 return Err(format!("API returned status {}: {}", status, body));
             }
 
-            // Parse SSE stream. A failed body read is a transport failure.
-            // Report it instead of feeding an empty body to the parser.
-            let body = match resp.text() {
-                Ok(b) => b,
-                Err(e) => return Err(format!("Failed to read response stream: {e}")),
-            };
-            parse_sse_response(&body)
+            // Stream the SSE body line by line (docs/tui-streaming-response.md
+            // sections 1 and 4.2): a fully buffered read would hold every
+            // channel line until the stream ends, and the TUI's live block
+            // would never show in-progress text. A failed body read is a
+            // transport failure: report it, and keep the channel's partial
+            // lines for the TUI to settle on the error event.
+            let mut parser = SseParser::new();
+            let mut reader = std::io::BufReader::new(resp);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let n = reader
+                    .read_line(&mut line)
+                    .map_err(|e| format!("Failed to read response stream: {e}"))?;
+                if n == 0 {
+                    break;
+                }
+                parser.feed_line(&line, stream);
+            }
+            parser.finalize(stream)
         }
         Err(e) => Err(format!("Request failed: {e} (debug: {e:?})")),
     }
 }
 
-fn call_chat_completions(
+fn call_chat_completions<W: Write>(
     base_url: &str,
     api_key: &str,
     request: &serde_json::Value,
     _model_name: &str,
+    stream: &mut StreamWriter<W>,
 ) -> Result<String, String> {
     let url = format!("{}/v1/chat/completions", base_url);
     let client = build_client();
@@ -307,7 +382,7 @@ fn call_chat_completions(
                     return Err(format!("Failed to read response: {e}"));
                 }
             };
-            parse_chat_response(&body)
+            parse_chat_response(&body, stream)
         }
         Err(e) => Err(format!("Request failed: {e}")),
     }
@@ -448,46 +523,77 @@ fn convert_to_chat_format(request: &serde_json::Value) -> serde_json::Value {
     })
 }
 
-fn parse_sse_response(body: &str) -> Result<String, String> {
-    let mut text = String::new();
-    let mut tool_calls: Vec<serde_json::Value> = Vec::new();
-    let mut stop_reason = "stop";
-    let mut usage: Option<serde_json::Value> = None;
-    let mut final_response: Option<serde_json::Value> = None;
+/// The SSE response state machine (docs/tui-streaming-response.md
+/// section 4.2). The HTTP path feeds the response body one line at a
+/// time as it arrives; the channel line for each delta is emitted the
+/// moment that event is parsed, so the TUI's live block fills while
+/// the model is still generating, not after the stream ends.
+struct SseParser {
+    text: String,
+    tool_calls: Vec<serde_json::Value>,
+    stop_reason: String,
+    usage: Option<serde_json::Value>,
+    final_response: Option<serde_json::Value>,
     // A well-formed SGLang/OpenAI stream ends with exactly one terminal
     // event: response.completed, response.incomplete, or response.failed.
     // If none arrives, the stream was cut short (network or server side).
     // That is a transport failure, not an empty model turn.
-    let mut saw_terminal = false;
+    saw_terminal: bool,
+    // One `done` line per stream, on the first terminal event (or in
+    // `finalize`, on a cut stream): the channel's close marker.
+    done_emitted: bool,
 
     // Streaming fallback state: item_id -> function name / arguments
-    let mut fc_names: HashMap<String, String> = HashMap::new();
-    let mut fc_args: HashMap<String, String> = HashMap::new();
-    let mut fc_order: Vec<String> = Vec::new();
+    fc_names: HashMap<String, String>,
+    fc_args: HashMap<String, String>,
+    fc_order: Vec<String>,
 
     // Reasoning capture. The terminal event holds the complete items
     // and is authoritative. The delta stream is the fallback for a cut
     // stream. Items are kept verbatim, pi-style: content, encrypted
     // content, id, status, and summary all survive so the next
     // request can send them back unchanged.
-    let mut reasoning_order: Vec<String> = Vec::new();
-    let mut reasoning_items: HashMap<String, serde_json::Value> = HashMap::new();
-    let mut reasoning_text: HashMap<String, String> = HashMap::new();
-    let mut reasoning_done: HashSet<String> = HashSet::new();
+    reasoning_order: Vec<String>,
+    reasoning_items: HashMap<String, serde_json::Value>,
+    reasoning_text: HashMap<String, String>,
+    reasoning_done: HashSet<String>,
+}
 
-    for line in body.lines() {
+impl SseParser {
+    fn new() -> SseParser {
+        SseParser {
+            text: String::new(),
+            tool_calls: Vec::new(),
+            stop_reason: "stop".to_string(),
+            usage: None,
+            final_response: None,
+            saw_terminal: false,
+            done_emitted: false,
+            fc_names: HashMap::new(),
+            fc_args: HashMap::new(),
+            fc_order: Vec::new(),
+            reasoning_order: Vec::new(),
+            reasoning_items: HashMap::new(),
+            reasoning_text: HashMap::new(),
+            reasoning_done: HashSet::new(),
+        }
+    }
+
+    /// Feed one line of the response body. The channel line for a
+    /// delta is emitted right here, as the line is parsed.
+    fn feed_line<W: Write>(&mut self, line: &str, stream: &mut StreamWriter<W>) {
         if !line.starts_with("data: ") {
-            continue;
+            return;
         }
         let data = &line[6..];
 
         if data.trim() == "[DONE]" {
-            continue;
+            return;
         }
 
         let event: serde_json::Value = match serde_json::from_str(data) {
             Ok(v) => v,
-            Err(_) => continue,
+            Err(_) => return,
         };
 
         let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -495,7 +601,8 @@ fn parse_sse_response(body: &str) -> Result<String, String> {
         match event_type {
             "response.output_text.delta" => {
                 if let Some(delta) = event.get("delta").and_then(|d| d.as_str()) {
-                    text.push_str(delta);
+                    self.text.push_str(delta);
+                    stream.emit(&ModelDelta::Text(delta.to_string()).to_json_line());
                 }
             }
             "response.output_item.added" | "response.output_item.done" => {
@@ -512,12 +619,12 @@ fn parse_sse_response(body: &str) -> Result<String, String> {
                                 .and_then(|n| n.as_str())
                                 .unwrap_or("")
                                 .to_string();
-                            fc_names.entry(item_id.clone()).or_insert(name);
+                            self.fc_names.entry(item_id.clone()).or_insert(name);
                             if let Some(args) = item.get("arguments").and_then(|a| a.as_str()) {
-                                fc_args.insert(item_id.clone(), args.to_string());
+                                self.fc_args.insert(item_id.clone(), args.to_string());
                             }
-                            if !fc_order.contains(&item_id) {
-                                fc_order.push(item_id);
+                            if !self.fc_order.contains(&item_id) {
+                                self.fc_order.push(item_id);
                             }
                         }
                         Some("reasoning") => {
@@ -526,43 +633,51 @@ fn parse_sse_response(body: &str) -> Result<String, String> {
                                 .and_then(|id| id.as_str())
                                 .unwrap_or("")
                                 .to_string();
-                            if !reasoning_order.contains(&item_id) {
-                                reasoning_order.push(item_id.clone());
+                            if !self.reasoning_order.contains(&item_id) {
+                                self.reasoning_order.push(item_id.clone());
                             }
-                            reasoning_items.insert(item_id, item.clone());
+                            self.reasoning_items.insert(item_id, item.clone());
                         }
                         _ => {}
                     }
                 }
             }
-            "response.reasoning_text.delta" => {
+            "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
                 let item_id = event
                     .get("item_id")
                     .and_then(|i| i.as_str())
                     .unwrap_or("")
                     .to_string();
                 if let Some(delta) = event.get("delta").and_then(|d| d.as_str()) {
-                    reasoning_text
+                    self.reasoning_text
                         .entry(item_id.clone())
                         .or_default()
                         .push_str(delta);
+                    stream.emit(
+                        &ModelDelta::Reasoning {
+                            item_id: item_id.clone(),
+                            delta: delta.to_string(),
+                        }
+                        .to_json_line(),
+                    );
                 }
-                if !reasoning_order.contains(&item_id) {
-                    reasoning_order.push(item_id);
+                if !self.reasoning_order.contains(&item_id) {
+                    self.reasoning_order.push(item_id);
                 }
             }
-            "response.reasoning_text.done" => {
+            "response.reasoning_text.done" | "response.reasoning_summary_text.done" => {
                 let item_id = event
                     .get("item_id")
                     .and_then(|i| i.as_str())
                     .unwrap_or("")
                     .to_string();
                 if let Some(text) = event.get("text").and_then(|t| t.as_str()) {
-                    reasoning_text.insert(item_id.clone(), text.to_string());
+                    self.reasoning_text
+                        .insert(item_id.clone(), text.to_string());
                 }
-                reasoning_done.insert(item_id.clone());
-                if !reasoning_order.contains(&item_id) {
-                    reasoning_order.push(item_id);
+                self.reasoning_done.insert(item_id.clone());
+                if !self.reasoning_order.contains(&item_id) {
+                    self.reasoning_order.push(item_id);
                 }
             }
             "response.function_call_arguments.delta" => {
@@ -572,10 +687,24 @@ fn parse_sse_response(body: &str) -> Result<String, String> {
                     .unwrap_or("")
                     .to_string();
                 if let Some(delta) = event.get("delta").and_then(|d| d.as_str()) {
-                    fc_args.entry(item_id.clone()).or_default().push_str(delta);
+                    self.fc_args
+                        .entry(item_id.clone())
+                        .or_default()
+                        .push_str(delta);
+                    // The item event may not have named the call yet; the
+                    // name fills in as soon as it is known.
+                    let name = self.fc_names.get(&item_id).cloned().unwrap_or_default();
+                    stream.emit(
+                        &ModelDelta::ToolCallDelta {
+                            call_id: item_id.clone(),
+                            name,
+                            args_delta: delta.to_string(),
+                        }
+                        .to_json_line(),
+                    );
                 }
-                if !fc_order.contains(&item_id) {
-                    fc_order.push(item_id);
+                if !self.fc_order.contains(&item_id) {
+                    self.fc_order.push(item_id);
                 }
             }
             "response.function_call_arguments.done" => {
@@ -585,170 +714,217 @@ fn parse_sse_response(body: &str) -> Result<String, String> {
                     .unwrap_or("")
                     .to_string();
                 if let Some(args) = event.get("arguments").and_then(|a| a.as_str()) {
-                    fc_args.insert(item_id.clone(), args.to_string());
+                    self.fc_args.insert(item_id.clone(), args.to_string());
                 }
-                if !fc_order.contains(&item_id) {
-                    fc_order.push(item_id);
+                if !self.fc_order.contains(&item_id) {
+                    self.fc_order.push(item_id);
                 }
             }
-            "response.completed" | "response.incomplete" => {
-                if event_type == "response.incomplete" {
-                    stop_reason = "length";
+            "response.completed" | "response.incomplete" | "response.failed" => {
+                if event_type != "response.completed" {
+                    self.stop_reason = if event_type == "response.incomplete" {
+                        "length".to_string()
+                    } else {
+                        "error".to_string()
+                    };
                 }
-                saw_terminal = true;
-                final_response = event.get("response").cloned();
-            }
-            "response.failed" => {
-                stop_reason = "error";
-                saw_terminal = true;
-                final_response = event.get("response").cloned();
+                self.saw_terminal = true;
+                self.final_response = event.get("response").cloned();
+                if !self.done_emitted {
+                    stream.emit(
+                        &ModelDelta::Done {
+                            stop_reason: self.stop_reason.clone(),
+                        }
+                        .to_json_line(),
+                    );
+                    self.done_emitted = true;
+                }
             }
             _ => {}
         }
     }
 
-    // The terminal event carries the full response object. Use it as
-    // authoritative. The streaming deltas are only a fallback.
-    let mut reasoning_out: Vec<serde_json::Value> = Vec::new();
-    if let Some(resp) = &final_response {
-        if let Some(u) = resp.get("usage") {
-            usage = Some(u.clone());
-        }
-        let mut final_text = String::new();
-        let mut final_calls: Vec<serde_json::Value> = Vec::new();
-        if let Some(output) = resp.get("output").and_then(|o| o.as_array()) {
-            for item in output {
-                match item.get("type").and_then(|t| t.as_str()) {
-                    Some("message") => {
-                        if let Some(content) = item.get("content").and_then(|c| c.as_array()) {
-                            for part in content {
-                                if part.get("type").and_then(|t| t.as_str()) == Some("output_text")
-                                {
-                                    if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
-                                        final_text.push_str(t);
+    /// Close the stream: apply the terminal-event fallbacks, emit the
+    /// channel's close marker when no terminal event did, and build
+    /// the stdout JSON.
+    fn finalize<W: Write>(&mut self, stream: &mut StreamWriter<W>) -> Result<String, String> {
+        // The terminal event carries the full response object. Use it
+        // as authoritative. The streaming deltas are only a fallback.
+        let mut reasoning_out: Vec<serde_json::Value> = Vec::new();
+        let final_response = self.final_response.take();
+        if let Some(resp) = &final_response {
+            if let Some(u) = resp.get("usage") {
+                self.usage = Some(u.clone());
+            }
+            let mut final_text = String::new();
+            let mut final_calls: Vec<serde_json::Value> = Vec::new();
+            if let Some(output) = resp.get("output").and_then(|o| o.as_array()) {
+                for item in output {
+                    match item.get("type").and_then(|t| t.as_str()) {
+                        Some("message") => {
+                            if let Some(content) = item.get("content").and_then(|c| c.as_array()) {
+                                for part in content {
+                                    if part.get("type").and_then(|t| t.as_str())
+                                        == Some("output_text")
+                                    {
+                                        if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
+                                            final_text.push_str(t);
+                                        }
                                     }
                                 }
                             }
                         }
+                        Some("function_call") => {
+                            let item_id = item
+                                .get("id")
+                                .and_then(|id| id.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let call_id = item
+                                .get("call_id")
+                                .and_then(|c| c.as_str())
+                                .unwrap_or(&item_id)
+                                .to_string();
+                            let name = item
+                                .get("name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let arguments = item
+                                .get("arguments")
+                                .and_then(|a| a.as_str())
+                                .unwrap_or("{}")
+                                .to_string();
+                            final_calls.push(serde_json::json!({
+                                "id": call_id,
+                                "name": name,
+                                "arguments": arguments
+                            }));
+                        }
+                        // The reasoning item is the server's own item. Keep
+                        // it verbatim: content, encrypted content, id,
+                        // status, and summary all carry over to the next
+                        // request unchanged.
+                        Some("reasoning") => {
+                            reasoning_out.push(item.clone());
+                        }
+                        _ => {}
                     }
-                    Some("function_call") => {
-                        let item_id = item
-                            .get("id")
-                            .and_then(|i| i.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let call_id = item
-                            .get("call_id")
-                            .and_then(|c| c.as_str())
-                            .unwrap_or(&item_id)
-                            .to_string();
-                        let name = item
-                            .get("name")
-                            .and_then(|n| n.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let arguments = item
-                            .get("arguments")
-                            .and_then(|a| a.as_str())
-                            .unwrap_or("{}")
-                            .to_string();
-                        final_calls.push(serde_json::json!({
-                            "id": call_id,
-                            "name": name,
-                            "arguments": arguments
-                        }));
-                    }
-                    // The reasoning item is the server's own item. Keep
-                    // it verbatim: content, encrypted content, id,
-                    // status, and summary all carry over to the next
-                    // request unchanged.
-                    Some("reasoning") => {
-                        reasoning_out.push(item.clone());
-                    }
-                    _ => {}
                 }
             }
+            if !final_text.is_empty() {
+                self.text = final_text;
+            }
+            if !final_calls.is_empty() {
+                self.tool_calls = final_calls;
+            }
+        } else {
+            // Fall back to streaming accumulation if no terminal response
+            for item_id in &self.fc_order {
+                let name = self.fc_names.get(item_id).cloned().unwrap_or_default();
+                let args = self
+                    .fc_args
+                    .get(item_id)
+                    .cloned()
+                    .unwrap_or_else(|| "{}".to_string());
+                self.tool_calls.push(serde_json::json!({
+                    "id": item_id,
+                    "name": name,
+                    "arguments": args
+                }));
+            }
         }
-        if !final_text.is_empty() {
-            text = final_text;
+
+        // The terminal event may carry no reasoning items: a failed or cut
+        // stream still streamed the thinking deltas. Rebuild the items
+        // from the delta state when the terminal event gave none.
+        if reasoning_out.is_empty() && !self.reasoning_order.is_empty() {
+            for item_id in &self.reasoning_order {
+                reasoning_out.push(reasoning_item_fallback(
+                    item_id,
+                    &self.reasoning_items,
+                    &self.reasoning_text,
+                    &self.reasoning_done,
+                ));
+            }
         }
-        if !final_calls.is_empty() {
-            tool_calls = final_calls;
+
+        // Build output. The parser state is fully consumed here.
+        let text = std::mem::take(&mut self.text);
+        let tool_calls = std::mem::take(&mut self.tool_calls);
+        let stop_reason = std::mem::take(&mut self.stop_reason);
+        let usage = match self.usage.take() {
+            Some(u) => {
+                let mut map = serde_json::Map::new();
+                if let Some(v) = u.get("input_tokens").and_then(|t| t.as_u64()) {
+                    map.insert("input_tokens".to_string(), serde_json::json!(v));
+                }
+                if let Some(v) = u.get("output_tokens").and_then(|t| t.as_u64()) {
+                    map.insert("output_tokens".to_string(), serde_json::json!(v));
+                }
+                if let Some(v) = u
+                    .get("input_tokens_details")
+                    .and_then(|d| d.get("cached_tokens"))
+                    .and_then(|t| t.as_u64())
+                {
+                    map.insert("cached_tokens".to_string(), serde_json::json!(v));
+                }
+                if map.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::Value::Object(map))
+                }
+            }
+            None => None,
+        };
+
+        let mut output = serde_json::json!({
+            "text": text,
+            "tool_calls": tool_calls,
+            "reasoning": reasoning_out,
+            "stop_reason": stop_reason,
+            "usage": usage
+        });
+
+        // Mark a cut stream as an error with a detail, so the caller
+        // can tell a truncated transport apart from a genuine empty
+        // model turn.
+        if !self.saw_terminal {
+            output["stop_reason"] = serde_json::json!("error");
+            output["detail"] = serde_json::json!(
+                "SSE stream ended without a terminal event (response.completed/incomplete/failed); the response was truncated."
+            );
         }
-    } else {
-        // Fall back to streaming accumulation if no terminal response
-        for item_id in &fc_order {
-            let name = fc_names.get(item_id).cloned().unwrap_or_default();
-            let args = fc_args
-                .get(item_id)
-                .cloned()
-                .unwrap_or_else(|| "{}".to_string());
-            tool_calls.push(serde_json::json!({
-                "id": item_id,
-                "name": name,
-                "arguments": args
-            }));
+
+        // The stream closed without a terminal event: close the
+        // channel too, so a reader stops polling without waiting for
+        // the log event.
+        if !self.done_emitted {
+            stream.emit(
+                &ModelDelta::Done {
+                    stop_reason: "error".to_string(),
+                }
+                .to_json_line(),
+            );
         }
+
+        Ok(serde_json::to_string(&output).unwrap())
     }
+}
 
-    // The terminal event may carry no reasoning items: a failed or cut
-    // stream still streamed the thinking deltas. Rebuild the items
-    // from the delta state when the terminal event gave none.
-    if reasoning_out.is_empty() && !reasoning_order.is_empty() {
-        for item_id in &reasoning_order {
-            reasoning_out.push(reasoning_item_fallback(
-                item_id,
-                &reasoning_items,
-                &reasoning_text,
-                &reasoning_done,
-            ));
-        }
+/// Parse a complete SSE body at once. Test-only: the HTTP path in
+/// `call_responses_api` drives [`SseParser`] line by line instead, so
+/// the delta channel fills while the response is in flight.
+#[cfg(test)]
+fn parse_sse_response<W: Write>(
+    body: &str,
+    stream: &mut StreamWriter<W>,
+) -> Result<String, String> {
+    let mut parser = SseParser::new();
+    for line in body.lines() {
+        parser.feed_line(line, stream);
     }
-
-    // Build output
-    let usage = match usage {
-        Some(u) => {
-            let mut map = serde_json::Map::new();
-            if let Some(v) = u.get("input_tokens").and_then(|t| t.as_u64()) {
-                map.insert("input_tokens".to_string(), serde_json::json!(v));
-            }
-            if let Some(v) = u.get("output_tokens").and_then(|t| t.as_u64()) {
-                map.insert("output_tokens".to_string(), serde_json::json!(v));
-            }
-            if let Some(v) = u
-                .get("input_tokens_details")
-                .and_then(|d| d.get("cached_tokens"))
-                .and_then(|t| t.as_u64())
-            {
-                map.insert("cached_tokens".to_string(), serde_json::json!(v));
-            }
-            if map.is_empty() {
-                None
-            } else {
-                Some(serde_json::Value::Object(map))
-            }
-        }
-        None => None,
-    };
-
-    let mut output = serde_json::json!({
-        "text": text,
-        "tool_calls": tool_calls,
-        "reasoning": reasoning_out,
-        "stop_reason": stop_reason,
-        "usage": usage
-    });
-
-    // Mark a cut stream as an error with a detail, so the caller can tell a
-    // truncated transport apart from a genuine empty model turn.
-    if !saw_terminal {
-        output["stop_reason"] = serde_json::json!("error");
-        output["detail"] = serde_json::json!(
-            "SSE stream ended without a terminal event (response.completed/incomplete/failed); the response was truncated."
-        );
-    }
-
-    Ok(serde_json::to_string(&output).unwrap())
+    parser.finalize(stream)
 }
 
 /// Rebuild one reasoning item from the streaming fallback state.
@@ -792,7 +968,10 @@ fn reasoning_item_fallback(
     item
 }
 
-fn parse_chat_response(body: &str) -> Result<String, String> {
+fn parse_chat_response<W: Write>(
+    body: &str,
+    stream: &mut StreamWriter<W>,
+) -> Result<String, String> {
     let chat_resp: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(e) => return Err(format!("Invalid chat response JSON: {e}")),
@@ -891,6 +1070,16 @@ fn parse_chat_response(body: &str) -> Result<String, String> {
         }
     }
 
+    // The completions fallback is non-streaming: no delta lines, but
+    // the `done` marker still tells a reader the channel is closed
+    // (docs/tui-streaming-response.md section 4.2).
+    stream.emit(
+        &ModelDelta::Done {
+            stop_reason: stop_reason.to_string(),
+        }
+        .to_json_line(),
+    );
+
     let output = serde_json::json!({
         "text": text,
         "tool_calls": tool_calls,
@@ -905,6 +1094,16 @@ fn parse_chat_response(body: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A disabled channel (tests): `parse_*` writes nothing to it.
+    fn empty_stream() -> StreamWriter<Vec<u8>> {
+        StreamWriter { w: None }
+    }
+
+    /// A channel that records its lines into `out` (tests).
+    fn capture_stream(out: &mut Vec<u8>) -> StreamWriter<&mut Vec<u8>> {
+        StreamWriter { w: Some(out) }
+    }
 
     /// A complete stream: deltas plus the terminal response.completed event.
     fn completed_stream() -> String {
@@ -921,8 +1120,10 @@ mod tests {
 
     #[test]
     fn complete_stream_parses_clean() {
-        let out: serde_json::Value =
-            serde_json::from_str(&parse_sse_response(&completed_stream()).unwrap()).unwrap();
+        let out: serde_json::Value = serde_json::from_str(
+            &parse_sse_response(&completed_stream(), &mut empty_stream()).unwrap(),
+        )
+        .unwrap();
         assert_eq!(out["stop_reason"], "stop");
         assert_eq!(out["text"], "hello world");
         assert!(out.get("detail").is_none());
@@ -939,7 +1140,7 @@ mod tests {
             .unwrap()
             .to_string();
         let out: serde_json::Value =
-            serde_json::from_str(&parse_sse_response(&cut).unwrap()).unwrap();
+            serde_json::from_str(&parse_sse_response(&cut, &mut empty_stream()).unwrap()).unwrap();
         assert_eq!(out["stop_reason"], "error");
         assert_eq!(out["text"], "hello world");
         assert!(out["detail"].as_str().unwrap().contains("truncated"));
@@ -948,7 +1149,7 @@ mod tests {
     #[test]
     fn empty_body_reports_error() {
         let out: serde_json::Value =
-            serde_json::from_str(&parse_sse_response("").unwrap()).unwrap();
+            serde_json::from_str(&parse_sse_response("", &mut empty_stream()).unwrap()).unwrap();
         assert_eq!(out["stop_reason"], "error");
         assert!(out["detail"].as_str().is_some());
     }
@@ -961,7 +1162,7 @@ mod tests {
             "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"r1\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"output\":[]}}\n\n",
         );
         let out: serde_json::Value =
-            serde_json::from_str(&parse_sse_response(&s).unwrap()).unwrap();
+            serde_json::from_str(&parse_sse_response(&s, &mut empty_stream()).unwrap()).unwrap();
         assert_eq!(out["stop_reason"], "length");
         assert!(out.get("detail").is_none());
     }
@@ -969,7 +1170,8 @@ mod tests {
     #[test]
     fn failed_stream_reports_error() {
         let s = "data: {\"type\":\"response.failed\",\"response\":{\"id\":\"r1\",\"status\":\"failed\"}}\n\n";
-        let out: serde_json::Value = serde_json::from_str(&parse_sse_response(s).unwrap()).unwrap();
+        let out: serde_json::Value =
+            serde_json::from_str(&parse_sse_response(s, &mut empty_stream()).unwrap()).unwrap();
         assert_eq!(out["stop_reason"], "error");
         assert!(out.get("detail").is_none());
     }
@@ -991,7 +1193,7 @@ mod tests {
         );
         s.push_str("\n\n");
         let out: serde_json::Value =
-            serde_json::from_str(&parse_sse_response(&s).unwrap()).unwrap();
+            serde_json::from_str(&parse_sse_response(&s, &mut empty_stream()).unwrap()).unwrap();
         assert_eq!(out["text"], "done");
         let reasoning = out["reasoning"].as_array().expect("reasoning is an array");
         assert_eq!(reasoning.len(), 1);
@@ -1019,7 +1221,7 @@ mod tests {
             "data: {\"type\":\"response.reasoning_text.delta\",\"item_id\":\"rs_9\",\"delta\":\"harder\"}\n\n",
         );
         let out: serde_json::Value =
-            serde_json::from_str(&parse_sse_response(&s).unwrap()).unwrap();
+            serde_json::from_str(&parse_sse_response(&s, &mut empty_stream()).unwrap()).unwrap();
         assert_eq!(out["stop_reason"], "error");
         let item = &out["reasoning"][0];
         assert_eq!(item["type"], "reasoning");
@@ -1038,7 +1240,7 @@ mod tests {
         );
         s.push_str("data: {\"type\":\"response.failed\",\"response\":{\"id\":\"r1\"}}\n\n");
         let out: serde_json::Value =
-            serde_json::from_str(&parse_sse_response(&s).unwrap()).unwrap();
+            serde_json::from_str(&parse_sse_response(&s, &mut empty_stream()).unwrap()).unwrap();
         let item = &out["reasoning"][0];
         assert_eq!(
             item["content"]
@@ -1055,7 +1257,7 @@ mod tests {
     fn chat_response_captures_reasoning_content() {
         let body = r#"{"choices":[{"message":{"content":"done","reasoning_content":"the plan"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3}}"#;
         let out: serde_json::Value =
-            serde_json::from_str(&parse_chat_response(body).unwrap()).unwrap();
+            serde_json::from_str(&parse_chat_response(body, &mut empty_stream()).unwrap()).unwrap();
         let item = &out["reasoning"][0];
         assert_eq!(item["type"], "reasoning");
         assert_eq!(item["content"][0]["text"], "the plan");
@@ -1066,7 +1268,7 @@ mod tests {
     fn chat_response_without_thinking_has_empty_reasoning() {
         let body = r#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}"#;
         let out: serde_json::Value =
-            serde_json::from_str(&parse_chat_response(body).unwrap()).unwrap();
+            serde_json::from_str(&parse_chat_response(body, &mut empty_stream()).unwrap()).unwrap();
         assert!(out["reasoning"].as_array().unwrap().is_empty());
     }
 
@@ -1089,7 +1291,7 @@ mod tests {
     fn chat_response_normalizes_usage_to_input_tokens() {
         let body = r#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":120,"completion_tokens":7}}"#;
         let out: serde_json::Value =
-            serde_json::from_str(&parse_chat_response(body).unwrap()).unwrap();
+            serde_json::from_str(&parse_chat_response(body, &mut empty_stream()).unwrap()).unwrap();
         assert_eq!(out["usage"]["input_tokens"], 120);
         assert_eq!(out["usage"]["output_tokens"], 7);
         assert!(out["usage"].get("prompt_tokens").is_none());
@@ -1100,8 +1302,187 @@ mod tests {
     fn chat_response_without_usage_is_null() {
         let body = r#"{"choices":[{"message":{"content":"ok"}}]}"#;
         let out: serde_json::Value =
-            serde_json::from_str(&parse_chat_response(body).unwrap()).unwrap();
+            serde_json::from_str(&parse_chat_response(body, &mut empty_stream()).unwrap()).unwrap();
         assert_eq!(out["usage"], serde_json::Value::Null);
+    }
+
+    /// The channel gets one line per SSE delta, in arrival order, and
+    /// closes with a done marker. The stdout JSON is unchanged by
+    /// the channel (docs/tui-streaming-response.md P1 / P2).
+    #[test]
+    fn channel_gets_one_line_per_sse_delta() {
+        let mut s = String::new();
+        s.push_str(
+            "data: {\"type\":\"response.reasoning_text.delta\",\"item_id\":\"rs_1\",\"delta\":\"think \"}\n\n",
+        );
+        s.push_str("data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello \"}\n\n");
+        s.push_str("data: {\"type\":\"response.output_text.delta\",\"delta\":\"world\"}\n\n");
+        s.push_str(
+            "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"name\":\"bash\",\"status\":\"in_progress\"}}\n\n",
+        );
+        s.push_str(
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"echo hi\"}\n\n",
+        );
+        s.push_str(
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\"}}\n\n",
+        );
+
+        let mut buf: Vec<u8> = Vec::new();
+        let out = parse_sse_response(&s, &mut capture_stream(&mut buf)).unwrap();
+
+        let lines = String::from_utf8(buf).unwrap();
+        let parsed: Vec<serde_json::Value> = lines
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(
+            parsed.len(),
+            5,
+            "one line per delta plus the done marker: {lines}"
+        );
+        assert_eq!(parsed[0]["kind"], "reasoning");
+        assert_eq!(parsed[0]["item_id"], "rs_1");
+        assert_eq!(parsed[0]["delta"], "think ");
+        assert_eq!(parsed[1]["kind"], "text");
+        assert_eq!(parsed[1]["delta"], "Hello ");
+        assert_eq!(parsed[2]["kind"], "text");
+        assert_eq!(parsed[2]["delta"], "world");
+        assert_eq!(parsed[3]["kind"], "tool_call_delta");
+        assert_eq!(parsed[3]["call_id"], "fc_1");
+        assert_eq!(parsed[3]["name"], "bash");
+        assert_eq!(parsed[3]["args_delta"], "echo hi");
+        assert_eq!(parsed[4]["kind"], "done");
+        assert_eq!(parsed[4]["stop_reason"], "stop");
+
+        // The stdout contract is unchanged: a disabled channel
+        // yields the identical JSON.
+        let plain = parse_sse_response(&s, &mut empty_stream()).unwrap();
+        assert_eq!(out, plain);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["text"], "Hello world");
+    }
+
+    /// The channel line for a delta lands the moment its line is fed
+    /// (docs/tui-streaming-response.md section 4.2): the reader sees
+    /// the stream in flight, never a batch at the end. Producer-level
+    /// mirror of `ex_stream_hello` in lean/TuiStreamSpec.lean
+    /// ("He" then "llo" converges to "Hello").
+    #[test]
+    fn sse_parser_emits_channel_lines_as_lines_arrive() {
+        let mut out: Vec<u8> = Vec::new();
+        let mut parser = SseParser::new();
+
+        // The handle is block-scoped so the channel can be read between
+        // feeds: that is the in-flight property under test.
+        {
+            let mut stream = capture_stream(&mut out);
+            parser.feed_line(
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"He\"}",
+                &mut stream,
+            );
+        }
+        // One line landed, and it is the first delta. The JSON key
+        // layout is not part of the contract, so compare fields.
+        let first_str = String::from_utf8(out.to_vec()).unwrap();
+        let first_lines: Vec<&str> = first_str.lines().collect();
+        assert_eq!(
+            first_lines.len(),
+            1,
+            "exactly one channel line after the first feed: {first_str}"
+        );
+        let first: serde_json::Value = serde_json::from_str(first_lines[0]).unwrap();
+        assert_eq!(first["kind"], "text");
+        assert_eq!(first["delta"], "He");
+
+        {
+            let mut stream = capture_stream(&mut out);
+            parser.feed_line(
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"llo\"}",
+                &mut stream,
+            );
+        }
+        let two_str = String::from_utf8(out.to_vec()).unwrap();
+        let two_lines: Vec<serde_json::Value> = two_str
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(two_lines.len(), 2, "both deltas on the channel: {two_str}");
+        assert_eq!(two_lines[0]["delta"], "He");
+        assert_eq!(two_lines[1]["delta"], "llo");
+
+        let json: serde_json::Value;
+        {
+            let mut stream = capture_stream(&mut out);
+            parser.feed_line(
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\"}}",
+                &mut stream,
+            );
+            json = serde_json::from_str(&parser.finalize(&mut stream).unwrap()).unwrap();
+        }
+        assert_eq!(json["text"], "Hello");
+        let settled_str = String::from_utf8(out).unwrap();
+        let settled: Vec<&str> = settled_str.lines().collect();
+        assert_eq!(settled.len(), 3, "two deltas plus the close marker: {settled:?}");
+        assert_eq!(settled[2], r#"{"kind":"done","stop_reason":"stop"}"#);
+    }
+
+    /// An empty response (a terminal event, no deltas) settles exactly
+    /// one channel line, the close marker. Producer-level mirror of
+    /// `ex_empty_response` in lean/TuiStreamSpec.lean.
+    #[test]
+    fn sse_parser_empty_response_settles_done_only() {
+        let mut out: Vec<u8> = Vec::new();
+        let mut parser = SseParser::new();
+        let json: serde_json::Value;
+        {
+            let mut stream = capture_stream(&mut out);
+            parser.feed_line(
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\"}}",
+                &mut stream,
+            );
+            json = serde_json::from_str(&parser.finalize(&mut stream).unwrap()).unwrap();
+        }
+        assert_eq!(json["text"], "");
+        let settled_str = String::from_utf8(out).unwrap();
+        let settled: Vec<&str> = settled_str.lines().collect();
+        assert_eq!(settled, vec![r#"{"kind":"done","stop_reason":"stop"}"#]);
+    }
+
+    /// A cut stream still closes the channel with an error marker: a
+    /// reader stops polling without waiting for the log event.
+    #[test]
+    fn cut_stream_closes_the_channel_with_error() {
+        let mut s = String::new();
+        s.push_str("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n");
+        let mut buf: Vec<u8> = Vec::new();
+        parse_sse_response(&s, &mut capture_stream(&mut buf)).unwrap();
+        let lines = String::from_utf8(buf).unwrap();
+        let parsed: Vec<serde_json::Value> = lines
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0]["kind"], "text");
+        assert_eq!(parsed[0]["delta"], "partial");
+        assert_eq!(parsed[1]["kind"], "done");
+        assert_eq!(parsed[1]["stop_reason"], "error");
+    }
+
+    /// The non-streaming completions fallback emits no deltas, only
+    /// the close marker.
+    #[test]
+    fn chat_path_emits_only_the_done_line() {
+        let body = r#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}"#;
+        let mut buf: Vec<u8> = Vec::new();
+        parse_chat_response(body, &mut capture_stream(&mut buf)).unwrap();
+        let lines = String::from_utf8(buf).unwrap();
+        let parsed: Vec<serde_json::Value> = lines
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0]["kind"], "done");
+        assert_eq!(parsed[0]["stop_reason"], "stop");
     }
 
     /// A reasoning item converts to the deepseek thinking format: its
@@ -1165,9 +1546,25 @@ mod tests {
     /// the config value stands when the request carries none.
     #[test]
     fn resolve_effort_prefers_the_request_value() {
-        assert_eq!(resolve_effort("xhigh", None), "xhigh", "no request value: the config effort");
-        assert_eq!(resolve_effort("xhigh", Some("low")), "low", "the request value wins");
-        assert_eq!(resolve_effort("xhigh", Some("off")), "none", "the request off normalizes");
-        assert_eq!(resolve_effort("off", None), "none", "the config off normalizes");
+        assert_eq!(
+            resolve_effort("xhigh", None),
+            "xhigh",
+            "no request value: the config effort"
+        );
+        assert_eq!(
+            resolve_effort("xhigh", Some("low")),
+            "low",
+            "the request value wins"
+        );
+        assert_eq!(
+            resolve_effort("xhigh", Some("off")),
+            "none",
+            "the request off normalizes"
+        );
+        assert_eq!(
+            resolve_effort("off", None),
+            "none",
+            "the config off normalizes"
+        );
     }
 }

@@ -1489,6 +1489,175 @@ fn working_row(app: &App, running: bool, now: &chrono::DateTime<chrono::Utc>) ->
     Line::from(vec![frame, body])
 }
 
+/// The live stream block for an in-progress model response
+/// (docs/tui-streaming-response.md §6.3).
+///
+/// Shows the header with an ellipsis ("…") while the stream is open
+/// and "· done" once the done line arrives. The body shows the tail
+/// of the accumulated content: the thinking tail and the response text
+/// share one window (the last `max_body_lines` rows, thinking above
+/// text), so the block grows with the content and its height never
+/// shrinks when the response text starts — the thinking slides out as
+/// the text arrives, not as a sudden collapse. (Any partial tool-call
+/// arguments render when no content has arrived yet.) A blinking
+/// block cursor marks the end of the live text.
+///
+/// The block sits right after the existing messages (the transcript),
+/// above the model status indicator (working row); it does not scroll
+/// with the transcript. The app clears it when the matching log event
+/// lands or the loop stops.
+///
+/// The block grows with the arriving content: the body rows are
+/// bounded by `max_body_lines` (the caller bounds it to a fraction of
+/// the viewport height, so a long response extends the block without
+/// stealing the whole screen; the transcript absorbs the rest).
+fn stream_block_lines(app: &App, width: usize, max_body_lines: usize) -> Vec<Line<'static>> {
+    let buf = match app.stream_buf() {
+        Some(b) => b,
+        None => return Vec::new(),
+    };
+    let palette = app.palette();
+    let prose = palette.style(crate::color::Role::PlainText, Modifier::empty());
+    let dim = palette.style(crate::color::Role::Status, Modifier::DIM);
+    let label_style = Style::default()
+        .fg(palette.color(crate::color::Role::ToolCommand))
+        .add_modifier(Modifier::BOLD);
+    let gutter = " ".repeat(GUTTER);
+    let wrap_w = width.saturating_sub(GUTTER).max(4);
+
+    let mut out: Vec<Line<'static>> = Vec::new();
+
+    // Header row.
+    let suffix = if buf.done { " · done" } else { " …" };
+    out.push(Line::from(vec![Span::styled(
+        format!("{LABEL}assistant{suffix}"),
+        label_style,
+    )]));
+
+    let mut body_lines: Vec<Line<'static>> = Vec::new();
+
+    let has_thinking = app.thinking_shown() && !buf.reasoning.is_empty();
+    let has_text = !buf.text.is_empty();
+
+    // Thinking renders above the response text (the natural order is
+    // thinking → response). Thinking and text share one content
+    // window: when the response starts, the thinking is not suddenly
+    // collapsed — the block keeps its height and the oldest thinking
+    // lines slide out as the text arrives, so the view never jumps
+    // (no flicker at the thinking → text transition).
+    let thinking_style = palette.style(crate::color::Role::Thinking, Modifier::empty());
+    let mut thinking_tail: Vec<Line<'static>> = Vec::new();
+    let mut shows_thinking_label = false;
+    if has_thinking && max_body_lines > 0 {
+        let mut ids: Vec<&String> = buf.reasoning.keys().collect();
+        ids.sort();
+        let thinking_text = ids
+            .iter()
+            .filter_map(|id| buf.reasoning.get(*id))
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !thinking_text.is_empty() {
+            shows_thinking_label = true;
+            thinking_tail = wrap_thinking(&thinking_text, wrap_w, palette, thinking_style);
+        }
+    }
+
+    // Text block: the accumulated response text, wrapped with the same
+    // markdown/syntax path used for the settled message.
+    let text_tail: Vec<Line<'static>> = if has_text {
+        wrap_markdown_p(&buf.text, wrap_w, palette, prose)
+    } else {
+        Vec::new()
+    };
+
+    // The shared content window: the last `max_body_lines` rows (one
+    // row reserved for the pinned "thinking" label when thinking is
+    // shown). While the content fits, the block grows with it; once
+    // full, the oldest rows (the front of the thinking) scroll out as
+    // the text grows. The block height never shrinks at the
+    // thinking → text transition, so the transcript above it does not
+    // lurch and the view does not flicker.
+    let window = max_body_lines.saturating_sub(usize::from(shows_thinking_label));
+    if window > 0 {
+        let combined = thinking_tail.len() + text_tail.len();
+        let drop = combined.saturating_sub(window);
+        let think_take = thinking_tail.len().saturating_sub(drop);
+        let text_drop = drop.saturating_sub(thinking_tail.len());
+        let text_take = text_tail.len().saturating_sub(text_drop);
+        if shows_thinking_label {
+            body_lines.push(Line::from(vec![Span::styled(
+                "thinking".to_string(),
+                thinking_style,
+            )]));
+        }
+        body_lines.extend(thinking_tail[thinking_tail.len() - think_take..].iter().cloned());
+        body_lines.extend(text_tail[text_tail.len() - text_take..].iter().cloned());
+    }
+
+    // Partial tool-call arguments: one dim line per call.
+    if body_lines.is_empty() {
+        let mut ids: Vec<&String> = buf.tool_args.keys().collect();
+        ids.sort();
+        for id in ids {
+            let Some((name, args)) = buf.tool_args.get(id) else {
+                continue;
+            };
+            let name_disp = if name.is_empty() { id.as_str() } else { name.as_str() };
+            let budget = max_body_lines.saturating_sub(body_lines.len());
+            if budget == 0 {
+                break;
+            }
+            let shown = trunc(args, wrap_w.saturating_sub(12));
+            body_lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{gutter}tool:{name_disp}"),
+                    label_style,
+                ),
+                Span::styled(format!(" {shown}"), dim),
+            ]));
+        }
+    }
+
+    // Apply the gutter to text/thinking body lines that lack it.
+    let mut content: Vec<Line<'static>> = body_lines
+        .into_iter()
+        .map(|l| {
+            // The wrap helpers already prefix the gutter when the wrap
+            // width accounts for it. If the first span does not start
+            // with the gutter, prepend it.
+            let has_gutter = l
+                .spans
+                .first()
+                .map_or(false, |s| s.content.starts_with(&gutter));
+            if has_gutter {
+                l
+            } else {
+                let mut spans = vec![Span::styled(gutter.clone(), Style::default())];
+                spans.extend(l.spans);
+                Line::from(spans)
+            }
+        })
+        .collect();
+
+    // Blinking cursor on the last content line while the stream is open.
+    if !buf.done && content.is_empty() {
+        content.push(Line::from(vec![
+            Span::styled(gutter.clone(), dim),
+            Span::styled("▊", dim),
+        ]));
+    } else if !buf.done && !content.is_empty() {
+        let now = chrono::Utc::now();
+        let blink = (now.timestamp_millis() / 500) % 2 == 0;
+        let cursor = if blink { "▊" } else { " " };
+        let last = content.last_mut().unwrap();
+        last.spans.push(Span::styled(cursor, dim));
+    }
+
+    out.extend(content);
+    out
+}
+
 /// Format a token count for display (ported from pi-goal
 /// `formatTokenCount`): 12400 → "12.4k", 1200000 → "1.2M".
 fn format_token_count(n: u64) -> String {
@@ -2344,7 +2513,24 @@ pub fn draw(
     // The waiting-message block owns one layout cell for its rows
     // (docs/tui_feature_requests_from_human.md 2026-08-31, stage 1).
     let pending_rows = pending_message_lines(app, running, inner.width as usize);
+    // The live stream block (docs/tui-streaming-response.md section
+    // 6.3): pinned right after the existing messages (the transcript)
+    // and above the model status indicator while a model response
+    // streams. Empty while no model call is in flight. The block
+    // grows with the arriving content: the body is bounded to half
+    // the viewport height, so a long response extends the block
+    // without stealing the whole screen (the transcript's Min(2)
+    // absorbs the rest).
+    let stream_max_body = inner.height as usize / 2;
+    let stream_lines = stream_block_lines(app, inner.width as usize, stream_max_body);
     let mut constraints: Vec<Constraint> = vec![Constraint::Min(2)];
+    // The live stream block owns one layout cell per row it renders
+    // (docs/tui-streaming-response.md section 6.3): it sits right
+    // after the existing messages, above the model status indicator.
+    // No cell when no model response is streaming.
+    if !stream_lines.is_empty() {
+        constraints.push(Constraint::Length(stream_lines.len() as u16));
+    }
     if !pending_rows.is_empty() {
         constraints.push(Constraint::Length(pending_rows.len() as u16));
     }
@@ -2504,6 +2690,27 @@ pub fn draw(
     }
 
     let mut row = 1usize;
+    // Live stream block (docs/tui-streaming-response.md section 6.3):
+    // the in-progress model response, rendered right after the
+    // existing messages, above the model status indicator (working
+    // row). It does not scroll with the transcript; the settle event
+    // moves the text into the transcript and clears the block.
+    if !stream_lines.is_empty() {
+        for (i, l) in stream_lines.iter().enumerate() {
+            if i as u16 >= rows[row].height {
+                break;
+            }
+            let sub = ratatui::layout::Rect {
+                x: rows[row].x,
+                y: rows[row].y + i as u16,
+                width: rows[row].width,
+                height: 1,
+            };
+            f.render_widget(Paragraph::new(l.clone()), sub);
+        }
+        row += 1;
+    }
+
     // waiting messages: the steering list of the active session
     // (docs/tui_feature_requests_from_human.md 2026-08-31, stage 1).
     // One layout cell for the block; one row per line, like the
@@ -2897,6 +3104,15 @@ mod tests {
         let mut app = App::new();
         app.set_active(crate::port::SessionId::new("s1"), events);
         app
+    }
+
+    /// Release the whole pace queue (docs/tui-streaming-response.md
+    /// section 6.5): the render tests assert on settled content, not
+    /// on the pacing.
+    fn settle_pace(app: &mut App) {
+        while app.stream_pending_chars() > 0 {
+            app.pump_stream_pacing();
+        }
     }
 
     /// An editor in the search command line, with `ab` typed.
@@ -4530,6 +4746,400 @@ mod tests {
             "the frame advances by one per interval"
         );
     }
+    /// P7 (missing-file): with no live stream buffer, the block is empty.
+    #[test]
+    fn stream_block_empty_when_no_buffer() {
+        let app = app_with_session(Vec::new());
+        assert!(stream_block_lines(&app, 80, 5).is_empty());
+    }
+
+    /// P4 (live-block): accumulated text renders in the live block, with a
+    /// header row. The text is wrapped with the same path as a settled
+    /// message, so it never exceeds the pane width.
+    #[test]
+    fn stream_block_shows_accumulated_text() {
+        let mut app = app_with_session(Vec::new());
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".model-stream");
+        std::fs::write(
+            &path,
+            [
+                serde_json::json!({"kind": "text", "delta": "Hello "}),
+                serde_json::json!({"kind": "text", "delta": "world"}),
+            ]
+            .iter()
+            .map(|v| format!("{v}\n"))
+            .collect::<String>(),
+        )
+        .unwrap();
+        app.refresh_stream(&path);
+        settle_pace(&mut app);
+
+        let lines = stream_block_lines(&app, 80, 5);
+        let text: String = lines.iter().map(|l| l.to_string()).collect();
+        assert!(
+            text.contains("assistant"),
+            "header row should label the live response: {text:?}"
+        );
+        assert!(
+            text.contains("Hello world"),
+            "accumulated text must render in the block: {text:?}"
+        );
+    }
+
+    /// P4 (done marker): once the `done` line is read, the header drops the
+    /// in-progress ellipsis and shows the done marker.
+    #[test]
+    fn stream_block_marks_done_when_done_line_read() {
+        let mut app = app_with_session(Vec::new());
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".model-stream");
+        std::fs::write(
+            &path,
+            [
+                serde_json::json!({"kind": "text", "delta": "hi"}),
+                serde_json::json!({"kind": "done", "stop_reason": "stop"}),
+            ]
+            .iter()
+            .map(|v| format!("{v}\n"))
+            .collect::<String>(),
+        )
+        .unwrap();
+        app.refresh_stream(&path);
+        settle_pace(&mut app);
+
+        let lines = stream_block_lines(&app, 80, 5);
+        let text: String = lines.iter().map(|l| l.to_string()).collect();
+        assert!(
+            text.contains("done"),
+            "the done marker should show once the done line is read: {text:?}"
+        );
+    }
+
+    /// P4 (thinking): when no output text has arrived but reasoning has,
+    /// the live block shows the in-progress thinking tail.
+    #[test]
+    fn stream_block_shows_thinking_when_no_text() {
+        let mut app = app_with_session(Vec::new());
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".model-stream");
+        std::fs::write(
+            &path,
+            serde_json::json!({"kind": "reasoning", "item_id": "r1", "delta": "let me think..."}).to_string() + "\n",
+        )
+        .unwrap();
+        app.refresh_stream(&path);
+        settle_pace(&mut app);
+
+        let lines = stream_block_lines(&app, 80, 5);
+        assert!(!lines.is_empty(), "the live block should show the thinking tail");
+        let text: String = lines.iter().map(|l| l.to_string()).collect();
+        assert!(
+            text.contains("let me think"),
+            "the in-progress reasoning should render: {text:?}"
+        );
+    }
+
+    /// P4 (tool-call deltas): partial tool-call arguments render as one dim
+    /// line per call, with the tool name shown as soon as it is known.
+    #[test]
+    fn stream_block_shows_partial_tool_calls() {
+        let mut app = app_with_session(Vec::new());
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".model-stream");
+        std::fs::write(
+            &path,
+            serde_json::json!({"kind": "tool_call_delta", "call_id": "c1", "name": "bash", "args_delta": "ls -la"}).to_string() + "\n",
+        )
+        .unwrap();
+        app.refresh_stream(&path);
+        settle_pace(&mut app);
+
+        let lines = stream_block_lines(&app, 80, 5);
+        let text: String = lines.iter().map(|l| l.to_string()).collect();
+        assert!(
+            text.contains("tool:bash"),
+            "the partial tool call should render with its name: {text:?}"
+        );
+        assert!(
+            text.contains("ls -la"),
+            "the partial arguments should render: {text:?}"
+        );
+    }
+
+    /// Growth: the block grows with the arriving content up to
+    /// `max_body_lines` — past the old fixed 5-row cap. When the
+    /// content exceeds the budget, the tail wins.
+    #[test]
+    fn stream_block_grows_with_content_within_budget() {
+        let mut app = app_with_session(Vec::new());
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".model-stream");
+        let text = (1..=12).map(|i| format!("L{i:02}")).collect::<Vec<_>>().join("\n");
+        std::fs::write(
+            &path,
+            format!("{}\n", serde_json::json!({"kind": "text", "delta": text})),
+        )
+        .unwrap();
+        app.refresh_stream(&path);
+        settle_pace(&mut app);
+
+        // A comfortable budget: all 12 content rows render (header +
+        // 12) — the block grew past the old fixed cap.
+        let lines = stream_block_lines(&app, 80, 30);
+        let joined: String = lines.iter().map(|l| l.to_string()).collect();
+        assert_eq!(lines.len(), 13, "header + 12 content rows: {joined:?}");
+        assert!(joined.contains("L01"), "the head stays: {joined:?}");
+        assert!(joined.contains("L12"), "the tail shows: {joined:?}");
+
+        // A tight budget: exactly 3 content rows, the tail wins.
+        let lines = stream_block_lines(&app, 80, 3);
+        let joined: String = lines.iter().map(|l| l.to_string()).collect();
+        assert_eq!(lines.len(), 4, "header + 3 content rows: {joined:?}");
+        assert!(joined.contains("L10"), "the tail shows: {joined:?}");
+        assert!(
+            !joined.contains("L01"),
+            "the head scrolled out: {joined:?}"
+        );
+    }
+
+    /// Growth: while no output text has arrived, the full budget goes
+    /// to the thinking tail.
+    #[test]
+    fn stream_block_thinking_grows_within_budget() {
+        let mut app = app_with_session(Vec::new());
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".model-stream");
+        let reasoning = (1..=20)
+            .map(|i| format!("think L{i:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                serde_json::json!({"kind": "reasoning", "item_id": "r1", "delta": reasoning})
+            ),
+        )
+        .unwrap();
+        app.refresh_stream(&path);
+        settle_pace(&mut app);
+
+        // A budget that fits: header + label + all 20 thinking rows.
+        let lines = stream_block_lines(&app, 80, 40);
+        let joined: String = lines.iter().map(|l| l.to_string()).collect();
+        assert_eq!(lines.len(), 22, "header + label + 20 rows: {joined:?}");
+        assert!(
+            joined.contains("think L01"),
+            "the head of the reasoning stays: {joined:?}"
+        );
+
+        // A tight budget: label + the 3-row tail.
+        let lines = stream_block_lines(&app, 80, 4);
+        let joined: String = lines.iter().map(|l| l.to_string()).collect();
+        assert_eq!(lines.len(), 5, "header + 4 content rows: {joined:?}");
+        assert!(joined.contains("think L20"), "the tail shows: {joined:?}");
+        assert!(
+            !joined.contains("think L01"),
+            "the head scrolled out: {joined:?}"
+        );
+    }
+
+    /// Transition (flicker fix): when the response text starts, the
+    /// thinking tail and the text share one sliding window instead of
+    /// the thinking collapsing to a 2-line summary. The block height
+    /// never shrinks at the transition — the thinking simply slides
+    /// out as the text grows.
+    #[test]
+    fn stream_block_thinking_and_text_share_the_window() {
+        let mut app = app_with_session(Vec::new());
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".model-stream");
+        let reasoning = (1..=10)
+            .map(|i| format!("think L{i:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(
+            &path,
+            [
+                serde_json::json!({"kind": "reasoning", "item_id": "r1", "delta": reasoning}),
+                serde_json::json!({"kind": "text", "delta": "alpha\nbeta\ngamma"}),
+            ]
+            .iter()
+            .map(|v| format!("{v}\n"))
+            .collect::<String>(),
+        )
+        .unwrap();
+        app.refresh_stream(&path);
+        settle_pace(&mut app);
+
+        // Tight budget: the last 7 content rows (1 reserved for the
+        // pinned label) of the combined 13 content rows — thinking tail
+        // 4 + text 3.
+        let lines = stream_block_lines(&app, 80, 8);
+        let joined: String = lines.iter().map(|l| l.to_string()).collect();
+        assert_eq!(lines.len(), 9, "header + label + 7 content rows: {joined:?}");
+        assert!(
+            joined.contains("think L07"),
+            "the thinking tail survives the transition: {joined:?}"
+        );
+        assert!(
+            !joined.contains("think L06"),
+            "the oldest thinking rows slid out: {joined:?}"
+        );
+        assert!(joined.contains("gamma"), "the text tail shows: {joined:?}");
+
+        // A budget that fits: header + label + all 13 content rows.
+        let lines = stream_block_lines(&app, 80, 20);
+        let joined: String = lines.iter().map(|l| l.to_string()).collect();
+        assert_eq!(lines.len(), 15, "header + label + 13 content rows: {joined:?}");
+        assert!(
+            joined.contains("think L01"),
+            "the head of the reasoning stays when it fits: {joined:?}"
+        );
+    }
+
+    /// Anti-flicker property: the block height at the thinking → text
+    /// transition never shrinks (the old 2-line compression caused a
+    /// sudden multi-row collapse = the reported view flicker).
+    #[test]
+    fn stream_block_height_never_shrinks_when_text_starts() {
+        let make_app = |reasoning: &str, text: &str| -> crate::app::App {
+            let mut app = app_with_session(Vec::new());
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join(".model-stream");
+            let mut out = String::new();
+            out.push_str(&format!(
+                "{}\n",
+                serde_json::json!({"kind": "reasoning", "item_id": "r1", "delta": reasoning})
+            ));
+            if !text.is_empty() {
+                out.push_str(&format!(
+                    "{}\n",
+                    serde_json::json!({"kind": "text", "delta": text})
+                ));
+            }
+            std::fs::write(&path, out).unwrap();
+            app.refresh_stream(&path);
+            settle_pace(&mut app);
+            app
+        };
+
+        let reasoning = (1..=10)
+            .map(|i| format!("think L{i:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Thinking only (the frame before the transition).
+        let app_think_only = make_app(&reasoning, "");
+        let h_think_only = stream_block_lines(&app_think_only, 80, 12).len();
+
+        // The first text row arrives.
+        let app_first_text = make_app(&reasoning, "w01");
+        let h_first_text = stream_block_lines(&app_first_text, 80, 12).len();
+
+        // A long text stream (past the window cap).
+        let text_long = (1..=30).map(|i| format!("w{i:02}")).collect::<Vec<_>>().join("\n");
+        let app_long_text = make_app(&reasoning, &text_long);
+        let h_long_text = stream_block_lines(&app_long_text, 80, 12).len();
+
+        assert_eq!(
+            h_think_only,
+            12,
+            "header + label + 10 thinking rows at budget 12"
+        );
+        assert!(
+            h_first_text >= h_think_only,
+            "the transition must not shrink the block ({h_first_text} < {h_think_only})"
+        );
+        assert!(
+            h_long_text >= h_think_only,
+            "a long text must not shrink the block ({h_long_text} < {h_think_only})"
+        );
+        assert_eq!(
+            h_long_text,
+            h_first_text,
+            "once full, the window height stays fixed"
+        );
+    }
+
+    /// A zero budget (a degenerate viewport) renders the header row
+    /// only.
+    #[test]
+    fn stream_block_zero_budget_shows_header_only() {
+        let mut app = app_with_session(Vec::new());
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".model-stream");
+        std::fs::write(
+            &path,
+            [
+                serde_json::json!({"kind": "text", "delta": "hi"}),
+                serde_json::json!({"kind": "done", "stop_reason": "stop"}),
+            ]
+            .iter()
+            .map(|v| format!("{v}\n"))
+            .collect::<String>(),
+        )
+        .unwrap();
+        app.refresh_stream(&path);
+        settle_pace(&mut app);
+        let lines = stream_block_lines(&app, 80, 0);
+        assert_eq!(lines.len(), 1, "the header row only: {lines:?}");
+    }
+
+    /// Position (docs/tui-streaming-response.md section 6.3): the live
+    /// block renders right after the existing messages, above the
+    /// model status indicator (the working row).
+    #[test]
+    fn stream_block_sits_between_transcript_and_working_row() {
+        let ts = fmt_ts(chrono::Utc::now() - chrono::Duration::seconds(2));
+        let mut evs: Vec<Event> =
+            (0..20).map(|i| produce::user_message(&format!("message {i}"))).collect();
+        evs.push(phase_marker(&ts, "wait"));
+        let mut app = app_with_session(evs);
+        attach_running_loop(&mut app, "s1");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".model-stream");
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                serde_json::json!({"kind": "text", "delta": "streaming reply"})
+            ),
+        )
+        .unwrap();
+        app.refresh_stream(&path);
+        settle_pace(&mut app);
+
+        let b = draw_frame(&mut app, 80, 30);
+        let row_of = |needle: &str| -> u16 {
+            let buf = b.buffer();
+            let area = buf.area();
+            (0..area.height)
+                .find(|&y| {
+                    let mut row = String::new();
+                    for x in 0..area.width {
+                        if let Some(cell) = buf.cell((x, y)) {
+                            row.push_str(cell.symbol());
+                        }
+                    }
+                    row.contains(needle)
+                })
+                .unwrap_or_else(|| panic!("no buffer row contains {needle:?}"))
+        };
+        let msg = row_of("message 19");
+        let stream = row_of("assistant");
+        let work = row_of("waiting for model");
+        assert!(
+            msg < stream,
+            "the stream block sits below the existing messages (msg={msg} stream={stream})"
+        );
+        assert!(
+            stream < work,
+            "the stream block sits above the model status indicator (stream={stream} work={work})"
+        );
+    }
+
 }
 
 #[cfg(test)]
@@ -4646,4 +5256,5 @@ mod cursor_span_tests {
         let cell = spans.iter().find(|s| s.content.contains("gray")).unwrap();
         assert_eq!(cell.style, style, "the cell keeps the thinking tone");
     }
+
 }

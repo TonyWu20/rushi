@@ -68,20 +68,25 @@ pub fn poll() -> Option<Signal> {
 
 /// Check for a caught signal. On a hit: cancel the in-flight child and
 /// exit with `exit_code` (the caller picks 1 for `step`, 143/130 for `run`).
+/// Also deletes the in-flight stream channel file so a restart does not
+/// pick up a stale stream (docs/tui-streaming-response.md section 10).
 /// Returns when no signal is pending.
 pub fn check_and_exit(exit_code: i32) {
     if poll().is_some() {
         crate::stage_runner::cancel_live_child();
+        crate::stream_channel::cleanup();
         std::process::exit(exit_code);
     }
 }
 
 /// Check for a caught signal and exit with the signal-specific code
 /// (143 for SIGTERM, 130 for SIGINT). Used by `rushi run`.
+/// Also deletes the in-flight stream channel file.
 /// For `rushi step`, use `check_and_exit(1)` instead.
 pub fn check_and_exit_for_run() {
     if let Some(sig) = poll() {
         crate::stage_runner::cancel_live_child();
+        crate::stream_channel::cleanup();
         std::process::exit(sig.run_exit_code());
     }
 }

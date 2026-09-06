@@ -184,6 +184,12 @@ pub trait SessionPort: Send + Sync {
     /// to locate the session's `goal.json` for goal-state display.
     fn session_dir(&self, session: &SessionId) -> Result<std::path::PathBuf, BusError>;
 
+    /// The session-local model stream channel file
+    /// (docs/tui-streaming-response.md section 3.1). The loop creates
+    /// and deletes this file around each model call; the TUI polls it
+    /// each frame to render the in-progress response.
+    fn model_stream_path(&self, session: &SessionId) -> Result<std::path::PathBuf, BusError>;
+
     /// Append one TUI trace record to the session trace log.
     ///
     /// The TUI writes its own errors and warnings to a trace a human
