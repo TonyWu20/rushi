@@ -56,6 +56,10 @@ pub enum Key {
     /// The picker preview-pane toggle (docs/tui-file-picker.md
     /// section 4.4).
     CtrlP,
+    /// The picker file-scope cycle (docs/tui-file-picker.md P9):
+    /// standard → show git-ignored → also show hidden → back to
+    /// standard. The item list is re-enumerated on each press.
+    CtrlI,
     /// Alt+Up: recall the pending message queue into the editor
     /// (docs/user-message-editing.md).
     AltUp,
@@ -408,6 +412,12 @@ const SS_ARM_TTL: std::time::Duration = std::time::Duration::from_secs(3);
 /// Scroll distance kept between the viewport top and the log end. The
 /// transcript is capped anyway, so the scroll clamps at draw time.
 const SCROLL_CAP: usize = 100_000;
+/// Maximum number of events held in memory per session. The render
+/// layer only displays the last `TRANSCRIPT_EVENT_CAP` events, but we
+/// keep extra for scrollback and pending-approval lookups. Capping the
+/// Vec prevents unbounded memory growth in long-running sessions
+/// (a single TUI instance must not exhaust system RAM).
+const EVENTS_CAP: usize = 10_000;
 
 impl App {
     pub fn new() -> Self {
@@ -533,7 +543,13 @@ impl App {
 
     /// Switch the visible session. Reloads its log and resets scroll.
     /// The caller restarts the port watch afterwards.
-    pub fn set_active(&mut self, id: SessionId, events: Vec<Event>) {
+    pub fn set_active(&mut self, id: SessionId, mut events: Vec<Event>) {
+        // Trim from the front to bound memory; the render layer only
+        // shows the last TRANSCRIPT_EVENT_CAP events anyway.
+        if events.len() > EVENTS_CAP {
+            let excess = events.len() - EVENTS_CAP;
+            events.drain(0..excess);
+        }
         let (statuses, status_ts, order) = ext_status_map(&events);
         self.active = Some(id);
         self.events = events;
@@ -618,6 +634,10 @@ impl App {
                     self.events_grew = true;
                 }
                 self.events.push(event);
+                if self.events.len() > EVENTS_CAP {
+                    let excess = self.events.len() - EVENTS_CAP;
+                    self.events.drain(0..excess);
+                }
                 self.events_version += 1;
             }
             WatchItem::Gone => self.flash("session log missing — waiting for it to come back"),
@@ -934,7 +954,7 @@ impl App {
         // Path queries (`/abs`, `~/x`, `../y`) re-root the search;
         // plain queries stay under the cwd.
         let (root, tail) = crate::picker::items::query_root_tail(&query, &cwd);
-        let items = source.collect_in(&root);
+        let items = source.collect_in(&root, self.picker.scope);
         let matcher = crate::picker::fuzzy::PickerMatcher::new(items);
         self.picker.open(&query, 10);
         if !tail.is_empty() {
@@ -1009,7 +1029,7 @@ impl App {
         let (root, tail) = crate::picker::items::query_root_tail(query, &base);
         let need_replace = root != self.picker_root;
         let new_items = if need_replace {
-            Some(src.collect_in(&root))
+            Some(src.collect_in(&root, self.picker.scope))
         } else {
             None
         };
@@ -1020,6 +1040,27 @@ impl App {
             }
             m.query_ranked(query, &tail);
         }
+    }
+
+    /// Re-enumerate the picker's item list after `Ctrl+I` cycled the
+    /// file scope (docs/tui-file-picker.md P9): collect the current
+    /// search root at the new scope, swap the matcher's list, and
+    /// re-rank the live query against the fresh list. The flash line
+    /// names the new mode so the user sees the switch without
+    /// inspecting the list.
+    fn recollect_picker_items(&mut self) {
+        let Some(src) = self.picker_source.as_ref() else {
+            return;
+        };
+        let base = src.base().to_path_buf();
+        let scope = self.picker.scope;
+        let items = src.collect_in(&self.picker_root, scope);
+        let (_, tail) = crate::picker::items::query_root_tail(&self.picker.query, &base);
+        if let Some(m) = &mut self.picker_matcher {
+            m.replace_items(items);
+            m.query_ranked(&self.picker.query, &tail);
+        }
+        self.flash(scope.hint());
     }
 
     /// Commit the picker: replace the `@query` token with the chosen
@@ -1768,6 +1809,14 @@ impl App {
                         | crate::picker::state::PickAction::ScrollPreview
                         | crate::picker::state::PickAction::TogglePreview
                         | crate::picker::state::PickAction::Nothing => {}
+                        crate::picker::state::PickAction::Recollect => {
+                            // `Ctrl+I` cycled the file scope
+                            // (docs/tui-file-picker.md P9): re-enumerate
+                            // the current search root at the new scope,
+                            // re-rank the live query, and flash the
+                            // scope line so the user sees the switch.
+                            self.recollect_picker_items();
+                        }
                     }
                     return Vec::new();
                 }
@@ -1944,6 +1993,12 @@ impl App {
             Key::CtrlK => {
                 // The picker list navigation key (docs/tui-file-picker.md
                 // section 5): Ctrl+K moves up in the picker list. The
+                // picker handles it when open; when closed it is a no-op.
+                Vec::new()
+            }
+            Key::CtrlI => {
+                // The picker file-scope cycle (docs/tui-file-picker.md
+                // P9): Ctrl+I cycles standard → ignored → hidden. The
                 // picker handles it when open; when closed it is a no-op.
                 Vec::new()
             }
@@ -3733,5 +3788,68 @@ mod tests {
         let result2 = app.press(Key::Quit);
         assert!(result2.is_empty(), "second q should also just type");
         assert_eq!(app.palette_state().query, "qq");
+    }
+
+    #[test]
+    fn events_vec_is_capped_on_session_load() {
+        let evs: Vec<Event> = (0..EVENTS_CAP + 100)
+            .map(|i| {
+                ev(&format!(
+                    r#"{{"v":1,"type":"user_message","ts":"{i}","content":"{i}"}}"#
+                ))
+            })
+            .collect();
+        let mut app = app_with(evs, "s1");
+        assert_eq!(
+            app.events().len(),
+            EVENTS_CAP,
+            "set_active trims the log down to the cap"
+        );
+        assert_eq!(
+            app.events().last().unwrap().kind(),
+            EventKind::UserMessage,
+            "the newest events survive the trim"
+        );
+    }
+
+    #[test]
+    fn events_vec_is_capped_by_the_tailer() {
+        let evs: Vec<Event> = (0..EVENTS_CAP).map(|_| ev(r#"{"v":1,"type":"user_message","ts":"t","content":"x"}"#)).collect();
+        let mut app = app_with(evs, "s1");
+        for _ in 0..EVENTS_CAP {
+            app.on_watch_item(WatchItem::Event {
+                event: ev(r#"{"v":1,"type":"user_message","ts":"t","content":"y"}"#),
+                cursor: crate::port::TailCursor::end(),
+            });
+        }
+        assert_eq!(
+            app.events().len(),
+            EVENTS_CAP,
+            "the tailer must not grow the Vec past the cap"
+        );
+        assert_eq!(
+            app.events()[0].get_str("content").as_deref(),
+            Some("y"),
+            "the oldest (x) lines drop first"
+        );
+    }
+
+    #[test]
+    fn events_vec_capped_in_set_active() {
+        let evs: Vec<Event> = (0..EVENTS_CAP + 500)
+            .map(|i| {
+                ev(&format!(
+                    r#"{{"v":1,"type":"user_message","ts":"{i}","content":"x"}}"#
+                ))
+            })
+            .collect();
+        let mut app = App::new();
+        app.set_sessions(vec![SessionId::new("s1")]);
+        app.set_active(SessionId::new("s1"), evs);
+        assert_eq!(
+            app.events().len(),
+            EVENTS_CAP,
+            "set_active must trim the Vec to EVENTS_CAP"
+        );
     }
 }
