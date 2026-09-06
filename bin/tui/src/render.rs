@@ -2799,7 +2799,7 @@ pub fn draw(
         let rows = layout.list.height.saturating_sub(2).max(1) as usize;
         app.picker().visible = rows;
 
-        let hints = "enter ok · esc keep · ctrl-j/ctrl-k move · ctrl-p preview";
+        let hints = "enter ok · esc keep · ctrl-j/ctrl-k move · ctrl-p preview · ctrl-i scope";
         // Clone the palette so the mutable picker borrow below does not
         // overlap an immutable borrow of the same app.
         let palette = app.palette().clone();

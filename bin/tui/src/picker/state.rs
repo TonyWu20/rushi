@@ -13,8 +13,15 @@
 //! - `Enter` → commit
 //! - `Esc` → close
 //! - `Ctrl+U` / `Ctrl+D` → scroll the preview pane
+//! - `Ctrl+I` → cycle the file scope (standard → ignored → hidden →
+//!   standard, P9 in docs/tui-file-picker.md). In a standard terminal
+//!   `Ctrl+I` is byte 0x09 — the same byte as `Tab` — so crossterm
+//!   reports it as `KeyCode::Tab`. The picker therefore also binds
+//!   `Tab` to the scope cycle.
 //!
-//! Multi-select (`Tab`) and quickfix are later adds (section 9).
+//! Multi-select and quickfix are later adds (section 9).
+
+use super::items::FileScope;
 
 /// The outcome of a picker key press.
 #[derive(Debug, Clone, PartialEq)]
@@ -33,6 +40,10 @@ pub enum PickAction {
     ScrollPreview,
     /// The preview pane visibility toggled.
     TogglePreview,
+    /// The file scope cycled (`Ctrl+I` / `Tab`). The caller re-enumerates the
+    /// item list under `PickerState::scope` and re-ranks the live
+    /// query (docs/tui-file-picker.md P9).
+    Recollect,
     /// The key is not handled by the picker. The caller falls through
     /// to the editor.
     Nothing,
@@ -60,6 +71,10 @@ pub struct PickerState {
     /// `preview_cutoff` auto-hide. Set by the toggle key when the pane
     /// is currently hidden.
     pub preview_forced: bool,
+    /// The file scope the item list was enumerated at
+    /// (docs/tui-file-picker.md P9). Cycled by `Ctrl+I` / `Tab`; the
+    /// caller re-collects items when it changes.
+    pub scope: FileScope,
 }
 
 impl Default for PickerState {
@@ -80,6 +95,7 @@ impl PickerState {
             preview_scroll: 0,
             preview_shown: true,
             preview_forced: false,
+            scope: FileScope::Standard,
         }
     }
 
@@ -93,6 +109,7 @@ impl PickerState {
         self.preview_scroll = 0;
         self.preview_shown = true;
         self.preview_forced = false;
+        self.scope = FileScope::Standard;
     }
 
     /// Close the picker without committing.
@@ -103,6 +120,7 @@ impl PickerState {
         self.top = 0;
         self.preview_scroll = 0;
         self.preview_forced = false;
+        self.scope = FileScope::Standard;
     }
 
     /// The current cursor index.
@@ -279,6 +297,21 @@ impl PickerState {
         PickAction::TogglePreview
     }
 
+    /// Cycle the file scope: standard → ignored → hidden → standard
+    /// (docs/tui-file-picker.md P9). The item list is re-enumerated
+    /// by the caller on the returned [`PickAction::Recollect`], so
+    /// reset the cursor to the top of the fresh list.
+    pub fn cycle_scope(&mut self) -> PickAction {
+        if !self.open {
+            return PickAction::Nothing;
+        }
+        self.scope = self.scope.next();
+        self.cursor = 0;
+        self.top = 0;
+        self.preview_scroll = 0;
+        PickAction::Recollect
+    }
+
     /// Handle one key. `count` is the current snapshot item count.
     /// `preview_page` is the scroll page size for Ctrl+U/D.
     /// `preview_cutoff` is the auto-hide threshold for the toggle.
@@ -312,6 +345,10 @@ impl PickerState {
             Key::CtrlU => self.scroll_preview_up(preview_page),
             Key::CtrlD => self.scroll_preview_down(preview_page),
             Key::CtrlP => self.toggle_preview(count, preview_cutoff),
+            // Ctrl+I and Tab are the same key in a standard terminal
+            // (both send byte 0x09; crossterm parses that byte as
+            // `KeyCode::Tab`). Either one cycles the file scope.
+            Key::CtrlI | Key::Tab => self.cycle_scope(),
             Key::Backspace => self.backspace(),
             Key::Char(c) => self.type_char(*c),
             _ => PickAction::Nothing,
@@ -486,5 +523,64 @@ mod tests {
         s.query = "abc".into();
         s.backspace();
         assert_eq!(s.query, "ab");
+    }
+
+    #[test]
+    fn scope_starts_standard_and_resets_on_open_and_close() {
+        let s = PickerState::new();
+        assert_eq!(s.scope, FileScope::Standard, "default scope is standard");
+        let mut s = open_picker(5);
+        s.press(&Key::CtrlI, 5, 5, 4);
+        s.press(&Key::CtrlI, 5, 5, 4);
+        assert_eq!(s.scope, FileScope::IncludeHidden, "two cycles land on hidden");
+        s.close();
+        assert_eq!(s.scope, FileScope::Standard, "close resets the scope");
+        s.open("q", 5);
+        assert_eq!(s.scope, FileScope::Standard, "open resets the scope");
+    }
+
+    #[test]
+    fn ctrl_i_cycles_the_scope_and_returns_recollect() {
+        let mut s = open_picker(5);
+        assert_eq!(s.press(&Key::CtrlI, 5, 5, 4), PickAction::Recollect);
+        assert_eq!(s.scope, FileScope::IncludeIgnored, "1st press: show ignored");
+        assert_eq!(s.press(&Key::CtrlI, 5, 5, 4), PickAction::Recollect);
+        assert_eq!(s.scope, FileScope::IncludeHidden, "2nd press: also show hidden");
+        assert_eq!(s.press(&Key::CtrlI, 5, 5, 4), PickAction::Recollect);
+        assert_eq!(s.scope, FileScope::Standard, "3rd press: back to default");
+        // The re-collected list restarts the cursor at the top.
+        s.cursor = 4;
+        s.top = 3;
+        s.press(&Key::CtrlI, 5, 5, 4);
+        assert_eq!(s.cursor(), 0, "cursor resets on recollect");
+        assert_eq!(s.top(), 0, "scroll resets on recollect");
+    }
+
+    #[test]
+    fn ctrl_i_does_nothing_when_closed() {
+        let mut s = PickerState::new();
+        assert_eq!(s.press(&Key::CtrlI, 5, 5, 4), PickAction::Nothing);
+        assert_eq!(s.scope, FileScope::Standard, "closed picker never cycles");
+    }
+
+    #[test]
+    fn tab_cycles_the_scope_like_ctrl_i() {
+        // Ctrl+I is byte 0x09 — the same byte as Tab. Crossterm
+        // reports that byte as `KeyCode::Tab`, so the picker binds
+        // Tab to the scope cycle too.
+        let mut s = open_picker(5);
+        assert_eq!(s.press(&Key::Tab, 5, 5, 4), PickAction::Recollect);
+        assert_eq!(s.scope, FileScope::IncludeIgnored, "1st Tab: show ignored");
+        assert_eq!(s.press(&Key::Tab, 5, 5, 4), PickAction::Recollect);
+        assert_eq!(s.scope, FileScope::IncludeHidden, "2nd Tab: also show hidden");
+        assert_eq!(s.press(&Key::Tab, 5, 5, 4), PickAction::Recollect);
+        assert_eq!(s.scope, FileScope::Standard, "3rd Tab: back to default");
+    }
+
+    #[test]
+    fn tab_does_nothing_when_closed() {
+        let mut s = PickerState::new();
+        assert_eq!(s.press(&Key::Tab, 5, 5, 4), PickAction::Nothing);
+        assert_eq!(s.scope, FileScope::Standard, "closed picker never cycles");
     }
 }

@@ -94,6 +94,7 @@ fn key_input(k: &cevent::KeyEvent) -> Option<Key> {
             cevent::KeyCode::Char('f') => Some(Key::CtrlF),
             cevent::KeyCode::Char('l') => Some(Key::CtrlL),
             cevent::KeyCode::Char('p') => Some(Key::CtrlP),
+            cevent::KeyCode::Char('i') => Some(Key::CtrlI),
             cevent::KeyCode::Char('q') => Some(Key::Quit),
             cevent::KeyCode::Char('r') => Some(Key::CtrlR),
             cevent::KeyCode::Char('u') => Some(Key::CtrlU),
@@ -1544,5 +1545,46 @@ mod tui_log_tests {
             !after.contains(&pat),
             "main.rs writes raw stderr after the terminal takeover (FT-017)"
         );
+    }
+}
+
+#[cfg(test)]
+mod key_input_tests {
+    use super::key_input;
+    use crate::app::Key;
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+    #[test]
+    fn ctrl_i_maps_to_key_ctrl_i() {
+        let ev = KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL);
+        assert_eq!(key_input(&ev), Some(Key::CtrlI));
+    }
+
+    #[test]
+    fn ctrl_i_repeat_events_also_map() {
+        use crossterm::event::KeyEventState;
+        let ev = KeyEvent {
+            code: KeyCode::Char('i'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Repeat,
+            state: KeyEventState::NONE,
+        };
+        assert_eq!(key_input(&ev), Some(Key::CtrlI));
+    }
+
+    #[test]
+    fn plain_i_is_not_ctrl_i() {
+        let ev = KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE);
+        assert_eq!(key_input(&ev), Some(Key::Char('i')));
+    }
+
+    #[test]
+    fn tab_maps_to_key_tab() {
+        // In a standard terminal a physical Ctrl+I press arrives as
+        // byte 0x09, which crossterm parses as KeyCode::Tab (not
+        // Char('i')+CONTROL). The picker binds Tab to the scope cycle
+        // so Ctrl+I works end to end (docs/tui-file-picker.md P9).
+        let ev = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(key_input(&ev), Some(Key::Tab));
     }
 }

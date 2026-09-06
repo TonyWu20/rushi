@@ -1042,11 +1042,11 @@ impl App {
         }
     }
 
-    /// Re-enumerate the picker's item list after `Ctrl+I` cycled the
-    /// file scope (docs/tui-file-picker.md P9): collect the current
-    /// search root at the new scope, swap the matcher's list, and
-    /// re-rank the live query against the fresh list. The flash line
-    /// names the new mode so the user sees the switch without
+    /// Re-enumerate the picker's item list after `Ctrl+I` / `Tab`
+    /// cycled the file scope (docs/tui-file-picker.md P9): collect the
+    /// current search root at the new scope, swap the matcher's list,
+    /// and re-rank the live query against the fresh list. The flash
+    /// line names the new mode so the user sees the switch without
     /// inspecting the list.
     fn recollect_picker_items(&mut self) {
         let Some(src) = self.picker_source.as_ref() else {
@@ -1776,7 +1776,12 @@ impl App {
                     return Vec::new();
                 }
                 // Host keys pass through even while the picker is open.
-                Key::Quit | Key::CtrlC | Key::CtrlR | Key::Tab
+                // `Tab` is deliberately not here: in a standard terminal
+                // it is the `Ctrl+I` key (both send byte 0x09, which
+                // crossterm parses as `KeyCode::Tab`), and the picker
+                // binds it to the file-scope cycle (docs/tui-file-picker.md
+                // P9), so it reaches the state machine below.
+                Key::Quit | Key::CtrlC | Key::CtrlR
                 | Key::BackTab => {}
                 // Esc, Enter, arrows, paging, preview keys: the state
                 // machine decides (docs/tui-file-picker.md section 5).
@@ -1810,7 +1815,7 @@ impl App {
                         | crate::picker::state::PickAction::TogglePreview
                         | crate::picker::state::PickAction::Nothing => {}
                         crate::picker::state::PickAction::Recollect => {
-                            // `Ctrl+I` cycled the file scope
+                            // `Ctrl+I` / `Tab` cycled the file scope
                             // (docs/tui-file-picker.md P9): re-enumerate
                             // the current search root at the new scope,
                             // re-rank the live query, and flash the
@@ -3799,7 +3804,7 @@ mod tests {
                 ))
             })
             .collect();
-        let mut app = app_with(evs, "s1");
+        let app = app_with(evs, "s1");
         assert_eq!(
             app.events().len(),
             EVENTS_CAP,
@@ -3834,6 +3839,98 @@ mod tests {
         );
     }
 
+    /// The P9 user flow through the real key dispatch, git-repo
+    /// variant: the `@sessions` case (docs/tui-file-picker.md P9).
+    /// A git-ignored `sessions/` dir is invisible at the default
+    /// scope; each `Ctrl+I` widens the list until the session files
+    /// surface.
+    #[test]
+    fn ctrl_i_surfaces_git_ignored_session_files() {
+        // A throwaway git repo with an ignored `sessions/` dir,
+        // mirroring the real harness layout.
+        let tmp = std::env::temp_dir().join("picker_test_appscope_git");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("sessions/demo")).unwrap();
+        std::fs::create_dir_all(tmp.join("src")).unwrap();
+        std::fs::write(tmp.join(".gitignore"), "sessions/\n").unwrap();
+        std::fs::write(tmp.join("src/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(tmp.join("sessions/demo/notes.txt"), "{}\n").unwrap();
+        let git_init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&tmp)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        let git_add = std::process::Command::new("git")
+            .args(["add", "src", ".gitignore"])
+            .current_dir(&tmp)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !git_init || !git_add {
+            eprintln!("skipped: git init/add unavailable in the fixture");
+            let _ = std::fs::remove_dir_all(&tmp);
+            return;
+        }
+
+        let mut app = App::new();
+        let src = crate::picker::items::FileItemSource::new(tmp.clone());
+        // Mirror `open_picker` for the `@sessions` seed query: the
+        // picker opens, the source and root are set, the live query
+        // is pushed.
+        let std_items = src.collect_in(&tmp, crate::picker::items::FileScope::Standard);
+        let matcher = crate::picker::fuzzy::PickerMatcher::new(std_items);
+        app.picker.open("sessions", 10);
+        matcher.query_ranked("sessions", "sessions");
+        app.picker_matcher = Some(matcher);
+        app.picker_source = Some(src);
+        app.picker_root = tmp.clone();
+
+        // Default scope: the git-ignored session file is absent, so
+        // the query matches nothing.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let snap = app.picker_matcher_ref().as_ref().unwrap().snapshot();
+        assert!(
+            snap.items.iter().all(|i| !i.label.starts_with("sessions/")),
+            "default scope hides the ignored session dir: {:?}",
+            snap.items.iter().map(|i| i.label.clone()).collect::<Vec<_>>()
+        );
+
+        // 1st Ctrl+I: the git-ignored files enter the list.
+        app.press(Key::CtrlI);
+        assert_eq!(
+            app.picker_ref().scope,
+            crate::picker::items::FileScope::IncludeIgnored
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let snap = app.picker_matcher_ref().as_ref().unwrap().snapshot();
+        assert!(
+            snap.items.iter().any(|i| i.label.starts_with("sessions/demo/")),
+            "the ignored session files surface after the first Ctrl+I: {:?}",
+            snap.items.iter().map(|i| i.label.clone()).collect::<Vec<_>>()
+        );
+
+        // 2nd and 3rd: hidden too, then back to the default.
+        app.press(Key::CtrlI);
+        assert_eq!(
+            app.picker_ref().scope,
+            crate::picker::items::FileScope::IncludeHidden
+        );
+        app.press(Key::CtrlI);
+        assert_eq!(
+            app.picker_ref().scope,
+            crate::picker::items::FileScope::Standard
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let snap = app.picker_matcher_ref().as_ref().unwrap().snapshot();
+        assert!(
+            snap.items.iter().all(|i| !i.label.starts_with("sessions/")),
+            "the third Ctrl+I returns to the default scope"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn events_vec_capped_in_set_active() {
         let evs: Vec<Event> = (0..EVENTS_CAP + 500)
@@ -3851,5 +3948,178 @@ mod tests {
             EVENTS_CAP,
             "set_active must trim the Vec to EVENTS_CAP"
         );
+    }
+
+    /// A non-git fixture directory for the P9 app-level test: prefer
+    /// the system temp dir; some sandboxes carry a `.git` into /tmp,
+    /// so fall back to the home dir when every temp ancestor is inside
+    /// a repo.
+    fn non_git_fixture(name: &str) -> Option<std::path::PathBuf> {
+        let mut bases = vec![std::env::temp_dir()];
+        if let Ok(home) = std::env::var("HOME") {
+            bases.push(std::path::PathBuf::from(home));
+        }
+        for base in bases {
+            let dir = base.join(name);
+            if std::fs::create_dir_all(&dir).is_ok()
+                && !dir.ancestors().any(|a| a.join(".git").exists())
+            {
+                return Some(dir);
+            }
+        }
+        None
+    }
+
+    /// The P9 flow through the real key dispatch: with the picker
+    /// open, `Ctrl+I` cycles the file scope and the item list is
+    /// re-enumerated and re-ranked under the new scope
+    /// (docs/tui-file-picker.md P9).
+    #[test]
+    fn ctrl_i_recollects_picker_items_under_new_scope() {
+        let fixture = match non_git_fixture("picker_test_appscope") {
+            Some(f) => f,
+            None => {
+                eprintln!("skipped: no non-git fixture base available");
+                return;
+            }
+        };
+        let _ = std::fs::remove_dir_all(&fixture);
+        std::fs::create_dir_all(&fixture).unwrap();
+        std::fs::write(fixture.join("visible.txt"), "x").unwrap();
+        std::fs::create_dir_all(fixture.join("target")).unwrap();
+        std::fs::write(fixture.join("target/out.bin"), "x").unwrap();
+        std::fs::write(fixture.join(".env"), "x").unwrap();
+        std::fs::create_dir_all(fixture.join(".hid")).unwrap();
+        std::fs::write(fixture.join(".hid/x.txt"), "x").unwrap();
+
+        let mut app = App::new();
+        let src = crate::picker::items::FileItemSource::new(fixture.clone());
+        let std_items = src.collect_in(&fixture, crate::picker::items::FileScope::Standard);
+        assert!(
+            std_items
+                .iter()
+                .all(|i| !i.label.starts_with('.') && !i.label.starts_with("target/")),
+            "premise: the default scope hides hidden and build files: {std_items:?}"
+        );
+        app.picker.open("", 10);
+        app.picker_matcher = Some(crate::picker::fuzzy::PickerMatcher::new(std_items));
+        app.picker_source = Some(src);
+        app.picker_root = fixture.clone();
+
+        // 1st press: show the ignored set (build dirs in a plain walk).
+        app.press(Key::CtrlI);
+        assert_eq!(
+            app.picker_ref().scope,
+            crate::picker::items::FileScope::IncludeIgnored,
+            "1st press advances to IncludeIgnored"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let snap = app.picker_matcher_ref().as_ref().unwrap().snapshot();
+        let labels: Vec<String> = snap.items.iter().map(|i| i.label.clone()).collect();
+        assert!(
+            labels.iter().any(|l| l == "target/out.bin"),
+            "ignored files now show: {labels:?}"
+        );
+        assert!(
+            !labels.iter().any(|l| l == ".env"),
+            "hidden files stay hidden at the ignored scope: {labels:?}"
+        );
+        assert_eq!(app.status(), Some("scope: showing git-ignored files"));
+
+        // 2nd press: show the hidden set too.
+        app.press(Key::CtrlI);
+        assert_eq!(
+            app.picker_ref().scope,
+            crate::picker::items::FileScope::IncludeHidden,
+            "2nd press advances to IncludeHidden"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let snap = app.picker_matcher_ref().as_ref().unwrap().snapshot();
+        let labels: Vec<String> = snap.items.iter().map(|i| i.label.clone()).collect();
+        assert!(
+            labels.iter().any(|l| l == ".env"),
+            "hidden files now show: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l.starts_with(".hid/")),
+            "hidden dirs now show: {labels:?}"
+        );
+        assert_eq!(app.status(), Some("scope: showing hidden files too"));
+
+        // 3rd press: back to the default.
+        app.press(Key::CtrlI);
+        assert_eq!(
+            app.picker_ref().scope,
+            crate::picker::items::FileScope::Standard,
+            "3rd press returns to the default"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let snap = app.picker_matcher_ref().as_ref().unwrap().snapshot();
+        let labels: Vec<String> = snap.items.iter().map(|i| i.label.clone()).collect();
+        assert!(
+            !labels.iter().any(|l| l == "target/out.bin"),
+            "build files are hidden again: {labels:?}"
+        );
+        assert!(
+            !labels.iter().any(|l| l == ".env"),
+            "hidden files are hidden again: {labels:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    /// The real-terminal half of P9: crossterm delivers a physical
+    /// `Ctrl+I` press as `KeyCode::Tab` (both are byte 0x09), so
+    /// `Key::Tab` must drive the scope cycle and recollect exactly
+    /// like `Key::CtrlI` does.
+    #[test]
+    fn tab_recollects_picker_items_under_new_scope() {
+        let fixture = match non_git_fixture("picker_test_appscope_tab") {
+            Some(f) => f,
+            None => {
+                eprintln!("skipped: no non-git fixture base available");
+                return;
+            }
+        };
+        let _ = std::fs::remove_dir_all(&fixture);
+        std::fs::create_dir_all(&fixture).unwrap();
+        std::fs::write(fixture.join("visible.txt"), "x").unwrap();
+        std::fs::create_dir_all(fixture.join("target")).unwrap();
+        std::fs::write(fixture.join("target/out.bin"), "x").unwrap();
+
+        let mut app = App::new();
+        let src = crate::picker::items::FileItemSource::new(fixture.clone());
+        let std_items = src.collect_in(&fixture, crate::picker::items::FileScope::Standard);
+        app.picker.open("", 10);
+        app.picker_matcher = Some(crate::picker::fuzzy::PickerMatcher::new(std_items));
+        app.picker_source = Some(src);
+        app.picker_root = fixture.clone();
+
+        // The press a terminal actually delivers for Ctrl+I.
+        app.press(Key::Tab);
+        assert_eq!(
+            app.picker_ref().scope,
+            crate::picker::items::FileScope::IncludeIgnored,
+            "Tab (== Ctrl+I) advances to IncludeIgnored"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let snap = app.picker_matcher_ref().as_ref().unwrap().snapshot();
+        let labels: Vec<String> = snap.items.iter().map(|i| i.label.clone()).collect();
+        assert!(
+            labels.iter().any(|l| l == "target/out.bin"),
+            "the re-collected list shows the widened set: {labels:?}"
+        );
+        assert_eq!(app.status(), Some("scope: showing git-ignored files"));
+
+        // BackTab stays a no-op: it is a distinct CSI sequence, not
+        // the 0x09 byte.
+        app.press(Key::BackTab);
+        assert_eq!(
+            app.picker_ref().scope,
+            crate::picker::items::FileScope::IncludeIgnored,
+            "BackTab does not cycle the scope"
+        );
+
+        let _ = std::fs::remove_dir_all(&fixture);
     }
 }
