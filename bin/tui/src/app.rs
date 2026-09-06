@@ -357,8 +357,9 @@ pub struct App {
     /// updates the value but leaves the entry untouched.
     ext_status_ts: HashMap<String, String>,
     /// Cached goal state for the active session, refreshed each tick
-    /// (docs/goal-ux.md §1.7). `None` when the session has no goal.json
-    /// or the file cannot be read.
+    /// (docs/goal-ux.md §1.7). `None` when the session has no goal
+    /// (no `goal.json` pointer, no current goal file) or the files
+    /// cannot be read.
     goal_state: Option<goal_state::GoalState>,
     /// Set when the user invoked `goal` or `goal_edit` from the palette
     /// and has not yet sent a message. Cleared on `SendDraft`
@@ -630,8 +631,10 @@ impl App {
         self.clear_stream();
     }
 
-    /// Refresh the in-memory goal state from `goal.json` on disk
-    /// (docs/goal-ux.md §1.7). Cheap: one small file read per tick.
+    /// Refresh the in-memory goal state from the session's goal files
+    /// on disk (the `goal.json` pointer plus `goal-<id>.json`)
+    /// (docs/goal-ux.md §1.7). Cheap: one or two small file reads per
+    /// tick.
     pub fn refresh_goal(&mut self, session_dir: &std::path::Path) {
         self.goal_state = goal_state::GoalState::load(session_dir);
     }

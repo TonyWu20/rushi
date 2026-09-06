@@ -1,6 +1,8 @@
 //! `goal_complete` — mark the active goal as done.
 //!
-//! Reads `HARNESS_SESSION_DIR`, loads `goal.json`, verifies the
+//! Reads `HARNESS_SESSION_DIR`, loads the session's current goal
+//! (the `goal.json` pointer plus its `goal-<id>.json` state file),
+//! verifies the
 //! `goal_id` argument against the goal's id (the stale-turn guard,
 //! docs/goal-ux.md §1.3, P8), rejects a `summary` that contradicts
 //! the completion claim (the completion guard, §1.5, P9), and only
@@ -21,12 +23,12 @@ fn main() {
 
     let session_dir = match session_dir() {
         Some(d) => d,
-        None => fail("HARNESS_SESSION_DIR is not set; cannot update goal.json."),
+        None => fail("HARNESS_SESSION_DIR is not set; cannot update the goal state."),
     };
 
     let mut state = match GoalState::load(&session_dir) {
         Some(s) => s,
-        None => fail("No goal.json found: start a goal first with the `goal` tool."),
+        None => fail("No goal found in this session: start a goal first with the `goal` tool."),
     };
 
     // Stale-turn guard (P8): the goal_id must be present and match
@@ -36,18 +38,18 @@ fn main() {
     }
 
     // Completion guard (P9): a summary that contradicts the
-    // completion claim is rejected; goal.json stays active.
+    // completion claim is rejected; the goal stays active.
     let summary = args.get("summary").and_then(|s| s.as_str()).unwrap_or("").to_string();
     if let Some(why) = contradiction_reason(&summary) {
         fail(&format!(
-            "goal_complete rejected: {why}. goal.json remains active — finish the work (or call goal_blocked with a reason), then call goal_complete again with a summary that does not contradict it."
+            "goal_complete rejected: {why}. The goal remains active — finish the work (or call goal_blocked with a reason), then call goal_complete again with a summary that does not contradict it."
         ));
     }
 
     state.mark_completed();
 
     if let Err(e) = state.save(&session_dir) {
-        fail(&format!("Failed to write goal.json: {e}"));
+        fail(&format!("Failed to write the goal state: {e}"));
     }
 
     let text = if summary.is_empty() {

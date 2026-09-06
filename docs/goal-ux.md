@@ -21,10 +21,10 @@ injects "call the `goal` tool" → the agent may or may not call it.
 The goal is not set until the agent complies.
 
 New flow: TUI arms the marker → user types the goal and sends → the goal
-extension receives the forwarded `user_message` event and writes `goal.json`
-directly. The `model.before` hook then injects the goal prompt (context,
-not a tool-call instruction). No agent round-trip is required to activate
-the goal.
+extension receives the forwarded `user_message` event and writes the
+session's goal files directly. The `model.before` hook then injects the
+goal prompt (context, not a tool-call instruction). No agent round-trip
+is required to activate the goal.
 
 The `goal` tool under `tools/goal/` remains for agent-initiated sub-goals
 and CLI use. The primary TUI path no longer depends on it.
@@ -33,24 +33,27 @@ The user's original message stays in `events.jsonl` unchanged. The goal
 block is appended to the model request as the **last message item**
 (after the conversation, agent-only, §1.1c), never written to the log.
 
-### 1.1b Injection is `goal.json`-driven, not log-derived
+### 1.1b Injection is goal-file-driven, not log-derived
 
 Because the goal prompt is deliberately *out of* `events.jsonl`, the
 only way the model sees it on a given turn is if the `model.before`
 hook injects it on *that* turn. The hook therefore does not scan the
-log to decide whether to inject: it reads `goal.json` and re-injects the
+log to decide whether to inject: it reads the session's current goal
+(the `goal.json` pointer plus its `goal-<id>.json` state file, §1.1d)
+and re-injects the
 prompt on **every** model call while `active == true`. This is the same
 pattern as a system prompt — a standing instruction served fresh in each
 request, not part of the conversation history. Consequences:
 
 - **Idempotent / no log dependency**: whether or not the derived
   context "covers" the goal round is irrelevant; the active state of
-  `goal.json` is the sole trigger. The prompt cannot be forgotten,
+  the current goal file is the sole trigger. The prompt cannot be
+  forgotten,
   dropped by a log scan, or lost to compaction (it was never in the
   log to lose).
 - **"Same block" is guaranteed**: the block is a pure function of
   `(goal text, goal_id)` — objective + rules + trust boundary +
-  `goal_id`. Stable `goal.json` → byte-identical block on every call
+  `goal_id`. Stable goal state → byte-identical block on every call
   (§1.1c). The only per-turn varying content is the "continuation #N"
   counter, which lives in the *logged* `run.idle` message (driven by
   `GoalState.iteration`), **never inside the block**.
@@ -92,7 +95,8 @@ Rules:
   message ("continuation #N") is a logged `user_message`
   (`queue: follow`); the user's goal message is the logged "start"
   signal.
-- Because the block is rebuilt from `goal.json` each call, an
+- Because the block is rebuilt from the current goal's state file each
+  call, an
   objective edit is reflected automatically — there is **no separate
   "objective updated" prompt variant**.
 - **Cache cost**: entering/exiting goal mode changes *only* the
@@ -102,6 +106,34 @@ Rules:
   block is recomputed with the new response (O(block), a few hundred
   tokens) — negligible next to the new tokens; the entire
   conversation still hits.
+
+
+
+### 1.1d File layout: one state file per goal, `goal.json` is a pointer
+
+Goal state persists in the session directory as **one file per goal**,
+named by the goal's id: `goal-<id>.json` (id = `g-<8-hex>`, §1.3).
+The session's *current* goal is named by a small pointer file,
+`goal.json`:
+
+```json
+{ "current_goal": "g-82397cfa" }
+```
+
+Consequences:
+
+- **Past goals are never overwritten.** Starting a new goal writes a
+  new `goal-<id>.json` and moves the pointer; the old goal's file
+  stays in the session directory as a trace.
+- **`goal clear` deletes the pointer only.** The per-goal files
+  remain as traces of the session's goals (§1.4).
+- **Legacy compatibility**: sessions that predate this layout hold a
+  full `GoalState` in `goal.json`. `GoalState::load` reads both
+  layouts; the next save migrates the legacy state into
+  `goal-<id>.json` and rewrites `goal.json` as a pointer.
+- All consumers (goal tools, goal hooks, the TUI status line) go
+  through `GoalState::load` / `GoalState::save`, so the layout is
+  contained in `crates/goal-state` — no call site changes.
 
 
 
@@ -144,12 +176,13 @@ rejected. This ports pi-goal's `goalIdRejectionReason`.
 - `goal pause` — sets `active = false`, preserves text and
   token accounting. The loop stops at the next `run.idle`.
   Re-activated by `goal resume`.
-- `goal clear` — deletes `goal.json` from the session dir.
-  Irreversible.
+- `goal clear` — deletes the `goal.json` pointer from the session
+  dir. The per-goal `goal-<id>.json` state files stay as traces of
+  the session's goals.
 
 Both are TUI palette commands handled by the goal extension (the same
 subprocess that handles `goal`, `goal edit`, `goal resume`). They write
-`goal.json` directly; no agent involvement.
+the goal files directly; no agent involvement.
 
 ### 1.5 Completion guard
 
@@ -162,7 +195,7 @@ case-insensitive):
 - `still incomplete|still failing|still fails`
 - `because .* tests? fail`
 
-A matching summary is rejected with the reason; `goal.json` stays
+A matching summary is rejected with the reason; the goal stays
 active.
 
 ### 1.6 No budget cap (user decision)
@@ -201,7 +234,8 @@ The TUI shows goal state in two places:
 
 The main block border is colored (success accent) when a goal is active.
 
-The TUI reads `goal.json` from the active session's directory on each
+The TUI reads the session's goal files (the `goal.json` pointer plus
+`goal-<id>.json`) from the active session's directory on each
 tick. This requires a `session_dir` method on the `SessionPort` trait.
 
 ### 1.8 Auto-Insert and persistent hint
@@ -259,6 +293,13 @@ mode changes (unlike the transient `flash` used today).
   `budget_tokens`/`budget_exhausted`.
 - Update `resume` to reset `iteration = 0` and `used_tokens = 0`,
   preserve `id`.
+- Per-goal file layout (§1.1d): `save` writes the per-goal file
+  `goal-<id>.json` and then rewrites the `goal.json` pointer (last,
+  so it always names a fully written state file); `load` resolves the
+  pointer with a legacy full-state fallback, migrating on the next
+  save. Add the `GoalPointer` type plus `goal_file_path`,
+  `load_by_id`, `current_id`, `clear` (deletes the pointer only —
+  per-goal traces survive), and `list` (every stored goal).
 
 Unit tests: `build_goal_block` produces the expected substrings
 (objective, rules, goal_id, "no token budget" line) and is **byte-stable**
@@ -274,7 +315,7 @@ preserves `id` and `iteration`.
   `id` (pi-goal `goalIdRejectionReason`). The model learns the id from
   the `<goal_id>` block in the injected goal prompt.
 - Add contradiction-pattern check on `summary` (three regex patterns
-  from pi-goal). On match, reject with the reason; `goal.json` stays
+  from pi-goal). On match, reject with the reason; the goal stays
   active.
 - Update the `goal_complete` system-prompt line in `config.toml` and
   `config-low.toml` to name the `goal_id` argument.
@@ -296,19 +337,22 @@ preserves `id` and `iteration`.
 
 - Add `armed: Option<String>` in-memory field (`"start"` / `"edit"`).
 - Handle `event` op: when `op.event.type == "user_message"` and
-  `armed.is_some()`, write `goal.json` via `GoalState::new` (start) or
-  `GoalState::edit_goal` (edit). Append a `goal_set` ext_status marker.
+  `armed.is_some()`, write the goal files via `GoalState::new` +
+  `save` (start) or `GoalState::edit_goal` (edit). Append a
+  `goal_set` ext_status marker.
   Clear `armed`.
-- Handle `invoke` for `goal_pause`: load `goal.json`, set
+- Handle `invoke` for `goal_pause`: load the current goal, set
   `active = false`, save. Reply with confirmation.
-- Handle `invoke` for `goal_clear`: delete `goal.json` (if it exists).
-  Reply with confirmation.
-- `goal_resume` unchanged (already writes `goal.json` directly).
+- Handle `invoke` for `goal_clear`: delete the `goal.json` pointer via
+  `GoalState::clear` (per-goal `goal-<id>.json` files stay as
+  traces). Reply with confirmation.
+- `goal_resume` unchanged (already rewrites the goal state directly).
 
 ### `bin/hook-goal-arm/src/main.rs`
 
-- Rewrite the injection logic (read **only `goal.json`**, no log scan):
-  - Read `goal.json`. If absent or `active = false`, print `{}`.
+- Rewrite the injection logic (read **only the goal files**, no log
+  scan):
+  - Read the current goal. If absent or `active = false`, print `{}`.
   - If active: append the single static block
     `goal.build_goal_block()` as a **trailing message item** to
     `request.input` (`{"type":"message","role":"user","content":
@@ -351,7 +395,8 @@ preserves `id` and `iteration`.
 - Add `goal_armed: bool` field (set on invoke reply for goal /
   goal_edit; cleared on SendDraft).
 - Add `fn refresh_goal(&mut self, port: &dyn SessionPort)` — reads
-  `goal.json` from `port.session_dir(active)` and updates
+  the session's goal files (pointer + per-goal state file) from
+  `port.session_dir(active)` and updates
   `self.goal_state`.
 
 ### `bin/tui/src/main.rs`
@@ -386,14 +431,15 @@ preserves `id` and `iteration`.
 
 ### `scripts/run-idle-continue-e2e.sh`
 
-- Add scenario: goal set by ext (marker + user_message + goal.json
+- Add scenario: goal set by ext (marker + user_message + goal files
   written by the ext, no agent tool call), loop continues via
   `run.idle` (P1).
-- Add scenario: `goal edit` → goal.json edited in place, id preserved
+- Add scenario: `goal edit` → the goal state file edited in place,
+  id preserved
   (P2).
 - Add scenario: `goal pause` → loop stops at next idle (P3).
 - Add scenario: `goal resume` → loop continues (P4).
-- Add scenario: `goal clear` → no goal.json → loop stops (P5).
+- Add scenario: `goal clear` → pointer deleted → loop stops (P5).
 - Add scenario: `goal_complete` with wrong `goal_id` → rejected (P8).
 - Add scenario: `goal_complete` with contradictory summary →
   rejected (P9).
@@ -402,7 +448,8 @@ preserves `id` and `iteration`.
   `closed-goal` scenarios cover P11.
 - Add scenario (P16): compact `events.jsonl` (drop the goal-era
   rounds), then confirm `hook-goal-arm` still re-injects the goal
-  prompt from `goal.json` alone, byte-identical to the pre-compaction
+  prompt from the goal files alone, byte-identical to the
+  pre-compaction
   prompt.
 
 ### `docs/pi-goal-readiness.md`
@@ -419,28 +466,29 @@ preserves `id` and `iteration`.
 ## Properties
 
 P1. goal-set-on-send: given the user selects `goal` from the palette
-    and sends a non-empty message M, observe that `goal.json` in the
-    session directory has `goal = M` and `active = true`, and `events
+    and sends a non-empty message M, observe that the session's current goal file
+    (`goal-<id>.json`, named by the `goal.json` pointer) has `goal = M` and `active = true`, and `events
     .jsonl` contains M as a `user_message` event with no intervening
     `goal` tool_call.
 
 P2. goal-edit-on-send: given an active goal with text G and id X,
     the user selects `goal edit` and sends a non-empty message M,
-    observe that `goal.json` has `goal = M`, `active = true`,
+    observe that the goal's state file has `goal = M`, `active = true`,
     `id = X` (unchanged), and `iteration` reset to 0.
 
 P3. goal-pause: given an active goal G, invoking `goal pause`
-    observe that `goal.json` has `active = false`, `goal = G.goal`
+    observe that the goal's state file has `active = false`, `goal = G.goal`
     (unchanged), `used_tokens` unchanged, and the loop stops at the
     next `run.idle` window.
 
 P4. goal-resume: given a goal with `active = false`, invoking
-    `goal resume` observe that `goal.json` has `active = true`,
+    `goal resume` observe that the goal's state file has `active = true`,
     `completed = false`, `blocked = false`, `used_tokens = 0`,
     `iteration = 0`.
 
 P5. goal-clear: given any goal state, invoking `goal clear` observe
-    that `goal.json` does not exist in the session directory.
+    that the `goal.json` pointer does not exist in the session directory
+    (the per-goal `goal-<id>.json` traces remain).
 
 P6. goal-prompt-injected: given an active goal with text G, observe
     that the model request's `input` array ends with a trailing
@@ -464,7 +512,7 @@ P8. goal-id-guard: given an active goal with id X, a
 P9. completion-guard: given a `goal_complete` call whose `summary`
     matches a contradiction pattern ("not complete", "still failing",
     "because tests fail"), observe that the tool result is a rejection
-    and `goal.json` remains `active = true`.
+    and the goal remains `active = true`.
 
 P10. active-goal-continue: given an active goal with `used_tokens`
     arbitrary (no budget check), observe that at the `run.idle`
@@ -472,7 +520,7 @@ P10. active-goal-continue: given an active goal with `used_tokens`
     prompt contains the goal text and the string "continuation #N"
     where N = `GoalState.iteration`.
 
-P11. no-active-goal-stops: given no active goal (no `goal.json`, or
+P11. no-active-goal-stops: given no active goal (no goal files, or
     `active = false`), observe that at the `run.idle` window the hook
     returns `{}` and no continuation prompt is injected.
 
@@ -490,12 +538,12 @@ P13. goal-status-line: given an active goal with text G,
 P14. goal-mode-border: given an active goal, observe that the TUI
     main border color differs from the idle border color.
 
-P15. no-goal-no-injection: given no active goal (no `goal.json` or
+P15. no-goal-no-injection: given no active goal (no goal files or
     `active = false`), observe that the model request is unchanged
     (no trailing goal block in `input`) and the TUI shows no goal
     status line and no `[goal]` bit.
 
-P16. goal-prompt-invariant: while `goal.json` exists and
+P16. goal-prompt-invariant: while an active goal exists (pointer + state file) and
     `active = true`, observe that every model request contains the
     goal block (objective + goal-mode rules + trust boundary +
     `goal_id`) as the **last item of `input`**, and the block is a
@@ -534,7 +582,7 @@ P17. cache-prefix-stability: given an active goal whose objective and
 | P13 | goal-status-line | `test_goal_status_line` in `bin/tui/src/render.rs` (assert the rendered line contains goal text, elapsed, token count — no budget ratio) | open |
 | P14 | goal-mode-border | `test_goal_border_color` in `bin/tui/src/render.rs` | open |
 | P15 | no-goal-no-injection | `test_no_goal_no_injection` in `bin/hook-goal-arm/src/main.rs` (no goal.json → `{}`) + `test_no_goal_status_line` in `bin/tui/src/render.rs` | open |
-| P16 | goal-prompt-invariant | `test_goal_block_pure_and_stable` in `crates/goal-state/src/lib.rs` (two equal `(goal,id)` → equal block bytes; a `GoalState` differing only in `iteration`/`used_tokens`/`opened_at` still yields the identical block) + `test_block_injected_every_active_call` in `bin/hook-goal-arm/src/main.rs` (active goal → inject; cleared goal → `{}`, no log dependency) + `test_block_survives_compaction` e2e scenario in `scripts/run-idle-continue-e2e.sh` (compact the log, re-inject from goal.json) | open |
+| P16 | goal-prompt-invariant | `test_goal_block_pure_and_stable` in `crates/goal-state/src/lib.rs` (two equal `(goal,id)` → equal block bytes; a `GoalState` differing only in `iteration`/`used_tokens`/`opened_at` still yields the identical block) + `test_block_injected_every_active_call` in `bin/hook-goal-arm/src/main.rs` (active goal → inject; cleared goal → `{}`, no log dependency) + `test_block_survives_compaction` e2e scenario in `scripts/run-idle-continue-e2e.sh` (compact the log, re-inject from the goal files) | open |
 | P17 | cache-prefix-stability | `test_block_byte_stable_across_turns` in `crates/goal-state/src/lib.rs` (consecutive calls with unchanged `(goal,id)` emit identical block bytes) + e2e assertion in `scripts/run-idle-continue-e2e.sh` that the trailing goal-block item is byte-identical across two active turns and the `instructions` prefix is untouched | open |
 
 ## Gate
