@@ -12,7 +12,11 @@ hidden — until a third press returns to the default. In a standard
 terminal `Ctrl+I` and `Tab` are the same key (both send byte 0x09,
 which crossterm parses as `KeyCode::Tab`), so the picker binds `Tab`
 to the cycle too; the `Ctrl+I` mapping stays for terminals that
-report it distinctly (e.g. the kitty keyboard protocol).
+report it distinctly (e.g. the kitty keyboard protocol). The
+long-path abbreviation (section 4.4, P10) landed 2026-09-06 as
+well: a result-list label wider than the list column — with the
+preview pane on or off — collapses its leading directory levels
+into a `...` prefix so the tail of the path stays visible.
 
 ## 1. Request
 
@@ -136,6 +140,15 @@ parts. Each part has one job.
   the visual mode lands (the open select-and-yank, section 11 of
   `docs/tui-conversation-browsing.md`). Until then the pane scrolls
   on `Ctrl+J`/`Ctrl+K` and `Ctrl+U`/`Ctrl+D`.
+- The result list abbreviates long path labels (P10): when a label
+  is wider than the list column — with the preview pane on or off —
+  the leading directory levels collapse into a `...` prefix and the
+  largest suffix of the path that fits the column stays visible
+  (`.../a/b/src/app.rs`). The budget follows the list column width,
+  which differs with the preview pane on or off. A label without
+  directory levels, or still too wide with only `.../` plus the
+  file name, falls back to the plain head truncation with a
+  trailing `…`.
 - If a render or source function grows past eight parameters, use the
   `bon` builder. This follows `docs/coding-conventions.md`.
 
@@ -370,6 +383,15 @@ P9. scope-cycle: given the picker is open at the default scope,
     `KeyCode::Tab`), so both `Ctrl+I` and `Tab` drive it. Given the
     picker closed, observe a scope-cycle press do nothing. Observe
     the scope reset to the default on every picker open.
+P10. path-abbrev: given a result-list path label wider than the
+    result-list column (with the preview pane on or off), observe
+    the leading directory levels collapsed into a `...` prefix and
+    the largest suffix of the path that fits the column kept
+    visible (e.g. `.../a/b/src/app.rs`); given a label that fits
+    the column, observe it shown in full; given a label without
+    directory levels, or still too wide with only `.../` plus the
+    file name, observe a head truncation with a trailing `…`
+    instead.
 
 ## Verification
 
@@ -387,6 +409,7 @@ and passes. `open` names the blocker and what unblocks it.
 | P7 | orientation | `wide_layout_splits_side_by_side`, `narrow_layout_stacks_vertically`, `too_narrow_drops_preview`, `orientation_flips_on_resize` in `bin/tui/src/float.rs` | proven |
 | P8 | git-source | `file_item_source_is_a_git_repo`, `file_item_source_non_git_walks` in `bin/tui/src/picker/items.rs` | proven |
 | P9 | scope-cycle | `ctrl_i_cycles_the_scope_and_returns_recollect`, `tab_cycles_the_scope_like_ctrl_i`, `scope_starts_standard_and_resets_on_open_and_close`, `ctrl_i_does_nothing_when_closed`, `tab_does_nothing_when_closed` in `bin/tui/src/picker/state.rs`; `file_scope_cycles_standard_to_ignored_to_hidden`, `walk_scope_controls_hidden_and_build_dirs`, `git_scope_includes_ignored_and_hidden_files` in `bin/tui/src/picker/items.rs`; `ctrl_i_recollects_picker_items_under_new_scope`, `tab_recollects_picker_items_under_new_scope`, `ctrl_i_surfaces_git_ignored_session_files` in `bin/tui/src/app.rs`; `tab_maps_to_key_tab`, `ctrl_i_maps_to_key_ctrl_i` in `bin/tui/src/main.rs` | proven |
+| P10 | path-abbrev | `abbrev_keeps_fitting_labels_unchanged`, `abbrev_collapses_leading_parent_levels`, `abbrev_handles_absolute_labels`, `abbrev_falls_back_to_head_truncation`, `render_picker_abbreviates_long_paths_in_narrow_list_column` in `bin/tui/src/picker/render.rs` | proven |
 
 ## Gate
 
