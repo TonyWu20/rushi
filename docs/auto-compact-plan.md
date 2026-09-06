@@ -526,6 +526,20 @@ idle session.
   optional `reasoning_effort` field. `bin/model` prefers the
   request value over the config. The Phase 1 list carries the
   `bin/model` change.
+- `compact_trigger_base = "input_budget"` (default) or
+  `"context_budget"` (pi parity). The `input_budget` base sits the
+  trigger at the clamped input budget minus
+  `compact_reserve_tokens`: one reserve below the trim budget, so
+  the LLM compaction leads. The `context_budget` base sits the
+  trigger at the full `context_budget_tokens` minus the reserve
+  (pi's `contextWindow - reserveTokens`; 245760 for the 262144
+  window). Under that base the trigger estimate adds the full-form
+  estimate of the kept region (chars/4 since the last compaction
+  boundary), because the measured readings of the clamped
+  (trim-form) request read shrunken and starve the LLM
+  compaction. The silent-overflow backstop follows the base: it
+  compares the measured input to the input budget (default) or to
+  the full context budget (pi parity, the provider wall).
 
 `context_budget_tokens` stays the cap of the reactive trim form.
 The trigger sits at `context_budget_tokens - compact_reserve_tokens`.
@@ -769,6 +783,12 @@ sections 4-5. Section 8.1 records the external review.
    auto-compact dies silently. Fixed: the trigger sits at budget
    minus reserve, the trigger consumes trigger-based readings
    only, and the level clause fires under an engaged trim form.
+   The `compact_trigger_base = "context_budget"` knob opts back
+   into the pi-parity ordering on purpose: the trigger sits
+   above the trim budget, and the full-form estimate keeps the
+   LLM compaction from starving. The trim form is the degraded
+   ride between the two; the provider wall is the final
+   backstop.
 2. The failure path kills the loop. The first draft logs a
    terminal `error` event on summary-call failure. `claim` maps
    `error` to `idle`. `turn.sh` breaks. The promised trim-form
@@ -975,6 +995,68 @@ Spec-gap findings, all accepted:
   session. It compacts in-session and continues the original
   session. The handoff retires (sections 4.3, 4.4, 4.6, 5, 7).
   The `--force-handoff` mechanism of A6 retires with it.
+
+## 9. Decision record: the pi parity trigger base (2026-09-15)
+
+### 9.1 The decision
+
+Decision: rushi's auto compact reaches pi's compact threshold.
+The mechanism stays opt-in. The default behavior does not move.
+
+- The knob: `compact_trigger_base` under `[limits]` (section 4.5).
+- `input_budget` (default): the trigger is `input_budget -
+  compact_reserve_tokens`. That is 212992 for the 262144 window
+  model.
+- `context_budget` (pi parity): the trigger is `context_budget_tokens
+  - compact_reserve_tokens`. That is 245760 for the same model. It
+  equals pi's `contextWindow - reserveTokens`.
+- The backstop follows the base. Under pi parity, the provider
+  wall is the last backstop.
+- Under `context_budget`, the trigger estimate adds the full-form
+  estimate of the kept region. The trim-form readings read shrunken.
+  The full form keeps the LLM compaction from starving.
+
+### 9.2 The change
+
+- `crates/rushi/src/compact_math.rs`: the `TriggerBase` enum, the
+  `trigger_level_for` clamp (reserve 0 lands at base minus 1), and
+  the `full_form_estimate` (chars/4 over the kept region, with the
+  handoff framing).
+- `bin/rushi/src/config.rs`: the unclamped `context_budget`, the
+  `compact_trigger_base` load, and the base-aware `trigger_level()`
+  and `compact_overflow_budget()`. An unknown value falls back to
+  `input_budget` with a warning.
+- `bin/rushi/src/step.rs`: `estimate_context` takes the max of the
+  measured plus trailing estimate and the full-form estimate under
+  the `context_budget` base. The silent overflow backstop uses
+  `compact_overflow_budget()`.
+- `bin/compact/src/main.rs`: the trigger decision uses the same
+  base. Under `context_budget`, the full-form reading of the kept
+  region joins the trigger readings.
+- `config.toml`, `config-low.toml`: the knob, commented out.
+- `scripts/compact-e2e.sh`: the `pi-parity` and `pi-parity-cold`
+  scenarios.
+- This document: section 4.5 states the knob semantics.
+
+### 9.3 The evidence
+
+- Unit: `context_budget_base_reaches_the_pi_threshold` in
+  `bin/rushi/src/config.rs` asserts `trigger_level() == 245760`.
+  The matching test in `bin/compact` asserts the same level from
+  the binary's own resolver.
+- E2E: `pi-parity` fires the threshold compact at the context
+  budget level. `pi-parity-cold` proves the default base stays
+  cold at the same session width.
+- Regression: the default base e2e scenarios pass. The workspace
+  test suite is green.
+
+### 9.4 Enable
+
+Uncomment one line under `[limits]` in the session config:
+
+```toml
+compact_trigger_base = "context_budget"
+```
 
 ## Properties
 

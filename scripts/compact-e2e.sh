@@ -77,7 +77,11 @@ EOF
 
 # ── The work config ──────────────────────────────────────────────
 # window 8000, output 4096, input budget 3904, trigger 3404.
+# The optional COMPACT_TRIGGER_BASE moves the trigger to the full
+# context budget (8000 - 500 = 7500, the pi-parity base).
 work_config() {
+  local base_line=""
+  [[ -n "${COMPACT_TRIGGER_BASE:-}" ]] && base_line="compact_trigger_base = \"${COMPACT_TRIGGER_BASE}\""
   cat > "$WORK/config.toml" <<EOF
 [model]
 api = "responses"
@@ -101,6 +105,7 @@ context_budget_tokens = 8000
 compact_reserve_tokens = 500
 compact_keep_tokens = 2000
 compact_enabled = $COMPACT_ENABLED
+$base_line
 
 [system_prompt]
 text = "test"
@@ -114,12 +119,14 @@ EOF
 # leaves a non-empty old region: the cut snaps back to the third
 # user turn and the first two groups stay in the old region.
 seed_session() {
-  # $1 = the first usage reading, $2 = the second, $3 = the third.
-  local u1="$1" u2="$2" u3="${3:-4300}"
+  # $1 = the first usage reading, $2 = the second, $3 = the third,
+  # $4 = the tool result half-size in chars (default 4000, so an
+  # 8000-char = 2000-token result).
+  local u1="$1" u2="$2" u3="${3:-4300}" half="${4:-4000}"
   local A B C
-  A="$(printf 'a%.0s' {1..4000})$(printf 'a1%.0s' {1..4000})"
-  B="$(printf 'b%.0s' {1..4000})$(printf 'b1%.0s' {1..4000})"
-  C="$(printf 'c%.0s' {1..4000})$(printf 'c1%.0s' {1..4000})"
+  A="$(printf 'a%.0s' $(seq 1 "$half"))$(printf 'a1%.0s' $(seq 1 "$half"))"
+  B="$(printf 'b%.0s' $(seq 1 "$half"))$(printf 'b1%.0s' $(seq 1 "$half"))"
+  C="$(printf 'c%.0s' $(seq 1 "$half"))$(printf 'c1%.0s' $(seq 1 "$half"))"
   cat > "$SLOG" <<EOF
 {"v":1,"type":"user_message","ts":"t1","seq":1,"content":"do the task, the old work"}
 {"v":1,"type":"assistant_message","ts":"t2","seq":2,"content":"step one","reasoning":[],"tool_calls":[{"id":"c1","name":"read","arguments":{"file_path":"a.txt"}}],"usage":{"input_tokens":$u1,"output_tokens":50}}
@@ -200,6 +207,7 @@ NEW_WORK() {
   SESSIONS_DIR="$WORK/sessions/session"
   SLOG="$SESSIONS_DIR/events.jsonl"
   mkdir -p "$SESSIONS_DIR" "$WORK/sessions"
+  COMPACT_TRIGGER_BASE=""
   echo "==== scenario: $1"
 }
 
@@ -229,6 +237,54 @@ scenario_threshold() {
   local n_hit
   n_hit=$(rg -c 'do the task' <<<"$req" 2>/dev/null || true)
   assert_eq "${n_hit:-0}" 0 "the old region is out of the next request"
+}
+
+# ── Scenario 1b: the pi-parity trigger base ─────────────────────
+# `compact_trigger_base = "context_budget"`: the trigger sits at the
+# full context budget minus the reserve (8000 - 500 = 7500), above
+# the input budget (3904). The trigger reading is the full-form
+# estimate of the kept region (~9000 tokens), so it crosses 7500
+# even while the measured readings (300-380) stay below the
+# default trigger (3404).
+scenario_pi_parity() {
+  NEW_WORK pi-parity
+  COMPACT_ENABLED=true
+  COMPACT_TRIGGER_BASE=context_budget
+  work_config
+  seed_session 300 350 380 6000
+  echo "$NORMAL_STOP" >"$WORK/plan"
+  make_stub
+  run_step
+  assert_eq "$(count_events compaction_summary)" 1 "one compaction_summary"
+  assert_contains "$(last_event compaction_summary)" '"reason":"threshold"' "the threshold reason rides the marker"
+  local tb
+  tb=$(jq -cs 'map(select(.type == "compaction_summary")) | last' "$SLOG" | jq -r '.tokens_before')
+  if [[ -n "$tb" && "$tb" -ge 7500 ]]; then
+    ok
+  else
+    ko "tokens_before $tb sits at the pi-parity threshold (>= 7500)"
+  fi
+  assert_no_context_exhausted
+  assert_eq "$(claim_state)" "idle" "the loop runs to idle"
+}
+
+# ── Scenario 1c: the same wide session, the default base ────────
+# The default `input_budget` base keeps the trigger at 3404. The
+# measured reading (380) plus the trailing result (~3000 tokens)
+# stays under 3404, so no compact fires despite the ~9000-token
+# full-form context. Only the pi-parity base reaches the higher
+# threshold.
+scenario_pi_parity_cold() {
+  NEW_WORK pi-parity-cold
+  COMPACT_ENABLED=true
+  work_config
+  seed_session 300 350 380 6000
+  echo "$NORMAL_STOP" >"$WORK/plan"
+  make_stub
+  run_step
+  assert_eq "$(count_events compaction_summary)" 0 "the default base stays cold"
+  assert_no_context_exhausted
+  assert_eq "$(claim_state)" "idle" "the loop runs to idle"
 }
 
 # ── Scenario 2: the overflow error recovery ──────────────────────
@@ -576,6 +632,8 @@ run_scenario() {
 
 # ── Run ──────────────────────────────────────────────────────────
 run_scenario threshold scenario_threshold
+run_scenario pi-parity scenario_pi_parity
+run_scenario pi-parity-cold scenario_pi_parity_cold
 run_scenario overflow scenario_overflow
 run_scenario silent-overflow scenario_silent_overflow
 run_scenario silent-post-engage scenario_silent_overflow_post_engage

@@ -58,7 +58,6 @@ bash_timeout_max = 300
 # token budget. The 8000/2000 values of the char era broke that
 # coherence: the compact request outgrew both the budget and the
 # provider window.
-compact_result_chars = 500
 compact_text_chars = 200
 
 # The in-session auto-compact (docs/auto-compact-plan.md).
@@ -71,6 +70,14 @@ compact_text_chars = 200
 compact_enabled = true
 compact_reserve_tokens = 16384
 compact_keep_tokens = 20000
+# The base of the compact trigger level (`compact_trigger_base`):
+# input_budget (default) = the clamped input budget minus the
+# reserve. LLM compaction leads, the trim form is the backstop.
+# context_budget = the full context budget minus the reserve (pi
+# parity, the trigger may sit above the input budget, like pi's
+# contextWindow - reserveTokens). The silent-overflow backstop
+# follows the base: it sits at the wall in pi-parity mode.
+# compact_trigger_base = "context_budget"
 # The context-overflow strategy (docs/phase-2-plan.md 3.2). The
 # only shipped value is `compact`: in-session shadow compact. The
 # key is a seam for future strategies.
