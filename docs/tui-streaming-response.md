@@ -452,13 +452,25 @@ releases them at a steady per-frame rate, so the text renders at a
 smooth frame rate (about 60 FPS while streaming). All properties
 P1–P7 are implemented and proven by tests in `bin/tui/src/app.rs`,
 `bin/tui/src/render.rs`, `bin/model/src/main.rs`, and
-`bin/model/tests/stream_channel.rs`. `cargo build`, `cargo test`, and
-`scripts/lean-gate.sh` all pass.
+`bin/model/tests/stream_channel.rs`.
+
+**DRT regression gate.** `lean/TuiStreamDrt.lean` is a pure CLI
+executable over the frozen `TuiStreamSpec` reference renderer
+(`View`, `step`, `runResponse`, `runResponses`). The production
+mirror is `bin/tui-stream-drt` (pure-Rust, std-only, no
+dependencies). Both share the one-line scenario protocol
+(`FT SC DRAFT SETTLED RESPONSES` → view after `runResponses`).
+The deterministic generator is `scripts/tui-stream-drt-inputs.sh`
+(fixed-seed LCG; alphabet `a-j 0-9`). The gate runs via
+`lean-verify` `op=drt` with `n=100000`.
 
 The acceptance commands and their status:
 
 ```
 cargo build          # PASS
-cargo test           # PASS (588 tui tests; 22 model tests incl. 2 new; 1 in-flight integration test)
+cargo test           # PASS
 scripts/compact-e2e.sh  # PASS (2 pre-existing failures in silent-overflow/last-resort unrelated to this spec)
+scripts/lean-gate.sh   # PASS (zero-sorry lake build over all spec targets)
+echo '{"op":"build","dir":"lean"}' | target/release/lean-verify  # PASS (4 targets, 0 sorry)
+echo '{"op":"drt","dir":".","model":"lean/.lake/build/bin/TuiStreamDrt \"$1\"","prod":"target/release/tui-stream-drt \"$1\"","n":100000,"input_gen":"scripts/tui-stream-drt-inputs.sh 100000","seed":42}' | target/release/lean-verify  # PASS (100000 inputs match)
 ```

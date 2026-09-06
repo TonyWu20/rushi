@@ -1432,6 +1432,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
+name = "lean-verify"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde_json",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3127,6 +3135,10 @@ dependencies = [
  "toml 1.1.4+spec-1.1.0",
  "uuid",
 ]
+
+[[package]]
+name = "tui-stream-drt"
+version = "0.1.0"
 
 [[package]]
 name = "typenum"

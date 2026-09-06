@@ -202,16 +202,37 @@ formal spec under `lean/`.
     request "Stream rendering of the model response"
     (`docs/tui_feature_requests_from_human.md`). It models the
     streaming renderer state machine and proves its invariants.
-  Both use core Lean only (no Mathlib), so the build is hermetic
+  - `lean/TuiViewportSpec.lean` specifies the viewport-based
+    scrollback invariants: no-flush while pinned, tail-following,
+    eviction safety, chunked reachability, and bounded window size.
+  All use core Lean only (no Mathlib), so the build is hermetic
   and needs no network.
 - **The devShell.** `flake.nix` defines `devShells.lean`
   (Lean 4.30.0 + Z3). Enter it with
   `nix develop .#lean` from the repo root.
+- **The Rust->Lean toolchain.** `flake.nix` also defines
+  `devShells.aeneas` (charon + aeneas, from the hermetic
+  AeneasVerif/aeneas flake input). The `lean-verify` tool's
+  `translate` op runs the charon -> aeneas pipeline (Rust MIR ->
+  LLBC -> pure Lean) and reports the generated model. The
+  translation is the model half of the workflow only — the `build`
+  kernel gate and the `drt` regression gate remain the guarantees
+  (docs/aeneas-rust-to-lean.md).
 - **The gate.** `scripts/lean-gate.sh` runs the Lean compiler over
   every spec in `lean/`. Exit 0 = every proof re-checked by the
   kernel. It is an optional backstop, not part of the main gate
   (`scripts/verify-specs.sh`), matching the stance in
   `docs/harness-distribution.md`.
+- **The DRT regression gate.** `lean/TuiStreamDrt.lean` is a pure
+  CLI executable over the frozen `TuiStreamSpec` reference renderer
+  (`View`, `step`, `runResponse`, `runResponses`). The production
+  mirror is `bin/tui-stream-drt` (pure-Rust, std-only). Both share a
+  one-line scenario protocol and are differential-random-tested via
+  `lean-verify` `op=drt` with a deterministic input generator
+  (`scripts/tui-stream-drt-inputs.sh`, fixed-seed LCG, alphabet
+  a-j 0-9). The `lean_exe «TuiStreamDrt»` target in `lakefile.lean`
+  puts the executable inside the zero-sorry build gate, so the DRT
+  model is kernel-checked alongside the theorems.
 - **Pinned toolchain.** `lean/lean-toolchain` pins
   `leanprover/lean4:v4.30.0`, matching the flake's `pkgs.lean4`.
   The Lean project uses core Lean only (no Mathlib), so the build
@@ -223,6 +244,6 @@ Running the backstop:
 scripts/lean-gate.sh
 # or, step by step:
 nix develop .#lean
-cd lean && lean RushiSpec.lean TuiStreamSpec.lean
+cd lean && lean RushiSpec.lean TuiStreamSpec.lean TuiViewportSpec.lean
 ```
 
