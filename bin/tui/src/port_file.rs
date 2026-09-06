@@ -24,7 +24,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::SyncSender;
 use std::time::Duration;
 
-use notify::{RecursiveMode, RecommendedWatcher, Watcher};
+use notify::{RecursiveMode, Watcher};
+use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
 
 use rushi_common::logline::LogLine;
 
@@ -47,6 +48,10 @@ const TAIL_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 /// Fallback tick when no inotify signal arrives: bounds recreate and
 /// rare inotify-gap detection. An idle tailer wakes at most this often.
 const NOTIFY_FALLBACK_INTERVAL: Duration = Duration::from_secs(1);
+/// Debounce window for the inotify coalescer. Rapid directory-level events
+/// (unrelated file writes in the session dir) are collapsed into a single
+/// wake-up within this window.
+const NOTIFY_DEBOUNCE: Duration = Duration::from_millis(50);
 /// Tailer channel capacity: when full, the tailer keeps its place and
 /// the next poll resumes. The tailer thread is one per active session;
 /// it exits when it next tries to send after the receiver is dropped,
@@ -159,14 +164,18 @@ fn tail_session(path: PathBuf, start: TailCursor, tx: SyncSender<WatchItem>) {
     let mut carry: Vec<u8> = Vec::new();
     let mut present = path.exists();
 
-    // inotify wake source. The unbounded channel queues activity
-    // signals; the tailer blocks on it with a bounded fallback tick.
+    // Debounced inotify wake source. The debouncer coalesces rapid
+    // inotify events (from the log file and its parent directory)
+    // into a single delivery, preventing a tight spin loop when
+    // directory-level events fire faster than the tailer can act.
     // `None` means the backend was unavailable: poll on the fixed
     // interval instead.
-    let (notify_tx, notify_rx) = std::sync::mpsc::channel::<notify::Result<notify::Event>>();
-    let mut watcher: Option<RecommendedWatcher> = notify::recommended_watcher(notify_tx).ok();
-    if let Some(w) = watcher.as_mut() {
-        register_watches(w, &path);
+    let (notify_tx, notify_rx) =
+        std::sync::mpsc::channel::<DebounceEventResult>();
+    let mut debouncer: Option<notify_debouncer_mini::Debouncer<_>> =
+        new_debouncer(NOTIFY_DEBOUNCE, notify_tx).ok();
+    if let Some(d) = debouncer.as_mut() {
+        register_watches(d.watcher(), &path);
     }
 
     loop {
@@ -178,8 +187,8 @@ fn tail_session(path: PathBuf, start: TailCursor, tx: SyncSender<WatchItem>) {
                     // The log reappeared under a new inode; the inotify
                     // watch still points at the dead inode, so
                     // re-register it.
-                    if let Some(w) = watcher.as_mut() {
-                        register_watches(w, &path);
+                    if let Some(d) = debouncer.as_mut() {
+                        register_watches(d.watcher(), &path);
                     }
                 }
             }
@@ -205,24 +214,24 @@ fn tail_session(path: PathBuf, start: TailCursor, tx: SyncSender<WatchItem>) {
             }
         }
 
-        // Wait for the next wake: an inotify activity signal, the
+        // Wait for the next wake: a debounced inotify batch, the
         // fallback tick, or (no inotify) a fixed poll interval. While
         // lines are held back by backpressure we tick on the short
         // interval so a draining consumer catches up; otherwise we
         // sleep on the long fallback to keep idle CPU near zero.
-        if watcher.is_some() {
+        if debouncer.is_some() {
             let tick = if carry.is_empty() {
                 NOTIFY_FALLBACK_INTERVAL
             } else {
                 TAIL_INTERVAL
             };
             match notify_rx.recv_timeout(tick) {
-                Ok(_) => {}
+                Ok(_events) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    // The inotify backend thread exited; degrade to
+                    // The debouncer thread exited; degrade to
                     // interval polling so tailing still makes progress.
-                    watcher = None;
+                    debouncer = None;
                 }
             }
         } else {
@@ -235,7 +244,7 @@ fn tail_session(path: PathBuf, start: TailCursor, tx: SyncSender<WatchItem>) {
 /// and truncates) and its parent directory (create and delete of the
 /// log), both non-recursive. Registration failures are ignored — the
 /// fallback tick still makes progress.
-fn register_watches(w: &mut RecommendedWatcher, path: &Path) {
+fn register_watches(w: &mut dyn Watcher, path: &Path) {
     let _ = w.watch(path, RecursiveMode::NonRecursive);
     if let Some(parent) = path.parent() {
         if parent != path {
@@ -297,11 +306,11 @@ fn read_tail(
         }
     }
     let want = len.saturating_sub(*offset);
-    // No new bytes and nothing held back: nothing to do this poll.
-    // When bytes sit in `carry` we still fall through and re-try them,
-    // so a full channel cannot strand complete lines while the file is
-    // static.
-    if want == 0 && carry.is_empty() {
+    // No new bytes and no complete line held in carry: nothing to do
+    // this poll. A partial tail (no newline yet) cannot make progress
+    // until new bytes arrive, so skip the clone-and-retry work that
+    // would spin on an idle file.
+    if want == 0 && !carry.iter().any(|b| *b == b'\n') {
         return Ok(());
     }
 
@@ -933,6 +942,34 @@ mod tests {
         rt.block_on(fut)
     }
 
+    /// RAII guard that kills a `setsid` process group and reaps the
+    /// direct child on drop, so no `while :; do sleep 1; done` loop
+    /// leaks into init when a test skips, fails, or is interrupted.
+    struct LoopGroupGuard {
+        child: Option<std::process::Child>,
+        leader: i32,
+    }
+
+    impl Drop for LoopGroupGuard {
+        fn drop(&mut self) {
+            let leader = if self.leader > 0 {
+                self.leader
+            } else {
+                self.child
+                    .as_ref()
+                    .map(|c| i32::try_from(c.id()).unwrap_or(0))
+                    .unwrap_or(0)
+            };
+            if leader > 0 {
+                unsafe { libc::kill(-leader, libc::SIGKILL) };
+            }
+            if let Some(mut c) = self.child.take() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+        }
+    }
+
     #[test]
     fn list_sessions_finds_only_dirs_with_logs() {
         let c = make_cfg(false, None);
@@ -1061,10 +1098,11 @@ mod tests {
             lock_path.display(),
             pid_file.display()
         );
-        let mut child = std::process::Command::new("setsid")
+        let child = std::process::Command::new("setsid")
             .args(["bash", "-c", &inner, "s-probe"])
             .spawn()
             .unwrap();
+        let mut guard = LoopGroupGuard { child: Some(child), leader: 0 };
         for _ in 0..100 {
             if pid_file.exists() {
                 break;
@@ -1078,10 +1116,10 @@ mod tests {
             Some(p) if proc_is_alive_group_leader_named(p, "s-probe") => p,
             _ => {
                 eprintln!("SKIPPED: no live group leader was observable here");
-                let _ = child.wait();
-                return;
+                return; // the guard kills the group on drop
             }
         };
+        guard.leader = pid;
         std::fs::write(dir.join("loop.pid"), format!("{pid}\n")).unwrap();
         assert_eq!(
             c.port.external_loop_pid(&sid).unwrap(),
@@ -1101,7 +1139,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         assert!(cleared, "the killed group must clear the probe");
-        let _ = child.wait();
+        // the guard kills the group and reaps the child on drop
     }
 
     #[test]
@@ -1124,10 +1162,11 @@ mod tests {
             "echo $$ > {}; while :; do sleep 1; done",
             pid_file.display()
         );
-        let mut child = std::process::Command::new("setsid")
+        let child = std::process::Command::new("setsid")
             .args(["bash", "-c", &inner, "s1_h1"])
             .spawn()
             .unwrap();
+        let mut guard = LoopGroupGuard { child: Some(child), leader: 0 };
         for _ in 0..100 {
             if pid_file.exists() {
                 break;
@@ -1141,18 +1180,18 @@ mod tests {
             Some(p) if proc_is_alive_group_leader_named(p, "s1_h1") => p,
             _ => {
                 eprintln!("SKIPPED: no live group leader was observable here");
-                let _ = child.wait();
-                return;
+                return; // the guard kills the group on drop
             }
         };
+        guard.leader = pid;
         assert!(pid_is_loop(pid, "s1_h1"), "the exact name passes");
         assert!(
             !pid_is_loop(pid, "s1"),
             "a substring of the name must not pass"
         );
-        // Leave no orphan group behind.
+        // Leave no orphan group behind. The guard reaps the group
+        // on the drop path as well.
         unsafe { libc::kill(-pid, libc::SIGKILL) };
-        let _ = child.wait();
     }
 
     #[test]
@@ -1171,10 +1210,11 @@ mod tests {
             lock_path.display(),
             pid_file.display()
         );
-        let mut child = std::process::Command::new("setsid")
+        let child = std::process::Command::new("setsid")
             .args(["bash", "-c", &inner, "s-reattach"])
             .spawn()
             .unwrap();
+        let mut guard = LoopGroupGuard { child: Some(child), leader: 0 };
         // Wait for the leader to record its pid.
         for _ in 0..100 {
             if pid_file.exists() {
@@ -1186,24 +1226,22 @@ mod tests {
             Ok(r) => r,
             Err(_) => {
                 eprintln!("SKIPPED: the leader did not record its pid here");
-                let _ = child.wait();
-                return;
+                return; // the guard kills the group on drop
             }
         };
         let pid: i32 = match raw.trim().parse() {
             Ok(p) => p,
             Err(_) => {
                 eprintln!("SKIPPED: the recorded pid is not numeric");
-                let _ = child.wait();
-                return;
+                return; // the guard kills the group on drop
             }
         };
+        guard.leader = pid;
         // Require a live group leader that names the session. If this
         // environment cannot produce one, skip the kill assertion.
         if !proc_is_alive_group_leader_named(pid, "s-reattach") {
             eprintln!("SKIPPED: no live group leader was observable here");
-            let _ = child.wait();
-            return;
+            return; // the guard kills the group on drop
         }
         std::fs::write(dir.join("loop.pid"), format!("{pid}\n")).unwrap();
         let msg = c.port.stop_external_loop(&sid).unwrap();
@@ -1223,7 +1261,7 @@ mod tests {
             dead,
             "the orphan group leader must die within the escalation window"
         );
-        let _ = child.wait();
+        // the guard kills the group and reaps the child on drop
     }
 
     /// A pid is dead when /proc/<pid> is gone or the process is a
