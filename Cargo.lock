@@ -1579,8 +1579,10 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "reqwest",
+ "rushi-common",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "toml 0.7.8",
  "url",

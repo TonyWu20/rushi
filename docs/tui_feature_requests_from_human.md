@@ -228,7 +228,37 @@ macchiato` as the first internal color scheme. Shipped in
 - [ ] The current markdown table rendering of the messages cannot correctly
       distinguish if `|` is used as the table column marker or written as part of the
       text or code, e.g. the closure syntax in Rust `.map(|e| ...)`/`.unwrap_or(|e| ...)`
-- [ ] Stream rendering of the model response.
+- [x] Stream rendering of the model response. Shipped 2026-09-13: the
+      `harness` loop owns `sessions/<n>/.model-stream`, the `model` binary writes one
+      JSON line per SSE delta, and the TUI polls the file each frame to render a live
+      block that settles into the transcript on the `assistant_message` event.
+      See `docs/tui-streaming-response.md` and `lean/TuiStreamSpec.lean`.
+      2026-09-06 audit: the TUI and harness consumer paths checked out; the single
+      defect was producer-side — `bin/model` buffered the whole SSE body before
+      writing any channel line, so the live block showed nothing while the response
+      was in flight. Fixed with the incremental `SseParser` in
+      `bin/model/src/main.rs`; in-flight growth is proven by
+      `bin/model/tests/stream_channel.rs` and re-verified against the live endpoint.
+      Lean spec clean (`scripts/lean-gate.sh`, zero `sorry`).
+- [x] The thinking→text transition flickered: when the response text
+      began, the thinking block collapsed from its full grown height to a
+      fixed 2-line summary, so the block shrunk ~16 rows and the view
+      jumped. Shipped 2026-09-13: the thinking tail and response text now
+      share one sliding window (`stream_block_lines`, `bin/tui/src/render.rs`)
+      — the oldest thinking rows slide out as text grows instead of a sudden
+      collapse, so the block height never shrinks at the transition.
+      Tests: `stream_block_thinking_and_text_share_the_window`,
+      `stream_block_height_never_shrinks_when_text_starts`.
+- [x] Buffer the response text and render it at a smooth, steady frame rate
+      instead of jumping in whole-delta bursts. Shipped 2026-09-13: the TUI
+      now queues arriving deltas into a FIFO pace queue and releases
+      `max(1, backlog/15)` characters per frame (`App::pump_stream_pacing`,
+      `bin/tui/src/app.rs`); the main loop ticks at ~60 FPS (16 ms poll)
+      while a response is in flight and falls back to 100 ms when idle.
+      `done` drains the queue in one shot so the final text settles promptly.
+      Tests: `stream_pacing_*`, `clear_stream_drops_the_pace_queue`.
+      Note: both changes are binary-side; the running TUI must be restarted
+      (rebuild `target/release/tui`) to pick them up.
 - [ ] Remove `assistant`, `user`, `tool:xxx` markers. Remove the indent of
       messages. Wrap the user message with the same box used for tool results.
 - [ ] When in browse mode, updates from model response should not flush the

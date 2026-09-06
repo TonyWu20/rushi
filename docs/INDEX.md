@@ -72,7 +72,7 @@ not built).
 | `tui-statusline-powerline.md`                 | Implemented       | 2026-09-02   | Record for the statusline powerline footer: rounded Nerd Font pills (`U+E0B4`/`U+E0B6`), per-span hex colors, overflow drops the lowest-priority pills |
 | `tui-thinking-block.md`                       | Spec, not yet built | 2026-09-02   | Request doc for the thinking (reasoning) block. Partial: the capture into the log shipped in `61cde02`. The TUI render, the toggle, and the effort control stay open |
 | `tui-thinking-level-input-box.md`             | Implemented       | 2026-09-02   | Record for docs/tui.md section 7.2: the loop publishes `model_thinking` (the resolved `reasoning_effort` mapped to 0-4, via `bin/model --describe`), the TUI colors the input-area border from the last value |
-| `tui-streaming-response.md`                   | Spec, not yet built | 2026-09-05   | Spec for live streaming of the model response to the TUI: a session-local `.model-stream` file the model binary writes to during the SSE call, the TUI polls it each frame and renders a growing live block, cleared when the final `assistant_message` lands. Depends on Phase 2 (`harness` binary). No new log event type |
+| `tui-streaming-response.md`                   | Implemented       | 2026-09-05   | Spec for live streaming of the model response to the TUI: a session-local `.model-stream` file the model binary writes to during the SSE call, the TUI polls it each frame and renders a growing live block, cleared when the final `assistant_message` lands. Depends on Phase 2 (`harness` binary). No new log event type |
 | `tui-tool-display-port.md`                    | Spec, not yet built | 2026-09-02   | Request doc for the full `pi-tool-display` style port: the lighter result box, the fold/expand control, per-tool limits, presets, and config                    |
 | `tui-tool-result-truncation.md`               | Spec, not yet built | 2026-09-02   | Request doc for truncating `Read`/`Write` results and the `Edit` diff, plus the six "never truncate" comment rescopes                                        |
 | `tui-syntax-highlighting.md`                  | Implemented       | 2026-09-08   | Decision record for the shared syntax-highlight engine (`highlight.rs`): `language_from_path`, the stateful `CodeHighlighter`, the `highlight_text_lines` entry point, the two consumers (picker preview + `Read` body), and the hand-rolled vs `syntect` vs tree-sitter tradeoff |
@@ -126,6 +126,12 @@ the spec doc. The doc gate is `scripts/verify-specs.sh` (structure and
 cross-reference checks on the docs). The code gate is the command list
 in each Gate section: `cargo build`, `cargo test`, and the named e2e
 scripts. A clean gate with zero open properties is the guarantee.
+
+A real Lean 4 backstop lives in `lean/RushiSpec.lean`. It mirrors the
+`rushi setup` resolver and is checked by `scripts/lean-gate.sh`
+(wraps `nix develop .#lean` + `lake build RushiSpec`). The Lean
+backstop is optional; the house gate remains the conformance and e2e
+scripts. See `docs/lean-driven-development.md` §8.
 
 - `scripts/verify-specs.sh` — run before pushing doc changes. Exit 0
   is clean; exit 1 names the failing doc and section.

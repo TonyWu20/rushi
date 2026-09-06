@@ -178,6 +178,50 @@ pub struct LoopState {
     pub exit_code: Option<i32>,
 }
 
+/// In-progress model response accumulated from the stream channel
+/// (docs/tui-streaming-response.md §3.2). One JSON line per SSE delta
+/// event; the TUI polls the file each frame and folds new lines in.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct StreamBuf {
+    /// Accumulated assistant text (`text` deltas).
+    pub text: String,
+    /// Accumulated reasoning text per item id (`reasoning` deltas).
+    pub reasoning: std::collections::HashMap<String, String>,
+    /// Partial tool-call arguments: call_id → (tool_name, args_so_far).
+    pub tool_args: std::collections::HashMap<String, (String, String)>,
+    /// Set when the channel's `done` line was read.
+    pub done: bool,
+}
+
+/// The kind of a paced stream delta: the accumulator key the release
+/// applies to (docs/tui-streaming-response.md §6.5).
+#[derive(Clone, Debug)]
+enum StreamDeltaKind {
+    /// Response text.
+    Text,
+    /// Reasoning text, keyed by the reasoning item id.
+    Reasoning(String),
+    /// Partial tool-call arguments, keyed by the call id and the
+    /// observed tool name.
+    ToolArgs(String, String),
+}
+
+/// One stream delta waiting to be released into the live buffer by
+/// [`App::pump_stream_pacing`]: the kind plus the raw delta text.
+#[derive(Clone, Debug)]
+struct PendingStreamDelta {
+    kind: StreamDeltaKind,
+    payload: String,
+}
+
+/// The paced-release window: the pending backlog clears in about this
+/// many frames (docs/tui-streaming-response.md §6.5). At the 60 FPS
+/// streaming cadence that is a quarter-second catch-up; the per-frame
+/// release is `max(1, backlog / STREAM_PACE_FRAMES)` chars, so a small
+/// backlog reads as a steady typewriter and an arrival burst smooths
+/// out instead of jumping the view.
+const STREAM_PACE_FRAMES: usize = 15;
+
 pub struct App {
     sessions: Vec<SessionId>,
     active: Option<SessionId>,
@@ -320,6 +364,20 @@ pub struct App {
     /// and has not yet sent a message. Cleared on `SendDraft`
     /// (docs/goal-ux.md §1.8).
     goal_armed: bool,
+    /// The in-progress model response, accumulated from the session-local
+    /// stream channel file (docs/tui-streaming-response.md §6.1).
+    /// `None` when no model call is in flight or the response settled.
+    stream_buf: Option<StreamBuf>,
+    /// Byte offset into the stream channel file already consumed.
+    /// Reset when the file is truncated or recreated.
+    stream_offset: u64,
+    /// Stream deltas queued for the paced release into the live buffer
+    /// (docs/tui-streaming-response.md §6.5): the text advances a few
+    /// characters per frame instead of jumping whole deltas.
+    stream_pending: VecDeque<PendingStreamDelta>,
+    /// The char count of `stream_pending` — the per-frame release
+    /// budget is `max(1, chars / STREAM_PACE_FRAMES)` (§6.5).
+    stream_pending_chars: usize,
 }
 
 /// The cap on the distinct ext_status ids the in-memory map holds.
@@ -463,6 +521,10 @@ impl App {
             palette_cmd_requested: false,
             goal_state: None,
             goal_armed: false,
+            stream_buf: None,
+            stream_offset: 0,
+            stream_pending: VecDeque::new(),
+            stream_pending_chars: 0,
         }
     }
 
@@ -565,6 +627,7 @@ impl App {
         self.ext_status_order = order;
         self.goal_state = None;
         self.goal_armed = false;
+        self.clear_stream();
     }
 
     /// Refresh the in-memory goal state from `goal.json` on disk
@@ -588,6 +651,195 @@ impl App {
     /// `InvokeExtCommand` for goal/goal_edit; cleared on `SendDraft`.
     pub fn set_goal_armed(&mut self, armed: bool) {
         self.goal_armed = armed;
+    }
+
+    // ── model stream channel (docs/tui-streaming-response.md §6) ──
+
+    /// The in-progress model response, if one is streaming. Returns
+    /// `None` when no model call is in flight or the response has
+    /// already settled into the transcript.
+    pub fn stream_buf(&self) -> Option<&StreamBuf> {
+        self.stream_buf.as_ref()
+    }
+
+    /// Clear the live stream buffer and reset the byte offset. Called
+    /// when a settle event (`assistant_message`, `error`, `cancel`) or
+    /// a session switch replaces the in-progress content with the
+    /// authoritative log entry.
+    pub fn clear_stream(&mut self) {
+        self.stream_buf = None;
+        self.stream_offset = 0;
+        self.stream_pending.clear();
+        self.stream_pending_chars = 0;
+    }
+
+    /// Poll the session-local stream channel file and fold new lines
+    /// into the live buffer (docs/tui-streaming-response.md §6.2).
+    ///
+    /// A missing file settles the buffer (the loop deleted it when the
+    /// model call ended). A file that shrank is a new channel (the
+    /// loop re-created it for the next call): reset and re-read from 0.
+    /// A file that grew is the normal case: parse new complete lines
+    /// and advance the offset. A trailing partial line stays for the
+    /// next poll. Transient I/O errors are dropped: the buffer keeps
+    /// its last good state.
+    pub fn refresh_stream(&mut self, path: &std::path::Path) {
+        let data = match std::fs::read_to_string(path) {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                self.clear_stream();
+                return;
+            }
+            Err(_) => return,
+        };
+        if (data.len() as u64) < self.stream_offset {
+            // The loop re-created the file for a new model call.
+            self.clear_stream();
+        }
+        let region = &data[self.stream_offset as usize..];
+        let complete_end: usize = region.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        for line in region[..complete_end].lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(delta) = rushi_common::stage::ModelDelta::from_json_line(line) {
+                self.queue_stream_delta(delta);
+            }
+        }
+        self.stream_offset += complete_end as u64;
+    }
+
+    /// Queue a new stream delta for the paced release. Content deltas
+    /// (`text`, `reasoning`, `tool_call_delta`) enter `stream_pending`
+    /// and are released into the live buffer a few characters at a
+    /// time by [`App::pump_stream_pacing`]. `done` is applied
+    /// immediately — the channel state flips now, and the queued
+    /// content drains at once on the next pump, so the final text
+    /// settles promptly instead of trickling.
+    fn queue_stream_delta(&mut self, delta: rushi_common::stage::ModelDelta) {
+        // The first delta of a call opens the live buffer (the header
+        // row shows), even when the payload is empty.
+        self.stream_buf.get_or_insert_with(StreamBuf::default);
+        match delta {
+            rushi_common::stage::ModelDelta::Text(t) => {
+                if !t.is_empty() {
+                    self.push_pending(StreamDeltaKind::Text, t);
+                }
+            }
+            rushi_common::stage::ModelDelta::Reasoning {
+                item_id,
+                delta,
+            } => {
+                if !delta.is_empty() {
+                    self.push_pending(StreamDeltaKind::Reasoning(item_id), delta);
+                }
+            }
+            rushi_common::stage::ModelDelta::ToolCallDelta {
+                call_id,
+                name,
+                args_delta,
+            } => {
+                if !args_delta.is_empty() {
+                    self.push_pending(
+                        StreamDeltaKind::ToolArgs(call_id, name),
+                        args_delta,
+                    );
+                }
+            }
+            rushi_common::stage::ModelDelta::Done { .. } => {
+                self.stream_buf
+                    .as_mut()
+                    .expect("opened above")
+                    .done = true;
+            }
+        }
+    }
+
+    /// Append a delta to the pace queue and count its characters.
+    fn push_pending(&mut self, kind: StreamDeltaKind, payload: String) {
+        self.stream_pending_chars += payload.chars().count();
+        self.stream_pending.push_back(PendingStreamDelta { kind, payload });
+    }
+
+    /// Release queued stream content into the live buffer at a smooth
+    /// per-frame pace (docs/tui-streaming-response.md §6.5). The main
+    /// loop calls this once per frame, right after
+    /// [`App::refresh_stream`].
+    ///
+    /// Each call releases `max(1, backlog / STREAM_PACE_FRAMES)`
+    /// characters: the backlog clears in about that many frames, so a
+    /// fast stream lags by at most a fraction of a second and then
+    /// catches up at a uniform rate, while a slow stream reads as a
+    /// steady typewriter. Once the channel is `done`, the whole
+    /// remainder releases at once. The release is strictly FIFO and
+    /// character-bounded, so the displayed text is always a prefix of
+    /// the channel's accumulated text (the P3 prefix growth of the
+    /// Lean spec).
+    pub fn pump_stream_pacing(&mut self) {
+        if self.stream_pending.is_empty() {
+            return;
+        }
+        let Some(buf) = self.stream_buf.as_mut() else {
+            // Cleared by a settle event: the transcript is
+            // authoritative, so drop the queue.
+            self.clear_stream();
+            return;
+        };
+        let backlog = self.stream_pending_chars;
+        let budget = if buf.done {
+            backlog
+        } else {
+            std::cmp::max(1, backlog / STREAM_PACE_FRAMES)
+        };
+        let mut remaining = budget;
+        while remaining > 0 {
+            let item = self
+                .stream_pending
+                .front()
+                .cloned()
+                .expect("the queue stays non-empty until it drains");
+            let chars_left = item.payload.chars().count();
+            if chars_left <= remaining {
+                self.stream_pending.pop_front();
+                self.stream_pending_chars -= chars_left;
+                remaining -= chars_left;
+                apply_paced(buf, &item.kind, &item.payload);
+            } else {
+                // Split at a character boundary: release the first
+                // `remaining` characters, keep the rest queued.
+                let take_len: usize = item
+                    .payload
+                    .chars()
+                    .take(remaining)
+                    .map(char::len_utf8)
+                    .sum();
+                let take = item.payload[..take_len].to_string();
+                if let Some(front) = self.stream_pending.front_mut() {
+                    front.payload = item.payload[take_len..].to_string();
+                }
+                self.stream_pending_chars -= remaining;
+                apply_paced(buf, &item.kind, &take);
+                remaining = 0;
+            }
+        }
+    }
+
+    /// True while a response is in flight: content is queued for the
+    /// paced release, or the channel is still open. The main loop
+    /// ticks at a high frame rate while this holds, so the paced text
+    /// advances smoothly (docs/tui-streaming-response.md §6.5).
+    pub fn stream_live(&self) -> bool {
+        !self.stream_pending.is_empty()
+            || self.stream_buf.as_ref().is_some_and(|b| !b.done)
+    }
+
+    /// The characters waiting in the pace queue (§6.5). Test and
+    /// diagnostic use: the main loop decides the cadence with
+    /// [`App::stream_live`].
+    #[cfg(test)]
+    pub fn stream_pending_chars(&self) -> usize {
+        self.stream_pending_chars
     }
 
     // ── new-session name input ──────────────────────────────
@@ -632,6 +884,17 @@ impl App {
                     // to tell event growth from a pane-rewrap
                     // growth (section 4.7).
                     self.events_grew = true;
+                    // Settle the live stream buffer when the
+                    // authoritative event lands (docs/tui-
+                    // streaming-response.md §6.4).
+                    if matches!(
+                        event.kind(),
+                        EventKind::AssistantMessage
+                            | EventKind::Error
+                            | EventKind::Cancel
+                    ) {
+                        self.clear_stream();
+                    }
                 }
                 self.events.push(event);
                 if self.events.len() > EVENTS_CAP {
@@ -2273,6 +2536,29 @@ impl App {
         self.quitting
     }
 
+}
+
+/// Fold one paced release into the live buffer accumulators (the
+/// consumer of the §6.5 pace queue).
+fn apply_paced(buf: &mut StreamBuf, kind: &StreamDeltaKind, payload: &str) {
+    match kind {
+        StreamDeltaKind::Text => {
+            buf.text.push_str(payload);
+        }
+        StreamDeltaKind::Reasoning(id) => {
+            buf.reasoning.entry(id.clone()).or_default().push_str(payload);
+        }
+        StreamDeltaKind::ToolArgs(call_id, name) => {
+            let entry = buf
+                .tool_args
+                .entry(call_id.clone())
+                .or_insert_with(|| (String::new(), String::new()));
+            if !name.is_empty() {
+                entry.0 = name.clone();
+            }
+            entry.1.push_str(payload);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -4121,5 +4407,449 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    // ── stream-channel tests (docs/tui-streaming-response.md P4–P7) ──
+
+    /// P5: a fresh TUI (or session switch) reads the stream file from
+    /// byte 0 and rebuilds the live buffer.
+    #[test]
+    fn refresh_stream_reads_from_byte_zero_on_fresh_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".model-stream");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"kind":"text","delta":"Hello "}
+"#,
+                r#"{"kind":"text","delta":"world"}
+"#,
+                r#"{"kind":"done","stop_reason":"stop"}
+"#,
+            ),
+        ).unwrap();
+
+        let app = app_with(Vec::new(), "s1");
+        assert!(app.stream_buf().is_none());
+
+        let mut app = app;
+        app.refresh_stream(&path);
+        // The content is paced (§6.5): the `done` line already landed,
+        // so one release drains the whole queue.
+        app.pump_stream_pacing();
+
+        let buf = app.stream_buf().expect("stream buffer should be set");
+        assert_eq!(buf.text, "Hello world");
+        assert!(buf.done);
+        assert_eq!(app.stream_pending_chars(), 0, "the queue drained");
+        drop(dir);
+    }
+
+    /// P4: the live buffer settles (clears) when the authoritative
+    /// `assistant_message` event arrives in the log.
+    #[test]
+    fn settle_event_clears_stream_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".model-stream");
+        std::fs::write(
+            &path,
+            r#"{"kind":"text","delta":"Hello"}
+"#,
+        ).unwrap();
+
+        let mut app = app_with(Vec::new(), "s1");
+        app.refresh_stream(&path);
+        assert!(app.stream_buf().is_some(), "buffer populated before settle");
+
+        // Simulate the assistant_message event arriving in the log.
+        let settle = ev(r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"Hello world"}"#);
+        app.on_watch_item(WatchItem::Event {
+            event: settle,
+            cursor: crate::port::TailCursor::end(),
+        });
+        assert!(
+            app.stream_buf().is_none(),
+            "settle event must clear the stream buffer"
+        );
+        drop(dir);
+    }
+
+    /// P7: a session without a `.model-stream` file draws no live block.
+    #[test]
+    fn refresh_stream_missing_file_clears_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join(".model-stream");
+
+        let mut app = app_with(Vec::new(), "s1");
+        // Seed the buffer first so the test is meaningful.
+        app.refresh_stream(&missing); // file does not exist → clear
+        assert!(app.stream_buf().is_none());
+
+        // Manually seed a buffer, then call refresh on a missing file.
+        let seed = dir.path().join(".seed");
+        std::fs::write(&seed, r#"{"kind":"text","delta":"partial"}
+"#).unwrap();
+        app.refresh_stream(&seed);
+        assert!(app.stream_buf().is_some());
+
+        app.refresh_stream(&missing); // missing → clear
+        assert!(app.stream_buf().is_none(), "missing file must clear the buffer");
+        drop(dir);
+    }
+
+    /// P5 (shrink): when the stream file is re-created shorter (new model
+    /// call), the offset resets and the buffer clears.
+    #[test]
+    fn refresh_stream_shrunk_file_resets_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".model-stream");
+
+        let mut app = app_with(Vec::new(), "s1");
+        // Two complete lines plus a partial third line (no newline):
+        // the offset parks after line 2, holding the partial for the
+        // next poll.
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"kind":"text","delta":"a"}
+"#,
+                r#"{"kind":"text","delta":"b"}
+"#,
+                r#"{"kind":"tex"# // partial line, no newline
+            ),
+        )
+        .unwrap();
+        let full = std::fs::metadata(&path).unwrap().len() as u64;
+        app.refresh_stream(&path);
+        assert!(app.stream_offset > 0, "offset advanced past complete lines");
+        assert!(
+            app.stream_offset < full,
+            "the partial line must stay for the next poll: offset {} of {full}",
+            app.stream_offset
+        );
+
+        // Simulate a new model call: the loop re-created the file and it
+        // is now shorter than the parked offset.
+        std::fs::write(&path, r#"{"kind":"text","delta":"c"}
+"#).unwrap();
+        app.refresh_stream(&path);
+        // Paced release (§6.5): release the queued "c" into the
+        // buffer.
+        while app.stream_pending_chars() > 0 {
+            app.pump_stream_pacing();
+        }
+        let buf = app
+            .stream_buf()
+            .expect("buffer re-seeded from the new file");
+        assert_eq!(buf.text, "c", "old buffer content must not linger");
+        assert_eq!(
+            app.stream_offset,
+            std::fs::metadata(&path).unwrap().len() as u64
+        );
+        drop(dir);
+    }
+
+    /// P6 (error): a model-call error event clears the live block; the
+    /// `error` event in the log is the authoritative record.
+    #[test]
+    fn error_event_clears_stream_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".model-stream");
+        std::fs::write(&path, r#"{"kind":"text","delta":"partial"}
+"#).unwrap();
+
+        let mut app = app_with(Vec::new(), "s1");
+        app.refresh_stream(&path);
+        assert!(app.stream_buf().is_some());
+
+        let err = ev(r#"{"v":1,"type":"error","ts":"t","id":"e1","message":"upstream 500"}"#);
+        app.on_watch_item(WatchItem::Event {
+            event: err,
+            cursor: crate::port::TailCursor::end(),
+        });
+        assert!(app.stream_buf().is_none(), "error event must clear the buffer");
+        drop(dir);
+    }
+
+    /// ex_empty_response (lean/TuiStreamSpec.lean): an empty response
+    /// (no deltas at all) still settles exactly once. Consumer side:
+    /// a done-only channel opens the live buffer with empty text and
+    /// marks it done, so the settled state is reached, not lost.
+    #[test]
+    fn ex_empty_response_done_only_channel_settles() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".model-stream");
+        std::fs::write(
+            &path,
+            r#"{"kind":"done","stop_reason":"stop"}
+"#,
+        )
+        .unwrap();
+
+        let mut app = app_with(Vec::new(), "s1");
+        app.refresh_stream(&path);
+
+        let buf = app
+            .stream_buf()
+            .expect("a done-only channel still opens the live buffer");
+        assert_eq!(buf.text, "");
+        assert!(buf.done, "the empty response is marked done");
+        drop(dir);
+    }
+
+    /// ex_two_responses (lean/TuiStreamSpec.lean): two consecutive
+    /// responses settle in order. Consumer side: the first call
+    /// settles via the authoritative `assistant_message` event (the
+    /// live buffer clears), the second call re-uses the same channel
+    /// file and carries only its own content; the transcript holds
+    /// both entries in order.
+    #[test]
+    fn ex_two_responses_settle_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".model-stream");
+
+        let mut app = app_with(Vec::new(), "s1");
+
+        // First response: a delta, then the log's assistant_message
+        // settles it out of the live buffer.
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"kind":"text","delta":"A"}
+"#,
+                r#"{"kind":"done","stop_reason":"stop"}
+"#,
+            ),
+        )
+        .unwrap();
+        app.refresh_stream(&path);
+        app.pump_stream_pacing(); // the `done` line drains the queue (§6.5)
+        assert_eq!(
+            app.stream_buf().expect("first call in flight").text,
+            "A"
+        );
+        let settle1 =
+            ev(r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"A"}"#);
+        app.on_watch_item(WatchItem::Event {
+            event: settle1,
+            cursor: crate::port::TailCursor::end(),
+        });
+        assert!(
+            app.stream_buf().is_none(),
+            "the first response settles out of the live buffer"
+        );
+
+        // Second response on the same channel file (the loop re-created
+        // it; after the settle the offset was cleared, so it is read
+        // from byte 0).
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"kind":"text","delta":"B"}
+"#,
+                r#"{"kind":"done","stop_reason":"stop"}
+"#,
+            ),
+        )
+        .unwrap();
+        app.refresh_stream(&path);
+        app.pump_stream_pacing(); // the `done` line drains the queue (§6.5)
+        assert_eq!(
+            app.stream_buf()
+                .expect("second call in flight")
+                .text,
+            "B",
+            "only the second response's content is live"
+        );
+
+        let settle2 =
+            ev(r#"{"v":1,"type":"assistant_message","ts":"t","id":"a2","content":"B"}"#);
+        app.on_watch_item(WatchItem::Event {
+            event: settle2,
+            cursor: crate::port::TailCursor::end(),
+        });
+        assert!(
+            app.stream_buf().is_none(),
+            "the second response settles out of the live buffer"
+        );
+
+        // Both responses settled into the transcript, in order.
+        let settled: Vec<String> = app
+            .events
+            .iter()
+            .filter(|e| e.kind() == crate::event::EventKind::AssistantMessage)
+            .filter_map(|e| e.get_str("content").map(str::to_string))
+            .collect();
+        assert_eq!(settled, vec!["A".to_string(), "B".to_string()]);
+        drop(dir);
+    }
+
+    /// §6.5: a small backlog reads as a steady typewriter — one
+    /// character per release while the backlog stays under the pace
+    /// window.
+    #[test]
+    fn stream_pacing_typewriter_on_small_backlog() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".model-stream");
+        std::fs::write(
+            &path,
+            r#"{"kind":"text","delta":"0123456789"}
+"#,
+        )
+        .unwrap();
+
+        let mut app = app_with(Vec::new(), "s1");
+        app.refresh_stream(&path);
+        assert_eq!(
+            app.stream_buf().expect("buffer opened").text,
+            "",
+            "nothing is released before the first pump"
+        );
+        assert_eq!(app.stream_pending_chars(), 10);
+
+        for (n, want) in ["0", "01", "012"].iter().enumerate() {
+            app.pump_stream_pacing();
+            assert_eq!(
+                app.stream_buf().as_ref().unwrap().text,
+                *want,
+                "release {n}"
+            );
+        }
+        assert_eq!(app.stream_pending_chars(), 7, "three chars released");
+        drop(dir);
+    }
+
+    /// §6.5: a large backlog catches up — the release budget is
+    /// `backlog / STREAM_PACE_FRAMES`, so the queue clears in about
+    /// that many frames instead of trickling.
+    #[test]
+    fn stream_pacing_catches_up_a_large_backlog() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".model-stream");
+        // The channel writer terminates every line; `refresh_stream`
+        // consumes complete lines only.
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"kind":"text","delta":"{}"}}
+"#,
+                "a".repeat(3000)
+            ),
+        )
+        .unwrap();
+
+        let mut app = app_with(Vec::new(), "s1");
+        app.refresh_stream(&path);
+        app.pump_stream_pacing();
+
+        let buf = app.stream_buf().expect("buffer opened");
+        assert_eq!(buf.text.len(), 200, "3000 / 15 chars released");
+        assert_eq!(app.stream_pending_chars(), 2800);
+        drop(dir);
+    }
+
+    /// §6.5: once the channel is `done`, the whole remainder
+    /// releases at once (the final text settles promptly).
+    #[test]
+    fn stream_pacing_drains_all_when_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".model-stream");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"kind":"text","delta":"xy"}
+"#,
+                r#"{"kind":"done","stop_reason":"stop"}
+"#,
+            ),
+        )
+        .unwrap();
+
+        let mut app = app_with(Vec::new(), "s1");
+        app.refresh_stream(&path);
+        assert_eq!(app.stream_pending_chars(), 2, "queued until the pump");
+        app.pump_stream_pacing();
+        assert_eq!(app.stream_buf().expect("buffer opened").text, "xy");
+        assert_eq!(app.stream_pending_chars(), 0);
+        drop(dir);
+    }
+
+    /// §6.5: the release is strictly FIFO across kinds — reasoning
+    /// content queued before text content reaches the buffer first.
+    #[test]
+    fn stream_pacing_keeps_reasoning_before_text_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".model-stream");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"kind":"reasoning","item_id":"r1","delta":"aa"}
+"#,
+                r#"{"kind":"text","delta":"bb"}
+"#,
+                r#"{"kind":"done","stop_reason":"stop"}
+"#,
+            ),
+        )
+        .unwrap();
+
+        let mut app = app_with(Vec::new(), "s1");
+        app.refresh_stream(&path);
+        while app.stream_pending_chars() > 0 {
+            app.pump_stream_pacing();
+        }
+        let buf = app.stream_buf().expect("buffer opened");
+        assert_eq!(buf.reasoning.get("r1").map(String::as_str), Some("aa"));
+        assert_eq!(buf.text, "bb");
+        drop(dir);
+    }
+
+    /// §6.5: a release that ends mid-delta splits at a character
+    /// boundary (multi-byte safe), keeping the remainder queued.
+    #[test]
+    fn stream_pacing_splits_at_char_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".model-stream");
+        std::fs::write(
+            &path,
+            r#"{"kind":"text","delta":"héllo"}
+"#,
+        )
+        .unwrap();
+
+        let mut app = app_with(Vec::new(), "s1");
+        app.refresh_stream(&path);
+        app.pump_stream_pacing();
+        assert_eq!(app.stream_buf().expect("buffer opened").text, "h");
+        app.pump_stream_pacing();
+        assert_eq!(
+            app.stream_buf().expect("buffer opened").text,
+            "hé",
+            "the release respects the multi-byte boundary"
+        );
+        assert_eq!(app.stream_pending_chars(), 3);
+        drop(dir);
+    }
+
+    /// §6.5: clearing the live buffer (a settle event) drops the
+    /// pace queue — the transcript is authoritative from here.
+    #[test]
+    fn clear_stream_drops_the_pace_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".model-stream");
+        std::fs::write(
+            &path,
+            r#"{"kind":"text","delta":"abc"}
+"#,
+        )
+        .unwrap();
+
+        let mut app = app_with(Vec::new(), "s1");
+        app.refresh_stream(&path);
+        assert_eq!(app.stream_pending_chars(), 3);
+        app.clear_stream();
+        assert!(app.stream_buf().is_none());
+        assert_eq!(app.stream_pending_chars(), 0);
+        drop(dir);
     }
 }

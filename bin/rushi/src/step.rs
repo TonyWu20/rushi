@@ -350,7 +350,21 @@ fn run_awaiting_model(
     }
 
     // The model retry loop.
-    let (output, terminal_logged) = model_retry_loop(cfg, runner, session, &mut request, &guard_model, describe, mode);
+    // Create the session-local stream channel so the model can write
+    // live deltas while the TUI polls it (docs/tui-streaming-response.md §5.1).
+    let stream_path = session.path.join(crate::stream_channel::MODEL_STREAM_FILE);
+    if let Err(e) = std::fs::File::create(&stream_path) {
+        eprintln!("rushi: warning: cannot create stream channel {stream_path:?}: {e}");
+    }
+    crate::stream_channel::register(&stream_path);
+
+    let (output, terminal_logged) = model_retry_loop(
+        cfg, runner, session, &mut request, &guard_model, describe, mode, Some(&stream_path),
+    );
+
+    // The call returned (success or terminal error): close the channel.
+    crate::stream_channel::unregister();
+    let _ = std::fs::remove_file(&stream_path);
 
     check_signal(mode);
 
@@ -444,6 +458,7 @@ fn estimate_context(cfg: &HarnessConfig, session_dir: &Path) -> u64 {
         return 0;
     };
     let caps = rushi_common::compact_math::Caps {
+        result: None,
         text: Some(cfg.compact_text_chars),
     };
 
@@ -748,6 +763,7 @@ fn model_retry_loop(
     guard_model: &str,
     describe: &Describe,
     mode: StepMode,
+    delta_file: Option<&std::path::Path>,
 ) -> (ModelOutput, bool) {
     let mut empty_attempts = 0usize;
     let mut model_err_retries = 0usize;
@@ -782,7 +798,7 @@ fn model_retry_loop(
             log_hook_window(cfg, session, "model.before", "", &results);
         }
 
-        let output = match runner.model(request) {
+        let output = match runner.model(request, delta_file) {
             Ok(o) => o,
             Err(e) => {
                 model_err_retries += 1;

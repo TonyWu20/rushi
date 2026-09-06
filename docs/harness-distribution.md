@@ -436,6 +436,17 @@ is a pure function. A Lean theorem can state "the resolver returns
 exactly the declared set." The default proof is a conformance test.
 Lean is an optional backstop, not the gate.
 
+The backstop exists: `lean/RushiSpec.lean` mirrors `resolve_tools`
+and states its invariants as theorems, checked by the Lean kernel
+via `scripts/lean-gate.sh` (devShell `nix develop .#lean`). It is
+documented in docs/lean-driven-development.md §8. The Lean project
+uses core Lean 4.7.0 only (no Mathlib), so the build is hermetic.
+Concrete examples mirroring the Rust unit tests are decided by
+computation. The inductive theorems (total preservation, P7
+local-masks-kernel, P10 missing-is-in-neither) are recorded as
+tracked work: they require `by_cases` / `split_ifs`, which the
+pinned 4.7.0 core toolchain does not provide.
+
 ## Gate
 
 Gate: partially open. The `rushi` binary, the manifest schema, and
