@@ -55,19 +55,21 @@ fn main() {
         }
     };
 
-    // A completed, blocked, or paused goal stops the loop.
-    if !goal.is_open() {
-        println!("{{}}");
-        return;
-    }
-
     // Token accounting (informational only, docs/goal-ux.md §1.6):
     // advance used_tokens by the output_tokens of the most recent
     // assistant message. This drives the TUI status line, never the
-    // loop.
+    // loop. Placed before the is_open check so the final turn's
+    // tokens are captured even when the goal just closed.
     let events_path = session_dir.join("events.jsonl");
     if let Some(usage) = GoalState::read_last_assistant_output_tokens(&events_path) {
         goal.add_used(usage);
+    }
+
+    // A completed, blocked, or paused goal stops the loop.
+    if !goal.is_open() {
+        let _ = goal.save(&session_dir);
+        println!("{{}}");
+        return;
     }
 
     // Increment the continuation counter (docs/goal-ux.md §2: used
@@ -173,5 +175,45 @@ mod tests {
         g2.iteration += 1;
         let prompt = g2.build_continue_prompt();
         assert!(prompt.contains("continuation #101"), "{prompt}");
+    }
+
+    /// A closed goal (completed/blocked) still records the last
+    /// assistant message's token usage before the loop stops.
+    /// This ensures used_tokens is recorded even when the goal closes
+    /// on the very turn the idle hook fires.
+    #[test]
+    fn test_closed_goal_still_gets_token_accounting() {
+        let dir = TempDir::new().unwrap();
+        let mut g = GoalState::new("short goal");
+        g.mark_completed();
+        g.save(dir.path()).unwrap();
+
+        // Simulate the last assistant message carrying usage data.
+        let events_path = dir.path().join("events.jsonl");
+        std::fs::write(
+            &events_path,
+            r#"{"v":1,"type":"assistant_message","content":"done","stop_reason":"stop","usage":{"input_tokens":100,"output_tokens":42}}"#,
+        )
+        .unwrap();
+
+        // Simulate what main() does after the fix:
+        // token accounting runs BEFORE the is_open() check.
+        let mut loaded = GoalState::load(dir.path()).unwrap();
+        assert!(!loaded.is_open(), "goal should be closed");
+        assert_eq!(loaded.used_tokens, 0, "no tokens yet");
+
+        let usage = GoalState::read_last_assistant_output_tokens(&events_path);
+        assert_eq!(usage, Some(42));
+        loaded.add_used(usage.unwrap());
+
+        // Save and verify the token count was recorded despite the
+        // goal being closed.
+        loaded.save(dir.path()).unwrap();
+        let reloaded = GoalState::load(dir.path()).unwrap();
+        assert_eq!(
+            reloaded.used_tokens, 42,
+            "closed goal should still record final-turn tokens"
+        );
+        assert!(reloaded.completed);
     }
 }

@@ -13,19 +13,22 @@
 //! When the user selects `goal` or `goal_edit` from the palette, the
 //! extension sets an in-memory `armed` flag. The next `user_message`
 //! event forwarded by the TUI (via `kinds = ["user_message"]` in
-//! ext.toml) triggers a direct write to `goal.json` — no agent
-//! round-trip needed.
+//! ext.toml) triggers a direct write of the session's goal files —
+//! no agent round-trip needed.
 //!
 //! User-facing commands (this extension):
 //!   - `goal`       — arm goal mode; user types the goal in the input
-//!     box and sends it. goal.json is written on the next user_message.
+//!     box and sends it. The goal files are written on the next
+//!     user_message.
 //!   - `goal_edit`  — arm goal-edit mode; user types the new goal in the
-//!     input box and sends it. goal.json is edited in place.
-//!   - `goal_pause` — set `active = false` in goal.json. The loop
-//!     stops at the next `run.idle` window.
-//!   - `goal_clear` — delete `goal.json` (irreversible).
+//!     input box and sends it. The goal state is edited in place.
+//!   - `goal_pause` — set `active = false` in the goal's state file.
+//!     The loop stops at the next `run.idle` window.
+//!   - `goal_clear` — delete the `goal.json` pointer (irreversible for
+//!     the current goal; the per-goal `goal-<id>.json` traces
+//!     remain).
 //!   - `goal_resume`— re-activate a previously blocked or completed
-//!     goal by rewriting `goal.json` directly.
+//!     goal by rewriting its state file directly.
 //!
 //! Agent-side tools (tools/goal, tools/goal_complete, tools/goal_blocked)
 //! are NOT registered here — they are called by the model, not by the
@@ -136,7 +139,7 @@ fn main() {
                             "label": "goal clear",
                             "kind": "run",
                             "hint": "",
-                            "help": "Delete goal.json. Irreversible. The loop stops immediately.",
+                            "help": "Delete the goal.json pointer. Past goal files (goal-*.json) stay as traces. The loop stops immediately.",
                             "options": []
                         },
                         {
@@ -340,16 +343,22 @@ fn handle_invoke<W: Write>(
             }
         }
         "goal_clear" => {
-            let path = session_dir.join("goal.json");
+            let path = goal_state::GoalState::path(&session_dir);
             if !path.exists() {
                 return (false, "No goal.json found — nothing to clear.".to_string(), None);
             }
-            match std::fs::remove_file(&path) {
-                Ok(()) => {
+            // Only the pointer is deleted; the per-goal files
+            // (goal-<id>.json) stay as traces of the session's goals.
+            match goal_state::GoalState::clear(&session_dir) {
+                true => {
                     append_ext_status(out, &session_dir, "goal_cleared", "clear");
-                    (true, "Goal cleared.".to_string(), None)
+                    (
+                        true,
+                        "Goal cleared: goal.json deleted. Past goal files (goal-*.json) stay as traces.".to_string(),
+                        None,
+                    )
                 }
-                Err(e) => (false, format!("Failed to delete goal.json: {e}"), None),
+                false => (false, "Failed to delete goal.json.".to_string(), None),
             }
         }
         "goal_resume" => {
@@ -455,9 +464,12 @@ mod tests {
         g.save(session_dir).unwrap();
         assert!(session_dir.join("goal.json").exists());
 
-        std::fs::remove_file(session_dir.join("goal.json")).unwrap();
+        assert!(goal_state::GoalState::clear(session_dir));
         assert!(!session_dir.join("goal.json").exists());
         assert!(goal_state::GoalState::load(session_dir).is_none());
+        // The goal's own state file survives as a trace.
+        let trace = session_dir.join(format!("goal-{}.json", g.id));
+        assert!(trace.exists(), "per-goal trace file must survive clear");
     }
 
     #[test]

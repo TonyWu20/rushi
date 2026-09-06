@@ -181,7 +181,8 @@ pub trait SessionPort: Send + Sync {
     /// (docs/goal-ux.md section 1.7). The file-based implementation
     /// maps it to `<sessions_root>/<session>`; a future daemon port
     /// would return the daemon's working directory. The TUI uses this
-    /// to locate the session's `goal.json` for goal-state display.
+    /// to locate the session's goal files (`goal.json` pointer plus
+    /// `goal-<id>.json`) for goal-state display.
     fn session_dir(&self, session: &SessionId) -> Result<std::path::PathBuf, BusError>;
 
     /// The session-local model stream channel file

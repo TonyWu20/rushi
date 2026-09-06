@@ -89,19 +89,23 @@ seed_session() {
 EOF
 }
 
-# Seed a goal.json with a given id. No budget (docs/goal-ux.md §1.6).
+# Seed the goal files with a given id: the per-goal state file
+# goal-<id>.json plus the goal.json pointer. No budget (§1.6).
 seed_goal() {
   local id="${1:-g-test0001}"
-  cat > "$SESSIONS_DIR/goal.json" <<EOF
+  cat > "$SESSIONS_DIR/goal-$id.json" <<EOF
 {"id":"$id","goal":"finish the task","active":true,"used_tokens":0,"iteration":0,"completed":false,"blocked":false,"block_reason":null,"opened_at":"t+0s","closed_at":null}
 EOF
+  echo "{\"current_goal\":\"$id\"}" > "$SESSIONS_DIR/goal.json"
 }
 
-# Seed a goal.json with specific state fields.
+# Seed the goal files with specific state fields. The state JSON is
+# the argument; its "id" picks the per-goal file name.
 seed_goal_state() {
-  cat > "$SESSIONS_DIR/goal.json" <<EOF
-$1
-EOF
+  local id
+  id=$(printf '%s' "$1" | jq -r '.id')
+  printf '%s\n' "$1" > "$SESSIONS_DIR/goal-$id.json"
+  echo "{\"current_goal\":\"$id\"}" > "$SESSIONS_DIR/goal.json"
 }
 
 # ── Stub model variants ───────────────────────────────────────────
@@ -170,9 +174,14 @@ count_follow_msgs() {
 }
 
 goal_field() {
-  # No `// empty`: jq treats `false` as falsy, and goal states use
-  # boolean fields that must surface as "false", not empty.
-  jq -r ".${1}" "$SESSIONS_DIR/goal.json" 2>/dev/null
+  # Read a field of the *current* goal: follow the goal.json pointer
+  # to its per-goal state file. No `// empty`: jq treats `false` as
+  # falsy, and goal states use boolean fields that must surface as
+  # "false", not empty.
+  local id
+  id=$(jq -r '.current_goal' "$SESSIONS_DIR/goal.json" 2>/dev/null)
+  [ -n "$id" ] && [ "$id" != "null" ] || return 1
+  jq -r ".${1}" "$SESSIONS_DIR/goal-$id.json" 2>/dev/null
 }
 
 assert_eq() {
@@ -252,7 +261,7 @@ scenario_closed_goal() {
 
 # ── Scenario: goal_complete with wrong goal_id (P8) ──────────────
 # The model calls goal_complete with a mismatched id. The tool
-# rejects it; goal.json stays active. The loop keeps going until
+# rejects it; the goal stays active. The loop keeps going until
 # timeout (no budget cap).
 scenario_goal_complete_wrong_id() {
   NEW_WORK wrong-id
@@ -265,7 +274,7 @@ scenario_goal_complete_wrong_id() {
   # Short timeout: the rejected tool_result is recorded on the first pass;
   # the loop would otherwise continue forever (no budget cap).
   run_harness 20
-  # The tool_call was rejected: goal.json is still active.
+  # The tool_call was rejected: the goal is still active.
   assert_eq "$(goal_field active)" "true" "goal still active after wrong-id rejection"
   assert_eq "$(goal_field completed)" "false" "goal not completed"
   # The tool_result should carry an error.
@@ -275,7 +284,7 @@ scenario_goal_complete_wrong_id() {
 
 # ── Scenario: goal_complete with contradictory summary (P9) ──────
 # The model calls goal_complete with a summary that contradicts
-# completion. The tool rejects it; goal.json stays active.
+# completion. The tool rejects it; the goal stays active.
 scenario_goal_complete_contradictory() {
   NEW_WORK contradictory
   work_config
@@ -287,7 +296,7 @@ scenario_goal_complete_contradictory() {
   # Short timeout: the rejected tool_result is recorded on the first pass;
   # the loop would otherwise continue forever (no budget cap).
   run_harness 20
-  # The tool_call was rejected: goal.json is still active.
+  # The tool_call was rejected: the goal is still active.
   assert_eq "$(goal_field active)" "true" "goal still active after contradictory rejection"
   assert_eq "$(goal_field completed)" "false" "goal not completed"
   # The tool_result should carry an error mentioning the contradiction.
@@ -323,7 +332,8 @@ scenario_goal_blocked_stops() {
 }
 
 # ── Scenario: cleared goal (P5) ──────────────────────────────────
-# goal.json deleted: the run.idle hook returns {}, the loop stops.
+# goal.json pointer absent: the run.idle hook returns {}, the loop
+# stops.
 scenario_goal_cleared() {
   NEW_WORK cleared
   work_config

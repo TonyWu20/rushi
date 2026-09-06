@@ -1,7 +1,7 @@
 //! `goal_blocked` — mark the active goal as blocked with a reason.
 //!
 //! The loop stops pursuing a blocked goal. The reason is recorded in
-//! `goal.json` so the user can see why the goal stopped.
+//! the goal's state file so the user can see why the goal stopped.
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -22,12 +22,12 @@ fn main() {
 
     let session_dir = match session_dir() {
         Some(d) => d,
-        None => fail("HARNESS_SESSION_DIR is not set; cannot update goal.json."),
+        None => fail("HARNESS_SESSION_DIR is not set; cannot update the goal state."),
     };
 
     let mut state = match GoalState::load(&session_dir) {
         Some(s) => s,
-        None => fail("No goal.json found: start a goal first with the `goal` tool."),
+        None => fail("No goal found in this session: start a goal first with the `goal` tool."),
     };
 
     // Stale-turn guard (docs/goal-ux.md §1.3): the goal_id must match
@@ -40,7 +40,7 @@ fn main() {
     state.mark_blocked(&reason);
 
     if let Err(e) = state.save(&session_dir) {
-        fail(&format!("Failed to write goal.json: {e}"));
+        fail(&format!("Failed to write the goal state: {e}"));
     }
 
     let out = serde_json::json!({

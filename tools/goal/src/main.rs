@@ -1,8 +1,11 @@
 //! `goal` — start a goal that the loop pursues across turns.
 //!
-//! Reads `HARNESS_SESSION_DIR` to locate the session's `goal.json` and
-//! writes a fresh active goal there. The `run.idle` hook continues the
-//! goal until `goal_complete` or `goal_blocked` closes it.
+//! Reads `HARNESS_SESSION_DIR` to locate the session's goal files and
+//! writes a fresh active goal: a new `goal-<id>.json` state file plus
+//! the `goal.json` pointer naming it. Past goals are never
+//! overwritten — their `goal-<old-id>.json` files stay in the session
+//! directory as traces. The `run.idle` hook continues the goal until
+//! `goal_complete` or `goal_blocked` closes it.
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -23,7 +26,7 @@ fn main() {
 
     let session_dir = match session_dir() {
         Some(d) => d,
-        None => fail("HARNESS_SESSION_DIR is not set; cannot write goal.json."),
+        None => fail("HARNESS_SESSION_DIR is not set; cannot write the goal files."),
     };
 
     // If an active goal already exists, edit it in place; otherwise

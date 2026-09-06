@@ -1,7 +1,9 @@
 //! `harness-hook-goal-arm` — goal-mode prompt injection.
 //!
-//! Registered on the `model.before` window. Reads `goal.json` from the
-//! session directory. When an active goal exists, appends the
+//! Registered on the `model.before` window. Reads the session's
+//! current goal (the `goal.json` pointer plus its `goal-<id>.json`
+//! state file) from the session directory. When an active goal
+//! exists, appends the
 //! cache-stable goal block (docs/goal-ux.md §1.1b/§1.1c) as the
 //! **last item** of `request.input` — after the conversation, not in
 //! `instructions`. This keeps the `[system][history…]` prefix
@@ -43,8 +45,9 @@ fn main() {
         }
     };
 
-    // Read goal.json — the sole source of truth for goal state
-    // (docs/goal-ux.md §1.1b: goal.json-driven, not log-derived).
+    // Read the session's current goal — the sole source of truth for
+    // goal state (docs/goal-ux.md §1.1b: goal-file-driven, not
+    // log-derived).
     let goal = match GoalState::load(&session_dir) {
         Some(g) if g.is_open() => g,
         _ => {
@@ -193,7 +196,7 @@ mod tests {
     fn test_goal_block_pure_and_stable() {
         // P16: two GoalStates with same (goal, id) but different
         // iteration/used_tokens produce identical blocks.
-        let dir = TempDir::new().unwrap();
+        let _dir = TempDir::new().unwrap();
         let mut g1 = GoalState::new("build a parser");
         g1.id = "g-deadbeef".to_string();
         g1.iteration = 0;
@@ -210,7 +213,7 @@ mod tests {
     fn test_block_byte_stable_across_turns() {
         // P17: consecutive calls with unchanged (goal, id) emit
         // identical bytes.
-        let dir = TempDir::new().unwrap();
+        let _dir = TempDir::new().unwrap();
         let mut g = GoalState::new("implement the feature");
         g.iteration = 0;
         let b1 = g.build_goal_block();
