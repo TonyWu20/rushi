@@ -666,3 +666,53 @@ owned. A guardrail test scans `main.rs` after the
 and `no_stderr_writes_after_the_terminal_takeover` in
 `bin/tui/src/main.rs` pass. All 549 TUI unit tests pass.
 Restart the TUI to load the rebuilt binary.
+
+## FT-018 — TUI process leaks memory when the loop is not running
+
+**Symptom:** The TUI process RSS hit 47 GB within minutes.
+The session had no running loop.
+The tailer thread holds 99.9% CPU. The inotify thread holds
+78.4% CPU. The pmap output shows about 350 uniform 128 MB
+anonymous regions.
+
+**Root cause:** Two defects compound in the tailer wake path
+(`bin/tui/src/port_file.rs`).
+
+1. **Raw inotify causes a busy loop.** The tailer watches the log
+   file and its parent directory via raw `notify`. The `notify`
+   inotify backend pushes each event into an unbounded
+   `std::sync::mpsc` channel. The TUI writes `tui-trace.jsonl`
+   and `goal.json` into the same session directory. Every write
+   fires a directory-level inotify event. The tailer's
+   `recv_timeout` returns at once because a new event already sits
+   in the queue. The loop never sleeps. The tailer spins at 99.9%
+   CPU. Each call runs `read_tail` on a file with no new data.
+
+2. **The carry buffer triggers wasted work.** When `want == 0`
+   but `carry` holds a partial line, `read_tail` falls through.
+   It clones `carry`, builds `candidate`, scans for newlines,
+   finds none, and reassigns `carry`. Each iteration allocates two
+   copies of the carry buffer. The busy loop multiplies this cost.
+   glibc fragments the heap into 128 MB arena regions.
+
+**Fix:**
+
+- `bin/tui/Cargo.toml`: Add `notify-debouncer-mini = "0.7"`.
+- `bin/tui/src/port_file.rs`:
+  - Replace `notify::recommended_watcher` with
+    `notify_debouncer_mini::new_debouncer`. The debouncer collapses
+    all inotify events in a 50 ms window into one delivery.
+    The tailer no longer sees raw individual events.
+  - `register_watches` now takes `&mut dyn Watcher` instead of
+    `&mut RecommendedWatcher`.
+  - The tailer loop drops the manual drain and sleep hack. One
+    `recv_timeout` on the debounced channel is enough.
+  - Tighten the `read_tail` early return. A partial tail alone
+    cannot make progress, so the function returns `Ok(())` without
+    cloning `carry` when no complete line is held.
+
+**Verification:** Build the release binary. Run
+`tui file-picker-ignored-files` against a session with no running loop. RSS
+holds at 22 MB with 62 threads and 0.0% CPU. No 128 MB
+anonymous region appears in pmap. All 576 TUI tests pass.
+

@@ -1989,6 +1989,17 @@ impl ExtHost {
     }
 }
 
+impl Drop for ExtHost {
+    /// Kill the extension groups when the host leaves scope, so a
+    /// dropped host (a failed test, a panic between start and stop)
+    /// leaves no orphan extension process behind. `stop` is idempotent:
+    /// a second call re-kills dead pids (a no-op) and reaps nothing
+    /// new.
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 impl HostInner {
     /// Parse one reply line and apply the per-op G5 fallback.
     /// Nothing here can fail the TUI: a bad line is dropped, a bad
