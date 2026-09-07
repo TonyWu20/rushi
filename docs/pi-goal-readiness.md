@@ -51,13 +51,13 @@ pieces are now implemented:
 | `tools/goal_complete/` CLI + `tool.toml` | `tools/goal_complete/` | Small |
 | `tools/goal_blocked/` CLI + `tool.toml` | `tools/goal_blocked/` | Small |
 | Goal state file (`sessions/<n>/goal.json`) + read/write | `crates/goal-state/` | Medium |
-| `run.idle` hook binary (continue loop when goal open) | `bin/hook-goal-idle/` | Medium |
-| `compact.before` hook binary (preserve goal across compaction) | `bin/hook-goal-compact/` | Small |
-| `tool.before` hook binary (block stale goal tool calls) | `bin/hook-goal-tools/` | Small |
-| `model.before` hook binary (inject goal-mode instruction) | `bin/hook-goal-arm/` | Small |
+| `run.idle` hook binary (continue loop when goal open) | `goal-hooks/hook-goal-idle/` (rushi-exts) | Medium |
+| `compact.before` hook binary (preserve goal across compaction) | `goal-hooks/hook-goal-compact/` (rushi-exts) | Small |
+| `tool.before` hook binary (block stale goal tool calls) | `goal-hooks/hook-goal-tools/` (rushi-exts) | Small |
+| `model.before` hook binary (inject goal-mode instruction) | `goal-hooks/hook-goal-arm/` (rushi-exts) | Small |
 | Token / budget accounting | `crates/goal-state/` (budget_tokens, used_tokens) | Medium |
 | User-facing goal commands (`goal`, `goal edit`, `goal resume`) | `ui_extensions/goal/` | Done |
-| Conformance test: `run.idle` continue e2e | `scripts/run-idle-continue-e2e.sh` | Done |
+| Conformance test: `run.idle` continue e2e | `run-idle-continue-e2e.sh` (rushi-exts root) | Done |
 
 ## 4. Gaps
 
@@ -99,7 +99,7 @@ goal is active. The agent-facing tools (`goal`, `goal_complete`,
 user-facing palette.
 
 **G3 — No conformance test for `run.idle` continue. Resolved (2026-07-04).**
-`scripts/run-idle-continue-e2e.sh` covers nine scenarios (no-goal,
+`run-idle-continue-e2e.sh` (rushi-exts root) covers nine scenarios (no-goal,
 active-goal, closed-goal, wrong-id, contradictory, paused,
 blocked-stops, cleared, block-stable) with 26 assertions, all passing.
 
@@ -133,14 +133,14 @@ The application-level pieces are complete:
   creates a fresh one otherwise. `goal_complete` rejects
   contradictory summaries (P9). `goal_blocked` records the block
   reason.
-- `bin/hook-goal-idle/` — `run.idle` hook: continues the loop with a
+- `goal-hooks/hook-goal-idle/` (rushi-exts) — `run.idle` hook: continues the loop with a
   `follow`-queue `user_message` when a goal is open; stops when
   closed. No budget check (§1.6).
-- `bin/hook-goal-compact/` — `compact.before` hook: always-allow
+- `goal-hooks/hook-goal-compact/` (rushi-exts) — `compact.before` hook: always-allow
   (no budget veto; §1.6).
-- `bin/hook-goal-tools/` — `tool.before` hook: blocks stale goal-tool
+- `goal-hooks/hook-goal-tools/` (rushi-exts) — `tool.before` hook: blocks stale goal-tool
   calls (e.g. `goal_complete` when no goal is active).
-- `bin/hook-goal-arm/` — `model.before` hook: reads `goal.json`
+- `goal-hooks/hook-goal-arm/` (rushi-exts) — `model.before` hook: reads `goal.json`
   (goal.json-driven, §1.1b) and appends the cache-stable goal block
   (objective + goal-mode rules + trust-boundary framing) as the last
   item in `request.input` while a goal is active. No log-derived
@@ -150,7 +150,7 @@ The application-level pieces are complete:
   (docs/ui-extension.md section 4) that the goal extension owns;
   no goal fields, no goal-specific rendering, no `goal` /
   `goal_edit` special-casing.
-- `scripts/run-idle-continue-e2e.sh` — conformance e2e (26 assertions,
+- `run-idle-continue-e2e.sh` (rushi-exts root) — conformance e2e (26 assertions,
   9 scenarios: no-goal, active-goal, closed-goal, wrong-id,
   contradictory, paused, blocked-stops, cleared, block-stable).
 - `ui_extensions/goal/` — TUI extension that registers `goal`,
