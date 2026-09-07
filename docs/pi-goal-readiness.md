@@ -145,9 +145,11 @@ The application-level pieces are complete:
   (objective + goal-mode rules + trust-boundary framing) as the last
   item in `request.input` while a goal is active. No log-derived
   state (§1.1b); byte-stable across turns (P16/P17).
-- `bin/tui/` — TUI goal status: goal status line (goal text, elapsed
-  time, token count — no budget ratio, §1.7), goal-mode border
-  colour, `goal_armed` input-box title hint.
+- `bin/tui/` — zero goal-state coupling (docs/goal-ux.md §1.7):
+  the host exposes a generic `row` capability
+  (docs/ui-extension.md section 4) that the goal extension owns;
+  no goal fields, no goal-specific rendering, no `goal` /
+  `goal_edit` special-casing.
 - `scripts/run-idle-continue-e2e.sh` — conformance e2e (26 assertions,
   9 scenarios: no-goal, active-goal, closed-goal, wrong-id,
   contradictory, paused, blocked-stops, cleared, block-stable).
@@ -155,7 +157,11 @@ The application-level pieces are complete:
   `goal edit`, `goal pause`, `goal clear`, and `goal resume` in the
   command palette (G2 resolution). `goal` and `goal edit` set an
   armed flag; the next `user_message` event triggers a direct write of
-  `goal.json` (no agent round-trip, §1.1/§1.8). Standalone cargo
+  `goal.json` (no agent round-trip, §1.1/§1.8). It also owns the
+  host-reserved row slot (docs/ui-extension.md section 4, `row`
+  capability): the goal status line (goal text, elapsed time, token
+  count — no budget ratio, §1.7) and the armed hint (§1.8); the bare
+  TUI shows no goal row. Standalone cargo
   package; build with `cargo build` in its directory.
 - Plumbing: `session_dir` added to `RouteEnv`, `route` accepts
   `--session-dir` and exports `HARNESS_SESSION_DIR`, four hooks

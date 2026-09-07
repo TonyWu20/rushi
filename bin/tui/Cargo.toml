@@ -22,7 +22,6 @@ bon = { workspace = true }
 frizbee = "0.13"
 uuid = { version = "1", features = ["v4"] }
 rushi-common = { path = "../../crates/rushi" }
-goal-state = { path = "../../crates/goal-state" }
 notify = "8.2.0"
 notify-debouncer-mini = "0.7"
 

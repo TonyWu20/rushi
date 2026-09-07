@@ -63,6 +63,14 @@ pub enum EventKind {
     /// the retracted message's `id`; `reason` is optional (v1:
     /// `"user_edit"`).
     UserMessageRetract,
+    /// The user forked the session (docs/rewind-fork-design.md).
+    /// `target_seq` is the 1-based log seq of the target event;
+    /// `mode` is `before` (the target — a user message — is restored
+    /// to the input box, unsent) or `on` (the target is included,
+    /// the finished step prepares its next move). The marker
+    /// projects to nothing in the model context: it masks the
+    /// abandoned branch through the active path.
+    Rewind,
     /// `type` value outside the known vocabulary. Render raw JSON.
     UnknownType,
     /// Known `type` but `v` outside [`SUPPORTED_VERSIONS`] (or missing).
@@ -90,6 +98,7 @@ impl EventKind {
         EventKind::CompactionSummary,
         EventKind::CompactionFailed,
         EventKind::UserMessageRetract,
+        EventKind::Rewind,
     ];
 
     /// The wire `type` value for a semantic kind; `None` for fallback kinds.
@@ -109,6 +118,7 @@ impl EventKind {
             EventKind::CompactionSummary => "compaction_summary",
             EventKind::CompactionFailed => "compaction_failed",
             EventKind::UserMessageRetract => "user_message_retract",
+            EventKind::Rewind => "rewind",
             EventKind::UnknownType | EventKind::UnsupportedVersion | EventKind::BadLine => {
                 return None
             }
@@ -133,6 +143,7 @@ impl EventKind {
             "compaction_summary" => EventKind::CompactionSummary,
             "compaction_failed" => EventKind::CompactionFailed,
             "user_message_retract" => EventKind::UserMessageRetract,
+            "rewind" => EventKind::Rewind,
             _ => return None,
         })
     }
@@ -214,6 +225,29 @@ pub mod produce {
                 "reason": "user_edit",
             }),
         }
+    }
+
+    /// `rewind` event forking the session at the target
+    /// (docs/rewind-fork-design.md).
+    ///
+    /// `target_seq` is the 1-based log seq of the target event.
+    /// `mode` is `"before"` (the target — a user message — is
+    /// restored to the input box, unsent) or `"on"` (the target is
+    /// included in the context; a finished step prepares its next
+    /// move). `reason` is optional; v1 uses `"tui_pick"`.
+    #[allow(dead_code)]
+    pub fn rewind(target_seq: u64, mode: &str, reason: Option<&str>) -> Event {
+        let mut obj = json!({
+            "v": 1,
+            "type": EventKind::Rewind.as_wire().expect("semantic kind has a wire name"),
+            "ts": now_ts(),
+            "target_seq": target_seq,
+            "mode": mode,
+        });
+        if let Some(reason) = reason {
+            obj["reason"] = json!(reason);
+        }
+        Event::Json { obj }
     }
 
     /// `approval` event answering an `approval_request`.
@@ -458,6 +492,7 @@ mod tests {
                         | EventKind::CompactionSummary
                         | EventKind::CompactionFailed
                         | EventKind::UserMessageRetract
+                        | EventKind::Rewind
                 ),
                 "type {wire} fell through to fallback"
             );
@@ -567,6 +602,22 @@ mod tests {
         let c = produce::cancel("turn");
         assert_eq!(c.kind(), EventKind::Cancel);
         assert_eq!(c.get_str("target"), Some("turn"));
+    }
+
+    #[test]
+    fn produced_rewind_event() {
+        let e = produce::rewind(41, "on", Some("tui_pick"));
+        assert_eq!(e.kind(), EventKind::Rewind);
+        assert_eq!(e.get_str("type"), Some("rewind"));
+        assert_eq!(e.get_i64("v"), Some(1));
+        assert_eq!(e.get_i64("target_seq"), Some(41));
+        assert_eq!(e.get_str("mode"), Some("on"));
+        assert_eq!(e.get_str("reason"), Some("tui_pick"));
+        assert!(e.get_str("ts").is_some());
+        // The optional reason degrades to absent, never to an error.
+        let bare = produce::rewind(41, "before", None);
+        assert_eq!(bare.get_str("mode"), Some("before"));
+        assert!(bare.get("reason").is_none());
     }
 
     #[test]

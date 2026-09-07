@@ -441,6 +441,59 @@ run_bash_test "bash: timeout too large" nonzero '{"command":"echo hi","timeout_s
 run_bash_test "bash: stdin EOF" 0 '{"command":"cat"}' '' '' 'ec:0' 'stdout_empty'
 
 echo ""
+echo "=== Lean-Verify Tool Tests ==="
+
+LV_BIN="$TOOLS_DIR/lean-verify/bin/lean-verify"
+if [ ! -f "$LV_BIN" ]; then
+  LV_BIN="$(cd "$SCRIPT_DIR/../target/debug" 2>/dev/null && pwd)/lean-verify"
+fi
+if [ ! -f "$LV_BIN" ]; then
+  echo "SKIP: lean-verify binary not found (cargo build -p lean-verify)"
+else
+  # P2 self-doc: --help documents the operations (no SKILL.md).
+  LV_HELP_OK=1
+  "$LV_BIN" --help > "$TEST_DIR/lv_help" 2>&1 || LV_HELP_OK=0
+  if [ "$LV_HELP_OK" -eq 1 ] \
+     && rg --fixed-strings "Operations" "$TEST_DIR/lv_help" > /dev/null 2>&1 \
+     && rg --fixed-strings "translate" "$TEST_DIR/lv_help" > /dev/null 2>&1; then
+    echo "PASS: lean-verify: self-doc (--help documents the operations)"
+    PASSED=$((PASSED + 1))
+  else
+    echo "FAIL: lean-verify: self-doc (--help missing or undocumented)"
+    FAILED=$((FAILED + 1))
+  fi
+
+  # P5 fenced failures: tool-level validation, exit 1, diagnostic on
+  # stderr. All of these fail before any Lean/Aeneas environment is
+  # touched, so they need no SKIP guard (lake-bound and aeneas-bound
+  # live rows live in scripts/lean-verify-e2e.sh, which SKIPs when the
+  # devShells are absent).
+  run_test "lean-verify: missing op" 1 "missing required field: op" '' '{}' "$LV_BIN"
+  run_test "lean-verify: unknown op" 1 "unknown op" '' '{"op":"frob"}' "$LV_BIN"
+  run_test "lean-verify: build bad dir" 1 "does not exist" '' '{"op":"build","dir":"/nonexistent-lv-gate-dir"}' "$LV_BIN"
+  run_test "lean-verify: translate without Cargo.toml" 1 "no Cargo.toml" '' "{\"op\":\"translate\",\"dir\":\"$TEST_DIR\"}" "$LV_BIN"
+  run_test "lean-verify: init missing name" 1 "init requires" '' '{"op":"init"}' "$LV_BIN"
+  run_test "lean-verify: init invalid name" 1 "invalid package name" '' '{"op":"init","name":"1bad"}' "$LV_BIN"
+
+  # P1 route discovery: route resolves tools/lean-verify/tool.toml to
+  # the binary and surfaces the tool-level diagnostic.
+  ROUTE_BIN="$(cd "$SCRIPT_DIR/../target/debug" 2>/dev/null && pwd)/route"
+  if [ -x "$ROUTE_BIN" ]; then
+    ROUTE_OUT=$(printf '%s' '{"type":"tool_call","id":"lv-1","name":"lean-verify","arguments":{"op":"init","name":"1bad"}}' \
+      | "$ROUTE_BIN" --tools "$TOOLS_DIR" --cwd "$TEST_DIR" 2>/dev/null || true)
+    if printf '%s' "$ROUTE_OUT" | rg --fixed-strings "invalid package name" > /dev/null 2>&1; then
+      echo "PASS: lean-verify: route discovery (tool ran via route, diagnostic surfaced)"
+      PASSED=$((PASSED + 1))
+    else
+      echo "FAIL: lean-verify: route discovery - no 'invalid package name' in route output"
+      FAILED=$((FAILED + 1))
+    fi
+  else
+    echo "SKIP: lean-verify route discovery (route binary not built)"
+  fi
+fi
+
+echo ""
 echo "=== Results: $PASSED passed, $FAILED failed ==="
 
 if [ "$FAILED" -gt 0 ]; then

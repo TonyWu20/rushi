@@ -282,3 +282,10 @@ macchiato` as the first internal color scheme. Shipped in
       largest suffix of the path that fits the column budget, and
       the budget follows the column width, which differs with the
       preview pane on or off (P10 in `docs/tui-file-picker.md`).
+
+## New requests (2026-09-07)
+
+- [ ] Bug: `tool:edit` results always show `diff +0 -0`. Evidence session:
+      `sessions/goal-ux-impl`
+- [ ] `tool:edit` shows diff in vertica split when terminal is wide, horizontal
+      split when terminal is narrow.

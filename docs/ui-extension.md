@@ -24,7 +24,7 @@ No extension code compiles into the TUI.
 
 ## 2. In scope and out of scope
 
-Six capabilities:
+Seven capabilities:
 
 | Cap | What it does |
 |---|---|
@@ -34,6 +34,7 @@ Six capabilities:
 | `append` | Writes whitelisted event types to the log |
 | `notify` | Terminal effects (bell, OSC), applied by the host |
 | `frame` | Owns the input-area chrome: border style, the label, and the interior height. The host renders the draft content and the cursor; the extension owns the frame, never the input state |
+| `row` | Owns the host-reserved row above the input box (between the working row and the input area): one or more styled lines, or none. The host owns the slot and its position; the extension supplies the content |
 
 Out of scope:
 
@@ -70,7 +71,7 @@ protocol_v = 1
 - `args` — arguments to the command
 - `caps` — claimed capabilities
 - `kinds` — event types the host forwards. Default: all
-- `tick_ms` — cadence for `status`
+- `tick_ms` — cadence for the `status`, `frame`, and `row` ticks
 - `transform` — scope-qualified rewrite targets. `fence:mermaid` rewrites
   code blocks of that language. `inline:latex` rewrites `$...$` and
   `$$...$$` spans. The host extracts the span, sends it, replaces it in place
@@ -93,6 +94,7 @@ TUI to extension:
 | `event` | one full log event | a new event matching `kinds` |
 | `tick` | `{seq, width, session, model, thinking, loop_running, color, statuses}` | cadence ping for status and frame extensions; `color` names the terminal capability level the TUI lowers hex wire colors to (color.rs `Level::name`) |
 | `frame` | `{seq, width, session, model, thinking, mode, loop_running}` | cadence ping for the frame extension; the `mode` label and `thinking` level drive its `frame_spec` |
+| `row` | `{seq, width, session, model, thinking, mode, loop_running}` | cadence ping for the row extension; the owner replies with the row content (`row_spec`) |
 | `transform` | `{req, text, width, scope}` | rewrite one span |
 
 Extension to TUI:
@@ -102,6 +104,7 @@ Extension to TUI:
 | `lines` | `{event_id, lines}` | styled lines replacing the built-in render of one event |
 | `status` | `{lines}` | the statusline row |
 | `frame_spec` | `{spec}` | the input-area frame: `{border, label, height}`. The host renders the draft and cursor; a bad `spec` keeps the last valid frame (G5) |
+| `row_spec` | `{lines}` | the host-reserved row above the input box. `lines` follows the line-item rules; an empty array hides the row. A bad reply keeps the last valid row (G5) |
 | `transformed` | `{req, lines}` | result for the matching `req` |
 | `append` | `{event}` | append the event via `SessionPort` |
 | `notify` | `{kind: "bell"}` or `{kind: "osc", code, args}` | the host applies it on its own terminal |
@@ -121,6 +124,7 @@ Malformed replies never crash the TUI. Fallback is per op
 
 - `lines`: fall back to the built-in render
 - `status`: keep the last valid row
+- `row_spec`: keep the last valid row
 - `transformed`: show the raw block
 - `append`: reject with a flash naming the reason
 
@@ -179,6 +183,9 @@ Layout:
 
 - the statusline row reserves one line when a `status` extension exists
 - without one, the TUI shows its built-in help/status row
+- the row extension's lines reserve layout cells between the working
+  row and the input box, one cell per line; with no `row` owner, or
+  an empty spec, the slot collapses to zero rows
 - transformed text renders in place in the transcript
 
 Load order is host-owned. This follows the deepseek-harness loader,
@@ -246,6 +253,12 @@ where the core decides the sequence and an entry never claims a slot
    title over that label (docs/ui-extension.md section 10).
    Proves the `frame` capability and its trust boundary (chrome
    only, no input state)
+6. `goal` — Rust. Owns the reserved row: the goal status line
+   (elapsed, token count) while a goal is open, and the armed hint
+   while a goal write or edit is pending. Also ships the goal
+   palette commands, the hooks, and the goal tools. Proves the
+   `row` capability: a host-reserved slot with extension-owned
+   content
 
 ## 9. Distribution and lifecycle policy
 
@@ -280,6 +293,11 @@ where the core decides the sequence and an entry never claims a slot
   `frame` capability is therefore presentation-level trust, below
   `append` (a log writer). Two frame owners refuse the start, like
   the `status` row
+- A `row` owner supplies content, not layout: a `row_spec` is an
+  array of styled lines drawn at a host-owned position between the
+  working row and the input box. The host reserves the layout and
+  collapses the slot when the spec is empty. Two `row` owners
+  refuse the start, like the `status` row
 - The `docs/tui.md` section 10 forbidden-string scan stays
 - Trust: an extension with `append` is a long-lived log writer.
   It holds loop-level trust, not tool-level trust. The tool contract is
@@ -357,10 +375,11 @@ Lean-style invariants for this spec (see `lean-driven-development.md`).
 P1. fail-loud-manifest: given a malformed manifest or a broken command, observe the host refuse to start and name the offending file.
 P2. load-order: given a global and a project extension of one name, observe the project entry override and the first-listed kind owner win.
 P3. protocol-v: given an extension whose `protocol_v` mismatches the host, observe the host skip it and flash without starting it.
-P4. per-op-fallback: given a malformed extension reply, observe the TUI stay up and revert per op: lines to the built-in render, status to the last valid row, transformed to the raw block, append to a named reject.
+P4. per-op-fallback: given a malformed extension reply, observe the TUI stay up and revert per op: lines to the built-in render, status and row_spec to the last valid row, transformed to the raw block, append to a named reject.
 P5. append-whitelist: given an `append` for a type outside `append_types`, observe the host reject it with a flash. Whitelisted types are appended through the port.
 P6. restart-budget: given a repeatedly crashing extension, observe three restart attempts with 1 s, 2 s, and 4 s backoff, then a dead hint.
 P7. ext-status-cap: given more than 128 distinct `ext_status` ids, observe the host drop the oldest-updated id to hold the cap.
+P8. row-slot: given a row extension with content, observe the reserved row above the input box; with no row owner, or an empty spec, observe zero reserved rows; with two row owners, observe a start refusal that names both files.
 
 ## Verification
 
@@ -373,6 +392,7 @@ P7. ext-status-cap: given more than 128 distinct `ext_status` ids, observe the h
 | P5 | append-whitelist | `append_whitelist_rejects_and_accepts` in `bin/tui/src/ext.rs` | proven |
 | P6 | restart-budget | `restart_budget_ends_in_dead`, `stop_kills_the_group` in `bin/tui/src/ext.rs` | proven |
 | P7 | ext-status-cap | `ext_statuses_drop_the_oldest_id_at_the_cap` in `bin/tui/src/app.rs` | proven |
+| P8 | row-slot | `row_caps_are_valid_manifest_caps`, `discovery_row_owner_resolves_and_conflict_refuses` in `bin/tui/src/ext.rs` | proven |
 
 ## Gate
 

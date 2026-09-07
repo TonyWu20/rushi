@@ -448,6 +448,7 @@ fn main() {
                 ext::ExtItem::LinesCached { .. }
                 | ext::ExtItem::StatusUpdated { .. }
                 | ext::ExtItem::FrameUpdated { .. }
+                | ext::ExtItem::RowUpdated { .. }
                 | ext::ExtItem::TransformedCached { .. } => {}
                 ext::ExtItem::AppendReq { ext: name, event } => {
                     let Some(sid) = app.active().cloned() else {
@@ -612,11 +613,6 @@ fn main() {
                     match rt.block_on(port.append_event(&sid, &ev)) {
                         Ok(()) => {
                             app.flash("message sent");
-                            // Clear the goal-armed flag: the message was
-                            // sent, so the goal extension will (or will not)
-                            // act on it via the forwarded event
-                            // (docs/goal-ux.md §1.8).
-                            app.set_goal_armed(false);
                         }
                         Err(e) => {
                             trace(
@@ -1061,14 +1057,6 @@ fn main() {
                     let req = host.request_invoke(&ext, &id, value.as_deref());
                     match req {
                         Some(req_id) => {
-                            // For goal / goal_edit, arm the goal-armed
-                            // flag so the input box shows the persistent
-                            // hint and switches to Insert mode
-                            // (docs/goal-ux.md §1.8).
-                            if id == "goal" || id == "goal_edit" {
-                                app.set_goal_armed(true);
-                                app.editor().mode = crate::vim_editor::Mode::Insert;
-                            }
                             app.flash(format!(
                                 "ext {ext}: {id} — pending (req {req_id})"
                             ));
@@ -1116,12 +1104,7 @@ fn main() {
         // re-requests. The tick cadence is per extension; the main
         // loop drives the host because it owns the width, session,
         // and loop state.
-        // Refresh goal state from disk each tick (docs/goal-ux.md §1.7).
-        // Must happen before `tick` borrows `app` immutably.
         if let Some(sid) = app.active().cloned() {
-            if let Ok(dir) = port.session_dir(&sid) {
-                app.refresh_goal(&dir);
-            }
             // The live model stream channel (docs/tui-streaming-response.md
             // section 6.2): poll the loop-owned file only while the loop
             // runs; a dead loop settles the live block (no stale block,
@@ -1157,6 +1140,10 @@ fn main() {
         // The frame owner also gets a cadence ping so its frame_spec
         // reply stays live (border color tracks the thinking level).
         host.pump_frame(&tick, &app.editor_mode_label());
+        // The row owner (the host-reserved row above the input box)
+        // gets the same cadence ping so its row_spec reply stays
+        // live (docs/ui-extension.md section 4, `row` capability).
+        host.pump_row(&tick, &app.editor_mode_label());
         host.poll_transforms();
         host.poll_status();
         host.poll_invokes();
