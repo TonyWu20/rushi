@@ -287,6 +287,43 @@ scenario_pi_parity_cold() {
   assert_eq "$(claim_state)" "idle" "the loop runs to idle"
 }
 
+# ── Scenario 1d: pi parity does not exhaust below the trigger ─────
+# Under the `context_budget` base the wire budget is the full window
+# (8000), not the input-only window (3904). The kept region below is
+# ~4050 tokens: above the clamped budget, below the 7500 trigger.
+# Before the unclamp, assemble emitted context_exhausted at the
+# clamped budget and the loop died. Now the request proceeds and the
+# loop runs to idle with no compaction.
+scenario_pi_parity_no_exhaust() {
+  NEW_WORK pi-parity-no-exhaust
+  COMPACT_ENABLED=false
+  COMPACT_TRIGGER_BASE=context_budget
+  work_config
+  local R
+  R="$(printf 'q%.0s' {1..16000})"  # 16000 chars = 4000 tokens
+  cat > "$SLOG" <<EOF
+{"v":1,"type":"user_message","ts":"t1","seq":1,"content":"do the task"}
+{"v":1,"type":"assistant_message","ts":"t2","seq":2,"content":"step one","reasoning":[],"tool_calls":[{"id":"c1","name":"read","arguments":{"file_path":"a.txt"}}],"usage":{"input_tokens":200,"output_tokens":50}}
+{"v":1,"type":"tool_result","ts":"t3","seq":3,"id":"c1","value":{"text":"small result"},"is_error":false}
+{"v":1,"type":"stop","ts":"t4","seq":4,"stop_reason":"end_turn"}
+{"v":1,"type":"compaction_summary","ts":"t5","seq":5,"summary":"the summary of the old region","first_kept_seq":6,"reason":"threshold","tokens_before":800}
+{"v":1,"type":"user_message","ts":"t6","seq":6,"content":"carry on"}
+{"v":1,"type":"assistant_message","ts":"t7","seq":7,"content":"step two","reasoning":[],"tool_calls":[{"id":"c2","name":"bash","arguments":{"command":"ls"}}],"usage":{"input_tokens":4500,"output_tokens":50}}
+{"v":1,"type":"tool_result","ts":"t8","seq":8,"id":"c2","value":{"text":"$R"},"is_error":false}
+{"v":1,"type":"stop","ts":"t9","seq":9,"stop_reason":"end_turn"}
+{"v":1,"type":"user_message","ts":"t10","seq":10,"content":"new task"}
+EOF
+  echo "$NORMAL_STOP" >"$WORK/plan"
+  make_stub
+  run_step
+  assert_eq "$(count_events compaction_summary)" 1 "only the seed boundary"
+  assert_no_context_exhausted
+  local n_err
+  n_err=$(jq -c 'select(.type == "error")' "$SLOG" | wc -l)
+  assert_eq "$n_err" 0 "no terminal error"
+  assert_eq "$(claim_state)" "idle" "the loop runs to idle"
+}
+
 # ── Scenario 2: the overflow error recovery ──────────────────────
 scenario_overflow() {
   NEW_WORK overflow
@@ -496,31 +533,43 @@ EOF
 # ── Scenario 8: the last-resort compaction ───────────────────────
 # Phase 2: the last-resort path is triggered by the context_exhausted
 # form from assemble, which fires the exhausted.handle window. The
-# seed readings exceed the trigger so the threshold compact fires and
-# succeeds (default stub). The context is still over budget, so the
-# assemble emits context_exhausted, the exhausted.handle window fires
-# with the default stay_compact, and a last-resort forced compact runs.
+# honest full-form size of the kept region exceeds the input budget,
+# so assemble emits context_exhausted; the exhausted.handle default
+# stay_compact runs a last-resort forced compact (not gated by
+# compact_enabled). The cut drops the heavy middle result into the
+# old region; the kept tail plus the framing summary fits under the
+# budget, so the loop recovers to idle.
 scenario_last_resort() {
   NEW_WORK last-resort
-  # A compaction_summary boundary already exists in the log. The
-  # post-boundary events exceed the input budget, so assemble emits
-  # context_exhausted; the exhausted.handle default stay_compact
-  # runs a last-resort forced compact (not gated by compact_enabled).
+  # A compaction_summary boundary already exists (first_kept_seq 6).
+  # The kept region carries a 14000-char result (3500 tokens) in its
+  # tail group: the honest estimate exceeds the 3904 input budget, so
+  # assemble emits context_exhausted. The forced compact keeps the
+  # 2000-token tail: the walk snaps back over the 3500-token result
+  # group and the orphan rule pulls the "new task" user into the kept
+  # region. The cut lands after the middle group, so the 4000-char
+  # middle result (1000 tokens) falls into the old region. The kept
+  # tail (3510) plus the framing summary fits under the budget.
   COMPACT_ENABLED=false
   work_config
-  local D
-  D="$(printf 'd%.0s' {1..4000})$(printf 'd1%.0s' {1..4000})$(printf 'd%.0s' {1..4000})$(printf 'd1%.0s' {1..4000})"
+  local OLD_D NEW_D
+  OLD_D="$(printf 'o%.0s' {1..4000})"
+  NEW_D="$(printf 'n%.0s' {1..14000})"
   cat > "$SLOG" <<EOF
 {"v":1,"type":"user_message","ts":"t1","seq":1,"content":"do the task"}
 {"v":1,"type":"assistant_message","ts":"t2","seq":2,"content":"step one","reasoning":[],"tool_calls":[{"id":"c1","name":"read","arguments":{"file_path":"a.txt"}}],"usage":{"input_tokens":200,"output_tokens":50}}
 {"v":1,"type":"tool_result","ts":"t3","seq":3,"id":"c1","value":{"text":"small result"},"is_error":false}
 {"v":1,"type":"stop","ts":"t4","seq":4,"stop_reason":"end_turn"}
-{"v":1,"type":"compaction_summary","ts":"t5","seq":5,"summary":"the summary of the old region","first_kept_seq":1,"reason":"threshold","tokens_before":800}
+{"v":1,"type":"compaction_summary","ts":"t5","seq":5,"summary":"the summary of the old region","first_kept_seq":6,"reason":"threshold","tokens_before":800}
 {"v":1,"type":"user_message","ts":"t6","seq":6,"content":"carry on"}
 {"v":1,"type":"assistant_message","ts":"t7","seq":7,"content":"step two","reasoning":[],"tool_calls":[{"id":"c2","name":"bash","arguments":{"command":"ls"}}],"usage":{"input_tokens":3800,"output_tokens":50}}
-{"v":1,"type":"tool_result","ts":"t8","seq":8,"id":"c2","value":{"text":"$D"},"is_error":false}
+{"v":1,"type":"tool_result","ts":"t8","seq":8,"id":"c2","value":{"text":"$OLD_D"},"is_error":false}
 {"v":1,"type":"stop","ts":"t9","seq":9,"stop_reason":"end_turn"}
 {"v":1,"type":"user_message","ts":"t10","seq":10,"content":"new task"}
+{"v":1,"type":"assistant_message","ts":"t11","seq":11,"content":"step three","reasoning":[],"tool_calls":[{"id":"c3","name":"bash","arguments":{"command":"ls"}}],"usage":{"input_tokens":3800,"output_tokens":50}}
+{"v":1,"type":"tool_result","ts":"t12","seq":12,"id":"c3","value":{"text":"$NEW_D"},"is_error":false}
+{"v":1,"type":"stop","ts":"t13","seq":13,"stop_reason":"end_turn"}
+{"v":1,"type":"user_message","ts":"t14","seq":14,"content":"continue"}
 EOF
   echo "$NORMAL_STOP" >"$WORK/plan"
   make_stub
@@ -634,6 +683,7 @@ run_scenario() {
 run_scenario threshold scenario_threshold
 run_scenario pi-parity scenario_pi_parity
 run_scenario pi-parity-cold scenario_pi_parity_cold
+run_scenario pi-parity-no-exhaust scenario_pi_parity_no_exhaust
 run_scenario overflow scenario_overflow
 run_scenario silent-overflow scenario_silent_overflow
 run_scenario silent-post-engage scenario_silent_overflow_post_engage
