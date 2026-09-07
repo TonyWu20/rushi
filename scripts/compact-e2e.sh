@@ -537,19 +537,16 @@ EOF
 # so assemble emits context_exhausted; the exhausted.handle default
 # stay_compact runs a last-resort forced compact (not gated by
 # compact_enabled). The cut drops the heavy middle result into the
-# old region; the kept tail plus the framing summary fits under the
-# budget, so the loop recovers to idle.
+# The hard-trim backstop trims the context to fit before
+# context_exhausted is reached, so the last-resort forced compact
+# is no longer needed. The loop recovers to idle via the trim.
 scenario_last_resort() {
   NEW_WORK last-resort
   # A compaction_summary boundary already exists (first_kept_seq 6).
-  # The kept region carries a 14000-char result (3500 tokens) in its
-  # tail group: the honest estimate exceeds the 3904 input budget, so
-  # assemble emits context_exhausted. The forced compact keeps the
-  # 2000-token tail: the walk snaps back over the 3500-token result
-  # group and the orphan rule pulls the "new task" user into the kept
-  # region. The cut lands after the middle group, so the 4000-char
-  # middle result (1000 tokens) falls into the old region. The kept
-  # tail (3510) plus the framing summary fits under the budget.
+  # The kept region carries a 14000-char result (3500 tokens): the
+  # honest estimate exceeds the 3904 input budget, so the hard-trim
+  # in assemble drops the oldest groups to fit the trigger level.
+  # The loop proceeds without a last-resort compact.
   COMPACT_ENABLED=false
   work_config
   local OLD_D NEW_D
@@ -574,12 +571,62 @@ EOF
   echo "$NORMAL_STOP" >"$WORK/plan"
   make_stub
   run_step
-  # The context_exhausted form fired: one last-resort compaction_summary.
-  assert_eq "$(count_events compaction_summary)" 2 "two compaction_summaries (the seed boundary + the last-resort)"
+  # The hard-trim handled the overflow: one hard_trim event, no second compact.
+  assert_eq "$(count_events compaction_summary)" 1 "the seed boundary only; hard-trim prevented the last-resort compact"
+  local n_trim
+  n_trim=$(jq -c 'select(.type == "ext_status" and .id == "hard_trim")' "$SLOG" 2>/dev/null | wc -l)
+  assert_eq "$n_trim" 1 "the hard_trim marker was logged"
   local n_err
   n_err=$(jq -c 'select(.type == "error")' "$SLOG" | wc -l)
   assert_eq "$n_err" 0 "no terminal error"
   assert_eq "$(claim_state)" "idle" "the loop runs to idle in the original session"
+}
+
+# The framing (boundary summary) is so large that the hard-trim
+# cannot fit even the framing alone under the target. The
+# context_exhausted form fires and the forced compact takes over.
+scenario_context_exhausted() {
+  NEW_WORK context-exhausted
+  COMPACT_ENABLED=false
+  work_config
+  local MID_D BIG_SUMMARY
+  MID_D="$(printf 'm%.0s' {1..4000})"
+  BIG_SUMMARY="$(printf 's%.0s' {1..20000})"
+  cat > "$SLOG" <<EOF
+{"v":1,"type":"user_message","ts":"t1","seq":1,"content":"do the task"}
+{"v":1,"type":"assistant_message","ts":"t2","seq":2,"content":"step one","reasoning":[],"tool_calls":[{"id":"c1","name":"read","arguments":{"file_path":"a.txt"}}],"usage":{"input_tokens":200,"output_tokens":50}}
+{"v":1,"type":"tool_result","ts":"t3","seq":3,"id":"c1","value":{"text":"small result"},"is_error":false}
+{"v":1,"type":"stop","ts":"t4","seq":4,"stop_reason":"end_turn"}
+{"v":1,"type":"compaction_summary","ts":"t5","seq":5,"summary":"$BIG_SUMMARY","first_kept_seq":6,"reason":"threshold","tokens_before":800}
+{"v":1,"type":"user_message","ts":"t6","seq":6,"content":"carry on"}
+{"v":1,"type":"assistant_message","ts":"t7","seq":7,"content":"step two","reasoning":[],"tool_calls":[{"id":"c2","name":"bash","arguments":{"command":"ls"}}],"usage":{"input_tokens":500,"output_tokens":50}}
+{"v":1,"type":"tool_result","ts":"t8","seq":8,"id":"c2","value":{"text":"$MID_D"},"is_error":false}
+{"v":1,"type":"stop","ts":"t9","seq":9,"stop_reason":"end_turn"}
+{"v":1,"type":"user_message","ts":"t10","seq":10,"content":"new task"}
+{"v":1,"type":"assistant_message","ts":"t11","seq":11,"content":"step three","reasoning":[],"tool_calls":[{"id":"c3","name":"bash","arguments":{"command":"ls"}}],"usage":{"input_tokens":500,"output_tokens":50}}
+{"v":1,"type":"tool_result","ts":"t12","seq":12,"id":"c3","value":{"text":"$MID_D"},"is_error":false}
+{"v":1,"type":"stop","ts":"t13","seq":13,"stop_reason":"end_turn"}
+{"v":1,"type":"user_message","ts":"t14","seq":14,"content":"another task"}
+{"v":1,"type":"assistant_message","ts":"t15","seq":15,"content":"step four","reasoning":[],"tool_calls":[{"id":"c4","name":"bash","arguments":{"command":"ls"}}],"usage":{"input_tokens":500,"output_tokens":50}}
+{"v":1,"type":"tool_result","ts":"t16","seq":16,"id":"c4","value":{"text":"$MID_D"},"is_error":false}
+{"v":1,"type":"stop","ts":"t17","seq":17,"stop_reason":"end_turn"}
+{"v":1,"type":"user_message","ts":"t18","seq":18,"content":"continue"}
+EOF
+  echo "$NORMAL_STOP" >"$WORK/plan"
+  make_stub
+  run_step
+  # The context_exhausted form fired: the forced compact ran and
+  # added a second compaction_summary. The hard-trim failed (the
+  # framing alone exceeded the target) so the hard_trim marker
+  # is absent.
+  assert_eq "$(count_events compaction_summary)" 2 "two compaction_summaries (seed + forced)"
+  local n_trim
+  n_trim=$(jq -c 'select(.type == "ext_status" and .id == "hard_trim")' "$SLOG" 2>/dev/null | wc -l)
+  assert_eq "$n_trim" 0 "the hard-trim failed (framing too large), no hard_trim marker"
+  local n_err
+  n_err=$(jq -c 'select(.type == "error")' "$SLOG" | wc -l)
+  assert_eq "$n_err" 0 "no terminal error"
+  assert_eq "$(claim_state)" "idle" "the loop recovers to idle after the forced compact"
 }
 
 # ── Scenario 9: the failed retry ────────────────────────────────
@@ -692,6 +739,7 @@ run_scenario compact-failure scenario_compact_failure
 run_scenario empty-summary scenario_empty_summary
 run_scenario iterative scenario_iterative
 run_scenario last-resort scenario_last_resort
+run_scenario context-exhausted scenario_context_exhausted
 run_scenario failed-retry scenario_failed_retry
 run_scenario kill-switch scenario_kill_switch
 run_scenario no-detail scenario_no_detail

@@ -57,6 +57,40 @@ fn main() {
         }
     };
 
+    // Load valid tool names from tools/
+    let tools_root_path = PathBuf::from(&tools_root);
+    let mut valid_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Ok(entries) = fs::read_dir(&tools_root_path) {
+        for entry in entries.flatten() {
+            let tool_path = entry.path();
+            if tool_path.is_dir() {
+                let tool_toml = tool_path.join("tool.toml");
+                if tool_toml.exists() {
+                    if let Some(name) = tool_path.file_name() {
+                        valid_tools.insert(name.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    let (code, lines) = process(&model_output, &valid_tools);
+    for line in &lines {
+        println!("{line}");
+    }
+    std::process::exit(code);
+}
+
+/// Validate model output and emit execution events.
+///
+/// Returns `(exit_code, event_lines)`.
+/// Exit codes: 1 = tool calls to route, 2 = terminal error or truncated turn.
+fn process(
+    model_output: &serde_json::Value,
+    valid_tools: &std::collections::HashSet<String>,
+) -> (i32, Vec<String>) {
+    let mut lines: Vec<String> = Vec::new();
+
     let mut text: String = model_output
         .get("text")
         .and_then(|t| t.as_str())
@@ -84,15 +118,10 @@ fn main() {
                 text = clean;
             }
             TextCalls::Bad(msg) => {
-                let ts = chrono_utc_now();
-                let error_event = serde_json::json!({
-                    "v": 1,
-                    "type": "error",
-                    "ts": ts,
-                    "message": format!("Model embedded tool calls in text. Could not parse them: {msg}")
-                });
-                println!("{}", error_event);
-                std::process::exit(2);
+                lines.push(error_event(&format!(
+                    "Model embedded tool calls in text. Could not parse them: {msg}"
+                )));
+                return (2, lines);
             }
         }
     }
@@ -122,25 +151,16 @@ fn main() {
         .and_then(|d| d.as_str())
         .map(str::to_string);
 
-    // Load valid tool names from tools/
-    let tools_root_path = PathBuf::from(&tools_root);
-    let mut valid_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
-    if let Ok(entries) = fs::read_dir(&tools_root_path) {
-        for entry in entries.flatten() {
-            let tool_path = entry.path();
-            if tool_path.is_dir() {
-                let tool_toml = tool_path.join("tool.toml");
-                if tool_toml.exists() {
-                    if let Some(name) = tool_path.file_name() {
-                        valid_tools.insert(name.to_string_lossy().to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    // Validate tool calls
+    // Validate tool calls, except on a length stop. A length stop means
+    // the model was cut off, so the last call may be truncated. Strict
+    // argument validation would hard-fail on that truncated call, so skip
+    // it here. The "length" branch below records the truncation and the
+    // loop can recover.
+    let validate = stop_reason != "length";
     for tc in &tool_calls {
+        if !validate {
+            continue;
+        }
         let tc_id = tc.get("id").and_then(|id| id.as_str()).unwrap_or("unknown");
         let tc_name = tc.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
 
@@ -149,40 +169,23 @@ fn main() {
             match normalize_arguments(Some(args_val)) {
                 Some(serde_json::Value::Object(_)) => {}
                 _ => {
-                    let ts = chrono_utc_now();
-                    let error_event = serde_json::json!({
-                        "v": 1,
-                        "type": "error",
-                        "ts": ts,
-                        "message": format!("Model emitted malformed tool arguments for call {}.", tc_id)
-                    });
-                    println!("{}", error_event);
-                    std::process::exit(2);
+                    lines.push(error_event(&format!(
+                        "Model emitted malformed tool arguments for call {tc_id}."
+                    )));
+                    return (2, lines);
                 }
             }
         } else {
-            let ts = chrono_utc_now();
-            let error_event = serde_json::json!({
-                "v": 1,
-                "type": "error",
-                "ts": ts,
-                "message": format!("Model emitted malformed tool arguments for call {}.", tc_id)
-            });
-            println!("{}", error_event);
-            std::process::exit(2);
+            lines.push(error_event(&format!(
+                "Model emitted malformed tool arguments for call {tc_id}."
+            )));
+            return (2, lines);
         }
 
         // Check tool name matches manifest
         if !valid_tools.contains(tc_name) {
-            let ts = chrono_utc_now();
-            let error_event = serde_json::json!({
-                "v": 1,
-                "type": "error",
-                "ts": ts,
-                "message": format!("Model called unknown tool {}.", tc_name)
-            });
-            println!("{}", error_event);
-            std::process::exit(2);
+            lines.push(error_event(&format!("Model called unknown tool {tc_name}.")));
+            return (2, lines);
         }
     }
 
@@ -191,31 +194,28 @@ fn main() {
     // Emit events based on stop_reason
     match stop_reason {
         "stop" | "tool_calls" => {
-            // Normal completion: assistant message plus any tool calls.
-            emit_assistant_and_tool_calls(
+            let (code, ev) = emit_assistant_and_tool_calls(
                 &text,
                 &tool_calls,
                 stop_reason,
                 usage.as_ref(),
                 &reasoning,
             );
+            lines.extend(ev);
+            (code, lines)
         }
         "error" | "aborted" => {
             let message = match &detail {
                 Some(d) => format!("Model stop reason: {stop_reason}. {d}"),
                 None => format!("Model stop reason: {stop_reason}."),
             };
-            let error_event = serde_json::json!({
-                "v": 1,
-                "type": "error",
-                "ts": ts,
-                "message": message
-            });
-            println!("{}", error_event);
-            std::process::exit(2);
+            lines.push(error_event(&message));
+            (2, lines)
         }
         "length" => {
-            // Emit assistant_message with truncated tool results
+            // Record the truncated turn. Arguments may be cut off mid-JSON,
+            // so normalize to an object (falling back to empty object) and
+            // flag each call as truncated so the loop can re-issue it.
             let mut assistant_tool_calls: Vec<serde_json::Value> = Vec::new();
             for tc in &tool_calls {
                 let args =
@@ -241,7 +241,7 @@ fn main() {
             if !reasoning.is_empty() {
                 assistant_message["reasoning"] = serde_json::json!(reasoning);
             }
-            println!("{}", assistant_message);
+            lines.push(serde_json::to_string(&assistant_message).unwrap());
 
             for tc in &tool_calls {
                 let tc_id = tc.get("id").and_then(|id| id.as_str()).unwrap_or("");
@@ -255,37 +255,46 @@ fn main() {
                     },
                     "is_error": true
                 });
-                println!("{}", tool_result);
+                lines.push(serde_json::to_string(&tool_result).unwrap());
             }
-            std::process::exit(2);
+            (2, lines)
         }
         other => {
-            // Unknown stop reason: treat as an error so the loop stops.
             let message = match &detail {
                 Some(d) => format!("Model stop reason: {other}. {d}"),
                 None => format!("Model stop reason: {other}."),
             };
-            let error_event = serde_json::json!({
-                "v": 1,
-                "type": "error",
-                "ts": ts,
-                "message": message
-            });
-            println!("{}", error_event);
-            std::process::exit(2);
+            lines.push(error_event(&message));
+            (2, lines)
         }
     }
 }
 
+/// One error event as a single JSON line.
+fn error_event(message: &str) -> String {
+    serde_json::to_string(
+        &serde_json::json!({
+            "v": 1,
+            "type": "error",
+            "ts": chrono_utc_now(),
+            "message": message
+        }),
+    )
+    .unwrap()
+}
+
 /// Emit the assistant_message plus one tool_call event per call.
+/// Returns (exit_code, event_lines): 1 when tool calls are present (route),
+/// 2 when it is a plain stop with no calls.
 fn emit_assistant_and_tool_calls(
     text: &str,
     tool_calls: &[serde_json::Value],
     stop_reason: &str,
     usage: Option<&serde_json::Value>,
     reasoning: &[serde_json::Value],
-) {
+) -> (i32, Vec<String>) {
     let ts = chrono_utc_now();
+    let mut lines: Vec<String> = Vec::new();
 
     let assistant_tool_calls: Vec<serde_json::Value> = tool_calls
         .iter()
@@ -312,10 +321,10 @@ fn emit_assistant_and_tool_calls(
     if !reasoning.is_empty() {
         assistant_message["reasoning"] = serde_json::json!(reasoning);
     }
-    println!("{}", assistant_message);
+    lines.push(serde_json::to_string(&assistant_message).unwrap());
 
     if tool_calls.is_empty() {
-        std::process::exit(2);
+        return (2, lines);
     }
 
     for tc in tool_calls {
@@ -327,9 +336,9 @@ fn emit_assistant_and_tool_calls(
             "name": tc.get("name").and_then(|n| n.as_str()).unwrap_or(""),
             "arguments": normalize_arguments(tc.get("arguments")).unwrap_or(serde_json::json!({}))
         });
-        println!("{}", tool_call_event);
+        lines.push(serde_json::to_string(&tool_call_event).unwrap());
     }
-    std::process::exit(1);
+    (1, lines)
 }
 
 fn normalize_arguments(args: Option<&serde_json::Value>) -> Option<serde_json::Value> {
@@ -673,5 +682,93 @@ mod tests {
     fn bad_antml_inner_reports_error() {
         let text = "\n<invoke>\nnot json\n\n<invoke>";
         assert!(matches!(extract_text_tool_calls(text), TextCalls::Bad(_)));
+    }
+
+    #[test]
+    fn length_stop_truncated_call_is_not_a_hard_error() {
+        // A length stop with a tool call cut off mid-JSON must not hard-fail.
+        // It records the truncation (assistant_message + re-issue tool_result)
+        // and exits 2 so the loop can recover.
+        let raw = r#"{
+            "text": "",
+            "tool_calls": [ { "id": "call_1", "name": "bash", "arguments": "garbled_truncated" } ],
+            "stop_reason": "length",
+            "usage": { "output_tokens": 32768, "input_tokens": 190000 }
+        }"#;
+        let model_output: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let valid_tools: std::collections::HashSet<String> =
+            std::iter::once("bash".to_string()).collect();
+        let (code, lines) = process(&model_output, &valid_tools);
+        let joined = lines.join("\n");
+        assert_eq!(code, 2, "a length stop records the truncation");
+        assert!(
+            !joined.contains("malformed tool arguments"),
+            "truncation must not be reported as malformed args: {joined}"
+        );
+        assert!(joined.contains("assistant_message"), "records the assistant turn");
+        assert!(joined.contains("Arguments may be truncated"), "prompts a re-issue");
+    }
+
+    #[test]
+    fn non_length_malformed_args_still_fail() {
+        // A non-length stop with malformed arguments is a genuine model
+        // error: it must still hard-fail with the malformed-args message.
+        let raw = r#"{
+            "text": "",
+            "tool_calls": [ { "id": "call_1", "name": "bash", "arguments": "not json at all" } ],
+            "stop_reason": "stop"
+        }"#;
+        let model_output: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let valid_tools: std::collections::HashSet<String> =
+            std::iter::once("bash".to_string()).collect();
+        let (code, lines) = process(&model_output, &valid_tools);
+        let joined = lines.join("\n");
+        assert_eq!(code, 2);
+        assert!(
+            joined.contains("malformed tool arguments"),
+            "a non-length malformed call must hard-fail: {joined}"
+        );
+    }
+
+    #[test]
+    fn length_stop_pure_text_truncation() {
+        // A length stop with no tool calls records the truncated text.
+        let raw = r#"{
+            "text": "partial answer that never finished",
+            "tool_calls": [],
+            "stop_reason": "length"
+        }"#;
+        let model_output: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let valid_tools: std::collections::HashSet<String> =
+            std::iter::once("bash".to_string()).collect();
+        let (code, lines) = process(&model_output, &valid_tools);
+        let joined = lines.join("\n");
+        assert_eq!(code, 2);
+        assert!(joined.contains("assistant_message"));
+        assert!(
+            !joined.contains("tool_result"),
+            "no tool results when there are no calls: {joined}"
+        );
+    }
+
+    #[test]
+    fn length_stop_unknown_tool_is_not_validated() {
+        // On a length stop the tool-name manifest check is skipped too, so a
+        // truncated response with an unknown or absent name is not a hard fail.
+        let raw = r#"{
+            "text": "",
+            "tool_calls": [ { "id": "call_1", "name": "weird_tool", "arguments": "truncated" } ],
+            "stop_reason": "length"
+        }"#;
+        let model_output: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let valid_tools: std::collections::HashSet<String> =
+            std::iter::once("bash".to_string()).collect();
+        let (code, lines) = process(&model_output, &valid_tools);
+        let joined = lines.join("\n");
+        assert_eq!(code, 2);
+        assert!(
+            !joined.contains("unknown tool"),
+            "a length stop must not fail on the tool manifest: {joined}"
+        );
     }
 }
