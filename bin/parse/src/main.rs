@@ -74,6 +74,22 @@ fn main() {
         }
     }
 
+    // Extension-provided tool roots (RUSHI_EXTRA_TOOLS_ROOT — e.g. the
+    // exts repo's goal-tools/ group): additive discovery, same as route.
+    // Names only; dispatch is route's business.
+    if let Ok(extra_root) = std::env::var("RUSHI_EXTRA_TOOLS_ROOT") {
+        if let Ok(entries) = fs::read_dir(extra_root) {
+            for entry in entries.flatten() {
+                let tool_path = entry.path();
+                if tool_path.is_dir() && tool_path.join("tool.toml").exists() {
+                    if let Some(name) = tool_path.file_name() {
+                        valid_tools.insert(name.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+    }
+
     let (code, lines) = process(&model_output, &valid_tools);
     for line in &lines {
         println!("{line}");

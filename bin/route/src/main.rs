@@ -249,100 +249,21 @@ fn main() {
 
     // Load tool manifests and validate arguments
     let mut tool_manifests: HashMap<String, (String, serde_json::Value)> = HashMap::new();
-    if let Ok(entries) = fs::read_dir(&tools_root) {
-        let entries_vec: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-        for entry in entries_vec {
-            let tool_path = entry.path();
-            if tool_path.is_dir() {
-                let tool_toml = tool_path.join("tool.toml");
-                if tool_toml.exists() {
-                    if let Some(name) = tool_path.file_name() {
-                        let name_str = name.to_string_lossy().to_string();
-                        if let Ok(content) = fs::read_to_string(&tool_toml) {
-                            if let Ok(config) = content.parse::<toml::Value>() {
-                                let raw_command = config
-                                    .get("tool")
-                                    .and_then(|t| t.get("command"))
-                                    .and_then(|c| c.as_str())
-                                    .unwrap_or(&name_str)
-                                    .to_string();
-                                // Resolve the tool binary. The binary name is
-                                // the manifest `command` when it differs from
-                                // the tool dir name (e.g. `harness-bash` for
-                                // the `bash` tool, so the built binary never
-                                // shadows a system tool on PATH), otherwise the
-                                // tool dir name. Prefer the cargo build output
-                                // (this binary's own directory), then the
-                                // tools/<name>/bin/ copy, then a bare PATH
-                                // lookup.
-                                let binary_name = if raw_command == name_str {
-                                    name_str.clone()
-                                } else {
-                                    raw_command.clone()
-                                };
-                                let exe_dir = std::env::current_exe()
-                                    .ok()
-                                    .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-                                let candidates = [
-                                    exe_dir.as_ref().map(|d| d.join(&binary_name)),
-                                    Some(tool_path.join("bin").join(&binary_name)),
-                                ];
-                                let command = candidates
-                                    .iter()
-                                    .flatten()
-                                    .find(|p| p.is_file())
-                                    .map(|p| p.to_string_lossy().to_string())
-                                    .unwrap_or(raw_command);
-                                let args_val = config
-                                    .get("tool")
-                                    .and_then(|t| t.get("args"))
-                                    .cloned()
-                                    .unwrap_or(toml::Value::Array(toml::value::Array::new()));
-                                let timeout_ms = config
-                                    .get("tool")
-                                    .and_then(|t| t.get("timeout_ms"))
-                                    .and_then(|t| t.as_integer())
-                                    .unwrap_or(30000)
-                                    as u64;
-                                let schema = config
-                                    .get("tool")
-                                    .and_then(|t| t.get("schema"))
-                                    .cloned()
-                                    .unwrap_or_else(|| {
-                                        let mut tbl = toml::value::Table::new();
-                                        tbl.insert(
-                                            "type".to_string(),
-                                            toml::Value::String("object".to_string()),
-                                        );
-                                        tbl.insert(
-                                            "properties".to_string(),
-                                            toml::Value::Table(toml::value::Table::new()),
-                                        );
-                                        tbl.insert(
-                                            "required".to_string(),
-                                            toml::Value::Array(toml::value::Array::new()),
-                                        );
-                                        toml::Value::Table(tbl)
-                                    });
-                                let args_json: serde_json::Value = toml_to_json(&args_val);
-                                let schema_json: serde_json::Value = toml_to_json(&schema);
-                                tool_manifests.insert(
-                                    name_str.clone(),
-                                    (
-                                        command,
-                                        serde_json::json!({
-                                            "args": args_json,
-                                            "timeout_ms": timeout_ms,
-                                            "schema": schema_json
-                                        }),
-                                    ),
-                                );
-                            }
-                        }
-                    }
-                }
-            }
+    // Roots are scanned in precedence order: first the primary
+    // `--tools` root, then the optional extra root supplied by the
+    // extension (RUSHI_EXTRA_TOOLS_ROOT — the exts repo's goal-tools/
+    // group; docs/tui-ext-repo-split.md section 4, item 16: goal-mode
+    // loop tools are extension-owned; exts' .envrc / ext-env.sh set the
+    // var and put the tool binaries on PATH). On a tool-name collision
+    // the higher-precedence root wins.
+    let mut roots: Vec<PathBuf> = vec![tools_root.clone()];
+    if let Ok(extra) = std::env::var("RUSHI_EXTRA_TOOLS_ROOT") {
+        if !extra.is_empty() {
+            roots.push(PathBuf::from(extra));
         }
+    }
+    for root in &roots {
+        scan_tool_root(root, &mut tool_manifests);
     }
 
     // Process each tool call
@@ -525,6 +446,118 @@ fn validate_args(args: &serde_json::Value, schema: &serde_json::Value) -> Option
         return (!missing.is_empty()).then(|| missing.join(", "));
     }
     Some("arguments".to_string())
+}
+
+/// Scan one tools root for `tool.toml` manifests and register each
+/// discovered tool in `manifests`. Tools already registered (from a
+/// higher-precedence root) are not re-registered: the caller scans
+/// roots in precedence order, so the primary root wins on a name
+/// collision.
+fn scan_tool_root(
+    root: &std::path::Path,
+    manifests: &mut HashMap<String, (String, serde_json::Value)>,
+) {
+    if let Ok(entries) = fs::read_dir(root) {
+        let entries_vec: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+        for entry in entries_vec {
+            let tool_path = entry.path();
+            if tool_path.is_dir() {
+                let tool_toml = tool_path.join("tool.toml");
+                if tool_toml.exists() {
+                    if let Some(name) = tool_path.file_name() {
+                        let name_str = name.to_string_lossy().to_string();
+                        // The primary root wins on a collision: a tool
+                        // already registered from a higher-precedence
+                        // root is not re-registered from this root.
+                        if manifests.contains_key(&name_str) {
+                            continue;
+                        }
+                        if let Ok(content) = fs::read_to_string(&tool_toml) {
+                            if let Ok(config) = content.parse::<toml::Value>() {
+                                let raw_command = config
+                                    .get("tool")
+                                    .and_then(|t| t.get("command"))
+                                    .and_then(|c| c.as_str())
+                                    .unwrap_or(&name_str)
+                                    .to_string();
+                                // Resolve the tool binary. The binary name is
+                                // the manifest `command` when it differs from
+                                // the tool dir name (e.g. `harness-bash` for
+                                // the `bash` tool, so the built binary never
+                                // shadows a system tool on PATH), otherwise the
+                                // tool dir name. Prefer the cargo build output
+                                // (this binary's own directory), then the
+                                // tools/<name>/bin/ copy, then a bare PATH
+                                // lookup.
+                                let binary_name = if raw_command == name_str {
+                                    name_str.clone()
+                                } else {
+                                    raw_command.clone()
+                                };
+                                let exe_dir = std::env::current_exe()
+                                    .ok()
+                                    .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+                                let candidates = [
+                                    exe_dir.as_ref().map(|d| d.join(&binary_name)),
+                                    Some(tool_path.join("bin").join(&binary_name)),
+                                ];
+                                let command = candidates
+                                    .iter()
+                                    .flatten()
+                                    .find(|p| p.is_file())
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .unwrap_or(raw_command);
+                                let args_val = config
+                                    .get("tool")
+                                    .and_then(|t| t.get("args"))
+                                    .cloned()
+                                    .unwrap_or(toml::Value::Array(toml::value::Array::new()));
+                                let timeout_ms = config
+                                    .get("tool")
+                                    .and_then(|t| t.get("timeout_ms"))
+                                    .and_then(|t| t.as_integer())
+                                    .unwrap_or(30000)
+                                    as u64;
+                                let schema = config
+                                    .get("tool")
+                                    .and_then(|t| t.get("schema"))
+                                    .cloned()
+                                    .unwrap_or_else(|| {
+                                        let mut tbl = toml::value::Table::new();
+                                        tbl.insert(
+                                            "type".to_string(),
+                                            toml::Value::String("object".to_string()),
+                                        );
+                                        tbl.insert(
+                                            "properties".to_string(),
+                                            toml::Value::Table(toml::value::Table::new()),
+                                        );
+                                        tbl.insert(
+                                            "required".to_string(),
+                                            toml::Value::Array(toml::value::Array::new()),
+                                        );
+                                        toml::Value::Table(tbl)
+                                    });
+                                let args_json: serde_json::Value = toml_to_json(&args_val);
+                                let schema_json: serde_json::Value = toml_to_json(&schema);
+                                manifests.insert(
+                                    name_str.clone(),
+                                    (
+                                        command,
+                                        serde_json::json!({
+                                            "args": args_json,
+                                            "timeout_ms": timeout_ms,
+                                            "schema": schema_json
+                                        }),
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn chrono_utc_now() -> String {
