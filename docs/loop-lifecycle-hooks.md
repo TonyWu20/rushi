@@ -512,5 +512,5 @@ cargo build
 cargo test
 scripts/compact-e2e.sh
 scripts/model-before-transform-e2e.sh
-scripts/run-idle-continue-e2e.sh
+run-idle-continue-e2e.sh   # rushi-exts root (docs/tui-ext-repo-split.md section 4)
 ```

@@ -635,40 +635,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hook-goal-arm"
-version = "0.1.0"
-dependencies = [
- "goal-state",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "hook-goal-compact"
-version = "0.1.0"
-dependencies = [
- "goal-state",
- "serde_json",
-]
-
-[[package]]
-name = "hook-goal-idle"
-version = "0.1.0"
-dependencies = [
- "goal-state",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "hook-goal-tools"
-version = "0.1.0"
-dependencies = [
- "goal-state",
- "serde_json",
-]
-
-[[package]]
 name = "hook-handoff"
 version = "0.1.0"
 dependencies = [

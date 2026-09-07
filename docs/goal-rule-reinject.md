@@ -53,11 +53,11 @@ model call.
      `build_goal_core_block()` (if the full block is no longer needed
      anywhere) or is kept for backward compatibility / testing.
 
-2. **`bin/hook-goal-arm/src/main.rs`**
+2. **`goal-hooks/hook-goal-arm/src/main.rs`** (rushi-exts)
    - Switch from `goal.build_goal_block()` to
      `goal.build_goal_core_block()`.
 
-3. **`bin/hook-goal-idle/src/main.rs`**
+3. **`goal-hooks/hook-goal-idle/src/main.rs`** (rushi-exts)
    - `build_continue_prompt()` now includes the rules automatically
      (change is inside the crate, no hook-side change needed).
 
@@ -97,6 +97,6 @@ model call.
   (rule list), §1.1c (cache-prefix discipline).
 - `crates/goal-state/src/lib.rs` — `build_goal_block`,
   `build_continue_prompt`, `goal_mode_rules`.
-- `bin/hook-goal-arm/src/main.rs` — the `model.before` injection point.
-- `bin/hook-goal-idle/src/main.rs` — the `run.idle` continuation
+- `goal-hooks/hook-goal-arm/src/main.rs` (rushi-exts) — the `model.before` injection point.
+- `goal-hooks/hook-goal-idle/src/main.rs` (rushi-exts) — the `run.idle` continuation
   point.

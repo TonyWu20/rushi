@@ -927,10 +927,10 @@ and passes. `open` names the blocker and what unblocks it.
 
 | P# | Property | Proof | Status |
 |----|----------|-------|--------|
-| P1 | run-idle-stop | the `no-goal` scenario in `scripts/run-idle-continue-e2e.sh` | proven |
+| P1 | run-idle-stop | the `no-goal` scenario in `run-idle-continue-e2e.sh` (rushi-exts root) | proven |
 | P2 | classifier-table | `self_test_rows` in `bin/harness/src/classifier.rs` | proven |
 | P3 | classifier-exclusion | `exclusion_wins_over_overflow_pattern` in `bin/harness/src/classifier.rs` | proven |
-| P4 | run-idle-continue | the `budgeted-goal` scenario in `scripts/run-idle-continue-e2e.sh` | proven |
+| P4 | run-idle-continue | the `budgeted-goal` scenario in `run-idle-continue-e2e.sh` (rushi-exts root) | proven |
 | P5 | shadow-compact | Blocked: the shadow-compact conformance row is not yet an e2e. Unblocked by adding that row to `scripts/compact-e2e.sh` | open |
 
 ## Gate
@@ -942,5 +942,5 @@ cargo build
 cargo test
 scripts/compact-e2e.sh
 scripts/model-before-transform-e2e.sh
-scripts/run-idle-continue-e2e.sh
+run-idle-continue-e2e.sh   # rushi-exts root (docs/tui-ext-repo-split.md section 4)
 ```

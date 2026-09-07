@@ -66,10 +66,11 @@ port is really a re-host of the loop, not a tool.
 **Status: Ported (2026-07-04).** The goal tools (`tools/goal/`,
 `tools/goal_complete/`, `tools/goal_blocked/`), the goal-state crate
 (`crates/goal-state/`), the four hook binaries
-(`bin/hook-goal-idle/`, `bin/hook-goal-compact/`,
-`bin/hook-goal-tools/`, `bin/hook-goal-arm/`), the TUI command-palette
+(`goal-hooks/hook-goal-idle/`, `goal-hooks/hook-goal-compact/`,
+`goal-hooks/hook-goal-tools/`, `goal-hooks/hook-goal-arm/` in the
+rushi-exts repo), the TUI command-palette
 extension (`ui_extensions/goal/`), and the conformance e2e
-(`scripts/run-idle-continue-e2e.sh`) are all built and tested.
+(`run-idle-continue-e2e.sh`, rushi-exts root) are all built and tested.
 See `docs/pi-goal-readiness.md` for the full assessment.
 
 ### `rpiv-ask-user-question` (juicesharp)
