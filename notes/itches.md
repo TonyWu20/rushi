@@ -86,3 +86,96 @@ hardcoded schema list and the `bin/claim` no-op list. The
 `bin/compact` binary does not validate: it pipes every marker
 through `bin/log`, the owner of the validator list. The
 `bin/tui` semantic parser gains the three `EventKind`s.
+
+## `lean-verify` `drt` op has no progress, checkpoint, or smoke mode (2026-09-12, episode 1) → resolved 2026-09-12
+
+**Observed.** Running `lean-verify op=drt` with `n=100000`
+takes ~3 h with zero output until completion. No progress
+counter, no checkpoint/resume, no `--smoke` alias. When the
+goal was re-posted (context overflow) mid-run, the only way to
+know whether the gate was still alive was `ps aux` — the tool
+gave no feedback.
+
+**Reproduce.** Pipe `{"op":"drt","n":100000,...}` to
+`target/release/lean-verify`; wait 3 h with no stdout until
+the final JSON blob.
+
+**P4 checklist.**
+1. Unblock a current task? Marginally — a `--smoke` (n=2000,
+   ~15 s) would make the "quick check" a one-liner instead of a
+   judgment call.
+2. Correctness bug? No.
+3. Recurring manual step? Yes — every DRT run requires manually
+   picking `n` and deciding whether to background the process.
+4. Invariant → code? Partially — a `--smoke` flag moves "how
+   many inputs for a quick check" from human discipline to a
+   named preset.
+
+**Pre-test.** A `--smoke` alias or auto-tier (`<10k` = fast,
+`≥10k` = full) is a one-line config, not a protocol change.
+But per P2 rule-of-three, one episode is not enough to add a
+new flag to the tool. **Parked as an itch.**
+
+**Resolution (2026-09-12).** The itch was confirmed real and solved
+in `tools/lean-verify`:
+- `"smoke":true` is the named quick tier (n=2000, ~15 s): the
+  quick check is a one-liner, no judgment call on `n` (an
+  explicit `n` still wins; the full tier gates the release).
+- A progress/heartbeat file `<dir>/.drt-progress.json` is written
+  every ~10 s or 100 inputs (pid, next index, rate, eta,
+  `updated_at`): a re-posted goal polls it instead of `ps aux`;
+  a clean run deletes the file.
+- A stop on mismatch/timeout keeps the file as a checkpoint, and
+  `"resume":true` continues the same call from the first failed
+  index (parameters must match the checkpoint; `input_gen` must
+  be deterministic). The result JSON reports `progress_file`,
+  `checkpoint`, and `resumed_from`; a live run is protected by a
+  pid liveness guard.
+Covered by `scripts/lean-verify-drt-e2e.sh` (kill+resume,
+fix+resume, live-run guard) and the drt steps of
+`scripts/lean-verify-e2e.sh`.
+
+## `lean-verify` `drt` op has no input-validation mode (2026-09-12, episode 1) → resolved 2026-09-12
+
+**Observed.** The `input_gen` parameter is a shell command that
+must emit well-formed scenario lines. There is no way to verify
+that the generator's output is parseable without running the
+full DRT comparison. When a test list contained a line that was
+supposed to be malformed but was actually well-formed, the only
+detection path was a full DRT run (~3 h for 100 K inputs).
+
+**Reproduce.** Write a generator that emits one unparseable line;
+run `lean-verify op=drt` with `n=100000`. The mismatch is only
+visible after the full comparison completes.
+
+**P4 checklist.**
+1. Unblock a current task? Yes — a `--check-inputs` mode (parse
+   each generated line, report the first unparseable one, exit)
+   would save a 3 h run on a broken generator.
+2. Correctness bug? No, but a *wasted-compute* bug: 3 h × 100 K
+   inputs to discover the generator was off by one.
+3. Recurring manual step? Yes — every time the generator or the
+   protocol changes, re-validation requires a full gate run.
+4. Invariant → code? Yes — "the generator emits well-formed
+   lines" is currently human discipline; a `--check-inputs`
+   mode makes it a 10-second automated check.
+
+**Pre-test.** The parser logic lives inside the Lean model
+executable and the Rust production binary. There is no standalone
+"parse one line" subcommand, so a pure script cannot do the job
+without duplicating the parser. A tool-level `--check-inputs`
+flag (or a separate `op=check-inputs`) is the right shape.
+**Parked as an itch** (one episode).
+
+**Resolution (2026-09-12).** Solved by a new `op=check-inputs` in
+`tools/lean-verify`: it runs the generator's lines through the
+model executable (and the production executable when given) and
+reports the first line either side rejects — a non-zero exit or a
+timeout; accepted inputs exit 0. Default n=2000 makes the
+preflight ~10 s instead of a 3 h full drt; `"stop_on_reject"`
+stops at the first rejection, `"max_rejections"` bounds
+collection. It shares the progress/checkpoint/resume machinery
+with drt. The invariant "the generator emits well-formed lines"
+moved from human discipline to an automated check. Covered by the
+check-inputs steps of `scripts/lean-verify-drt-e2e.sh` and
+`scripts/lean-verify-e2e.sh`.

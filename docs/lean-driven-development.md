@@ -233,6 +233,19 @@ formal spec under `lean/`.
   a-j 0-9). The `lean_exe «TuiStreamDrt»` target in `lakefile.lean`
   puts the executable inside the zero-sorry build gate, so the DRT
   model is kernel-checked alongside the theorems.
+- **The DRT preflight and long-run ergonomics.** After a generator or
+  protocol change, `lean-verify` `op=check-inputs` (default n=2000,
+  ~10 s) verifies that the generator's lines are well-formed for the
+  one-line scenario protocol: each line is fed to the model
+  executable (and the production executable when given), and a line
+  either side rejects (non-zero exit or timeout; accepted inputs
+  exit 0) is reported with its line number instead of waiting for a
+  full drt to surface it. Long drt runs write a heartbeat/checkpoint
+  to `<dir>/.drt-progress.json` every ~10 s or 100 inputs (poll it
+  to confirm a run is alive; a clean run deletes it); `"smoke":true`
+  is the quick tier (n=2000, the one-liner quick check), and
+  `"resume":true` continues a stopped run from its first failed
+  index after the fix.
 - **Pinned toolchain.** `lean/lean-toolchain` pins
   `leanprover/lean4:v4.30.0`, matching the flake's `pkgs.lean4`.
   The Lean project uses core Lean only (no Mathlib), so the build
