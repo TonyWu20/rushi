@@ -1176,6 +1176,67 @@ response. The reactive overflow recovery path in `step.rs`
 (`is_overflow` + `CompactReason::Overflow` + last-resort fallback)
 already mirrors pi's `isContextOverflow` compact-and-retry.
 
+### 9.8 Hard-trim backstop: mechanical cut-down-to-fit (2026-09-16)
+
+The LLM compaction leads at the trigger level
+(`context_budget_tokens - compact_reserve_tokens`). When a request's
+full-form estimate still exceeds that level, `bin/assemble` now
+drops whole step groups from the oldest until the request fits the
+trigger level. The append-only event log keeps every dropped event
+(source of truth); the request is the projection that fits. The
+trim marker rides the request JSON as a top-level `hard_trim`
+field; `bin/rushi` logs it as a `hard_trim` `ext_status` event and
+strips it before the model call. `bin/model` strips it defensively.
+
+- Target: `trigger_level_for(budget_tokens, compact_reserve_tokens)`.
+- Cut: whole step groups only. A tool call and its result never split.
+- No model call, so a stalled provider cannot hang the backstop.
+- When even the framing alone exceeds the target, the trim returns
+  `None`; the `context_exhausted` form fires and the last-resort
+  in-session compaction takes over (`bin/compact`).
+- The summary-input request clamps its target to
+  `min(budget_tokens, window_input)` so the summary call itself
+  fits the window even under the unclamped pi-parity base.
+
+This backstop makes the `log-tree-design` input-overflow case
+recoverable: instead of dying on a server-side context-length
+error, the loop mechanically trims the oldest groups and
+continues.
+
+- `bin/assemble/src/main.rs`: `hard_trim_groups`, the
+  `hard_trim` marker, and the `context_exhausted` fallback.
+- `bin/rushi/src/step.rs`: `log_and_strip_hard_trim`.
+- `bin/model/src/main.rs`: the defensive strip.
+- `scripts/compact-e2e.sh`: the `last-resort` scenario now
+  exercises the hard-trim success path; the `context-exhausted`
+  scenario exercises the framing-too-large fallback.
+
+### 9.9 Truncation-aware parse: the length-stop recovery (2026-09-16)
+
+`bin/parse` previously hard-failed (exit 2) on any tool call whose
+`arguments` were not a JSON object, regardless of stop reason. When
+a `length` stop cut the stream mid-call, the last call's JSON was
+truncated, so parse exited 2 and the loop's existing
+`stop_reason == "length"` recovery in `bin/rushi/src/step.rs`
+(`log_truncated_group` + compact + retry) never ran.
+
+pi does not hard-fail here. It treats the truncated response as a
+length stop and recovers. The fix matches pi: when
+`stop_reason == "length"`, parse skips strict argument validation,
+normalizes each call's arguments to an object (empty object when
+truncated), records the assistant message with `stop_reason`
+preserved, and attaches a `Re-issue the call` hint to each tool
+result. Strict validation still hard-fails for a non-length
+malformed call. This unblocks the `log-tree-fork-recursion-prove`
+output-exhaustion stall, where thinking consumed the full output
+budget and cut the last call mid-stream.
+
+- `bin/parse/src/main.rs`: the `stop_reason != "length"` gate and
+  the `length` branch.
+- `bin/rushi/src/step.rs`: the unchanged length-stop recovery
+  now runs.
+- Unit: the parse length-stop tests in `bin/parse/src/main.rs`.
+
 ## Properties
 
 Lean-style invariants for this spec (see `lean-driven-development.md`).
@@ -1203,6 +1264,9 @@ P9. iterative-merge: given a prior `compaction_summary`, observe the next summar
 | P7 | silent-overflow | `scenario_silent_overflow` in `scripts/compact-e2e.sh` | proven |
 | P8 | overflow-retry | `scenario_overflow`, `scenario_failed_retry` in `scripts/compact-e2e.sh` | proven |
 | P9 | iterative-merge | `scenario_iterative` in `scripts/compact-e2e.sh`; `summary_input_update_prompt_carries_the_previous_summary` in `bin/assemble/src/main.rs` | proven |
+| P10 | hard-trim-backstop: given a request whose full-form estimate exceeds the trigger level, observe the oldest step groups drop so the request fits; the log keeps every event | `hard_trim_drops_groups_from_the_oldest`, `scenario_last_resort` in `scripts/compact-e2e.sh` | proven |
+| P11 | hard-trim-fallback: given a framing alone that exceeds the target, observe the `context_exhausted` form fire the last-resort compaction | `hard_trim_fails_when_the_framing_alone_exceeds_the_target`, `scenario_context_exhausted` in `scripts/compact-e2e.sh` | proven |
+| P12 | length-stop-recovery: given a `length` stop that truncates a tool call, observe parse record the turn without a hard-fail and the loop re-issue via compact | the parse length-stop tests in `bin/parse/src/main.rs` | proven |
 
 ## Gate
 

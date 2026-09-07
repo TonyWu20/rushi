@@ -69,6 +69,11 @@ bash_timeout_max = 300
 # the trigger fires too late and the response overflows the window.
 # The pi default is 16384; 4096 pushes the trigger to 258048 but
 # leaves less headroom than this model's 4-8k responses.
+# The same value is the hard-trim backstop target
+# (docs/auto-compact-plan.md 9.8): when a request's estimate
+# exceeds the trigger level, the oldest step groups drop until the
+# request fits; when even the framing alone exceeds it, the
+# context_exhausted last-resort compaction takes over.
 # compact_keep_tokens: the keep window of the compact cut.
 compact_enabled = true
 compact_reserve_tokens = 16384

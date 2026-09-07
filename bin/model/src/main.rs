@@ -216,6 +216,12 @@ fn main() {
     // it can round-trip verbatim. Reasoning models get the configured
     // effort with an automatic summary.
     let mut api_request = request.clone();
+    // The hard-trim marker is a log record of the harness
+    // (docs/auto-compact-plan.md section 9.8). It must not reach the
+    // provider payload.
+    if let Some(obj) = api_request.as_object_mut() {
+        obj.remove("hard_trim");
+    }
     api_request["stream"] = serde_json::json!(true);
     api_request["store"] = serde_json::json!(false);
     api_request["include"] = serde_json::json!(["reasoning.encrypted_content"]);

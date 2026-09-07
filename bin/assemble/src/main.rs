@@ -2,6 +2,7 @@
 
 use clap::Parser;
 use bon::builder;
+use rushi_common::compact_math::trigger_level_for;
 use rushi_common::rewind;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -848,6 +849,36 @@ fn estimate_request_tokens(
     anchor + trailing
 }
 
+/// The hard-trim walk (docs/auto-compact-plan.md section 9.8). When
+/// the full-form estimate of `events` exceeds `target`, drop whole
+/// step groups from the oldest until the estimate fits. A cut never
+/// lands between a tool call and its result. Returns the number of
+/// oldest groups to drop (zero when nothing is dropped). `None`
+/// when even the framing alone exceeds the target; the
+/// `context_exhausted` form and the last-resort in-session
+/// compaction take over in that case.
+fn hard_trim_groups(
+    events: &[&Ev],
+    framing: &Option<serde_json::Value>,
+    target: u64,
+) -> Option<usize> {
+    if estimate_request_tokens(events, framing) <= target {
+        return Some(0);
+    }
+    let groups = step_groups(events);
+    for drop in 1..=groups.len() {
+        let start = if drop < groups.len() {
+            groups[drop].0
+        } else {
+            events.len()
+        };
+        if estimate_request_tokens(&events[start..], framing) <= target {
+            return Some(drop);
+        }
+    }
+    None
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -1196,13 +1227,24 @@ fn main() {
         if args.drop_last_assistant {
             old_region = drop_last_assistant_group(&old_region);
         }
+        // The summary request must fit the window with room for its
+        // own output cap. Under the `context_budget` base the wire
+        // budget is the full window, so the drop search bounds the
+        // input at the input-only window (docs/auto-compact-plan.md
+        // section 9.8). Under the default base the budget is already
+        // clamped, and the minimum is a no-op.
+        let window_input = model_settings
+            .context_tokens
+            .saturating_sub(model_settings.max_output_tokens as usize)
+            .max(1);
+        let summary_input_target = budget_tokens.min(window_input);
         let builder = summary_input_request()
             .old(&old_region)
             .prev(&boundary)
             .model(&model_settings.model_id)
             .max_out_cap(model_settings.max_output_tokens)
             .caps(&base_caps)
-            .input_budget(budget_tokens)
+            .input_budget(summary_input_target)
             .ptrs(&ptrs);
         // The optional request-level effort: the session effort stands
         // when the config leaves it unset.
@@ -1216,10 +1258,40 @@ fn main() {
     }
 
     // The request-time exclusion of the last assistant group.
-    let sel_events: Vec<&Ev> = if args.drop_last_assistant {
-        drop_last_assistant_group(&kept_events)
+    // The `sel_seqs` parallel array maps each projected event to its
+    // 1-based log sequence: the hard-trim marker names the first
+    // kept sequence so the log and the request stay aligned.
+    let mut sel_events: Vec<&Ev>;
+    let sel_seqs: Vec<usize>;
+    if args.drop_last_assistant {
+        let groups = step_groups(&kept_events);
+        match groups
+            .iter()
+            .rev()
+            .find(|&&(start, _)| matches!(kept_events[start], Ev::Assistant { .. }))
+        {
+            Some(&(start, end)) => {
+                sel_events = kept_events
+                    .iter()
+                    .take(start)
+                    .chain(kept_events.iter().skip(end))
+                    .cloned()
+                    .collect();
+                sel_seqs = kept_seqs
+                    .iter()
+                    .take(start)
+                    .chain(kept_seqs.iter().skip(end))
+                    .cloned()
+                    .collect();
+            }
+            None => {
+                sel_events = kept_events.clone();
+                sel_seqs = kept_seqs.clone();
+            }
+        }
     } else {
-        kept_events.clone()
+        sel_events = kept_events.clone();
+        sel_seqs = kept_seqs.clone();
     };
 
     // The framing item: the handoff document when present, else the
@@ -1239,6 +1311,65 @@ fn main() {
     // (docs/phase-2-plan.md stage 0). The drop set is computed over
     // the masked context: a pair masked out of the context is out of
     // the set (docs/rewind-fork-design.md section 3).
+
+    // The hard-trim backstop (docs/auto-compact-plan.md section
+    // 9.8): the LLM compaction leads at the trigger level. When the
+    // full-form estimate of this request still exceeds that level,
+    // drop the oldest step groups until the request fits. The log
+    // keeps every event (the append-only source of truth); the
+    // request is the projection that fits. The trim marker rides the
+    // request JSON; the harness logs it and strips it before the
+    // model call. When even the framing alone exceeds the level,
+    // emit the `context_exhausted` form: the last-resort in-session
+    // compaction takes over (docs/phase-2-plan.md 4.3 step 5).
+    let compact_reserve: u64 = val_int(&limits, "compact_reserve_tokens")
+        .unwrap_or(16384)
+        .max(0) as u64;
+    let trim_target = trigger_level_for(budget_tokens as u64, compact_reserve);
+    let est_before = estimate_request_tokens(&sel_events, &framing);
+    let mut hard_trim: Option<serde_json::Value> = None;
+    if est_before > trim_target {
+        match hard_trim_groups(&sel_events, &framing, trim_target) {
+            Some(drop) => {
+                if drop > 0 {
+                    let groups = step_groups(&sel_events);
+                    let start = groups.get(drop).map(|g| g.0).unwrap_or(sel_events.len());
+                    sel_events = sel_events.iter().skip(start).cloned().collect();
+                    let est_after = estimate_request_tokens(&sel_events, &framing);
+                    hard_trim = Some(serde_json::json!({
+                        "dropped_groups": drop,
+                        "first_kept_seq": sel_seqs.get(start).copied(),
+                        "est_tokens_before": est_before,
+                        "est_tokens_after": est_after,
+                    }));
+                }
+            }
+            None => {
+                let drop_pairs = drop_pair_ids(&kept_events, kept_events.len());
+                let mut items = build_items(
+                    &sel_events,
+                    sel_events.len(),
+                    &Caps { text: 0 },
+                    &drop_pairs,
+                    &ptrs,
+                );
+                if let Some(f) = &framing {
+                    items.insert(0, f.clone());
+                }
+                let request = make_request(&items);
+                let exhausted = serde_json::json!({
+                    "v": 1,
+                    "type": "context_exhausted",
+                    "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    "message": "Context budget exhausted. The last-resort in-session compaction takes over.",
+                    "request": request,
+                });
+                println!("{}", exhausted);
+                return;
+            }
+        }
+    }
+
     let drop_pairs = drop_pair_ids(&kept_events, kept_events.len());
     let mut items = build_items(
         &sel_events,
@@ -1250,29 +1381,9 @@ fn main() {
     if let Some(f) = &framing {
         items.insert(0, f.clone());
     }
-
-    // Budget check: estimate the request size in tokens (chars/4).
-    // Only emit `context_exhausted` when a boundary already exists
-    // (i.e. an earlier compaction ran but the context is still too
-    // big). Without a boundary, the threshold or overflow path in
-    // the harness handles it (docs/phase-2-plan.md 4.3 step 5).
-    let request = make_request(&items);
-    if boundary.is_some() {
-        let est_tokens = estimate_request_tokens(
-            &sel_events,
-            &framing,
-        );
-        if est_tokens > budget_tokens as u64 {
-            let exhausted = serde_json::json!({
-                "v": 1,
-                "type": "context_exhausted",
-                "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                "message": "Context budget exhausted. The last-resort in-session compaction takes over.",
-                "request": request,
-            });
-            println!("{}", exhausted);
-            return;
-        }
+    let mut request = make_request(&items);
+    if let Some(marker) = &hard_trim {
+        request["hard_trim"] = marker.clone();
     }
 
     println!("{}", request);
@@ -1444,6 +1555,92 @@ compact_trigger_base = "nonsense"
         let limits = v.get("limits").unwrap();
         // Unknown base -> default input_budget clamp -> 229376.
         assert_eq!(resolve_budget_tokens(limits, &ms(262144, 32768)), 229376);
+    }
+
+    /// The hard-trim walk of section 9.8. The events: user A
+    /// (1000 tokens), an assistant group of a call and its result
+    /// (1000 + 1000), user B (1000). Total 4000 tokens.
+    fn hard_trim_events() -> Vec<Ev> {
+        let mut evs: Vec<Ev> = Vec::new();
+        evs.push(Ev::User {
+            text: "a".repeat(4000),
+        });
+        evs.push(Ev::Assistant {
+            text: String::new(),
+            calls: vec![Call {
+                id: "c1".to_string(),
+                name: "bash".to_string(),
+                args_str: "b".repeat(4000),
+            }],
+            reasoning: Vec::new(),
+            usage_input: None,
+        });
+        evs.push(Ev::ToolResult {
+            id: "c1".to_string(),
+            text: "c".repeat(4000),
+        });
+        evs.push(Ev::User {
+            text: "d".repeat(4000),
+        });
+        evs
+    }
+
+    fn hard_trim_refs<'a>(evs: &'a [Ev]) -> Vec<&'a Ev> {
+        evs.iter().collect()
+    }
+
+    #[test]
+    fn hard_trim_noop_when_the_estimate_fits() {
+        let evs = hard_trim_events();
+        let refs = hard_trim_refs(&evs);
+        let framing: Option<serde_json::Value> = None;
+        assert_eq!(hard_trim_groups(&refs, &framing, 4000), Some(0));
+        assert_eq!(hard_trim_groups(&refs, &framing, 4001), Some(0));
+    }
+
+    #[test]
+    fn hard_trim_drops_groups_from_the_oldest() {
+        let evs = hard_trim_events();
+        let refs = hard_trim_refs(&evs);
+        let framing: Option<serde_json::Value> = None;
+        // Target 3000: keep the assistant group (2000) plus user B
+        // (1000); drop user A. Target 1500: keep user B only. Target
+        // 999 drops nothing that fits: even the smallest non-empty
+        // suffix (user B, 1000) exceeds 999, so the walk drops to
+        // the empty suffix, which is 0 tokens.
+        assert_eq!(hard_trim_groups(&refs, &framing, 3000), Some(1));
+        assert_eq!(hard_trim_groups(&refs, &framing, 1500), Some(2));
+        assert_eq!(hard_trim_groups(&refs, &framing, 999), Some(3));
+    }
+
+    #[test]
+    fn hard_trim_never_splits_a_call_from_its_result() {
+        let evs = hard_trim_events();
+        let refs = hard_trim_refs(&evs);
+        let framing: Option<serde_json::Value> = None;
+        // Every kept suffix starts at a group boundary: either an
+        // assistant message (the head of the call/result group) or a
+        // user message. A target that fits exactly one group keeps
+        // the group whole.
+        let drop = hard_trim_groups(&refs, &framing, 2000).expect("trims to one group");
+        let start = step_groups(&refs)[drop].0;
+        assert!(matches!(refs[start], Ev::Assistant { .. } | Ev::User { .. }));
+    }
+
+    #[test]
+    fn hard_trim_fails_when_the_framing_alone_exceeds_the_target() {
+        let evs = hard_trim_events();
+        let refs = hard_trim_refs(&evs);
+        // A 20000-char framing item is 5000 tokens: above any target
+        // that is under 5000, no drop count fits the request.
+        let framing: Option<serde_json::Value> = Some(serde_json::json!({
+            "type": "message",
+            "role": "user",
+            "content": "f".repeat(20000)
+        }));
+        assert_eq!(hard_trim_groups(&refs, &framing, 4000), None);
+        // A target above the framing cost fits with zero events kept.
+        assert_eq!(hard_trim_groups(&refs, &framing, 5000), Some(3));
     }
 
     fn ev_res(id: &str, text: &str) -> Ev {

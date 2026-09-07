@@ -323,6 +323,7 @@ fn run_awaiting_model(
             std::process::exit(1);
         }
     };
+    log_and_strip_hard_trim(cfg, session, &mut request);
 
     // Assemble error form: append and stop.
     if request.json.get("type").and_then(|t| t.as_str()) == Some("error") {
@@ -337,7 +338,7 @@ fn run_awaiting_model(
             return;
         }
         // Reassemble after the in-session compact and fall through to the model retry loop.
-        reassemble(runner, session, &mut request, false);
+        reassemble(cfg, runner, session, &mut request, false);
 
         // If the reassembled request is still a context_exhausted form the
         // compact did not shrink the context enough; do not feed a
@@ -950,17 +951,17 @@ fn model_retry_loop(
                         let _ = try_compact_with_hooks(
                             cfg, runner, session, CompactReason::LastResort, true, false,
                         );
-                        reassemble(runner, session, request, false);
+                        reassemble(cfg, runner, session, request, false);
                         continue;
                     }
-                    reassemble(runner, session, request, false);
+                    reassemble(cfg, runner, session, request, false);
                     continue;
                 }
                 last_resort = true;
                 let _ = try_compact_with_hooks(
                     cfg, runner, session, CompactReason::LastResort, true, false,
                 );
-                reassemble(runner, session, request, false);
+                reassemble(cfg, runner, session, request, false);
                 continue;
             }
             // Transport-level model failure.
@@ -1033,14 +1034,14 @@ fn model_retry_loop(
                         cfg.compact_enabled,
                         true,
                     );
-                    reassemble(runner, session, request, false);
+                    reassemble(cfg, runner, session, request, false);
                     continue;
                 }
                 last_resort = true;
                 let _ = try_compact_with_hooks(
                     cfg, runner, session, CompactReason::LastResort, true, true,
                 );
-                reassemble(runner, session, request, false);
+                reassemble(cfg, runner, session, request, false);
                 continue;
             }
         }
@@ -1066,6 +1067,7 @@ fn model_retry_loop(
 }
 
 fn reassemble(
+    cfg: &HarnessConfig,
     runner: &SubprocessRunner,
     session: &SessionDir,
     request: &mut rushi_common::stage::RequestFile,
@@ -1073,11 +1075,40 @@ fn reassemble(
 ) {
     let opts = AssembleOpts { inject_follow };
     match runner.assemble(session, &opts) {
-        Ok(r) => *request = r,
+        Ok(r) => {
+            *request = r;
+            log_and_strip_hard_trim(cfg, session, request);
+        }
         Err(e) => {
             eprintln!("rushi: reassemble failed: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+/// Log the assemble hard-trim marker (docs/auto-compact-plan.md
+/// section 9.8) as a `hard_trim` ext_status event and strip it from
+/// the request: the marker is a log record only. The wire form the
+/// provider sees must not carry it.
+fn log_and_strip_hard_trim(
+    cfg: &HarnessConfig,
+    session: &SessionDir,
+    request: &mut rushi_common::stage::RequestFile,
+) {
+    let Some(marker) = request.json.get("hard_trim").cloned() else {
+        return;
+    };
+    let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let event = serde_json::json!({
+        "v": 1,
+        "type": "ext_status",
+        "ts": ts,
+        "id": "hard_trim",
+        "value": marker,
+    });
+    append_event(cfg, &session.path, &event);
+    if let Some(obj) = request.json.as_object_mut() {
+        obj.remove("hard_trim");
     }
 }
 
