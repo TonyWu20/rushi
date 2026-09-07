@@ -49,7 +49,9 @@
             lockFile = ./Cargo.lock;
           };
           nativeBuildInputs = [ rustToolchain ];
-          # Build all workspace members (loop stages, tools, tui, hooks).
+          # Build all workspace members (loop stages, tools, hooks).
+          # (The TUI + TUI-stream-drt moved to the rushi-tui repo at the
+          # split; docs/tui-ext-repo-split.md section 4, item 6.)
           cargoBuildFlags = [ "--workspace" ];
           doCheck = false;
         };
