@@ -54,15 +54,16 @@ fn main() {
     let args = parse_args(read_stdin_json());
     let op = match args.op.clone() {
         Some(o) => o,
-        None => fail("missing required field: op. Use one of 'init', 'build', 'drt', 'translate'. Run `lean-verify --help`."),
+        None => fail("missing required field: op. Use one of 'init', 'build', 'drt', 'check-inputs', 'translate'. Run `lean-verify --help`."),
     };
     match op.as_str() {
         "init" => op_init(&args),
         "build" => op_build(&args),
         "drt" => op_drt(&args),
+        "check-inputs" => op_check_inputs(&args),
         "translate" => op_translate(&args),
         _ => fail(&format!(
-            "unknown op '{op}'. Use one of 'init', 'build', 'drt', 'translate'. Run `lean-verify --help`."
+            "unknown op '{op}'. Use one of 'init', 'build', 'drt', 'check-inputs', 'translate'. Run `lean-verify --help`."
         )),
     }
 }
@@ -83,6 +84,11 @@ struct Args {
     stop_on_mismatch: Option<bool>,
     max_mismatches: Option<u64>,
     per_input_timeout_s: Option<u64>,
+    smoke: Option<bool>,
+    resume: Option<bool>,
+    progress: Option<bool>,
+    max_rejections: Option<u64>,
+    stop_on_reject: Option<bool>,
 }
 
 fn read_stdin_json() -> serde_json::Value {
@@ -120,6 +126,11 @@ fn parse_args(v: serde_json::Value) -> Args {
         stop_on_mismatch: bool_field(&v, "stop_on_mismatch"),
         max_mismatches: int_field(&v, "max_mismatches"),
         per_input_timeout_s: int_field(&v, "per_input_timeout_s"),
+        smoke: bool_field(&v, "smoke"),
+        resume: bool_field(&v, "resume"),
+        progress: bool_field(&v, "progress"),
+        max_rejections: int_field(&v, "max_rejections"),
+        stop_on_reject: bool_field(&v, "stop_on_reject"),
     }
 }
 
@@ -177,6 +188,40 @@ Operations (one JSON object on stdin, one JSON object on stdout):
           stripping trailing whitespace. A mismatch on an
           exact/abstraction-classified definition is a real bug; fix
           the model or the source. Run after every model change.
+          Long runs and resumptions:
+          - "smoke":true is the quick tier (n=2000, ~15 s): the
+            one-liner quick check, no judgment call on n. The full
+            tier (default n=100000) still gates the release.
+          - A progress/heartbeat file <dir>/.drt-progress.json is
+            written every ~10 s or 100 inputs (pid, next index,
+            rate, eta, updated_at). Poll it to see whether a long
+            drt is still alive — no ps needed; it is deleted on a
+            clean run. If `updated_at` lags far behind, the run is
+            stuck: kill it and re-run with "resume":true.
+          - A stop on mismatch/timeout keeps the file as a
+            checkpoint. After the fix, re-run the SAME call with
+            "resume":true: the run continues from the first failed
+            index (parameters must match the checkpoint and
+            input_gen must be deterministic). The result JSON
+            reports progress_file, checkpoint (kept=true means
+            resumable), and resumed_from.
+
+   check-inputs Preflight the DRT input protocol without the full
+          comparison.
+          {"op":"check-inputs","model":"...","prod":"...","input_gen":"...","n":2000}
+          Runs each generated line through the model executable (and
+          the production executable when "prod" is given) and
+          reports the first line a side rejects. A side rejects an
+          input when it exits non-zero or times out; an accepted
+          input exits 0. Default n=2000 (~10 s); "n":100000 checks
+          every line the full drt would consume. "stop_on_reject"
+          (default true) stops at the first rejection;
+          "max_rejections" bounds collection otherwise. progress /
+          resume work as for drt. Run after every generator or
+          protocol change — a broken generator costs seconds here
+          instead of a full drt. Note: an executable that exits 0
+          even on parse failure is not caught here; op=drt catches
+          that through the output comparison.
 
   translate Translate a Rust crate to a Lean model (the charon +
           aeneas pipeline, borrowed from AeneasVerif/aeneas).
@@ -216,7 +261,13 @@ Rules
     mismatch classification blocks DRT: fix the model or the source
     first.
   - Run `drt` after every model change; release only after all
-    inputs pass. A passing DRT run is the regression gate.
+    inputs pass. A passing DRT run is the regression gate. The
+     quick tier is "smoke":true (n=2000); the full tier (default
+     n=100000) gates the release. Long runs: poll the progress
+     file, resume a stopped run with "resume":true.
+   - Run `check-inputs` after every generator or protocol change,
+     before a full `drt`: it verifies the generator's lines are
+     well-formed for the DRT protocol in ~10 s.
 
 Exit codes
   0  a command-level result was produced (see the JSON: ok/clean/pass)
@@ -360,9 +411,6 @@ fn run_sh(cmd: &str, cwd: &Path, timeout_s: u64) -> Result<RunResult, String> {
     })
 }
 
-/// Optional per-input payload is forwarded to spawned commands as
-/// the DRT_INPUT environment variable (see `run_input_pair`).
-
 // ─── Tool runner (PATH or nix devShell fallback) ─────────────────
 
 /// Which flake devShell provides the toolchain for an op.
@@ -499,6 +547,13 @@ const BUILD_TIMEOUT_S: u64 = 10800; // 3h; below the manifest backstop
 const GEN_TIMEOUT_S: u64 = 300;
 const TRANSLATE_CHARON_TIMEOUT_S: u64 = 1800; // charon cargo + MIR extraction
 const TRANSLATE_AENEAS_TIMEOUT_S: u64 = 600; // aeneas LLBC -> Lean
+const SMOKE_N: u64 = 2000; // quick-check tier ("smoke":true)
+const DRT_DEFAULT_N: u64 = 100000;
+const CHECK_INPUTS_DEFAULT_N: u64 = 2000;
+const PROGRESS_FILE_NAME: &str = ".drt-progress.json";
+const PROGRESS_VERSION: u64 = 1; // bump to invalidate stored checkpoints
+const PROGRESS_EVERY_INPUTS: u64 = 100;
+const PROGRESS_EVERY_SECS: u64 = 10;
 
 fn emit(obj: serde_json::Value) {
     println!("{}", serde_json::to_string(&obj).unwrap_or_default());
@@ -819,6 +874,20 @@ fn lcg_values(seed: u64, bound: u64, n: u64) -> Vec<u64> {
     out
 }
 
+/// Run one side of a pair on one input: `sh -c <cmd> '' <input>` —
+/// the empty first argument is $0, so the input lands on $1. The
+/// input is also exported as DRT_INPUT for commands that read the
+/// environment.
+fn run_input_side(cmd: &str, input: &str, dir: &Path, timeout_s: u64) -> Result<RunResult, String> {
+    let c = format!(
+        "DRT_INPUT={} sh -c {} '' {}",
+        sh_quote(input),
+        sh_quote(cmd),
+        sh_quote(input)
+    );
+    run_sh(&c, dir, timeout_s)
+}
+
 fn run_input_pair(
     model: &str,
     prod: &str,
@@ -826,23 +895,8 @@ fn run_input_pair(
     dir: &Path,
     timeout_s: u64,
 ) -> Result<(RunResult, RunResult), String> {
-    // Each side runs as `sh -c <cmd> '' <input>`: the empty first
-    // argument is $0, so the input lands on $1. The input is also
-    // exported as DRT_INPUT for commands that read the environment.
-    let m_cmd = format!(
-        "DRT_INPUT={} sh -c {} '' {}",
-        sh_quote(input),
-        sh_quote(model),
-        sh_quote(input)
-    );
-    let p_cmd = format!(
-        "DRT_INPUT={} sh -c {} '' {}",
-        sh_quote(input),
-        sh_quote(prod),
-        sh_quote(input)
-    );
-    let m = run_sh(&m_cmd, dir, timeout_s)?;
-    let p = run_sh(&p_cmd, dir, timeout_s)?;
+    let m = run_input_side(model, input, dir, timeout_s)?;
+    let p = run_input_side(prod, input, dir, timeout_s)?;
     Ok((m, p))
 }
 
@@ -866,6 +920,17 @@ fn mismatch_entry(input: &str, m: &RunResult, p: &RunResult) -> serde_json::Valu
     })
 }
 
+/// Resolve `n` with the quick tier: an explicit "n" wins; "smoke":true
+/// (with no explicit n) selects the smoke tier; otherwise the op's
+/// default.
+fn resolve_n(args: &Args, default: u64) -> u64 {
+    match args.n {
+        Some(n) => n,
+        None if args.smoke == Some(true) => SMOKE_N,
+        None => default,
+    }
+}
+
 fn op_drt(args: &Args) {
     let model = args
         .model
@@ -877,10 +942,11 @@ fn op_drt(args: &Args) {
         .clone()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| fail("drt requires 'prod' (the sh -c command of the production executable)."));
-    let n = match args.n.unwrap_or(100000) {
+    let n = match resolve_n(args, DRT_DEFAULT_N) {
         x if (1..=1000000).contains(&x) => x,
         x => fail(&format!("drt 'n' must be in 1..=1000000, got {x}.")),
     };
+    let smoke = args.smoke == Some(true) && args.n.is_none();
     let seed = args.seed.unwrap_or(42);
     let bound = args.bound.unwrap_or(0);
     let stop = args.stop_on_mismatch.unwrap_or(true);
@@ -892,6 +958,8 @@ fn op_drt(args: &Args) {
         x if (1..=300).contains(&x) => x,
         x => fail(&format!("drt 'per_input_timeout_s' must be in 1..=300, got {x}.")),
     };
+    let progress = args.progress.unwrap_or(true);
+    let resume = args.resume.unwrap_or(false);
     let dir = match abs_path(&PathBuf::from(args.dir.clone().unwrap_or_else(|| ".".into())))
     {
         Ok(p) => p,
@@ -951,42 +1019,139 @@ fn op_drt(args: &Args) {
         return;
     }
 
+    let params = checkpoint_params(
+        args,
+        "drt",
+        n,
+        seed,
+        bound,
+        per_input,
+        stop,
+        max_mismatches,
+        args.max_rejections.unwrap_or(10),
+        args.stop_on_reject.unwrap_or(true),
+        prod.as_str(),
+        args.input_gen.as_deref().unwrap_or(""),
+    );
+    let (start, started_at, mut problems) = if resume {
+        if !progress {
+            fail("drt \"resume\":true requires the checkpoint file; run with the default \"progress\":true.");
+        }
+        resume_from(&dir, "drt", &params, inputs.len(), &inputs)
+    } else {
+        if progress {
+            guard_live_run(&dir);
+        }
+        (0, now_s(), 0)
+    };
+    let ctx = ProgressCtx {
+        dir: dir.clone(),
+        op: "drt",
+        params,
+        started_at,
+    };
+    if progress {
+        ctx.write(
+            "running",
+            start as u64,
+            inputs.len() as u64,
+            start as u64,
+            problems,
+            inputs.get(start.saturating_sub(1)).map(|s| s.as_str()),
+        )
+        .unwrap_or_else(|e| fail(&e));
+    }
+
     let mut mismatches: Vec<serde_json::Value> = Vec::new();
     let mut stop_reason: Option<String> = None;
-    let mut checked = 0usize;
-    for input in &inputs {
+    let mut first_problem: Option<usize> = None;
+    let mut last_write = Instant::now();
+    let mut i = start;
+    while i < inputs.len() {
+        let input = &inputs[i];
         let (m, p) = match run_input_pair(&model, &prod, input, &dir, per_input) {
             Ok(x) => x,
             Err(e) => fail(&e),
         };
-        checked += 1;
+        i += 1;
+        let mut stopped = false;
         if m.timed_out || p.timed_out {
             mismatches.push(mismatch_entry(input, &m, &p));
+            if first_problem.is_none() {
+                first_problem = Some(i - 1);
+            }
+            problems += 1;
             stop_reason = Some("timeout".into());
-            break;
-        }
-        if norm_output(&m.stdout) != norm_output(&p.stdout) {
+            stopped = true;
+        } else if norm_output(&m.stdout) != norm_output(&p.stdout) {
             mismatches.push(mismatch_entry(input, &m, &p));
+            if first_problem.is_none() {
+                first_problem = Some(i - 1);
+            }
+            problems += 1;
             if stop {
                 stop_reason = Some("mismatch".into());
-                break;
-            }
-            if mismatches.len() as u64 >= max_mismatches {
+                stopped = true;
+            } else if mismatches.len() as u64 >= max_mismatches {
                 stop_reason = Some("limit".into());
-                break;
+                stopped = true;
             }
         }
+        if stopped {
+            if progress {
+                ctx.write(
+                    stop_reason.as_deref().unwrap_or("stop"),
+                    first_problem.unwrap_or(i - 1) as u64,
+                    inputs.len() as u64,
+                    i as u64,
+                    problems,
+                    Some(input.as_str()),
+                )
+                .unwrap_or_else(|e| fail(&e));
+            }
+            break;
+        }
+        if progress
+            && ((i as u64).is_multiple_of(PROGRESS_EVERY_INPUTS)
+                || last_write.elapsed() >= Duration::from_secs(PROGRESS_EVERY_SECS))
+        {
+            ctx.write(
+                "running",
+                i as u64,
+                inputs.len() as u64,
+                i as u64,
+                problems,
+                Some(input.as_str()),
+            )
+            .ok();
+            last_write = Instant::now();
+        }
     }
-    if stop_reason.is_none() {
-        checked = inputs.len();
-    }
+    let checked: usize = i;
 
     let pass = mismatches.is_empty();
+    let pfile = progress_path(&dir);
+    let checkpoint_kept = match &stop_reason {
+        Some(_) => progress,
+        None => {
+            if progress {
+                let _ = std::fs::remove_file(&pfile);
+            }
+            false
+        }
+    };
     let text = if pass {
-        format!(
+        let mut t = format!(
             "DRT: all {checked} inputs match (seed {seed}). Regression gate GREEN — the model \
              and the production code agree on every input tested."
-        )
+        );
+        if smoke {
+            t.push_str(" (smoke tier — the quick check; the full n still gates the release)");
+        }
+        if resume {
+            t.push_str(&format!(" (resumed from index {start})"));
+        }
+        t
     } else {
         let first = &mismatches[0];
         let first_input = first.get("input").and_then(|i| i.as_str()).unwrap_or("");
@@ -1000,7 +1165,7 @@ fn op_drt(args: &Args) {
             .and_then(|l| l.get("out"))
             .and_then(|o| o.as_str())
             .unwrap_or("");
-        format!(
+        let mut t = format!(
             "DRT: MISMATCH input={first_input}\n  lean: {lean_out}\n  prod: {prod_out}\n\
              ({} of {} inputs checked; {} mismatch(es) collected)\n\
              GATE RED — a mismatch on an exact/abstraction-classified definition is a real bug: \
@@ -1009,20 +1174,643 @@ fn op_drt(args: &Args) {
             checked,
             inputs.len(),
             mismatches.len()
-        )
+        );
+        if checkpoint_kept {
+            t.push_str(&format!(
+                "\nCheckpoint kept at {} — after the fix, re-run the same call with \
+                 \"resume\":true; it re-checks index {} (the first failed input) and continues \
+                 from there.",
+                pfile.display(),
+                first_problem.unwrap_or(0)
+            ));
+        }
+        t
     };
 
-    emit(serde_json::json!({
+    let mut result = serde_json::json!({
         "op": "drt",
         "ok": pass,
         "pass": pass,
         "n": inputs.len() as u64,
-        "checked": checked,
+        "checked": checked as u64,
         "seed": seed,
         "stop_reason": stop_reason,
         "mismatches": mismatches,
-        "text": text
-    }));
+    });
+    if smoke {
+        result["tier"] = serde_json::json!("smoke");
+    }
+    if resume {
+        result["resumed_from"] = serde_json::json!(start as u64);
+    }
+    if progress {
+        result["progress_file"] = serde_json::json!(pfile.display().to_string());
+        result["checkpoint"] = serde_json::json!(checkpoint_kept);
+    }
+    result["text"] = serde_json::json!(text);
+    emit(result);
+}
+
+// ─── Progress / checkpoint (drt + check-inputs) ──────────────────
+//
+// A long DRT run must answer "is it still alive?" without `ps aux`,
+// and a re-posted goal (context overflow) must be able to pick a
+// stopped run back up. Both come from one small file,
+// <dir>/.drt-progress.json, written atomically (tmp + rename) every
+// PROGRESS_EVERY_INPUTS inputs or PROGRESS_EVERY_SECS seconds: pid,
+// status, next index, rate, eta, updated_at, and the parameter block
+// that identifies the run. A clean run deletes the file; a stopped
+// run keeps it as the checkpoint that "resume":true continues from.
+
+/// Path of the progress/heartbeat file for a run rooted at `dir`.
+fn progress_path(dir: &Path) -> PathBuf {
+    dir.join(PROGRESS_FILE_NAME)
+}
+
+fn now_s() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// True when `pid` names a live process: kill(pid, 0) succeeds for a
+/// live process, reports EPERM for a live process that is not ours,
+/// and fails with ESRCH when the process is gone.
+fn pid_alive(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error()
+        .raw_os_error()
+        .is_some_and(|e| e == libc::EPERM)
+}
+
+/// Atomically write the progress document (tmp file + rename, so a
+/// poller never reads a torn file).
+fn write_checkpoint(dir: &Path, doc: &serde_json::Value) -> Result<(), String> {
+    let path = progress_path(dir);
+    let tmp = dir.join(format!(".drt-progress.json.tmp.{}", std::process::id()));
+    let json =
+        serde_json::to_string(doc).map_err(|e| format!("cannot serialize checkpoint: {e}"))?;
+    std::fs::write(&tmp, json)
+        .map_err(|e| format!("cannot write checkpoint '{}': {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)
+        .map_err(|e| format!("cannot update checkpoint '{}': {e}", path.display()))?;
+    Ok(())
+}
+
+/// The progress-file context of one run: where the file lives, which
+/// run it identifies (its parameter block), and when the run started
+/// (preserved across resumes so rate/eta stay meaningful).
+struct ProgressCtx {
+    dir: PathBuf,
+    op: &'static str,
+    params: serde_json::Value,
+    started_at: u64,
+}
+
+impl ProgressCtx {
+    /// Write one progress document (atomically), computing rate/eta
+    /// from the time elapsed since `started_at`. `next` is the index
+    /// of the next input to (re-)check; `processed` counts inputs
+    /// checked so far (cumulative across resumes); `last_input` is
+    /// the line at `processed - 1`.
+    fn write(
+        &self,
+        status: &str,
+        next: u64,
+        total: u64,
+        processed: u64,
+        problems: u64,
+        last_input: Option<&str>,
+    ) -> Result<(), String> {
+        let now = now_s();
+        let elapsed = now.saturating_sub(self.started_at);
+        let rate = if elapsed > 0 && processed > 0 {
+            Some((processed as f64 / elapsed as f64).round() * 10.0 / 10.0)
+        } else {
+            None
+        };
+        let eta = rate.map(|r| {
+            if r > 0.0 {
+                (total.saturating_sub(processed) as f64 / r).ceil() as u64
+            } else {
+                u64::MAX
+            }
+        });
+        let doc = serde_json::json!({
+            "version": PROGRESS_VERSION,
+            "op": self.op,
+            "pid": std::process::id(),
+            "status": status,
+            "next": next,
+            "total": total,
+            "processed": processed,
+            "problems": problems,
+            "last_input": last_input,
+            "params": self.params,
+            "started_at": self.started_at,
+            "updated_at": now,
+            "rate_sps": rate,
+            "eta_s": eta
+        });
+        write_checkpoint(&self.dir, &doc)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+/// The parameter block stored in the checkpoint — the resume
+/// identity. A resume is only valid when every field still matches
+/// the call that is resuming it.
+fn checkpoint_params(
+    a: &Args,
+    op: &str,
+    n: u64,
+    seed: u64,
+    bound: u64,
+    per_input: u64,
+    stop_mismatch: bool,
+    max_mismatches: u64,
+    max_rejections: u64,
+    stop_reject: bool,
+    prod: &str,
+    input_gen: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "op": op,
+        "seed": seed,
+        "bound": bound,
+        "n": n,
+        "model": a.model.as_deref().unwrap_or(""),
+        "prod": prod,
+        "input_gen": input_gen,
+        "per_input_timeout_s": per_input,
+        "stop_on_mismatch": stop_mismatch,
+        "max_mismatches": max_mismatches,
+        "max_rejections": max_rejections,
+        "stop_on_reject": stop_reject
+    })
+}
+
+/// Validate the checkpoint at `dir` for a resume and return
+/// `(next, started_at, problems)` — the index to (re-)check first,
+/// the run's original start time, and the cumulative problem count.
+/// Fails the tool on any mismatch: a resume must continue exactly
+/// the run it claims to.
+fn resume_from(
+    dir: &Path,
+    op: &str,
+    params: &serde_json::Value,
+    total: usize,
+    inputs: &[String],
+) -> (usize, u64, u64) {
+    let path = progress_path(dir);
+    let s = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => fail(&format!(
+            "no checkpoint at '{}'; start without \"resume\":true.",
+            path.display()
+        )),
+    };
+    let ck: serde_json::Value = match serde_json::from_str(&s) {
+        Ok(v) => v,
+        Err(e) => fail(&format!("corrupt checkpoint at '{}': {e}", path.display())),
+    };
+    if ck.get("version").and_then(|v| v.as_u64()) != Some(PROGRESS_VERSION) {
+        fail("checkpoint was written by a different lean-verify version; re-run without \"resume\":true.");
+    }
+    if ck.get("op").and_then(|v| v.as_str()) != Some(op) {
+        fail(&format!(
+            "checkpoint was written by op '{}', not '{op}'; re-run without \"resume\":true.",
+            ck.get("op").and_then(|v| v.as_str()).unwrap_or("?")
+        ));
+    }
+    let status = ck.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    if status == "done" {
+        fail("checkpoint marks a completed run; nothing to resume — re-run without \"resume\":true.");
+    }
+    let stored = match ck.get("params").and_then(|p| p.as_object()) {
+        Some(o) => o,
+        None => fail("checkpoint has no parameter block; re-run without \"resume\":true."),
+    };
+    let cur = match params.as_object() {
+        Some(o) => o,
+        None => fail("internal error: current parameters are not an object."),
+    };
+    let mut bad: Vec<String> = Vec::new();
+    {
+        let keys: std::collections::BTreeSet<String> =
+            stored.keys().chain(cur.keys()).map(|k| k.to_string()).collect();
+        for k in &keys {
+            if stored.get(k) != cur.get(k) {
+                bad.push(k.to_string());
+            }
+        }
+    }
+    if !bad.is_empty() {
+        fail(&format!(
+            "checkpoint parameter mismatch ({}): this call differs from the checkpointed run. \
+             Re-run without \"resume\":true to start fresh.",
+            bad.join(", ")
+        ));
+    }
+    let next = ck.get("next").and_then(|v| v.as_u64()).unwrap_or(0);
+    let total_ck = ck.get("total").and_then(|v| v.as_u64()).unwrap_or(u64::MAX);
+    if total_ck != total as u64 {
+        fail(&format!(
+            "checkpoint recorded {total_ck} inputs; this run resolved {total}. The input \
+             sequence changed — re-run without \"resume\":true."
+        ));
+    }
+    if next >= total as u64 {
+        fail("checkpoint points past the end of the input sequence; re-run without \"resume\":true.");
+    }
+    let next = next as usize;
+    let processed_ck = ck.get("processed").and_then(|v| v.as_u64()).unwrap_or(0);
+    if processed_ck > 0 && processed_ck as usize <= inputs.len() {
+        // Determinism guard: the line just before the checkpoint
+        // (`last_input`, the line at `processed - 1`) must be what
+        // the regenerated sequence produces there. LCG sequences are
+        // deterministic by construction; this catches a
+        // non-deterministic input_gen.
+        let recorded = ck.get("last_input").and_then(|v| v.as_str()).unwrap_or("");
+        let actual = inputs
+            .get(processed_ck as usize - 1)
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        if recorded != actual {
+            fail(&format!(
+                "input line {} is now '{}', the checkpoint recorded '{}': the input generator \
+                 is not deterministic — re-run without \"resume\":true.",
+                processed_ck - 1,
+                actual,
+                recorded
+            ));
+        }
+    }
+    if status == "running" {
+        if let Some(pid) = ck.get("pid").and_then(|v| v.as_u64()) {
+            if pid_alive(pid as i32) {
+                fail(&format!(
+                    "another lean-verify run (pid {pid}) still owns this checkpoint; wait for \
+                     it to finish or kill it, then retry."
+                ));
+            }
+        }
+    }
+    let started_at = ck.get("started_at").and_then(|v| v.as_u64()).unwrap_or_else(now_s);
+    let problems = ck.get("problems").and_then(|v| v.as_u64()).unwrap_or(0);
+    (next, started_at, problems)
+}
+
+/// A fresh run must not clobber the checkpoint of a live run. A
+/// stale file (dead pid, or a stopped status) is simply replaced.
+fn guard_live_run(dir: &Path) {
+    let Ok(s) = std::fs::read_to_string(progress_path(dir)) else {
+        return;
+    };
+    let Ok(ck) = serde_json::from_str::<serde_json::Value>(&s) else {
+        return;
+    };
+    if ck.get("version").and_then(|v| v.as_u64()) != Some(PROGRESS_VERSION) {
+        return;
+    }
+    if ck.get("status").and_then(|v| v.as_str()) != Some("running") {
+        return;
+    }
+    if let Some(pid) = ck.get("pid").and_then(|v| v.as_u64()) {
+        if pid_alive(pid as i32) {
+            fail(&format!(
+                "another lean-verify run (pid {pid}) owns this checkpoint (status running); \
+                 wait for it to finish or kill it before starting a fresh run."
+            ));
+        }
+    }
+}
+
+// ─── Input-protocol preflight (check-inputs) ──────────────────────
+
+/// `check-inputs` — the DRT preflight. Feeds the generator's lines
+/// through the model executable (and the production executable when
+/// given) and reports the lines a side rejects. A side rejects an
+/// input when it exits non-zero or times out; an accepted input
+/// exits 0. This is the ~10 s check for "the generator emits
+/// well-formed lines" that used to cost a full drt run to find out.
+/// (An executable that exits 0 even on parse failure is not caught
+/// here; op=drt catches that through the output comparison.)
+fn op_check_inputs(args: &Args) {
+    let model = args
+        .model
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| {
+            fail("check-inputs requires 'model' (the sh -c command of the Lean model executable).")
+        });
+    let prod = args.prod.clone().filter(|s| !s.trim().is_empty());
+    let n = match resolve_n(args, CHECK_INPUTS_DEFAULT_N) {
+        x if (1..=1000000).contains(&x) => x,
+        x => fail(&format!("check-inputs 'n' must be in 1..=1000000, got {x}.")),
+    };
+    let seed = args.seed.unwrap_or(42);
+    let bound = args.bound.unwrap_or(0);
+    let per_input = match args.per_input_timeout_s.unwrap_or(30) {
+        x if (1..=300).contains(&x) => x,
+        x => fail(&format!(
+            "check-inputs 'per_input_timeout_s' must be in 1..=300, got {x}."
+        )),
+    };
+    let stop_reject = args.stop_on_reject.unwrap_or(true);
+    let max_rejections = match args.max_rejections.unwrap_or(10) {
+        x if (1..=1000).contains(&x) => x,
+        x => fail(&format!(
+            "check-inputs 'max_rejections' must be in 1..=1000, got {x}."
+        )),
+    };
+    let progress = args.progress.unwrap_or(false);
+    let resume = args.resume.unwrap_or(false);
+    let dir = match abs_path(&PathBuf::from(args.dir.clone().unwrap_or_else(|| ".".into())))
+    {
+        Ok(p) => p,
+        Err(e) => fail(&e),
+    };
+    if !dir.is_dir() {
+        fail(&format!("directory '{}' does not exist.", dir.display()));
+    }
+
+    // Resolve the input sequence (same contract as drt).
+    let inputs: Vec<String> = match &args.input_gen {
+        Some(gen) => {
+            let r = match run_sh(gen, &dir, GEN_TIMEOUT_S) {
+                Ok(r) => r,
+                Err(e) => fail(&e),
+            };
+            if r.exit != 0 {
+                emit(serde_json::json!({
+                    "op": "check-inputs",
+                    "ok": false,
+                    "n": 0,
+                    "checked": 0,
+                    "seed": seed,
+                    "rejected": [],
+                    "text": format!(
+                        "Input generator failed (exit {}):\n{}\n(check-inputs not run)",
+                        r.exit,
+                        tail_cap(&r.stderr, 2000)
+                    ),
+                }));
+                return;
+            }
+            r.stdout
+                .lines()
+                .map(|l| l.trim_end().to_string())
+                .filter(|l| !l.is_empty())
+                .take(n as usize)
+                .collect()
+        }
+        None => lcg_values(seed, bound, n)
+            .into_iter()
+            .map(|v| v.to_string())
+            .collect(),
+    };
+    if inputs.is_empty() {
+        emit(serde_json::json!({
+            "op": "check-inputs",
+            "ok": false,
+            "n": 0,
+            "checked": 0,
+            "seed": seed,
+            "rejected": [],
+            "text": "No inputs produced (generator empty). check-inputs not run.",
+        }));
+        return;
+    }
+
+    let params = checkpoint_params(
+        args,
+        "check-inputs",
+        n,
+        seed,
+        bound,
+        per_input,
+        args.stop_on_mismatch.unwrap_or(true),
+        args.max_mismatches.unwrap_or(10),
+        max_rejections,
+        stop_reject,
+        prod.as_deref().unwrap_or(""),
+        args.input_gen.as_deref().unwrap_or(""),
+    );
+    let (start, started_at, mut problems) = if resume {
+        if !progress {
+            fail("check-inputs \"resume\":true requires the checkpoint file; run with \"progress\":true.");
+        }
+        resume_from(&dir, "check-inputs", &params, inputs.len(), &inputs)
+    } else {
+        if progress {
+            guard_live_run(&dir);
+        }
+        (0, now_s(), 0)
+    };
+    let ctx = ProgressCtx {
+        dir: dir.clone(),
+        op: "check-inputs",
+        params,
+        started_at,
+    };
+    if progress {
+        ctx.write(
+            "running",
+            start as u64,
+            inputs.len() as u64,
+            start as u64,
+            problems,
+            inputs.get(start.saturating_sub(1)).map(|s| s.as_str()),
+        )
+        .unwrap_or_else(|e| fail(&e));
+    }
+
+    let mut rejections: Vec<serde_json::Value> = Vec::new();
+    let mut stop_reason: Option<String> = None;
+    let mut first_problem: Option<usize> = None;
+    let mut last_write = Instant::now();
+    let mut i = start;
+    while i < inputs.len() {
+        let input = &inputs[i];
+        let m = match run_input_side(&model, input, &dir, per_input) {
+            Ok(r) => r,
+            Err(e) => fail(&e),
+        };
+        let p = prod.as_deref().map(|pc| match run_input_side(pc, input, &dir, per_input) {
+            Ok(r) => r,
+            Err(e) => fail(&e),
+        });
+        let mut reasons: Vec<String> = Vec::new();
+        if m.timed_out {
+            reasons.push("model:timeout".to_string());
+        }
+        if m.exit != 0 {
+            reasons.push(format!("model:exit_{}", m.exit));
+        }
+        if let Some(pr) = &p {
+            if pr.timed_out {
+                reasons.push("prod:timeout".to_string());
+            }
+            if pr.exit != 0 {
+                reasons.push(format!("prod:exit_{}", pr.exit));
+            }
+        }
+        i += 1;
+        if !reasons.is_empty() {
+            if first_problem.is_none() {
+                first_problem = Some(i - 1);
+            }
+            problems += 1;
+            rejections.push(serde_json::json!({
+                "input": input,
+                "reasons": reasons,
+                "model": {
+                    "exit": m.exit,
+                    "timed_out": m.timed_out,
+                    "stderr": tail_cap(&m.stderr, 400)
+                },
+                "prod": p.as_ref().map(|pr| serde_json::json!({
+                    "exit": pr.exit,
+                    "timed_out": pr.timed_out,
+                    "stderr": tail_cap(&pr.stderr, 400)
+                })),
+            }));
+            let reached = rejections.len() as u64 >= max_rejections;
+            if stop_reject || reached {
+                stop_reason = Some(if stop_reject {
+                    "reject".to_string()
+                } else {
+                    "limit".to_string()
+                });
+                if progress {
+                    ctx.write(
+                        stop_reason.as_deref().unwrap(),
+                        first_problem.unwrap_or(i - 1) as u64,
+                        inputs.len() as u64,
+                        i as u64,
+                        problems,
+                        Some(input.as_str()),
+                    )
+                    .unwrap_or_else(|e| fail(&e));
+                }
+                break;
+            }
+        }
+        if progress
+            && ((i as u64).is_multiple_of(PROGRESS_EVERY_INPUTS)
+                || last_write.elapsed() >= Duration::from_secs(PROGRESS_EVERY_SECS))
+        {
+            ctx.write(
+                "running",
+                i as u64,
+                inputs.len() as u64,
+                i as u64,
+                problems,
+                Some(input.as_str()),
+            )
+            .ok();
+            last_write = Instant::now();
+        }
+    }
+    let checked: usize = i;
+    let ok = rejections.is_empty();
+    let pfile = progress_path(&dir);
+    let checkpoint_kept = match &stop_reason {
+        Some(_) => progress,
+        None => {
+            if progress {
+                let _ = std::fs::remove_file(&pfile);
+            }
+            false
+        }
+    };
+
+    let who = if prod.is_some() { "model and prod" } else { "model" };
+    let text = if ok {
+        let mut t = format!(
+            "check-inputs: all {checked} inputs accepted by the {who} side (a side rejects an \
+             input when it exits non-zero or times out; accepted inputs exit 0). The \
+             generator's lines are well-formed for the DRT protocol — run op=drt for the \
+             full regression gate."
+        );
+        if resume {
+            t.push_str(&format!(" (resumed from index {start})"));
+        }
+        t
+    } else {
+        let first = &rejections[0];
+        let first_input = first.get("input").and_then(|x| x.as_str()).unwrap_or("");
+        let reasons: Vec<String> = first
+            .get("reasons")
+            .and_then(|r| r.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let m_err = first
+            .get("model")
+            .and_then(|x| x.get("stderr"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        let p_err = first
+            .get("prod")
+            .and_then(|x| x.get("stderr"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        let mut t = format!(
+            "check-inputs: REJECTED input={first_input} ({})\n  model stderr: {m_err}\n",
+            reasons.join(", ")
+        );
+        if prod.is_some() {
+            t.push_str(&format!("  prod stderr: {p_err}\n"));
+        }
+        t.push_str(&format!(
+            "({checked} of {} inputs checked; {} rejection(s); stop: {})\n\
+             GATE RED — the generator is emitting lines the executable(s) reject. Fix the \
+             generator or the protocol, re-run check-inputs, then op=drt.",
+            inputs.len(),
+            rejections.len(),
+            stop_reason.as_deref().unwrap_or("end")
+        ));
+        if checkpoint_kept {
+            t.push_str(&format!(
+                "\nCheckpoint kept at {} — after the fix, re-run the same call with \
+                 \"resume\":true; it re-checks index {} (the first rejected input) and \
+                 continues from there.",
+                pfile.display(),
+                first_problem.unwrap_or(0)
+            ));
+        }
+        t
+    };
+
+    let mut result = serde_json::json!({
+        "op": "check-inputs",
+        "ok": ok,
+        "n": inputs.len() as u64,
+        "checked": checked as u64,
+        "seed": seed,
+        "stop_reason": stop_reason,
+        "rejected": rejections,
+    });
+    if resume {
+        result["resumed_from"] = serde_json::json!(start as u64);
+    }
+    if progress {
+        result["progress_file"] = serde_json::json!(pfile.display().to_string());
+        result["checkpoint"] = serde_json::json!(checkpoint_kept);
+    }
+    result["text"] = serde_json::json!(text);
+    emit(result);
 }
 
 // ─── Rust -> Lean translation (charon + aeneas pipeline) ─────────

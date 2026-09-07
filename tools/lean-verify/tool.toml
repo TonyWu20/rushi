@@ -13,7 +13,7 @@ required = ["op"]
 
 [tool.schema.properties.op]
 type = "string"
-description = "Operation: 'init' create a lake project, 'build' run the zero-sorry lake build kernel gate, 'drt' differential random testing, 'translate' translate a Rust crate to a Lean model via charon + aeneas."
+description = "Operation: 'init' create a lake project, 'build' run the zero-sorry lake build kernel gate, 'drt' differential random testing, 'check-inputs' preflight the DRT input protocol (report the lines the executables reject, without the full comparison), 'translate' translate a Rust crate to a Lean model via charon + aeneas."
 
 [tool.schema.properties.name]
 type = "string"
@@ -38,7 +38,7 @@ description = "drt: sh -c command for the production-code executable. Same input
 
 [tool.schema.properties.n]
 type = "integer"
-description = "drt: number of random inputs. Default 100000, max 1000000."
+description = "drt/check-inputs: number of inputs. drt default 100000 (2000 when smoke is true); check-inputs default 2000. Max 1000000."
 default = 100000
 
 [tool.schema.properties.seed]
@@ -66,5 +66,29 @@ default = 10
 
 [tool.schema.properties.per_input_timeout_s]
 type = "integer"
-description = "drt: per-input command timeout in seconds. Default 30, max 300."
+description = "drt/check-inputs: per-input command timeout in seconds. Default 30, max 300."
 default = 30
+
+[tool.schema.properties.smoke]
+type = "boolean"
+description = "drt/check-inputs: the quick tier. When n is not given, n=2000 (~15 s) instead of the full default. An explicit n still wins. The full tier gates the release; smoke is the one-liner quick check."
+default = false
+
+[tool.schema.properties.progress]
+type = "boolean"
+description = "drt: write the progress/heartbeat + checkpoint file <dir>/.drt-progress.json (every ~10 s or 100 inputs: pid, next index, rate, eta, updated_at; poll it to see whether a long run is alive; deleted on a clean run, kept on a stop). Default true for drt, false for check-inputs."
+
+[tool.schema.properties.resume]
+type = "boolean"
+description = "drt/check-inputs: continue from the checkpoint file left by a stopped run (mismatch/timeout/reject), starting at the first failed index. The call must match the checkpoint's parameters and the input sequence must be deterministic. Default false."
+default = false
+
+[tool.schema.properties.max_rejections]
+type = "integer"
+description = "check-inputs: number of rejections to collect before stopping when stop_on_reject is false. Default 10, max 1000."
+default = 10
+
+[tool.schema.properties.stop_on_reject]
+type = "boolean"
+description = "check-inputs: stop at the first rejected input. Default true. Set false to collect up to max_rejections examples."
+default = true
