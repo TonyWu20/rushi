@@ -16,15 +16,17 @@ readiness record) and `loop-lifecycle-hooks.md` (the hook ABI).
 
 ### 1.1 Goal is set by the user, not the agent
 
-The current flow: TUI arms a `goal_armed` marker → `model.before` hook
-injects "call the `goal` tool" → the agent may or may not call it.
-The goal is not set until the agent complies.
+The flow this redesign replaces: the `model.before` hook injects
+"call the `goal` tool" → the agent may or may not call it. The goal
+is not set until the agent complies.
 
-New flow: TUI arms the marker → user types the goal and sends → the goal
-extension receives the forwarded `user_message` event and writes the
-session's goal files directly. The `model.before` hook then injects the
-goal prompt (context, not a tool-call instruction). No agent round-trip
-is required to activate the goal.
+New flow: the user selects `goal` from the palette; the goal
+extension arms its in-memory flag (the armed hint shows in the
+host-reserved row slot, §1.8) → user types the goal and sends → the
+goal extension receives the forwarded `user_message` event and writes
+the session's goal files directly. The `model.before` hook then
+injects the goal prompt (context, not a tool-call instruction). No
+agent round-trip is required to activate the goal.
 
 The `goal` tool under `tools/goal/` remains for agent-initiated sub-goals
 and CLI use. The primary TUI path no longer depends on it.
@@ -131,9 +133,9 @@ Consequences:
   full `GoalState` in `goal.json`. `GoalState::load` reads both
   layouts; the next save migrates the legacy state into
   `goal-<id>.json` and rewrites `goal.json` as a pointer.
-- All consumers (goal tools, goal hooks, the TUI status line) go
-  through `GoalState::load` / `GoalState::save`, so the layout is
-  contained in `crates/goal-state` — no call site changes.
+- All consumers (goal tools, goal hooks, the goal extension's row
+  slot) go through `GoalState::load` / `GoalState::save`, so the
+  layout is contained in `crates/goal-state` — no call site changes.
 
 
 
@@ -218,33 +220,49 @@ budget" wrap-up prompt is therefore *not* ported — it is incoherent
 without a ceiling. The prompt instead tells the agent to keep working
 until the goal is complete or it is genuinely blocked.
 
-### 1.7 TUI goal status
+### 1.7 Goal status via the host-reserved row slot
 
-The TUI shows goal state in two places:
+The TUI carries no goal state: `goal-state` is not a TUI
+dependency, and no goal files are read inside the TUI process. The
+host reserves one generic row above the input box — between the
+working row and the input area — as the kernel-owned `row`
+capability (docs/ui-extension.md section 4). The slot belongs to
+whichever installed extension owns the `row` cap; the host pumps the
+`row` op on the owner's tick cadence and draws the owner's last
+valid lines. With no owner, or an empty spec, the slot collapses to
+zero rows.
 
-1. **Top-right status bit**: alongside `[idle]` / `[wait]`, a `[goal]`
-   bit in the success color when a goal is active.
-2. **Goal status line**: a single line between the working row and the
-   input box, shown only when a goal is active:
-   `⚡ "goal text" · 2m 34s · 12.4k`. Elapsed time is computed from
-   `opened_at` (`t+<secs>s` format); the number is the cumulative
-   assistant-token usage (informational — see §1.6, no budget). Both
-   use pi-goal's `formatTokenCount` / `formatDuration` (ported from
-   `accounting.ts` / `runtime.ts`).
+The `goal` extension owns that slot (docs/ui-extension.md section 8
+item 6). While a goal is open it supplies:
 
-The main block border is colored (success accent) when a goal is active.
+- **Goal status line**: `⚡ "goal text" · 2m 34s · 12.4k`.
+  Elapsed time is computed from `opened_at` (`t+<secs>s` format);
+  the number is the cumulative assistant-token usage
+  (informational — see §1.6, no budget). The extension ports
+  pi-goal's `formatTokenCount` / `formatDuration` (`accounting.ts`
+  / `runtime.ts`).
+- **Armed hint** while a goal write/edit is pending (§1.8).
 
-The TUI reads the session's goal files (the `goal.json` pointer plus
-`goal-<id>.json`) from the active session's directory on each
-tick. This requires a `session_dir` method on the `SessionPort` trait.
+The goal extension reads the session's goal files (the `goal.json`
+pointer plus `goal-<id>.json`) from the active session's directory on
+each row tick. The former TUI-owned goal chrome (the `[goal]` status
+bit, the success-accent border) is retired with the decoupling: the
+bare TUI shows no goal row, and installing the goal extension
+restores it.
 
-### 1.8 Auto-Insert and persistent hint
+### 1.8 Armed hint, extension-owned
 
-After selecting `goal` or `goal edit` from the palette, the TUI
-automatically switches the editor to Insert mode. A persistent hint
-("goal armed — type your goal, Enter to send") is shown in the input
-box border title until the user sends a message. The hint survives
-mode changes (unlike the transient `flash` used today).
+After selecting `goal` or `goal edit` from the palette, the goal
+extension arms an in-memory flag and the invoke reply flashes the
+confirmation ("Goal mode armed. Type your goal description in the
+input box and send it."). On each row tick, while armed, the
+extension's row slot shows the persistent hint: "type your goal"
+when the editor is in insert mode, "press i, type your goal" when
+it is in a modal normal mode. The hint survives mode changes. The
+next `user_message` event the host forwards clears the armed state
+and writes (or edits) the goal files (§1.1). The TUI hosts none of
+this: arming, hint wording, and the slot content are
+extension-owned; the host only pumps the `row` op.
 
 ## 2. Files touched
 
@@ -332,6 +350,9 @@ preserves `id` and `iteration`.
   this extension.
 - Add two new command entries: `goal_pause`, `goal_clear`.
 - Update the comment block to describe the event-driven write flow.
+- `caps = ["commands", "append", "row"]`: the extension owns the
+  host-reserved row slot above the input box (docs/ui-extension.md
+  section 4, section 8 item 6).
 
 ### `ui_extensions/goal/src/main.rs`
 
@@ -339,7 +360,7 @@ preserves `id` and `iteration`.
 - Handle `event` op: when `op.event.type == "user_message"` and
   `armed.is_some()`, write the goal files via `GoalState::new` +
   `save` (start) or `GoalState::edit_goal` (edit). Append a
-  `goal_set` ext_status marker.
+  `goal_set` (start) or `goal_edited` (edit) ext_status marker.
   Clear `armed`.
 - Handle `invoke` for `goal_pause`: load the current goal, set
   `active = false`, save. Reply with confirmation.
@@ -347,6 +368,10 @@ preserves `id` and `iteration`.
   `GoalState::clear` (per-goal `goal-<id>.json` files stay as
   traces). Reply with confirmation.
 - `goal_resume` unchanged (already rewrites the goal state directly).
+- Handle the tick-driven `row` op: reply `row_spec` with the goal
+  status line while a goal is open, the armed hint while a
+  write/edit is pending, or an empty array (row hidden). Ports
+  `format_token_count` / `format_duration` from pi-goal.
 
 ### `bin/hook-goal-arm/src/main.rs`
 
@@ -377,12 +402,18 @@ preserves `id` and `iteration`.
 
 ### `bin/tui/Cargo.toml`
 
-- Add `goal-state = { path = "../../crates/goal-state" }`.
+- No goal-state dependency. The TUI has zero goal-mode coupling:
+  the host exposes a generic `row` slot (docs/ui-extension.md
+  section 4) and the goal extension owns it (section 8 item 6).
+  Goal state lives in `ui_extensions/goal`, the goal hooks, and the
+  goal tools, which share `crates/goal-state`.
 
 ### `bin/tui/src/port.rs`
 
-- Add `fn session_dir(&self, session: &SessionId) -> Result<PathBuf,
-  BusError>` to the `SessionPort` trait.
+- `fn session_dir(&self, session: &SessionId) -> Result<PathBuf,
+  BusError>` on the `SessionPort` trait: used by `FileSessionPort`
+  for the log and model-stream paths. The TUI no longer reads goal
+  files through it (goal state is extension-owned, §1.7).
 
 ### `bin/tui/src/port_file.rs`
 
@@ -391,43 +422,37 @@ preserves `id` and `iteration`.
 
 ### `bin/tui/src/app.rs`
 
-- Add `goal_state: Option<goal_state::GoalState>` field to `App`.
-- Add `goal_armed: bool` field (set on invoke reply for goal /
-  goal_edit; cleared on SendDraft).
-- Add `fn refresh_goal(&mut self, port: &dyn SessionPort)` — reads
-  the session's goal files (pointer + per-goal state file) from
-  `port.session_dir(active)` and updates
-  `self.goal_state`.
+- No goal fields: the `goal_state` / `goal_armed` fields and
+  `refresh_goal` were removed with the decoupling. Goal UI state
+  lives in the host's row slot (`bin/tui/src/ext.rs`,
+  `SlotShared.last_row`), supplied by the goal extension.
 
 ### `bin/tui/src/main.rs`
 
-- In the `InvokeExtCommand` handler: when the reply is `ok` and the
-  command id is `goal` or `goal_edit`, set `app.editor().mode =
-  Mode::Insert` and `app.goal_armed = true`.
-- Before each draw tick: call `app.refresh_goal(&port)` (cheap: one
-  small file read).
-- In `SendDraft`: after appending the event, set
-  `app.goal_armed = false`.
+- No `goal` / `goal_edit` special-casing: the invoke handler does
+  not arm goal state or switch the editor mode. Each draw tick
+  calls `host.pump_row(&tick, &mode)` alongside `pump_frame`,
+  feeding the row owner on its tick cadence.
 
 ### `bin/tui/src/render.rs`
 
-- In the title row (around L2176): when `app.goal_state` is
-  `Some(g)` and `g.is_open()`, push a `[goal]` `Span` to
-  `status_bits` in the success color.
-- For the main block border: when goal active, use the success accent
-  for the border color instead of the default.
-- Add a goal status line between the working row and the input box
-  (only when goal active):
-  `⚡ "{goal}" · {elapsed} · {used} tokens`.
-  - `elapsed`: parse `opened_at` (`t+<secs>s`), compute
-    `now - opened_secs`, format as `Nm` / `Ns` (port of
-    pi-goal's `formatDuration`).
-  - `{used}`: cumulative `GoalState::used_tokens`, informational only
-    (§1.6 — no budget ratio). Format with a `format_token_count`
-    helper (port of pi-goal's `formatTokenCount`).
-- In `input_box_title`: when `app.goal_armed`, show the persistent
-  hint `"goal armed — type your goal, Enter to send"` instead of the
-  default title.
+- No goal-specific rendering. The host-reserved row slot between the
+  working row and the input box is drawn from `host.row_spec()`:
+  one layout cell per line the row owner last supplied; zero cells
+  when there is no owner or the spec is empty. The goal extension
+  supplies the goal status line and the armed hint for that slot
+  (docs/ui-extension.md section 4, `row` capability).
+
+### `bin/tui/src/ext.rs`
+
+- Host-reserved `row` capability (kernel-owned slot): `row` in
+  `CAPS`; `Discovery.row_owner` resolves a single row owner across
+  the composed sequence (two owners refuse the start, naming both
+  files); `SlotShared.last_row` + `row_tick`; `ExtHost::pump_row`
+  sends the `row` op on the owner's tick cadence; the `row_spec`
+  reply stores the last valid row (G5: a bad reply keeps the last
+  valid row); `ExtHost::row_spec()` exposes the owner's last valid
+  lines for the renderer.
 
 ### `scripts/run-idle-continue-e2e.sh`
 
@@ -524,24 +549,32 @@ P11. no-active-goal-stops: given no active goal (no goal files, or
     `active = false`), observe that at the `run.idle` window the hook
     returns `{}` and no continuation prompt is injected.
 
-P12. auto-insert-on-arm: given the user selects `goal` from the
-    palette, observe that after the palette closes the input box is in
-    Insert mode and the input box border title contains the substring
-    "goal armed". The hint is absent after the user sends a message.
+P12. armed-hint-in-row: given the user selects `goal` or `goal edit`
+    from the palette with the goal extension installed, observe that
+    the host-reserved row shows the armed hint until the user sends
+    the next message: "type your goal" when the editor is in insert
+    mode, "press i, type your goal" when it is in a modal normal
+    mode. The hint is absent after the message is sent. In the bare
+    TUI (no goal extension) observe no armed hint and no goal
+    palette commands.
 
 P13. goal-status-line: given an active goal with text G,
-    `opened_at = T0`, and cumulative `used_tokens = U`, observe that
-    the TUI renders a line containing G, a human-readable elapsed time
-    computed from `now - T0`, and the token count formatted via
-    `format_token_count` (no budget ratio).
+    `opened_at = T0`, and cumulative `used_tokens = U`, and the goal
+    extension installed, observe that the host-reserved row contains a
+    line with G, a human-readable elapsed time computed from
+    `now - T0`, and the token count formatted via the extension's
+    `format_token_count` (no budget ratio). Without the extension,
+    observe no such row.
 
-P14. goal-mode-border: given an active goal, observe that the TUI
-    main border color differs from the idle border color.
+P14. goal-mode-border: withdrawn with the goal-state decoupling. The
+    TUI no longer colors the main border for goal mode; the goal
+    chrome lives in the extension-owned row slot (P12, P13).
 
 P15. no-goal-no-injection: given no active goal (no goal files or
     `active = false`), observe that the model request is unchanged
-    (no trailing goal block in `input`) and the TUI shows no goal
-    status line and no `[goal]` bit.
+    (no trailing goal block in `input`) and the goal extension's row
+    is empty (no goal status line). In the bare TUI observe no goal
+    row at all.
 
 P16. goal-prompt-invariant: while an active goal exists (pointer + state file) and
     `active = true`, observe that every model request contains the
@@ -578,10 +611,10 @@ P17. cache-prefix-stability: given an active goal whose objective and
 | P9 | completion-guard | `test_contradictory_completion` in `tools/goal_complete/src/main.rs` + e2e scenario | open |
 | P10 | active-goal-continue | `test_active_goal_continues` in `bin/hook-goal-idle/src/main.rs` (goal active, not blocked → `continue`, no budget check) + e2e scenario in `scripts/run-idle-continue-e2e.sh` | open |
 | P11 | no-active-goal-stops | `test_no_active_goal_stops` in `bin/hook-goal-idle/src/main.rs` (no goal.json, or active=false → `{}`) + e2e scenario | open |
-| P12 | auto-insert-on-arm | `test_auto_insert_on_arm` in `bin/tui/src/app.rs` (unit test: invoke goal command, assert `editor.mode() == Insert`) + `test_persistent_hint` in `bin/tui/src/render.rs` | open |
-| P13 | goal-status-line | `test_goal_status_line` in `bin/tui/src/render.rs` (assert the rendered line contains goal text, elapsed, token count — no budget ratio) | open |
-| P14 | goal-mode-border | `test_goal_border_color` in `bin/tui/src/render.rs` | open |
-| P15 | no-goal-no-injection | `test_no_goal_no_injection` in `bin/hook-goal-arm/src/main.rs` (no goal.json → `{}`) + `test_no_goal_status_line` in `bin/tui/src/render.rs` | open |
+| P12 | armed-hint-in-row | `test_row_lines_armed_hint_in_insert_mode`, `test_row_lines_armed_hint_in_normal_mode`, `test_row_lines_empty_when_no_goal_and_not_armed` in `ui_extensions/goal/src/main.rs` + PTY smoke goal-row case | open |
+| P13 | goal-status-line | `test_row_lines_goal_open` in `ui_extensions/goal/src/main.rs` (row contains goal text, elapsed, token count — no budget ratio) + PTY smoke goal-row case | open |
+| P14 | goal-mode-border | withdrawn: the TUI border is no longer goal-colored with the decoupling; the goal chrome lives in the row slot (P12, P13) | withdrawn |
+| P15 | no-goal-no-injection | `test_no_goal_no_injection` in `bin/hook-goal-arm/src/main.rs` (no goal.json → `{}`) + `test_row_lines_empty_when_no_goal_and_not_armed` in `ui_extensions/goal/src/main.rs` + bare-TUI build proof (`cargo tree -p tui` has no goal-state) | open |
 | P16 | goal-prompt-invariant | `test_goal_block_pure_and_stable` in `crates/goal-state/src/lib.rs` (two equal `(goal,id)` → equal block bytes; a `GoalState` differing only in `iteration`/`used_tokens`/`opened_at` still yields the identical block) + `test_block_injected_every_active_call` in `bin/hook-goal-arm/src/main.rs` (active goal → inject; cleared goal → `{}`, no log dependency) + `test_block_survives_compaction` e2e scenario in `scripts/run-idle-continue-e2e.sh` (compact the log, re-inject from the goal files) | open |
 | P17 | cache-prefix-stability | `test_block_byte_stable_across_turns` in `crates/goal-state/src/lib.rs` (consecutive calls with unchanged `(goal,id)` emit identical block bytes) + e2e assertion in `scripts/run-idle-continue-e2e.sh` that the trailing goal-block item is byte-identical across two active turns and the `instructions` prefix is untouched | open |
 
@@ -637,11 +670,16 @@ moving to the next.
 5. **`bin/hook-goal-idle`** — use `build_continue_prompt`, increment
    `iteration`.
 
-6. **`bin/tui`** — `port.rs` (`session_dir` on trait),
-   `port_file.rs` (implement), `app.rs` (`goal_state`, `goal_armed`),
-   `main.rs` (auto-Insert, refresh, clear armed on send),
-   `render.rs` (goal bit, border color, status line, persistent hint),
-   `Cargo.toml` (add `goal-state` dep).
+6. **`bin/tui`** — host-reserved `row` capability in `ext.rs`
+   (`CAPS`, `Discovery.row_owner`, `SlotShared.last_row` /
+   `row_tick`, `ExtHost::pump_row`, the `row_spec` reply,
+   `row_spec()` getter); the main loop pumps `pump_row` beside
+   `pump_frame`; `render.rs` draws the slot from `host.row_spec()`
+   (one layout cell per line; zero cells without an owner). The TUI
+   holds no goal state: no `goal-state` dep, no goal fields, no
+   `goal` / `goal_edit` invoke special-casing. `session_dir` stays
+   on the `SessionPort` trait (used by `FileSessionPort` for the
+   log and model-stream paths).
 
 7. **`scripts/run-idle-continue-e2e.sh`** — add the new scenarios
    (P1, P2, P3, P4, P5, P8, P9, P16, P17).

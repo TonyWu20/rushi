@@ -62,7 +62,16 @@ const DEFAULT_TICK_MS: u64 = 1000;
 /// reply (ui-extension-plan stage 4 open items: status staleness).
 const INITIAL_STATUS_GRACE: Duration = Duration::from_secs(10);
 /// The capability names a manifest may list.
-pub const CAPS: &[&str] = &["render", "status", "transform", "append", "notify", "frame", "commands"];
+pub const CAPS: &[&str] = &[
+    "render",
+    "status",
+    "transform",
+    "append",
+    "notify",
+    "frame",
+    "commands",
+    "row",
+];
 /// Cap on the number of cached extension line-replies per slot. The
 /// render layer only displays the last `TRANSCRIPT_EVENT_CAP` events,
 /// so keeping more than a multiple of that in memory is wasted. The
@@ -246,6 +255,11 @@ pub struct Discovery {
     /// the input-area rendering (border style, border color, the
     /// label); one owner across the whole sequence, like `status`.
     pub frame_owner: Option<usize>,
+    /// The single `row` owner index, if one exists. The row owner
+    /// owns the host-reserved content row above the input box
+    /// (between the working row and the input area); one owner
+    /// across the whole sequence, like `status` and `frame`.
+    pub row_owner: Option<usize>,
 }
 
 impl Discovery {
@@ -312,6 +326,27 @@ pub fn discover(cfg: &TuiConfig) -> Result<Discovery, ExtError> {
     }
     let frame_owner = frames.into_iter().next();
 
+    // The row slot allows one owner across the whole sequence, like
+    // the status and frame slots: one surface (the host-reserved
+    // content row above the input box), one owner.
+    let rows: Vec<usize> = (0..exts.len())
+        .filter(|&i| exts[i].manifest.caps.iter().any(|c| c == "row"))
+        .collect();
+    if rows.len() > 1 {
+        let names = rows
+            .iter()
+            .map(|&i| exts[i].manifest.manifest_path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(" and ");
+        return Err(ExtError {
+            message: format!(
+                "two or more extensions own the `row` slot: {names}. \
+                 The host allows one owner across the whole sequence."
+            ),
+        });
+    }
+    let row_owner = rows.into_iter().next();
+
     let mut kind_owners = HashMap::new();
     let mut transform_owners = HashMap::new();
     for (i, e) in exts.iter().enumerate() {
@@ -332,6 +367,7 @@ pub fn discover(cfg: &TuiConfig) -> Result<Discovery, ExtError> {
         exts,
         status_owner,
         frame_owner,
+        row_owner,
         kind_owners,
         transform_owners,
         index_by_name,
@@ -791,6 +827,11 @@ pub enum ExtItem {
     /// Informational: the frame re-renders on the next draw.
     #[allow(dead_code)]
     FrameUpdated { ext: String },
+    /// A valid `row_spec` reply replaced the host-reserved row
+    /// content above the input box. Informational: the row
+    /// re-renders on the next draw.
+    #[allow(dead_code)]
+    RowUpdated { ext: String },
     /// A matching `transformed` reply completed its request.
     /// The `req` field is informational for logs; the main loop does
     /// not read it in Stage 1.
@@ -1045,6 +1086,10 @@ struct SlotShared {
     pub last_status: Mutex<Option<Vec<ExtLine>>>,
     /// The last valid `frame` reply (G5: a bad reply keeps it).
     pub last_frame: Mutex<Option<FrameSpec>>,
+    /// The last valid `row_spec` reply (G5: a bad reply keeps it).
+    /// `None` when no `row` extension has replied yet: the host
+    /// shows no row.
+    pub last_row: Mutex<Option<Vec<ExtLine>>>,
     /// When the last valid `status` reply landed (or `None` since
     /// the generation started). The staleness check reads it.
     pub last_status_reply: Mutex<Option<Instant>>,
@@ -1067,6 +1112,12 @@ struct SlotShared {
     /// re-arm the deadline every cycle, so `pump_frame` always sees a
     /// future deadline and the `frame` op is never sent.
     pub frame_tick: Mutex<TickClock>,
+    /// The `row` op's own deadline. A row owner may also declare the
+    /// `status` or `frame` cap; one shared clock would let the
+    /// competing pump re-arm the deadline every cycle, so
+    /// `pump_row` always sees a future deadline and the `row` op is
+    /// never sent.
+    pub row_tick: Mutex<TickClock>,
 }
 
 struct HostInner {
@@ -1127,6 +1178,7 @@ impl ExtHost {
                     lines_cache: Mutex::new(LinesCache::new()),
                     last_status: Mutex::new(None),
                     last_frame: Mutex::new(None),
+                    last_row: Mutex::new(None),
                     last_status_reply: Mutex::new(None),
                     gen_started: Mutex::new(Instant::now()),
                     status_stale: AtomicBool::new(false),
@@ -1138,6 +1190,10 @@ impl ExtHost {
                         seq: 0,
                     }),
                     frame_tick: Mutex::new(TickClock {
+                        next_at: Instant::now(),
+                        seq: 0,
+                    }),
+                    row_tick: Mutex::new(TickClock {
                         next_at: Instant::now(),
                         seq: 0,
                     }),
@@ -1418,6 +1474,49 @@ impl ExtHost {
         let mut obj = json!({
             "v": 1,
             "op": "frame",
+            "seq": seq,
+            "width": p.width,
+            "thinking": p.thinking,
+            "mode": mode,
+            "loop_running": p.loop_running,
+        });
+        if let Some(ses) = p.session {
+            obj["session"] = json!(ses);
+        }
+        if let Some(m) = p.model {
+            obj["model"] = json!(m);
+        }
+        self.send_op(i, &obj);
+    }
+
+    /// Send a `row` op to the row owner on its tick cadence. The row
+    /// extension replies `row_spec` with the content of the
+    /// host-reserved row above the input box (between the working
+    /// row and the input area): the goal extension uses it for the
+    /// goal status line and the armed hint. A missing or dead owner
+    /// sends nothing; the row shows nothing (the bare TUI has no
+    /// row, docs/ui-extension.md section 4).
+    pub fn pump_row(&self, p: &TickPayload, mode: &str) {
+        let Some(i) = self.disc.row_owner else {
+            return;
+        };
+        let s = &self.inner.slots[i];
+        if *s.state.lock().unwrap() == SlotState::Skipped {
+            return;
+        }
+        let now = Instant::now();
+        let seq = {
+            let mut t = s.row_tick.lock().unwrap();
+            if now < t.next_at {
+                return;
+            }
+            t.seq += 1;
+            t.next_at = now + Duration::from_millis(s.manifest.tick_ms);
+            t.seq
+        };
+        let mut obj = json!({
+            "v": 1,
+            "op": "row",
             "seq": seq,
             "width": p.width,
             "thinking": p.thinking,
@@ -1827,6 +1926,27 @@ impl ExtHost {
         s.last_frame.lock().unwrap().clone()
     }
 
+    /// The host-reserved row content above the input box (the `row`
+    /// owner's last valid `row_spec` reply, docs/ui-extension.md
+    /// section 4). `None` when no row extension is installed, when
+    /// its reply is still missing, or when it died: the row is
+    /// transient content, so a dead or absent owner clears it —
+    /// unlike `status`, which keeps its last valid row with a dead
+    /// hint. An empty `lines` array is a live "no row" from the
+    /// owner (the goal extension hides the row when no goal is open
+    /// and nothing is armed).
+    pub fn row_spec(&self) -> Option<Vec<ExtLine>> {
+        let i = self.disc.row_owner?;
+        let s = &self.inner.slots[i];
+        if !matches!(
+            *s.state.lock().unwrap(),
+            SlotState::Running | SlotState::Restarting
+        ) {
+            return None;
+        }
+        s.last_row.lock().unwrap().clone()
+    }
+
     /// The statusline row content (docs/ui-extension-plan stage 1
     /// layout).
     pub fn status_row(&self) -> StatusRow {
@@ -2095,6 +2215,27 @@ impl HostInner {
                 *slot.last_frame.lock().unwrap() = Some(spec);
                 self.replies_version.fetch_add(1, Ordering::SeqCst);
                 let _ = self.out_tx.try_send(ExtItem::FrameUpdated {
+                    ext: slot.name.clone(),
+                });
+            }
+            "row_spec" => {
+                let Some(lines) =
+                    lines_value(&v["lines"]).map(|l| lower_ext_lines(l, self.color_level))
+                else {
+                    // G5: keep the last valid row.
+                    return;
+                };
+                let mut last = slot.last_row.lock().unwrap();
+                // Unchanged content: no version bump. A row reply is
+                // usually identical tick to tick, and a bump would
+                // rewrap the whole transcript (same rule as `status`).
+                if *last == Some(lines.clone()) {
+                    return;
+                }
+                *last = Some(lines);
+                drop(last);
+                self.replies_version.fetch_add(1, Ordering::SeqCst);
+                let _ = self.out_tx.try_send(ExtItem::RowUpdated {
                     ext: slot.name.clone(),
                 });
             }
@@ -2906,6 +3047,49 @@ protocol_v = 1
         let msg = err.to_string();
         assert!(msg.contains("f1/ext.toml"), "{msg}");
         assert!(msg.contains("f2/ext.toml"), "{msg}");
+    }
+
+    // ── row capability ─────────────────────────────────────────
+
+    #[test]
+    fn discovery_row_owner_resolves_and_conflict_refuses() {
+        let dir = TempDir::new().unwrap();
+        let global = dir.path().join("ui_extensions");
+        write_ext(
+            &global,
+            "r1",
+            "[ext]\ncommand = \"bash\"\ncaps = [\"row\"]\nprotocol_v = 1\n",
+        );
+        let mut cfg = cfg_for(dir.path());
+        cfg.ext_dir = Some(global.clone());
+        let disc = discover(&cfg).unwrap();
+        assert_eq!(disc.row_owner, Some(0), "a single row owner resolves");
+        // A second row owner refuses the start, like the status row.
+        write_ext(
+            &global,
+            "r2",
+            "[ext]\ncommand = \"bash\"\ncaps = [\"row\"]\nprotocol_v = 1\n",
+        );
+        let err = discover(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("r1/ext.toml"), "{msg}");
+        assert!(msg.contains("r2/ext.toml"), "{msg}");
+    }
+
+    #[test]
+    fn row_caps_are_valid_manifest_caps() {
+        // `row` is a known capability: a manifest listing it does
+        // not refuse the start (docs/ui-extension.md section 3).
+        let dir = TempDir::new().unwrap();
+        let global = dir.path().join("ui_extensions");
+        write_ext(
+            &global,
+            "r1",
+            "[ext]\ncommand = \"bash\"\ncaps = [\"row\"]\nprotocol_v = 1\n",
+        );
+        let mut cfg = cfg_for(dir.path());
+        cfg.ext_dir = Some(global);
+        discover(&cfg).expect("a `row` manifest is valid");
     }
 
     #[test]

@@ -10,6 +10,16 @@ Checks:
 The screen checks replay the pty byte stream into a small terminal
 grid. Ratatui diffs frames: it writes only the cells that changed, so
 raw stream text is fragmented. The replayed grid is the real display.
+
+Args: the `tui` binary, then the kernel repo root. The repo root is
+used for the plain cases' session (`sessions/tui-test`, a
+machine-local fixture: the head/tail markers the scroll-burst case
+asserts), the `scripts/ext-fixture/` host-test inputs, and the
+default extension layer tree. The `EXTS_ROOT` env var points the
+extension layer tree (`ui_extensions/`, `ext-rs/`,
+`ui_extensions-demos/`) at a separate exts checkout
+(docs/tui-ext-repo-split.md section 4, item 4); the default is the
+repo argument.
 """
 import os
 import pty
@@ -32,12 +42,20 @@ BIN = sys.argv[1]
 # (the `.` of a direct run) would match nothing and the orphan
 # checks would silently no-op.
 REPO = os.path.abspath(sys.argv[2])
+# Root of the extension layer tree (ui_extensions/, ext-rs/,
+# ui_extensions-demos/). Same-tree default: the kernel repo
+# argument. A split layout (docs/tui-ext-repo-split.md) points it
+# at the exts repo checkout via the EXTS_ROOT env var; kernel-side
+# paths (sessions, the ext-fixture host-test inputs, temp configs)
+# stay under REPO.
+EXTS_ROOT = os.path.abspath(os.environ.get("EXTS_ROOT", REPO))
 SESSION = "tui-test"
 EXT_SESSION = "tui-test-ext"
-MERMAID_EXT_DIR = REPO + "/ui_extensions/mermaid"
-EXT_RS_STATUSLINE = REPO + "/ext-rs/statusline-rs"
-EXT_RS_TOOL_RESULT = REPO + "/ext-rs/tool_result-rs"
-EXT_RS_NOTIFY = REPO + "/ext-rs/notify-rs"
+MERMAID_EXT_DIR = EXTS_ROOT + "/ui_extensions/mermaid"
+GOAL_EXT_DIR = EXTS_ROOT + "/ui_extensions/goal"
+EXT_RS_STATUSLINE = EXTS_ROOT + "/ext-rs/statusline-rs"
+EXT_RS_TOOL_RESULT = EXTS_ROOT + "/ext-rs/tool_result-rs"
+EXT_RS_NOTIFY = EXTS_ROOT + "/ext-rs/notify-rs"
 WHEEL_UP = b"\x1b[<64;5;5M"  # SGR mouse: wheel up at col 5 row 5
 
 
@@ -54,6 +72,7 @@ def setup_ext_bins():
     import subprocess
     ext_packages = [
         (MERMAID_EXT_DIR, "mermaid-ext"),
+        (GOAL_EXT_DIR, "goal-ext"),
         (EXT_RS_STATUSLINE, "statusline-ext"),
         (EXT_RS_TOOL_RESULT, "tool_result-ext"),
         (EXT_RS_NOTIFY, "notify-ext"),
@@ -79,6 +98,11 @@ def setup_ext_bins():
 def fixture_dir(name):
     # Absolute: the temp config lives outside the repo, and a
     # relative dir would resolve against the config's directory.
+    # The fixture layers are host-test inputs (they exercise the
+    # TUI host against broken extensions), so they stay under the
+    # kernel REPO even when EXTS_ROOT points at a separate exts
+    # checkout; at the split (docs/tui-ext-repo-split.md) they
+    # move to the TUI repo as `scripts/ext-fixture/`.
     return os.path.abspath(REPO + "/scripts/ext-fixture/" + name)
 
 
@@ -278,7 +302,14 @@ def case(name, burst):
         os.write(master, b"q")
         pump(master, 0.4, screen)
         os.write(master, b"q")
-        deadline = time.time() + 3.0
+        # The quit path runs the stop sequence with a 3 s
+        # SIGTERM->SIGKILL grace (docs/ui-extension.md section 7);
+        # on a slow box the exit measures ~4.5 s, so the budget must
+        # exceed the grace with margin. 3.0 s was systematically too
+        # tight and turned a healthy TUI into a false "hang"
+        # (2026-09-07: the three plain cases failed while the TUI
+        # exited cleanly at ~4.5 s after the second q).
+        deadline = time.time() + 8.0
         while time.time() < deadline:
             if not alive(pid):
                 break
@@ -807,7 +838,7 @@ def ext_statusline_real():
     stream).
     """
     tmp = tempfile.mkdtemp(prefix="tui-ext-real-")
-    cfg, sessions = layer_config(tmp, REPO + "/ui_extensions", active_model="smoke-model")
+    cfg, sessions = layer_config(tmp, EXTS_ROOT + "/ui_extensions", active_model="smoke-model")
     seed_session(sessions, EXT_SESSION, seed_events())
     # The powerline footer splits the model pill and the stats pill,
     # so the two markers are separate.
@@ -824,13 +855,13 @@ def ext_statusline_real():
         )
         if not alive(pid):
             print("FAIL ext-statusline-real: process died during startup")
-            cleanup_layer(pid, REPO + "/ui_extensions")
+            cleanup_layer(pid, EXTS_ROOT + "/ui_extensions")
             return False
         missing = [m for m in ["git:none", "smoke-model", stats_marker] if m not in seen]
         if missing:
             print(f"FAIL ext-statusline-real: markers not seen: {missing}")
             print("screen was:\n" + screen.text())
-            cleanup_layer(pid, REPO + "/ui_extensions")
+            cleanup_layer(pid, EXTS_ROOT + "/ui_extensions")
             return False
         # The finished turn rings: the notify extension flushes its
         # remembered turn ~5 s after start. Check the raw stream for
@@ -842,11 +873,11 @@ def ext_statusline_real():
                 break
         if b"\x07" not in screen.raw:
             print("FAIL ext-statusline-real: no terminal bell in the pty stream")
-            cleanup_layer(pid, REPO + "/ui_extensions")
+            cleanup_layer(pid, EXTS_ROOT + "/ui_extensions")
             return False
         if b"turn finished" not in screen.raw:
             print("FAIL ext-statusline-real: no OSC title in the pty stream")
-            cleanup_layer(pid, REPO + "/ui_extensions")
+            cleanup_layer(pid, EXTS_ROOT + "/ui_extensions")
             return False
         # Quit, then restart: the usage totals must survive from the
         # log alone (the host re-sends every usage-bearing message).
@@ -864,10 +895,10 @@ def ext_statusline_real():
             print("FAIL ext-statusline-real: still running after double-q (hang)")
             os.kill(pid, signal.SIGKILL)
             reap(pid)
-            cleanup_layer(pid, REPO + "/ui_extensions")
+            cleanup_layer(pid, EXTS_ROOT + "/ui_extensions")
             return False
         reap(pid)
-        orphans = settled_orphans(REPO + "/ui_extensions")
+        orphans = settled_orphans(EXTS_ROOT + "/ui_extensions")
         if orphans:
             print(f"FAIL ext-statusline-real: orphan layer processes: {orphans}")
             for p in orphans:
@@ -884,14 +915,14 @@ def ext_statusline_real():
                 pump(master2, 0.2, screen2)
                 if not alive(pid2):
                     print("FAIL ext-statusline-real: restart died during startup")
-                    cleanup_layer(pid2, REPO + "/ui_extensions")
+                    cleanup_layer(pid2, EXTS_ROOT + "/ui_extensions")
                     return False
                 if stats_marker in screen2.text():
                     break
             if stats_marker not in screen2.text():
                 print("FAIL ext-statusline-real: usage stats did not survive the restart")
                 print("screen was:\n" + screen2.text())
-                cleanup_layer(pid2, REPO + "/ui_extensions")
+                cleanup_layer(pid2, EXTS_ROOT + "/ui_extensions")
                 return False
         finally:
             os.write(master2, b"q")
@@ -903,7 +934,7 @@ def ext_statusline_real():
             if alive(pid2):
                 os.kill(pid2, signal.SIGKILL)
             reap(pid2)
-            cleanup_layer(pid2, REPO + "/ui_extensions")
+            cleanup_layer(pid2, EXTS_ROOT + "/ui_extensions")
             try:
                 os.close(master2)
             except OSError:
@@ -972,19 +1003,19 @@ def ext_statusline_repo():
         seen, _ = wait_markers(master, pid, screen, markers, deadline)
         if not alive(pid):
             print("FAIL ext-statusline-repo: process died during startup")
-            cleanup_layer(pid, REPO + "/ui_extensions")
+            cleanup_layer(pid, EXTS_ROOT + "/ui_extensions")
             return False
         text = screen.text()
         missing = [m for m in markers if m not in seen]
         if missing:
             print(f"FAIL ext-statusline-repo: markers not seen: {missing}")
             print("screen was:\n" + text)
-            cleanup_layer(pid, REPO + "/ui_extensions")
+            cleanup_layer(pid, EXTS_ROOT + "/ui_extensions")
             return False
         if "in:" not in text:
             print("FAIL ext-statusline-repo: usage totals not shown")
             print("screen was:\n" + text)
-            cleanup_layer(pid, REPO + "/ui_extensions")
+            cleanup_layer(pid, EXTS_ROOT + "/ui_extensions")
             return False
         # The vim modal composer starts in insert mode: the quit gate
         # needs the insert exit key first.
@@ -1000,10 +1031,10 @@ def ext_statusline_repo():
             print("FAIL ext-statusline-repo: still running after double-q (hang)")
             os.kill(pid, signal.SIGKILL)
             reap(pid)
-            cleanup_layer(pid, REPO + "/ui_extensions")
+            cleanup_layer(pid, EXTS_ROOT + "/ui_extensions")
             return False
         reap(pid)
-        orphans = settled_orphans(REPO + "/ui_extensions")
+        orphans = settled_orphans(EXTS_ROOT + "/ui_extensions")
         if orphans:
             print(f"FAIL ext-statusline-repo: orphan layer processes: {orphans}")
             for p in orphans:
@@ -1031,7 +1062,7 @@ def ext_statusline_slowgit():
     this case guards).
     """
     tmp = tempfile.mkdtemp(prefix="tui-ext-slowgit-")
-    cfg, sessions = layer_config(tmp, REPO + "/ui_extensions", active_model="smoke-model")
+    cfg, sessions = layer_config(tmp, EXTS_ROOT + "/ui_extensions", active_model="smoke-model")
     seed_session(sessions, EXT_SESSION, seed_events())
     bindir = tmp + "/slowbin"
     os.makedirs(bindir)
@@ -1066,7 +1097,7 @@ def ext_statusline_slowgit():
                 screen.feed(chunk)
             if not alive(pid):
                 print("FAIL ext-statusline-slowgit: process died during startup")
-                cleanup_layer(pid, REPO + "/ui_extensions")
+                cleanup_layer(pid, EXTS_ROOT + "/ui_extensions")
                 return False
             text = screen.text()
             if row_at is None and stats_marker in text:
@@ -1076,15 +1107,15 @@ def ext_statusline_slowgit():
                 break
         if stale_at is not None:
             print(f"FAIL ext-statusline-slowgit: stale hint at {stale_at:.1f} s; a tick reply must not wait on a slow git")
-            cleanup_layer(pid, REPO + "/ui_extensions")
+            cleanup_layer(pid, EXTS_ROOT + "/ui_extensions")
             return False
         if row_at is None:
             print("FAIL ext-statusline-slowgit: the status row never showed")
-            cleanup_layer(pid, REPO + "/ui_extensions")
+            cleanup_layer(pid, EXTS_ROOT + "/ui_extensions")
             return False
         if row_at > 4.0:
             print(f"FAIL ext-statusline-slowgit: the row took {row_at:.1f} s; the first tick reply must stay fast")
-            cleanup_layer(pid, REPO + "/ui_extensions")
+            cleanup_layer(pid, EXTS_ROOT + "/ui_extensions")
             return False
         # The vim modal composer starts in insert mode: the quit gate
         # needs the insert exit key first.
@@ -1099,7 +1130,7 @@ def ext_statusline_slowgit():
         if alive(pid):
             os.kill(pid, signal.SIGKILL)
         reap(pid)
-        orphans = settled_orphans(REPO + "/ui_extensions")
+        orphans = settled_orphans(EXTS_ROOT + "/ui_extensions")
         if orphans:
             print(f"FAIL ext-statusline-slowgit: orphan layer processes: {orphans}")
             for p in orphans:
@@ -1129,7 +1160,7 @@ def tool_result_only_layer(tmp):
     layer = tmp + "/tr-layer"
     d = layer + "/tool_result"
     os.makedirs(d)
-    src_dir = REPO + "/ui_extensions-demos/tool_result"
+    src_dir = EXTS_ROOT + "/ui_extensions-demos/tool_result"
     for fn in ("ext.toml", "tool_result.sh"):
         with open(src_dir + "/" + fn) as f:
             data = f.read()
@@ -1265,7 +1296,7 @@ def ext_mermaid():
     on unparseable source, and the per-op G5 fallback shows it.
     """
     tmp = tempfile.mkdtemp(prefix="tui-ext-mermaid-")
-    cfg, sessions = layer_config(tmp, REPO + "/ui_extensions", active_model="smoke-model")
+    cfg, sessions = layer_config(tmp, EXTS_ROOT + "/ui_extensions", active_model="smoke-model")
     ts = "2026-08-27T11:00:00Z"
     events = [
         {"v": 1, "type": "user_message", "ts": ts, "content": "draw the flow"},
@@ -1295,12 +1326,12 @@ def ext_mermaid():
             missing = [m for m in markers if m not in seen]
             print(f"FAIL ext-mermaid: markers not seen: {missing}")
             print("screen was:\n" + text)
-            cleanup_layer(pid, REPO + "/ui_extensions")
+            cleanup_layer(pid, EXTS_ROOT + "/ui_extensions")
             return False
         if "graph TD" in text:
             print("FAIL ext-mermaid: the valid fence shows raw, the art is missing")
             print("screen was:\n" + text)
-            cleanup_layer(pid, REPO + "/ui_extensions")
+            cleanup_layer(pid, EXTS_ROOT + "/ui_extensions")
             return False
         # Quit: no orphan layer process may survive.
         # The vim modal composer starts in insert mode: the quit gate
@@ -1317,10 +1348,10 @@ def ext_mermaid():
             print("FAIL ext-mermaid: still running after double-q (hang)")
             os.kill(pid, signal.SIGKILL)
             reap(pid)
-            cleanup_layer(pid, REPO + "/ui_extensions")
+            cleanup_layer(pid, EXTS_ROOT + "/ui_extensions")
             return False
         reap(pid)
-        orphans = settled_orphans(REPO + "/ui_extensions")
+        orphans = settled_orphans(EXTS_ROOT + "/ui_extensions")
         if orphans:
             print(f"FAIL ext-mermaid: orphan layer processes: {orphans}")
             for p in orphans:
@@ -1349,7 +1380,7 @@ def ext_rus():
     criterion: every surface has a bash and a Rust reference.
     """
     tmp = tempfile.mkdtemp(prefix="tui-ext-rus-")
-    cfg, sessions = layer_config(tmp, REPO + "/ext-rs", active_model="smoke-model")
+    cfg, sessions = layer_config(tmp, EXTS_ROOT + "/ext-rs", active_model="smoke-model")
     seed_session(sessions, EXT_SESSION, seed_events())
     # The powerline footer splits the model pill and the stats
     # pill, so the two markers are separate.
@@ -1365,13 +1396,13 @@ def ext_rus():
         )
         if not alive(pid):
             print("FAIL ext-rus: process died during startup")
-            cleanup_layer(pid, REPO + "/ext-rs")
+            cleanup_layer(pid, EXTS_ROOT + "/ext-rs")
             return False
         missing = [m for m in ["git:none", "smoke-model", stats_marker] if m not in seen]
         if missing:
             print(f"FAIL ext-rus: markers not seen: {missing}")
             print("screen was:\n" + screen.text())
-            cleanup_layer(pid, REPO + "/ext-rs")
+            cleanup_layer(pid, EXTS_ROOT + "/ext-rs")
             return False
         # The Rust notify reference rings once: the start resend is
         # a burst, so the bell flushes when the stream goes quiet
@@ -1381,7 +1412,7 @@ def ext_rus():
             pump(master, 0.25, screen)
         if b"\x07" not in screen.raw:
             print("FAIL ext-rus: no terminal bell from the Rust notify reference")
-            cleanup_layer(pid, REPO + "/ext-rs")
+            cleanup_layer(pid, EXTS_ROOT + "/ext-rs")
             return False
         # Quit: no orphan layer process may survive.
         # The vim modal composer starts in insert mode: the quit gate
@@ -1398,10 +1429,10 @@ def ext_rus():
             print("FAIL ext-rus: still running after double-q (hang)")
             os.kill(pid, signal.SIGKILL)
             reap(pid)
-            cleanup_layer(pid, REPO + "/ext-rs")
+            cleanup_layer(pid, EXTS_ROOT + "/ext-rs")
             return False
         reap(pid)
-        orphans = settled_orphans(REPO + "/ext-rs")
+        orphans = settled_orphans(EXTS_ROOT + "/ext-rs")
         if orphans:
             print(f"FAIL ext-rus: orphan layer processes: {orphans}")
             for p in orphans:
@@ -1411,6 +1442,157 @@ def ext_rus():
                     pass
             return False
         print("OK ext-rus: Rust statusline, tool_result, and notify references shown")
+        return True
+    finally:
+        try:
+            os.close(master)
+        except OSError:
+            pass
+
+
+def goal_only_layer(tmp):
+    """A temp layer that carries only the goal extension entry.
+
+    The entry is a symlink, not a copy: the manifest resolves the
+    binary by an entry-relative path (`target/debug/goal-ext`,
+    docs/ui-extension.md section 6), so the entry dir must keep
+    its own `target` tree. Symlinking shares the build with the
+    repo tree and keeps the host's entry-relative resolution
+    working.
+    """
+    layer = tmp + "/goal-layer"
+    os.makedirs(layer)
+    os.symlink(GOAL_EXT_DIR, layer + "/goal")
+    return layer
+
+
+def seed_goal(sessions_dir, name, goal_text="shrink the smoke pty"):
+    """Seed an open goal state into a session (pointer + state file).
+
+    Only the goal extension reads these files (`GoalState::load`,
+    docs/goal-ux.md section 1.1d): the TUI has no goal-state
+    coupling (docs/goal-ux.md section 1.7), which is what these
+    cases prove.
+    """
+    d = os.path.join(sessions_dir, name)
+    os.makedirs(d, exist_ok=True)
+    opened = int(time.time()) - 154
+    with open(d + "/goal-g-smoke0001.json", "w") as f:
+        json.dump({
+            "id": "g-smoke0001",
+            "goal": goal_text,
+            "active": True,
+            "used_tokens": 12400,
+            "opened_at": "t+%ds" % opened,
+        }, f)
+    with open(d + "/goal.json", "w") as f:
+        json.dump({"current_goal": "g-smoke0001"}, f)
+
+
+def ext_goal_row_installed():
+    """The goal status row appears when the goal extension is installed.
+
+    A goal-only layer + a seeded open goal: the host-reserved row
+    slot (docs/ui-extension.md section 4, `row` capability) shows
+    the extension-supplied goal line `⚡ "<goal>" · <elapsed> ·
+    <tokens>`. Quit is clean, no orphans.
+    """
+    tmp = tempfile.mkdtemp(prefix="tui-goal-installed-")
+    layer = goal_only_layer(tmp)
+    cfg, sessions = layer_config(tmp, layer, active_model="smoke-model")
+    seed_session(sessions, EXT_SESSION, seed_events())
+    seed_goal(sessions, EXT_SESSION)
+    master, pid = spawn(EXT_SESSION, cfg)
+    screen = Screen(24, 80)
+    try:
+        markers = ["⚡", "shrink the smoke pty", "12.4k"]
+        seen, ok = wait_markers(master, pid, screen, markers, time.time() + 15.0)
+        if not ok:
+            missing = [m for m in markers if m not in seen]
+            print(f"FAIL ext-goal-row-installed: goal row markers not seen: {missing}")
+            print("screen was:\n" + screen.text())
+            cleanup_layer(pid, GOAL_EXT_DIR)
+            return False
+        # Double-q quit: the vim modal composer starts in insert
+        # mode, so the exit key comes first.
+        os.write(master, b"\x1b")
+        pump(master, 0.3, screen)
+        os.write(master, b"q")
+        pump(master, 0.4, screen)
+        os.write(master, b"q")
+        deadline = time.time() + 8.0
+        while time.time() < deadline and alive(pid):
+            pump(master, 0.2, screen)
+        if alive(pid):
+            print("FAIL ext-goal-row-installed: still running after double-q (hang)")
+            os.kill(pid, signal.SIGKILL)
+            reap(pid)
+            cleanup_layer(pid, GOAL_EXT_DIR)
+            return False
+        reap(pid)
+        orphans = settled_orphans(GOAL_EXT_DIR)
+        if orphans:
+            print(f"FAIL ext-goal-row-installed: orphan layer processes: {orphans}")
+            for p in orphans:
+                try:
+                    os.kill(p, signal.SIGKILL)
+                except OSError:
+                    pass
+            return False
+        print("OK ext-goal-row-installed: goal row seen, clean quit, no orphans")
+        return True
+    finally:
+        try:
+            os.close(master)
+        except OSError:
+            pass
+
+
+def ext_goal_row_bare():
+    """No goal row without the goal extension, even with goal state on disk.
+
+    An empty `[ext] dir` (zero extensions) + the same seeded open
+    goal: the bare TUI has no goal-state coupling, so the
+    host-reserved row slot collapses to zero rows. Prove "⚡" never
+    appears and the TUI still quits cleanly.
+    """
+    tmp = tempfile.mkdtemp(prefix="tui-goal-bare-")
+    empty = tmp + "/bare-layer"
+    os.makedirs(empty)
+    cfg, sessions = layer_config(tmp, empty)
+    seed_session(sessions, EXT_SESSION, seed_events())
+    seed_goal(sessions, EXT_SESSION)
+    master, pid = spawn(EXT_SESSION, cfg)
+    screen = Screen(24, 80)
+    try:
+        # Pump well past several tick intervals: with no row owner
+        # the slot stays empty.
+        pump(master, 6.0, screen)
+        if not alive(pid):
+            print("FAIL ext-goal-row-bare: process died during startup")
+            return False
+        text = screen.text()
+        if "⚡" in text:
+            print("FAIL ext-goal-row-bare: goal row without the goal extension")
+            print("screen was:\n" + text)
+            os.kill(pid, signal.SIGKILL)
+            reap(pid)
+            return False
+        os.write(master, b"\x1b")
+        pump(master, 0.3, screen)
+        os.write(master, b"q")
+        pump(master, 0.4, screen)
+        os.write(master, b"q")
+        deadline = time.time() + 4.0
+        while time.time() < deadline and alive(pid):
+            pump(master, 0.2, screen)
+        if alive(pid):
+            print("FAIL ext-goal-row-bare: still running after double-q (hang)")
+            os.kill(pid, signal.SIGKILL)
+            reap(pid)
+            return False
+        reap(pid)
+        print("OK ext-goal-row-bare: no goal row without the goal extension")
         return True
     finally:
         try:
@@ -1429,8 +1611,8 @@ def purge_strays():
     the case fails on stale state. Purge them at suite start.
     """
     prefixes = [
-        REPO + "/ui_extensions",
-        REPO + "/ext-rs",
+        EXTS_ROOT + "/ui_extensions",
+        EXTS_ROOT + "/ext-rs",
     ]
     killed = []
     for d in os.listdir("/proc"):
@@ -1476,6 +1658,8 @@ def main():
     ok &= ext_tool_result_kill()
     ok &= ext_mermaid()
     ok &= ext_rus()
+    ok &= ext_goal_row_installed()
+    ok &= ext_goal_row_bare()
     if not ok:
         sys.exit(1)
     print("ALL SMOKE CASES PASSED")

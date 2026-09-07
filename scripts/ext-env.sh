@@ -16,9 +16,18 @@
 #   export PATH="$(bash scripts/ext-env.sh):$PATH"
 # fish:
 #   set -gx PATH (bash scripts/ext-env.sh) $PATH
+#
+# EXTS_ROOT env var: build the reference entries under this tree
+# instead of the tree this script lives in (docs/tui-ext-repo-split.md
+# section 4, item 5: a kernel-side script can build a separate exts
+# checkout). Use an absolute path: the printed dirs go on PATH.
 
 set -u
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -n "${EXTS_ROOT:-}" ]; then
+  root="$(cd "$EXTS_ROOT" && pwd)"
+else
+  root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
 
 pkgs="ui_extensions/mermaid ui_extensions/goal ext-rs/statusline-rs ext-rs/tool_result-rs ext-rs/notify-rs"
 out=""

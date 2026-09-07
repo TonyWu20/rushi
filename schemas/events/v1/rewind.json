@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["v", "type", "ts", "target_seq", "mode"],
+  "properties": {
+    "v": { "type": "integer", "const": 1 },
+    "type": { "type": "string", "const": "rewind" },
+    "ts": { "type": "string", "format": "date-time" },
+    "target_seq": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "the 1-based log sequence of the target event. The context at the rewind equals the context at the target. The minimum keyword and the earlier-than-self rule (target_seq below the event's own seq) are outside the validator subset; the producer enforces them (docs/rewind-fork-design.md section 3)."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["before", "on"],
+      "description": "'before': the target is excluded from the model context (a user message restored to the input box, unsent). 'on': the target is included in the context. The enum keyword is outside the validator subset; the producer enforces it."
+    },
+    "reason": {
+      "type": "string",
+      "description": "optional producer note. v1 value: tui_pick."
+    }
+  }
+}

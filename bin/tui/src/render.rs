@@ -627,6 +627,19 @@ fn event_lines<'a>(
                 out.push(Line::from(spans));
             }
         }
+        EventKind::Rewind => {
+            // The fork marker (docs/rewind-fork-design.md): a past
+            // branch point, rendered dim like a closed marker. The
+            // event projects to nothing in the model context; it
+            // names the target seq and the mode (`before` restores
+            // the target user message to the input box).
+            let target = e.get_i64("target_seq").unwrap_or(0);
+            let mode = e.get_str("mode").unwrap_or("on");
+            out.push(Line::from(Span::styled(
+                format!("{LABEL}rewound to seq {target} ({mode})"),
+                dim,
+            )));
+        }
         EventKind::UnknownType => {
             let ty = e.type_name().unwrap_or("?").to_string();
             out.push(Line::from(Span::styled(
@@ -1658,82 +1671,6 @@ fn stream_block_lines(app: &App, width: usize, max_body_lines: usize) -> Vec<Lin
     out
 }
 
-/// Format a token count for display (ported from pi-goal
-/// `formatTokenCount`): 12400 → "12.4k", 1200000 → "1.2M".
-fn format_token_count(n: u64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{:.1}k", n as f64 / 1_000.0)
-    } else {
-        n.to_string()
-    }
-}
-
-/// Format a duration in seconds as a compact human-readable string
-/// (ported from pi-goal `formatDuration`): 34s, 2m 34s, 1h 2m.
-fn format_duration(secs: i64) -> String {
-    if secs <= 0 {
-        return "0s".to_string();
-    }
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        let m = secs / 60;
-        let s = secs % 60;
-        if s == 0 {
-            format!("{m}m")
-        } else {
-            format!("{m}m {s}s")
-        }
-    } else {
-        let h = secs / 3600;
-        let m = (secs % 3600) / 60;
-        if m == 0 {
-            format!("{h}h")
-        } else {
-            format!("{h}h {m}m")
-        }
-    }
-}
-
-/// The goal status line shown between the working row and the input
-/// box when a goal is active (docs/goal-ux.md §1.7).
-///
-/// Format: `⚡ "goal text" · 2m 34s · 12.4k`
-fn goal_status_line(
-    goal: &goal_state::GoalState,
-    now: &chrono::DateTime<chrono::Utc>,
-) -> Line<'static> {
-    // Parse opened_at: "t+<secs>s" format.
-    let opened_secs: i64 = goal
-        .opened_at
-        .as_deref()
-        .and_then(|ts| {
-            ts.strip_prefix("t+")
-                .and_then(|rest| rest.strip_suffix('s'))
-                .and_then(|n| n.parse::<i64>().ok())
-        })
-        .unwrap_or(0);
-
-    let now_secs = now.timestamp();
-    let elapsed = (now_secs - opened_secs).max(0);
-
-    let text = format!(
-        " ⚡ \"{}\" · {} · {}",
-        goal.goal,
-        format_duration(elapsed),
-        format_token_count(goal.used_tokens),
-    );
-
-    Line::from(Span::styled(
-        text,
-        Style::default()
-            .fg(Color::Green)
-            .add_modifier(Modifier::BOLD),
-    ))
-}
-
 /// The status/help row content as terminal lines (one per row).
 ///
 /// The TUI flash wins; then the status extension row (its lines or
@@ -2327,7 +2264,6 @@ fn input_box_title(
     frame: &Option<crate::ext::FrameSpec>,
     border_color: Color,
     browse_prompt: Option<&str>,
-    goal_armed: bool,
 ) -> Line<'static> {
     // The browse command line owns the title while it is open
     // (docs/tui-conversation-browsing.md sections 4.4 and 7.3):
@@ -2345,16 +2281,6 @@ fn input_box_title(
     if let Some(prompt) = editor.command_line_label() {
         Line::from(Span::styled(
             prompt,
-            Style::default()
-                .fg(Color::Black)
-                .bg(border_color)
-                .add_modifier(Modifier::BOLD),
-        ))
-    } else if goal_armed {
-        // Persistent hint while the user is typing the goal text
-        // (docs/goal-ux.md §1.8).
-        Line::from(Span::styled(
-            " goal armed — type your goal, Enter to send ",
             Style::default()
                 .fg(Color::Black)
                 .bg(border_color)
@@ -2442,21 +2368,6 @@ pub fn draw(
             Style::default().fg(warning_fg),
         ));
     }
-    // Goal status bit (docs/goal-ux.md §1.7): shown when a goal is
-    // active, in the success color.
-    let goal_active = app
-        .goal_state()
-        .as_ref()
-        .is_some_and(|g| g.is_open());
-    if goal_active {
-        status_bits.push(Span::styled(
-            " [goal] ",
-            Style::default()
-                .fg(success_fg)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-
     let title_left = Line::from(vec![Span::styled(
         format!("Session: {session_label}"),
         Style::default().add_modifier(Modifier::BOLD),
@@ -2464,13 +2375,7 @@ pub fn draw(
     let block = Block::bordered()
         .title(title_left)
         .title(Line::from(status_bits).right_aligned())
-        // Goal active: use the success accent for the main border
-        // (docs/goal-ux.md §1.7).
-        .border_style(if goal_active {
-            Style::default().fg(success_fg)
-        } else {
-            Style::default()
-        });
+        .border_style(Style::default());
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -2545,9 +2450,24 @@ pub fn draw(
     if running {
         constraints.push(Constraint::Length(1));
     }
-    // Goal status line (docs/goal-ux.md §1.7): one row between the
-    // working row and the input box, shown only when a goal is active.
-    if goal_active {
+    // The host-reserved row above the input box (docs/ui-extension.md
+    // section 4, `row` capability): the row owner's last valid
+    // `row_spec` lines, one layout cell per line. No cell when no row
+    // extension is installed, or when the owner's content is empty
+    // (the bare TUI shows no row).
+    let row_lines = host.row_spec().unwrap_or_default();
+    let row_cells: Vec<Line<'static>> = row_lines
+        .iter()
+        .map(|l| {
+            Line::from(
+                l.spans
+                    .iter()
+                    .map(|s| Span::styled(s.text.clone(), s.style))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    for _ in &row_cells {
         constraints.push(Constraint::Length(1));
     }
     constraints.push(Constraint::Length(input_area_h));
@@ -2765,14 +2685,13 @@ pub fn draw(
         row += 1;
     }
 
-    // Goal status line (docs/goal-ux.md §1.7): shown between the
-    // working row and the input box while a goal is active.
-    if goal_active {
-        if let Some(ref g) = *app.goal_state() {
-            let now = chrono::Utc::now();
-            f.render_widget(Paragraph::new(goal_status_line(g, &now)), rows[row]);
-            row += 1;
-        }
+    // The host-reserved row above the input box (docs/ui-extension.md
+    // section 4, `row` capability): the row owner's content, one cell
+    // per line. No cell when no row extension is installed, or when
+    // the owner's content is empty (the bare TUI shows no row).
+    for l in &row_cells {
+        f.render_widget(Paragraph::new(l.clone()), rows[row]);
+        row += 1;
     }
 
     // input area: a bordered, rounded-corner box showing two (or the
@@ -2811,15 +2730,12 @@ pub fn draw(
     } else {
         None
     };
-    // Capture goal_armed as a bool before the mutable borrow of app.editor()
-    let goal_armed = app.goal_armed();
     let title = input_box_title(
         &*app.editor(),
         &mode_label,
         &frame,
         border_color,
         browse_prompt.as_deref(),
-        goal_armed,
     );
     let input_block = Block::bordered()
         .border_type(border_type)
@@ -3344,11 +3260,11 @@ mod tests {
         // host keeps its modal-state render in the box title.
         let e = command_line_editor();
         let frame = frame_with_label("[COMMAND]");
-        let title = input_box_title(&e, "[COMMAND]", &frame, Color::DarkGray, None, false);
+        let title = input_box_title(&e, "[COMMAND]", &frame, Color::DarkGray, None);
         assert_eq!(title.to_string(), "/ab\u{2588}");
         // No frame label: the prompt still shows (the built-in case).
         let none: Option<crate::ext::FrameSpec> = None;
-        let title = input_box_title(&e, "[COMMAND]", &none, Color::DarkGray, None, false);
+        let title = input_box_title(&e, "[COMMAND]", &none, Color::DarkGray, None);
         assert_eq!(title.to_string(), "/ab\u{2588}");
     }
 
@@ -3360,7 +3276,7 @@ mod tests {
         let e = command_line_editor();
         let frame = frame_with_label("[COMMAND]");
         let title =
-            input_box_title(&e, "[COMMAND]", &frame, Color::DarkGray, Some("/err"), false);
+            input_box_title(&e, "[COMMAND]", &frame, Color::DarkGray, Some("/err"));
         assert_eq!(title.to_string(), "/err\u{2588}");
     }
 
@@ -3372,11 +3288,11 @@ mod tests {
         e.set_text("abc");
         e.press(crate::app::Key::Esc); // normal mode
         let frame = frame_with_label("[COMMAND]");
-        let title = input_box_title(&e, "[NORMAL]", &frame, Color::DarkGray, None, false);
+        let title = input_box_title(&e, "[NORMAL]", &frame, Color::DarkGray, None);
         assert_eq!(title.to_string(), "[COMMAND]");
         // No frame label: the built-in mode label shows.
         let none: Option<crate::ext::FrameSpec> = None;
-        let title = input_box_title(&e, "[NORMAL]", &none, Color::DarkGray, None, false);
+        let title = input_box_title(&e, "[NORMAL]", &none, Color::DarkGray, None);
         assert_eq!(title.to_string(), "[NORMAL]");
     }
 
@@ -3643,6 +3559,41 @@ mod tests {
         assert!(
             joined.contains("compacting (threshold): 213k tokens"),
             "the closed marker renders the plain form: {joined}"
+        );
+    }
+
+    /// The fork marker renders its dim line naming the target and
+    /// the mode (docs/rewind-fork-design.md section 6). Missing
+    /// fields degrade to placeholders, never to a crash (G5).
+    #[test]
+    fn rewind_marker_line_renders() {
+        let evs = vec![
+            Event::parse_line(
+                r#"{"v":1,"type":"rewind","ts":"t","target_seq":41,"mode":"before"}"#,
+            )
+            .unwrap(),
+            Event::parse_line(
+                r#"{"v":1,"type":"rewind","ts":"t","target_seq":7,"mode":"on","reason":"tui_pick"}"#,
+            )
+            .unwrap(),
+        ];
+        let app = app_with_session(evs);
+        let joined = join(&build_transcript_lines(&app, 80, None));
+        assert!(
+            joined.contains("rewound to seq 41 (before)"),
+            "the marker names the target and mode: {joined}"
+        );
+        assert!(
+            joined.contains("rewound to seq 7 (on)"),
+            "the second marker renders too: {joined}"
+        );
+        // The degraded form: a marker without the optional fields.
+        let bare = vec![Event::parse_line(r#"{"v":1,"type":"rewind","ts":"t"}"#).unwrap()];
+        let app = app_with_session(bare);
+        let joined = join(&build_transcript_lines(&app, 80, None));
+        assert!(
+            joined.contains("rewound to seq 0 (on)"),
+            "missing fields degrade to placeholders: {joined}"
         );
     }
 

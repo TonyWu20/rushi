@@ -140,6 +140,15 @@ fn main() {
 
     let api_key = std::env::var(api_key_env).unwrap_or_default();
 
+    // Overall request timeout in seconds: the per-model `timeout_s`
+    // overrides the global `[model] model_timeout_s`. 0 disables the
+    // cap (the historical behavior). The default 3600 keeps long
+    // thinking streams safe while a stalled provider can no longer
+    // hang the loop or a compaction summary call forever.
+    let model_timeout_s = val_int(mdl, "timeout_s")
+        .or_else(|| val_int(model_root, "model_timeout_s"))
+        .unwrap_or(3600) as u64;
+
     if args.describe {
         // The resolved call config, one JSON object. The loop reads
         // `thinking_level` and publishes it; the overflow guard reads
@@ -217,7 +226,9 @@ fn main() {
     apply_output_budget(&mut api_request, max_output_tokens);
 
     // Try responses API first
-    let result = call_responses_api(&url, &api_key, &api_request, &model_name, &mut stream);
+    let result = call_responses_api(
+        &url, &api_key, &api_request, &model_name, model_timeout_s, &mut stream,
+    );
 
     match result {
         Ok(response) => {
@@ -276,11 +287,18 @@ fn apply_output_budget(request: &mut serde_json::Value, config_max: u64) {
 /// Streaming SSE responses can run for minutes on thinking models. The
 /// reqwest blocking default applies a 30 second overall request timeout,
 /// which cuts long streams short and silently turns them into empty
-/// turns. Disable the overall timeout for this client and bound only the
-/// connect phase.
-fn build_client() -> reqwest::blocking::Client {
+/// turns. Bound the overall call to `timeout_s` instead: long streams
+/// stay safe, and a stalled provider (accepted connection, no response)
+/// cannot hang the loop or a compaction summary call forever.
+/// `timeout_s = 0` disables the cap (the pre-timeout behavior).
+fn build_client(timeout_s: u64) -> reqwest::blocking::Client {
+    let timeout = if timeout_s > 0 {
+        Some(std::time::Duration::from_secs(timeout_s))
+    } else {
+        None
+    };
     match reqwest::blocking::Client::builder()
-        .timeout(None)
+        .timeout(timeout)
         .connect_timeout(std::time::Duration::from_secs(30))
         .pool_idle_timeout(std::time::Duration::from_secs(60))
         .build()
@@ -298,9 +316,10 @@ fn call_responses_api<W: Write>(
     api_key: &str,
     request: &serde_json::Value,
     model_name: &str,
+    timeout_s: u64,
     stream: &mut StreamWriter<W>,
 ) -> Result<String, String> {
-    let client = build_client();
+    let client = build_client(timeout_s);
 
     let response = client
         .post(url)
@@ -315,7 +334,9 @@ fn call_responses_api<W: Write>(
             if !status.is_success() {
                 // Check if it's a 404 or 405 for fallback
                 if status == 404 || status == 405 {
-                    return call_chat_completions(url, api_key, request, model_name, stream);
+                    return call_chat_completions(
+                        url, api_key, request, model_name, timeout_s, stream,
+                    );
                 }
                 let body = resp.text().unwrap_or_default();
                 return Err(format!("API returned status {}: {}", status, body));
@@ -351,10 +372,11 @@ fn call_chat_completions<W: Write>(
     api_key: &str,
     request: &serde_json::Value,
     _model_name: &str,
+    timeout_s: u64,
     stream: &mut StreamWriter<W>,
 ) -> Result<String, String> {
     let url = format!("{}/v1/chat/completions", base_url);
-    let client = build_client();
+    let client = build_client(timeout_s);
 
     // Convert responses format to chat completions format
     let chat_request = convert_to_chat_format(request);

@@ -2,6 +2,7 @@
 
 use clap::Parser;
 use bon::builder;
+use rushi_common::rewind;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -505,6 +506,76 @@ fn drop_pair_ids(events: &[&Ev], split: usize) -> HashSet<String> {
     ids
 }
 
+/// The pair-stranding invariant (docs/rewind-fork-design.md P4):
+/// every `function_call` in the context carries its `function_call_
+/// output`, and every `function_call_output` carries its call. Call
+/// ids are unique, so membership on each side is enough. A rewind
+/// that strands either side is ignored by the projection: the
+/// marker is dropped, the branch re-projects linear.
+fn context_strands_pairs(events: &[&Ev]) -> bool {
+    let result_ids: HashSet<&str> = events
+        .iter()
+        .filter_map(|ev| match ev {
+            Ev::ToolResult { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    let call_ids: HashSet<&str> = events
+        .iter()
+        .filter_map(|ev| match ev {
+            Ev::Assistant { calls, .. } => Some(calls),
+            _ => None,
+        })
+        .flat_map(|calls| calls.iter())
+        .map(|c| c.id.as_str())
+        .collect();
+    events.iter().any(|ev| match ev {
+        Ev::Assistant { calls, .. } => {
+            calls.iter().any(|c| !result_ids.contains(c.id.as_str()))
+        }
+        // An orphan result: the output sits in the context but its
+        // call is masked (or absent). The pair is stranded either
+        // way.
+        Ev::ToolResult { id, .. } => !call_ids.contains(id.as_str()),
+        Ev::User { .. } => false,
+    })
+}
+
+/// The active-path mask of the projected region
+/// (docs/rewind-fork-design.md section 3). Keeps the events whose
+/// log seq is in the active path of the log tail, and drops the
+/// markers that strand a tool call without its result (P4): each
+/// violation pops the outermost active marker, warns through the
+/// returned list, and re-projects. Returns the kept events, their
+/// seqs, and the ignored markers (outermost first).
+fn mask_active_path<'a>(
+    events_refs: &'a [&'a Ev],
+    projected_seqs: &[usize],
+    end_seq: usize,
+    mut rewinds: Vec<rewind::RewindRef>,
+) -> (Vec<&'a Ev>, Vec<usize>, Vec<rewind::RewindRef>) {
+    let mut ignored: Vec<rewind::RewindRef> = Vec::new();
+    loop {
+        let ranges = rewind::active_ranges(end_seq, &rewinds);
+        let mut kept_events: Vec<&'a Ev> = Vec::new();
+        let mut kept_seqs: Vec<usize> = Vec::new();
+        for (ev, s) in events_refs.iter().zip(projected_seqs.iter()) {
+            if rewind::seq_in_ranges(*s, &ranges) {
+                kept_events.push(ev);
+                kept_seqs.push(*s);
+            }
+        }
+        if context_strands_pairs(&kept_events) && !rewinds.is_empty() {
+            // The outermost marker is the one that owns the current
+            // gap: pop it and re-project. The branch it abandoned
+            // re-projects linear until a valid marker applies.
+            ignored.push(rewinds.pop().expect("the guard above"));
+            continue;
+        }
+        return (kept_events, kept_seqs, ignored);
+    }
+}
+
 /// Model input items for one event, full form.
 fn full_items(
     ev: &Ev,
@@ -876,6 +947,7 @@ fn main() {
     let mut event_seqs: Vec<usize> = Vec::new();
     let mut seq: usize = 0;
     let mut boundary: Option<Boundary> = None;
+    let mut rewinds: Vec<rewind::RewindRef> = Vec::new();
     for line in lines.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -982,6 +1054,17 @@ fn main() {
                     boundary = Some(b);
                 }
             }
+            "rewind" => {
+                // The fork marker (docs/rewind-fork-design.md
+                // section 4): it projects to nothing. It only masks
+                // the abandoned branch through the active path. A
+                // malformed value is skipped: the projection
+                // re-renders as if the marker were absent, like a
+                // corrupt compaction boundary.
+                if let Some(r) = rewind::parse_rewind_event(&event, seq) {
+                    rewinds.push(r);
+                }
+            }
             // error events are terminal. Skip them, as before.
             "error" => {}
             _ => {}
@@ -1071,6 +1154,22 @@ fn main() {
         None => (events.iter().collect(), event_seqs),
     };
 
+    // The active path of the log tail (docs/rewind-fork-design.md
+    // section 3): the recursion through the rewind chain masks every
+    // abandoned branch, at every nesting depth. The boundary filter
+    // runs first: a rewind target inside the compacted region
+    // degrades to the region head.
+    let (kept_events, kept_seqs, ignored_rewinds) =
+        mask_active_path(&events_refs, &projected_seqs, seq, rewinds);
+    // The P4 violations, outermost first: each marker re-projected
+    // as absent. The log keeps them; only the request loses them.
+    for r in &ignored_rewinds {
+        eprintln!(
+            "assemble: ignoring rewind at seq {} (target seq {}): its context strands a tool call or result without its pair",
+            r.seq, r.target
+        );
+    }
+
     // The summary-input mode (docs/auto-compact-plan.md section 4.3):
     // project the old region from the last boundary to `--up-to` in
     // the compact form, append the summary-ask user item, and print
@@ -1087,11 +1186,11 @@ fn main() {
         let base_caps = Caps {
             text: compact_text_chars,
         };
-        let cut = projected_seqs
+        let cut = kept_seqs
             .iter()
             .position(|&s| s > up_to)
-            .unwrap_or(events_refs.len());
-        let mut old_region: Vec<&Ev> = events_refs[..cut].to_vec();
+            .unwrap_or(kept_events.len());
+        let mut old_region: Vec<&Ev> = kept_events[..cut].to_vec();
         // The strip flag excludes the last assistant group (the
         // logged length-stop group) from the summary input.
         if args.drop_last_assistant {
@@ -1118,9 +1217,9 @@ fn main() {
 
     // The request-time exclusion of the last assistant group.
     let sel_events: Vec<&Ev> = if args.drop_last_assistant {
-        drop_last_assistant_group(&events_refs)
+        drop_last_assistant_group(&kept_events)
     } else {
-        events_refs.clone()
+        kept_events.clone()
     };
 
     // The framing item: the handoff document when present, else the
@@ -1135,9 +1234,12 @@ fn main() {
     };
 
     // The projected events: post-boundary when a boundary exists,
-    // else the full log. No sticky state, no keep halving, no
-    // group-drop levers (docs/phase-2-plan.md stage 0).
-    let drop_pairs = drop_pair_ids(&events_refs, events_refs.len());
+    // else the full log, masked to the active path when rewinds
+    // exist. No sticky state, no keep halving, no group-drop levers
+    // (docs/phase-2-plan.md stage 0). The drop set is computed over
+    // the masked context: a pair masked out of the context is out of
+    // the set (docs/rewind-fork-design.md section 3).
+    let drop_pairs = drop_pair_ids(&kept_events, kept_events.len());
     let mut items = build_items(
         &sel_events,
         sel_events.len(),
@@ -2187,5 +2289,196 @@ not json at all
             Some("b".to_string()),
             "the restart injects the follow message"
         );
+    }
+
+    // ── the rewind active path (docs/rewind-fork-design.md) ─────
+
+    fn ev_user(text: &str) -> Ev {
+        Ev::User {
+            text: text.to_string(),
+        }
+    }
+
+    fn ev_call(call_id: &str) -> Ev {
+        Ev::Assistant {
+            text: "step".to_string(),
+            calls: vec![Call {
+                id: call_id.to_string(),
+                name: "bash".to_string(),
+                args_str: "{}".to_string(),
+            }],
+            reasoning: vec![],
+            usage_input: None,
+        }
+    }
+
+    fn refs_of(events: &[Ev]) -> (Vec<&Ev>, Vec<usize>) {
+        (events.iter().collect(), (1..=events.len()).collect())
+    }
+
+    /// P1: a single fork masks the abandoned span (T, S] and keeps
+    /// the target prefix plus the continuation after the marker.
+    #[test]
+    fn mask_masks_the_abandoned_branch() {
+        let events: Vec<Ev> = vec![
+            ev_user("task"),              // 1
+            ev_call("c1"),               // 2
+            ev_res("c1", "A result"),    // 3
+            ev_call("c2"),               // 4
+            ev_res("c2", "B result"),    // 5
+        ];
+        let (refs, seqs) = refs_of(&events);
+        // Rewind at log seq 6 to seq 3 (on): the span 4..5 is the
+        // abandoned branch.
+        let rewinds = vec![rushi_common::rewind::RewindRef {
+            seq: 6,
+            target: 3,
+            before: false,
+        }];
+        let (kept, kept_seqs, ignored) = mask_active_path(&refs, &seqs, 6, rewinds);
+        let texts: Vec<&str> = kept
+            .iter()
+            .map(|ev| match ev {
+                Ev::User { text } => text.as_str(),
+                Ev::Assistant { .. } => "assistant",
+                Ev::ToolResult { text, .. } => text.as_str(),
+            })
+            .collect();
+        assert_eq!(texts, vec!["task", "assistant", "A result"]);
+        assert_eq!(kept_seqs, vec![1, 2, 3]);
+        assert!(ignored.is_empty());
+    }
+
+    /// P2: the depth-2 counter-example. The single-gap rule of the
+    /// naive design would keep branch B; the recursion masks it.
+    #[test]
+    fn mask_nested_forks_mask_the_intermediate_branch() {
+        // 1..3 = A, rewind(4,3) forks B (5..6), rewind(7,3) forks
+        // A' (8..9), rewind(10,9) continues A'.
+        let events: Vec<Ev> = vec![
+            ev_user("task"),              // 1
+            ev_call("ca"),                // 2
+            ev_res("ca", "A result"),     // 3
+            ev_call("cb"),                // 5 (4 is the rewind)
+            ev_res("cb", "B result"),     // 6
+            ev_call("ca2"),               // 8 (7 is the rewind)
+            ev_res("ca2", "A' result"),   // 9
+            ev_call("ca3"),               // 11 (10 is the rewind)
+            ev_res("ca3", "A' done"),     // 12
+        ];
+        // Log seqs: the rewinds sit at 4, 7, 10, so the events above
+        // occupy 1,2,3,5,6,8,9,11,12.
+        let refs: Vec<&Ev> = events.iter().collect();
+        let seqs: Vec<usize> = vec![1, 2, 3, 5, 6, 8, 9, 11, 12];
+        let rewinds = vec![
+            rushi_common::rewind::RewindRef { seq: 4, target: 3, before: false },
+            rushi_common::rewind::RewindRef { seq: 7, target: 3, before: false },
+            rushi_common::rewind::RewindRef { seq: 10, target: 9, before: false },
+        ];
+        let (kept, _, ignored) = mask_active_path(&refs, &seqs, 12, rewinds);
+        let texts: Vec<&str> = kept
+            .iter()
+            .map(|ev| match ev {
+                Ev::User { text } => text.as_str(),
+                Ev::Assistant { .. } => "assistant",
+                Ev::ToolResult { text, .. } => text.as_str(),
+            })
+            .collect();
+        // A (1..3) and A' (11..12) ride; B (5..6) is masked.
+        assert!(texts.contains(&"A result"));
+        assert!(texts.contains(&"A' done"));
+        assert!(!texts.contains(&"B result"), "branch B must be masked");
+        assert!(ignored.is_empty());
+    }
+
+    /// P3: a rewind to a branch tail re-enters that branch: its full
+    /// active path is rebuilt, the sibling branch is masked.
+    #[test]
+    fn mask_reentering_a_branch_rebuilds_its_path() {
+        // 1..3 = A, rewind(4,3) forks B (5..6), rewind(7,3) forks
+        // A' (8..9), rewind(10,6) re-enters B at its tail.
+        let events: Vec<Ev> = vec![
+            ev_user("task"),              // 1
+            ev_call("ca"),                // 2
+            ev_res("ca", "A result"),     // 3
+            ev_call("cb"),                // 5
+            ev_res("cb", "B result"),     // 6
+            ev_call("ca2"),               // 8
+            ev_res("ca2", "A' result"),   // 9
+            ev_call("cb2"),               // 11
+            ev_res("cb2", "B' result"),   // 12
+        ];
+        let refs: Vec<&Ev> = events.iter().collect();
+        let seqs: Vec<usize> = vec![1, 2, 3, 5, 6, 8, 9, 11, 12];
+        let rewinds = vec![
+            rushi_common::rewind::RewindRef { seq: 4, target: 3, before: false },
+            rushi_common::rewind::RewindRef { seq: 7, target: 3, before: false },
+            rushi_common::rewind::RewindRef { seq: 10, target: 6, before: false },
+        ];
+        let (kept, _, ignored) = mask_active_path(&refs, &seqs, 12, rewinds);
+        let texts: Vec<&str> = kept
+            .iter()
+            .map(|ev| match ev {
+                Ev::User { text } => text.as_str(),
+                Ev::Assistant { .. } => "assistant",
+                Ev::ToolResult { text, .. } => text.as_str(),
+            })
+            .collect();
+        // A (1..3) and B (5..6, 11..12) ride; A' (8..9) is masked.
+        assert!(texts.contains(&"B result"));
+        assert!(texts.contains(&"B' result"));
+        assert!(!texts.contains(&"A' result"), "branch A' must be masked");
+        assert!(ignored.is_empty());
+    }
+
+    /// P4: a rewind whose context strands a tool call without its
+    /// result is ignored: the marker drops out, the branch re-
+    /// projects linear, and the violation is reported.
+    #[test]
+    fn mask_ignores_a_rewind_that_strands_a_call() {
+        // The target branch ends mid-step: assistant c5 with no
+        // result. A rewind to it strands c5 in the context.
+        let events: Vec<Ev> = vec![
+            ev_user("task"),              // 1
+            ev_call("c5"),                // 2 (no result follows)
+            ev_call("c6"),                // 4 (3 is the rewind)
+            ev_res("c6", "C result"),     // 5
+        ];
+        let refs: Vec<&Ev> = events.iter().collect();
+        let seqs: Vec<usize> = vec![1, 2, 4, 5];
+        let rewinds = vec![rushi_common::rewind::RewindRef {
+            seq: 3,
+            target: 2,
+            before: false,
+        }];
+        let (kept, _, ignored) = mask_active_path(&refs, &seqs, 5, rewinds);
+        // The marker is ignored: the projection is the full log.
+        assert_eq!(kept.len(), 4, "the branch re-projects linear");
+        assert_eq!(ignored.len(), 1, "the violation is reported");
+        assert_eq!(ignored[0].seq, 3);
+        // And the linear projection is itself dangling (an
+        // interrupted log): the check stops at the marker, not at
+        // the log. The loop state machine owes the result (claim),
+        // so no stranded request is ever sent.
+        assert!(context_strands_pairs(&kept), "the linear tail strands c5");
+    }
+
+    /// The pair-stranding invariant, both sides: a call without a
+    /// result strands; a result without its call strands; a paired
+    /// log is clean.
+    #[test]
+    fn pair_stranding_check_both_sides() {
+        let ok: Vec<Ev> = vec![ev_user("task"), ev_call("c1"), ev_res("c1", "r")];
+        let refs: Vec<&Ev> = ok.iter().collect();
+        assert!(!context_strands_pairs(&refs), "the paired log is clean");
+
+        let dangling: Vec<Ev> = vec![ev_user("task"), ev_call("c2")];
+        let refs: Vec<&Ev> = dangling.iter().collect();
+        assert!(context_strands_pairs(&refs), "a result-less call strands");
+
+        // The mirror case: an orphan result, its call masked out.
+        let orphan: Vec<Ev> = vec![ev_user("task"), ev_res("c3", "orphan")];
+        let refs: Vec<&Ev> = orphan.iter().collect();
+        assert!(context_strands_pairs(&refs), "a call-less result strands");
     }
 }

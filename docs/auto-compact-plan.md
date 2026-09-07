@@ -1088,8 +1088,14 @@ commented-out documentation from `config-low.toml` if wanted:
 compact_trigger_base = "context_budget"
 ```
 
-Restart the loop after adding the line. The config is read once at
-loop start; a running loop does not pick up the change.
+Set `compact_reserve_tokens` to at least the expected next-response
+size so the next response fits inside the window after the trigger.
+The pi default is 16384, which gives the 245760 trigger. A smaller
+reserve (e.g. 4096) pushes the trigger toward the window wall and
+leaves too little headroom for this model's 4-8k responses.
+
+Restart the loop after changing the config. The config is read once
+at loop start; a running loop does not pick up the change.
 
 ### 9.5 Post-mortem: the tui-stream-impl unrecoverable failure
 
@@ -1149,6 +1155,26 @@ compaction point.
 
 - `scripts/compact-e2e.sh`: the `pi-parity-no-exhaust` scenario.
 - Unit: the `budget_*` tests in `bin/assemble/src/main.rs`.
+
+### 9.7 The tui-separation-repo degradation (2026-09-07)
+
+The session ran with `compact_trigger_base = "context_budget"` and
+`compact_reserve_tokens = 4096`, so the trigger sat at
+`262144 - 4096 = 258048`. Measured input peaked at 254808 tokens
+(plus about 700 of trailing estimate), which stayed under the
+trigger. No proactive compact fired. The session then died on model
+quality errors (empty turns, malformed tool arguments) near the
+window wall, not on a provider context-overflow error, so the
+reactive `is_overflow` compact-and-retry path never ran.
+
+pi's own logs show it compacting in this same band because its
+reserve is 16384 (trigger 245760), leaving real headroom for the
+next response. The fix is the reserve value, not a missing
+capability: set `compact_reserve_tokens` to 16384 (the pi
+default) so the trigger leaves enough room for the next model
+response. The reactive overflow recovery path in `step.rs`
+(`is_overflow` + `CompactReason::Overflow` + last-resort fallback)
+already mirrors pi's `isContextOverflow` compact-and-retry.
 
 ## Properties
 

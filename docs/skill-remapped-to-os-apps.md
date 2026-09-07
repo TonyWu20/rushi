@@ -242,7 +242,7 @@ P5. fenced-failure: given a fenced tool that fails, observe the host report it a
 | P# | Property | Proof | Status |
 |----|----------|-------|--------|
 | P1 | path-registration | `scripts/tool-conformance.sh` runs the `tools/*` binaries through `route` discovery | proven |
-| P2 | self-doc | Blocked: no test asserts the `--help` output of the four aligned apps. Unblock with a conformance row that runs each app's `--help` and checks for non-empty help. | open |
+| P2 | self-doc | Blocked: no test asserts the `--help` output of the four aligned apps. Unblock with a conformance row that runs each app's `--help` and checks for non-empty help. (The `lean-verify` tool's `--help` is asserted in `scripts/tool-conformance.sh`.) | open (lean-verify covered) |
 | P3 | catalog | Blocked: the `tools --list` catalog and the TUI `/`-window are not built. Unblock when the catalog lands with a sorted, byte-identical test. | open |
 | P4 | no-prompt-mutation | `scripts/cache-e2e.sh` asserts a byte-identical cached prefix across turns | proven |
 | P5 | fenced-failure | the spawn-failure rows in `scripts/tool-conformance.sh` assert a reported failure, not a hang | proven |
@@ -255,5 +255,17 @@ Gate: blocked — the `tools --list` catalog and the TUI `/`-window in section 5
 cargo build
 cargo test
 scripts/tool-conformance.sh
+scripts/lean-verify-e2e.sh
 scripts/cache-e2e.sh
 ```
+
+The `lean-verify` tool (and its flake-managed toolchains: `devShells.lean`,
+`devShells.aeneas`) is registered the way the model says a tool registers:
+on the agent-visible path with a `tool.toml` manifest, self-documenting via
+`--help`, with no SKILL.md. Its multi-step spec-driven workflow is one
+short-lived command with ops (`init`, `build`, `drt`, `translate`), and
+every environment dependency is a flake devShell, never an ad-hoc install
+(docs/aeneas-rust-to-lean.md). The `--help` output also carries the
+spec-driven loop itself — including the "follow the proven spec to
+implement the Rust" step that `docs/lean-driven-development.md` §3.3
+defines — so the instruction travels with the tool, not in a SKILL.md.

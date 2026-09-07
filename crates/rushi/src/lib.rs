@@ -6,9 +6,12 @@
 //! - `compact_math` — pure trigger math and cut walk.
 //! - `stage` — the `StageRunner` trait and payload types.
 //! - `hooks` — lifecycle-window dispatcher and decision types.
+//! - `rewind` — the active-path computation over rewind events
+//!   (docs/rewind-fork-design.md section 3).
 
 pub mod logline;
 pub mod event_validation;
 pub mod compact_math;
 pub mod stage;
 pub mod hooks;
+pub mod rewind;

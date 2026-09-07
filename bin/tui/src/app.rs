@@ -356,15 +356,6 @@ pub struct App {
     /// the value map at the cap. An event without a `ts` field
     /// updates the value but leaves the entry untouched.
     ext_status_ts: HashMap<String, String>,
-    /// Cached goal state for the active session, refreshed each tick
-    /// (docs/goal-ux.md §1.7). `None` when the session has no goal
-    /// (no `goal.json` pointer, no current goal file) or the files
-    /// cannot be read.
-    goal_state: Option<goal_state::GoalState>,
-    /// Set when the user invoked `goal` or `goal_edit` from the palette
-    /// and has not yet sent a message. Cleared on `SendDraft`
-    /// (docs/goal-ux.md §1.8).
-    goal_armed: bool,
     /// The in-progress model response, accumulated from the session-local
     /// stream channel file (docs/tui-streaming-response.md §6.1).
     /// `None` when no model call is in flight or the response settled.
@@ -520,8 +511,6 @@ impl App {
             ext_commands: Vec::new(),
             effort_current: "medium".to_string(),
             palette_cmd_requested: false,
-            goal_state: None,
-            goal_armed: false,
             stream_buf: None,
             stream_offset: 0,
             stream_pending: VecDeque::new(),
@@ -626,34 +615,7 @@ impl App {
         self.ext_status_values = statuses;
         self.ext_status_ts = status_ts;
         self.ext_status_order = order;
-        self.goal_state = None;
-        self.goal_armed = false;
         self.clear_stream();
-    }
-
-    /// Refresh the in-memory goal state from the session's goal files
-    /// on disk (the `goal.json` pointer plus `goal-<id>.json`)
-    /// (docs/goal-ux.md §1.7). Cheap: one or two small file reads per
-    /// tick.
-    pub fn refresh_goal(&mut self, session_dir: &std::path::Path) {
-        self.goal_state = goal_state::GoalState::load(session_dir);
-    }
-
-    /// Cached goal state for the active session (docs/goal-ux.md §1.7).
-    pub fn goal_state(&self) -> &Option<goal_state::GoalState> {
-        &self.goal_state
-    }
-
-    /// True when the user has armed `goal` or `goal_edit` from the
-    /// palette but has not yet sent a message (docs/goal-ux.md §1.8).
-    pub fn goal_armed(&self) -> bool {
-        self.goal_armed
-    }
-
-    /// Set the goal-armed flag. Set by the main loop on
-    /// `InvokeExtCommand` for goal/goal_edit; cleared on `SendDraft`.
-    pub fn set_goal_armed(&mut self, armed: bool) {
-        self.goal_armed = armed;
     }
 
     // ── model stream channel (docs/tui-streaming-response.md §6) ──

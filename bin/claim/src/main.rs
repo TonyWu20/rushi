@@ -2,7 +2,7 @@
 
 use clap::Parser;
 use rushi_common::event_validation;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
@@ -124,6 +124,10 @@ fn derive_state(
     let mut pending_tool_calls: Vec<serde_json::Value> = Vec::new();
     let mut pending_follow_ups: Vec<usize> = Vec::new();
     let mut pending_approval_request: Option<serde_json::Value> = None;
+    // The event type of each 1-based log seq: the rewind arm reads
+    // its target's type to decide the owed state (docs/rewind-fork-
+    // design.md section 5).
+    let mut seq_types: HashMap<usize, String> = HashMap::new();
     let mut i = 0;
 
     for line in lines.lines() {
@@ -143,6 +147,7 @@ fn derive_state(
         }
 
         let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        seq_types.insert(i, event_type.to_string());
 
         match event_type {
             "user_message" => {
@@ -218,6 +223,32 @@ fn derive_state(
                 pending_tool_calls.clear();
                 pending_follow_ups.clear();
                 pending_approval_request = None;
+            }
+            "rewind" => {
+                // The fork marker settles the session at its target
+                // (docs/rewind-fork-design.md section 5): the events
+                // it masks owe nothing, so every pending list
+                // clears. The owed state is the target's: a
+                // `tool_result` target in `on` mode is the finished
+                // step, and the model call that continues it is
+                // owed; every other target is idle (a `before`-mode
+                // user message waits in the input box, unsent).
+                pending_tool_calls.clear();
+                pending_follow_ups.clear();
+                pending_approval_request = None;
+                let target = event
+                    .get("target_seq")
+                    .and_then(|t| t.as_u64())
+                    .map(|t| t as usize)
+                    .unwrap_or(0);
+                let before = event
+                    .get("mode")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("")
+                    == "before";
+                let owed = !before
+                    && seq_types.get(&target).is_some_and(|t| t == "tool_result");
+                state = if owed { "awaiting_model".to_string() } else { "idle".to_string() };
             }
             _ => {}
         }
@@ -640,5 +671,118 @@ mod tests {
         let (state, seq, _, _) = derive_state(&log, &schemas());
         assert_eq!(state, "awaiting_approval");
         assert_eq!(seq, 1, "the last user message still counts");
+    }
+
+    // ── rewind: the fork marker (docs/rewind-fork-design.md 5) ──
+
+    fn rewind(target: u64, mode: &str) -> String {
+        line(&serde_json::json!({
+            "v":1,"type":"rewind","ts":"t","target_seq":target,"mode":mode
+        }))
+    }
+
+    /// A rewind to a user message settles the session: idle, and the
+    /// masked events owe nothing (the call in the abandoned branch
+    /// must not be re-dispatched).
+    #[test]
+    fn rewind_to_user_message_settles_the_session() {
+        let log = [
+            user_msg(),
+            assistant_with_call(),
+            tool_call(),
+            rewind(1, "before"),
+        ]
+        .join("\n");
+        let (state, seq, pending, follows) = derive_state(&log, &schemas());
+        assert_eq!(state, "idle");
+        assert_eq!(seq, 1, "the last user message still counts");
+        assert!(
+            pending.is_empty(),
+            "the masked call owes nothing: {pending:?}"
+        );
+        assert!(follows.is_empty());
+    }
+
+    /// A rewind to a tool_result target in `on` mode is the finished
+    /// step: the model call that continues it is owed.
+    #[test]
+    fn rewind_to_tool_result_awaits_model() {
+        let log = [
+            user_msg(),
+            assistant_with_call(),
+            tool_call(),
+            tool_result(),
+            rewind(4, "on"),
+        ]
+        .join("\n");
+        let (state, _, pending, _) = derive_state(&log, &schemas());
+        assert_eq!(state, "awaiting_model", "the finished step owes its model call");
+        assert!(pending.is_empty());
+    }
+
+    /// A `before`-mode rewind to a tool_result target is the moment
+    /// before the result: the step is un-finished, but claim owes no
+    /// re-route. The v1 rule is idle (the producer only picks
+    /// settled targets).
+    #[test]
+    fn rewind_before_mode_never_awaits_model() {
+        let log = [
+            user_msg(),
+            assistant_with_call(),
+            tool_call(),
+            tool_result(),
+            rewind(4, "before"),
+        ]
+        .join("\n");
+        let (state, _, pending, _) = derive_state(&log, &schemas());
+        assert_eq!(state, "idle");
+        assert!(pending.is_empty());
+    }
+
+    /// A rewind clears the pending follow-ups of the masked region:
+    /// they waited on a turn boundary that no longer exists in this
+    /// branch.
+    #[test]
+    fn rewind_clears_masked_follow_ups() {
+        let follow = line(
+            &serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"later","queue":"follow"}),
+        );
+        let log = format!("{follow}\n{}", rewind(1, "before"));
+        let (state, _, _, follows) = derive_state(&log, &schemas());
+        assert_eq!(state, "idle");
+        assert!(follows.is_empty(), "the masked follow-up is dropped");
+    }
+
+    /// A rewind clears an open approval wait of the masked region.
+    #[test]
+    fn rewind_clears_masked_approval_waits() {
+        let log = [
+            user_msg(),
+            assistant_with_call(),
+            tool_call(),
+            approval_request("a1"),
+            rewind(1, "before"),
+        ]
+        .join("\n");
+        let (state, _, pending, _) = derive_state(&log, &schemas());
+        assert_eq!(state, "idle", "the masked wait owes nothing");
+        assert!(pending.is_empty());
+    }
+
+    /// Events after the rewind ride the new branch: a user message
+    /// appended after the marker wakes the model again.
+    #[test]
+    fn user_message_after_rewind_reopens_the_loop() {
+        let log = [
+            user_msg(),
+            assistant_with_call(),
+            tool_call(),
+            rewind(1, "before"),
+            user_msg(),
+        ]
+        .join("\n");
+        let (state, seq, _, _) = derive_state(&log, &schemas());
+        assert_eq!(state, "awaiting_model");
+        assert_eq!(seq, 5, "the new-branch message counts");
     }
 }

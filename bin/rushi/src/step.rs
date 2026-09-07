@@ -761,6 +761,20 @@ fn try_compact_with_hooks(
         }
         Err(e) => {
             eprintln!("rushi: compact failed: {e}");
+            // A failed compact call leaves no compaction event in the log
+            // (the binary was killed or hung, and never reached its own
+            // failure path). Publish the failure so the session log shows
+            // why the context stayed above the trigger.
+            let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let event = serde_json::json!({
+                "v": 1,
+                "type": "ext_status",
+                "ts": ts,
+                "id": "compact.failed",
+                "reason": reason.as_str(),
+                "detail": e.to_string(),
+            });
+            append_event(cfg, &session.path, &event);
             CompactStatus::noop()
         }
     }
