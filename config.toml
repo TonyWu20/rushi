@@ -63,16 +63,9 @@ bash_timeout_max = 300
 # minus the reserve.
 # compact_keep_tokens: the keep window of the compact cut.
 compact_enabled = true
-compact_reserve_tokens = 16384
+compact_reserve_tokens = 4096
 compact_keep_tokens = 20000
-# The base of the compact trigger level (`compact_trigger_base`):
-# input_budget (default) = the clamped input budget minus the
-# reserve. LLM compaction leads, the trim form is the backstop.
-# context_budget = the full context budget minus the reserve (pi
-# parity, the trigger may sit above the input budget, like pi's
-# contextWindow - reserveTokens). The silent-overflow backstop
-# follows the base: it sits at the wall in pi-parity mode.
-# compact_trigger_base = "context_budget"
+compact_trigger_base = "context_budget"
 # The context-overflow strategy (docs/phase-2-plan.md 3.2). The
 # only shipped value is `compact`: in-session shadow compact. The
 # key is a seam for future strategies.
@@ -126,7 +119,7 @@ args = []
 [system_prompt]
 # Borrowed from the pi coding agent default prompt.
 # Adapted to this harness's tool set and task discipline.
-text = """You are an expert coding assistant in a Unix agent harness.
+text = """You are an expert coding assistant in `rushi`, a Unix agent harness.
 You help the user by reading files, running commands, editing code,
 and writing new files.
 
@@ -139,6 +132,7 @@ Available tools:
 - goal: Start a goal the loop pursues across turns.
 - goal_complete: Mark the active goal as complete. Requires the goal_id from the goal prompt.
 - goal_blocked: Mark the active goal as blocked with a reason. Requires the goal_id from the goal prompt.
+- lean-verify: Lean 4 formal-verification gate: init a lake project, run the zero-sorry lake build kernel check, translate a Rust crate to a Lean model (charon + aeneas), and differential-random-test a Lean model against production code.
 
 The project can add custom tools to the list above.
 
