@@ -470,7 +470,7 @@ The acceptance commands and their status:
 cargo build          # PASS
 cargo test           # PASS
 scripts/compact-e2e.sh  # PASS (2 pre-existing failures in silent-overflow/last-resort unrelated to this spec)
-scripts/lean-gate.sh   # PASS (zero-sorry lake build over all spec targets)
-echo '{"op":"build","dir":"lean"}' | target/release/lean-verify  # PASS (4 targets, 0 sorry)
+scripts/lean-gate.sh   # PASS (zero-`sorry` lake build over all spec targets)
+echo '{"op":"build","dir":"lean"}' | target/release/lean-verify  # PASS (4 targets, 0 `sorry`)
 echo '{"op":"drt","dir":".","model":"lean/.lake/build/bin/TuiStreamDrt \"$1\"","prod":"target/release/tui-stream-drt \"$1\"","n":100000,"input_gen":"scripts/tui-stream-drt-inputs.sh 100000","seed":42}' | target/release/lean-verify  # PASS (100000 inputs match)
 ```
