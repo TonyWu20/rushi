@@ -443,12 +443,22 @@ run_bash_test "bash: stdin EOF" 0 '{"command":"cat"}' '' '' 'ec:0' 'stdout_empty
 echo ""
 echo "=== Lean-Verify Tool Tests ==="
 
-LV_BIN="$TOOLS_DIR/lean-verify/bin/lean-verify"
-if [ ! -f "$LV_BIN" ]; then
-  LV_BIN="$(cd "$SCRIPT_DIR/../target/debug" 2>/dev/null && pwd)/lean-verify"
+# lean-verify is extension-owned (rushi-exts/goal-tools/lean-verify/,
+# docs/tui-ext-repo-split.md section 4, item 16): resolve the built
+# binary from the sibling exts checkout (bootstrap; override with
+# EXTS_ROOT).
+EXTS_ROOT="${EXTS_ROOT:-$(cd "$SCRIPT_DIR/../../rushi-exts" 2>/dev/null && pwd)}"
+LV_BIN=""
+if [ -n "$EXTS_ROOT" ]; then
+  for d in "$EXTS_ROOT/goal-tools/lean-verify/target/debug" "$EXTS_ROOT/goal-tools/lean-verify/target/release"; do
+    if [ -x "$d/lean-verify" ]; then
+      LV_BIN="$d/lean-verify"
+      break
+    fi
+  done
 fi
-if [ ! -f "$LV_BIN" ]; then
-  echo "SKIP: lean-verify binary not found (cargo build -p lean-verify)"
+if [ -z "$LV_BIN" ]; then
+  echo "SKIP: lean-verify binary not found (extension-owned: cargo build in rushi-exts/goal-tools/lean-verify)"
 else
   # P2 self-doc: --help documents the operations (no SKILL.md).
   LV_HELP_OK=1
@@ -475,12 +485,14 @@ else
   run_test "lean-verify: init missing name" 1 "init requires" '' '{"op":"init"}' "$LV_BIN"
   run_test "lean-verify: init invalid name" 1 "invalid package name" '' '{"op":"init","name":"1bad"}' "$LV_BIN"
 
-  # P1 route discovery: route resolves tools/lean-verify/tool.toml to
-  # the binary and surfaces the tool-level diagnostic.
+  # P1 route discovery: route resolves the lean-verify manifest from
+  # the exts extra tools root (RUSHI_EXTRA_TOOLS_ROOT) to the binary
+  # (on PATH) and surfaces the tool-level diagnostic.
   ROUTE_BIN="$(cd "$SCRIPT_DIR/../target/debug" 2>/dev/null && pwd)/route"
-  if [ -x "$ROUTE_BIN" ]; then
+  if [ -x "$ROUTE_BIN" ] && [ -n "$EXTS_ROOT" ] && [ -d "$EXTS_ROOT/goal-tools" ]; then
     ROUTE_OUT=$(printf '%s' '{"type":"tool_call","id":"lv-1","name":"lean-verify","arguments":{"op":"init","name":"1bad"}}' \
-      | "$ROUTE_BIN" --tools "$TOOLS_DIR" --cwd "$TEST_DIR" 2>/dev/null || true)
+      | env RUSHI_EXTRA_TOOLS_ROOT="$EXTS_ROOT/goal-tools" PATH="$(dirname "$LV_BIN"):$PATH" \
+        "$ROUTE_BIN" --tools "$TOOLS_DIR" --cwd "$TEST_DIR" 2>/dev/null || true)
     if printf '%s' "$ROUTE_OUT" | rg --fixed-strings "invalid package name" > /dev/null 2>&1; then
       echo "PASS: lean-verify: route discovery (tool ran via route, diagnostic surfaced)"
       PASSED=$((PASSED + 1))
@@ -489,7 +501,7 @@ else
       FAILED=$((FAILED + 1))
     fi
   else
-    echo "SKIP: lean-verify route discovery (route binary not built)"
+    echo "SKIP: lean-verify route discovery (route binary or exts goal-tools unavailable)"
   fi
 fi
 

@@ -1109,52 +1109,73 @@ fn main() {
     let tools_root_path = PathBuf::from(&tools_root);
     let mut tool_schemas: Vec<serde_json::Value> = Vec::new();
 
-    if let Ok(entries) = fs::read_dir(&tools_root_path) {
-        let mut tool_names: Vec<String> = Vec::new();
-        for entry in entries.flatten() {
-            let tool_path = entry.path();
-            if tool_path.is_dir() {
-                let tool_toml = tool_path.join("tool.toml");
-                if tool_toml.exists() {
+    // Tool dir names that carry a manifest under a tools root.
+    fn tool_names_in(root: &Path) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        if let Ok(entries) = fs::read_dir(root) {
+            for entry in entries.flatten() {
+                let tool_path = entry.path();
+                if tool_path.is_dir() && tool_path.join("tool.toml").exists() {
                     if let Some(name) = tool_path.file_name() {
-                        tool_names.push(name.to_string_lossy().to_string());
+                        names.push(name.to_string_lossy().to_string());
                     }
                 }
             }
         }
-        tool_names.sort();
+        names.sort();
+        names
+    }
 
-        for name in &tool_names {
-            let tool_toml = tools_root_path.join(name).join("tool.toml");
-            let Ok(content) = fs::read_to_string(&tool_toml) else {
-                continue;
-            };
-            let Ok(tool_config) = content.parse::<toml::Value>() else {
-                continue;
-            };
-            let Some(tool_def) = tool_config.get("tool") else {
-                continue;
-            };
-            let desc = tool_def
-                .get("description")
-                .and_then(|d| d.as_str())
-                .unwrap_or("")
-                .to_string();
-            let params = match tool_def.get("schema") {
-                Some(p) => toml_to_json(p),
-                None => serde_json::json!({
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }),
-            };
+    // Build one model tool schema from a `tool.toml` manifest.
+    fn load_tool_schema(tool_toml: &Path, name: &str) -> Option<serde_json::Value> {
+        let content = fs::read_to_string(tool_toml).ok()?;
+        let tool_config = content.parse::<toml::Value>().ok()?;
+        let tool_def = tool_config.get("tool")?;
+        let desc = tool_def
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("")
+            .to_string();
+        let params = match tool_def.get("schema") {
+            Some(p) => toml_to_json(p),
+            None => serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }),
+        };
+        Some(serde_json::json!({
+            "type": "function",
+            "name": name,
+            "description": desc,
+            "parameters": params
+        }))
+    }
 
-            tool_schemas.push(serde_json::json!({
-                "type": "function",
-                "name": name,
-                "description": desc,
-                "parameters": params
-            }));
+    for name in tool_names_in(&tools_root_path) {
+        let tool_toml = tools_root_path.join(&name).join("tool.toml");
+        if let Some(schema) = load_tool_schema(&tool_toml, &name) {
+            tool_schemas.push(schema);
+        }
+    }
+
+    // Extension-provided tool roots (RUSHI_EXTRA_TOOLS_ROOT — the exts
+    // repo's goal-tools/ group): additive discovery, same as route.
+    // The primary root wins on a name collision.
+    if let Ok(extra_root_str) = std::env::var("RUSHI_EXTRA_TOOLS_ROOT") {
+        let extra_root = PathBuf::from(&extra_root_str);
+        let known: HashSet<String> = tool_schemas
+            .iter()
+            .filter_map(|s| s.get("name").and_then(|n| n.as_str()).map(str::to_string))
+            .collect();
+        for name in tool_names_in(&extra_root) {
+            if known.contains(name.as_str()) {
+                continue;
+            }
+            let tool_toml = extra_root.join(&name).join("tool.toml");
+            if let Some(schema) = load_tool_schema(&tool_toml, &name) {
+                tool_schemas.push(schema);
+            }
         }
     }
 

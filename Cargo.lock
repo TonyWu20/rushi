@@ -563,37 +563,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
-name = "goal"
-version = "0.1.0"
-dependencies = [
- "goal-state",
- "serde_json",
-]
-
-[[package]]
 name = "goal-state"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
  "tempfile",
-]
-
-[[package]]
-name = "goal_blocked"
-version = "0.1.0"
-dependencies = [
- "goal-state",
- "serde_json",
-]
-
-[[package]]
-name = "goal_complete"
-version = "0.1.0"
-dependencies = [
- "goal-state",
- "regex",
- "serde_json",
 ]
 
 [[package]]
@@ -974,14 +949,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lean-verify"
-version = "0.1.0"
-dependencies = [
- "libc",
- "serde_json",
-]
-
-[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -992,14 +959,6 @@ name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
-
-[[package]]
-name = "list"
-version = "0.1.0"
-dependencies = [
- "clap",
- "serde_json",
-]
 
 [[package]]
 name = "litemap"

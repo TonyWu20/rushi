@@ -63,8 +63,9 @@ harness point.
 Your harness already self-hosts this work. It is the loop itself. So the
 port is really a re-host of the loop, not a tool.
 
-**Status: Ported (2026-07-04).** The goal tools (`tools/goal/`,
-`tools/goal_complete/`, `tools/goal_blocked/`), the goal-state crate
+**Status: Ported (2026-07-04).** The goal tools
+(`goal-tools/goal/`, `goal-tools/goal_complete/`,
+`goal-tools/goal_blocked/` in the rushi-exts repo), the goal-state crate
 (`crates/goal-state/`), the four hook binaries
 (`goal-hooks/hook-goal-idle/`, `goal-hooks/hook-goal-compact/`,
 `goal-hooks/hook-goal-tools/`, `goal-hooks/hook-goal-arm/` in the

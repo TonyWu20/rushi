@@ -47,9 +47,9 @@ pieces are now implemented:
 
 | Item | Lands where | Size |
 |---|---|---|
-| `tools/goal/` CLI + `tool.toml` (start or edit goal) | `tools/goal/` | Small |
-| `tools/goal_complete/` CLI + `tool.toml` | `tools/goal_complete/` | Small |
-| `tools/goal_blocked/` CLI + `tool.toml` | `tools/goal_blocked/` | Small |
+| `goal` CLI + `tool.toml` (start or edit goal) | `goal-tools/goal/` (rushi-exts) | Small |
+| `goal_complete` CLI + `tool.toml` | `goal-tools/goal_complete/` (rushi-exts) | Small |
+| `goal_blocked` CLI + `tool.toml` | `goal-tools/goal_blocked/` (rushi-exts) | Small |
 | Goal state file (`sessions/<n>/goal.json`) + read/write | `crates/goal-state/` | Medium |
 | `run.idle` hook binary (continue loop when goal open) | `goal-hooks/hook-goal-idle/` (rushi-exts) | Medium |
 | `compact.before` hook binary (preserve goal across compaction) | `goal-hooks/hook-goal-compact/` (rushi-exts) | Small |
@@ -127,8 +127,9 @@ The application-level pieces are complete:
   mark_complete/mark_blocked/edit_goal/build_continue_prompt/
   build_goal_block/format_duration/format_token_count`.
   No budget cap (user decision, docs/goal-ux.md §1.6).
-- `tools/goal/`, `tools/goal_complete/`, `tools/goal_blocked/` — CLI
-  tools that read/write `goal.json` via `HARNESS_SESSION_DIR`. The
+- `goal-tools/goal/`, `goal-tools/goal_complete/`,
+  `goal-tools/goal_blocked/` (rushi-exts) — CLI tools that read/write
+  `goal.json` via `HARNESS_SESSION_DIR`. The
   `goal` tool edits an active goal in place when one exists, and
   creates a fresh one otherwise. `goal_complete` rejects
   contradictory summaries (P9). `goal_blocked` records the block

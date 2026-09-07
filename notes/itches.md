@@ -117,7 +117,7 @@ But per P2 rule-of-three, one episode is not enough to add a
 new flag to the tool. **Parked as an itch.**
 
 **Resolution (2026-09-12).** The itch was confirmed real and solved
-in `tools/lean-verify`:
+in the exts-owned `lean-verify` tool (`rushi-exts/goal-tools/lean-verify/`):
 - `"smoke":true` is the named quick tier (n=2000, ~15 s): the
   quick check is a one-liner, no judgment call on `n` (an
   explicit `n` still wins; the full tier gates the release).
@@ -167,8 +167,9 @@ without duplicating the parser. A tool-level `--check-inputs`
 flag (or a separate `op=check-inputs`) is the right shape.
 **Parked as an itch** (one episode).
 
-**Resolution (2026-09-12).** Solved by a new `op=check-inputs` in
-`tools/lean-verify`: it runs the generator's lines through the
+**Resolution (2026-09-12).** Solved by a new `op=check-inputs` in the
+exts-owned `lean-verify` tool (`rushi-exts/goal-tools/lean-verify/`): it
+runs the generator's lines through the
 model executable (and the production executable when given) and
 reports the first line either side rejects — a non-zero exit or a
 timeout; accepted inputs exit 0. Default n=2000 makes the

@@ -65,8 +65,10 @@
             pkgs.jq
             pkgs.python3
             pkgs.file
-            # Lean toolchain for the lean-verify tool (tools/lean-verify):
-            # `lake`, `lean`, and `z3` on PATH. `leanPackages.mathlib`
+            # Lean toolchain for the Lean 4 backstop (`lake build
+            # RushiSpec`) and the exts-owned lean-verify tool
+            # (rushi-exts/goal-tools/lean-verify/): `lake`, `lean`, and
+            # `z3` on PATH. `leanPackages.mathlib`
             # exports LEAN_PATH with the Nix-prebuilt Mathlib oleans, so
             # the tool's `lake build` kernel gate and DRT work without a
             # separate `nix develop .#lean` step. Environment is managed

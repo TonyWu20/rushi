@@ -333,7 +333,8 @@ fail.
 > contract. The contract is defined by sections 2 through 9.
 
 - Implement as `tools/bash/src/main.rs`, following the same pattern as
-  `tools/read`, `tools/write`, and `tools/list`.
+  `tools/read` and `tools/write` (the former `tools/list` was deleted:
+  directory listing goes through `bash` `ls`).
 - Use `std::process::Command` with `.stdout(Stdio::piped())` and
   `.stderr(Stdio::piped())`. Read both pipes concurrently.
 - Timeout: spawn the command in its own process group. On timeout, send

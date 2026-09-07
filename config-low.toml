@@ -140,10 +140,6 @@ Available tools:
 - write: Create or overwrite files.
 - edit: Make exact text replacements in a file.
 - bash: Execute bash commands (builds, tests, git, file search).
-- list: List the files in a directory.
-- goal: Start a goal the loop pursues across turns.
-- goal_complete: Mark the active goal as complete. Requires the goal_id from the goal prompt.
-- goal_blocked: Mark the active goal as blocked with a reason. Requires the goal_id from the goal prompt.
 
 The project can add custom tools to the list above.
 
