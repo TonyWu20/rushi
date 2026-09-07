@@ -540,6 +540,13 @@ idle session.
   compaction. The silent-overflow backstop follows the base: it
   compares the measured input to the input budget (default) or to
   the full context budget (pi parity, the provider wall).
+  The `assemble` wire budget follows the base: the default base
+  clamps it to the input-only window (`context_tokens -
+  max_output_tokens`), which reserves space for output. The
+  `context_budget` base clamps it only to the model window, so the
+  `context_exhausted` gate and the summary call run on the full
+  window. That matches pi, which does not reserve `maxTokens` from
+  the window.
 
 `context_budget_tokens` stays the cap of the reactive trim form.
 The trigger sits at `context_budget_tokens - compact_reserve_tokens`.
@@ -1016,6 +1023,10 @@ The mechanism stays opt-in. The default behavior does not move.
   estimate of the kept region. The trim-form readings read shrunken.
   The full form keeps the LLM compaction from starving.
 
+The live `config.toml` keeps the default base. The knob line and its
+comment block were removed from it. `config-low.toml` keeps the
+commented-out documentation.
+
 ### 9.2 The change
 
 - `crates/rushi/src/compact_math.rs`: the `TriggerBase` enum, the
@@ -1033,7 +1044,21 @@ The mechanism stays opt-in. The default behavior does not move.
 - `bin/compact/src/main.rs`: the trigger decision uses the same
   base. Under `context_budget`, the full-form reading of the kept
   region joins the trigger readings.
-- `config.toml`, `config-low.toml`: the knob, commented out.
+- `bin/assemble/src/main.rs`: `estimate_request_tokens` skips the
+  measured anchor when a compaction boundary exists (`framing.is_some()`)
+  and estimates the full kept region from scratch instead (see 9.5).
+  `resolve_budget_tokens` clamps the wire budget to the input-only
+  window on the default base and to the full model window on the
+  `context_budget` base. The `context_exhausted` gate and the summary
+  call budget follow the base (see 9.6).
+- `bin/rushi/src/step.rs`: `estimate_context` applies the same rule.
+  A last reading that predates the boundary is stale and is replaced
+  by the full-form estimate of the kept region.
+- `scripts/compact-e2e.sh`: the `last-resort` fixture was re-calibrated
+  so the heavy result lands in the old region, not the kept tail
+  (see 9.5).
+- `config-low.toml`: the knob documentation, commented out.
+  `config.toml` carries no trace of the knob.
 - `scripts/compact-e2e.sh`: the `pi-parity` and `pi-parity-cold`
   scenarios.
 - This document: section 4.5 states the knob semantics.
@@ -1046,17 +1071,84 @@ The mechanism stays opt-in. The default behavior does not move.
   the binary's own resolver.
 - E2E: `pi-parity` fires the threshold compact at the context
   budget level. `pi-parity-cold` proves the default base stays
-  cold at the same session width.
+  cold at the same session width. `pi-parity-no-exhaust` proves
+  the unclamped wire budget: a kept region above the clamped input
+  budget but below the trigger proceeds to idle without
+  `context_exhausted`.
 - Regression: the default base e2e scenarios pass. The workspace
-  test suite is green.
+  test suite is green. `scripts/compact-e2e.sh` passes 62 of 62
+  assertions, including `last-resort`.
 
 ### 9.4 Enable
 
-Uncomment one line under `[limits]` in the session config:
+Add one line under `[limits]` in the session config. Copy the
+commented-out documentation from `config-low.toml` if wanted:
 
 ```toml
 compact_trigger_base = "context_budget"
 ```
+
+Restart the loop after adding the line. The config is read once at
+loop start; a running loop does not pick up the change.
+
+### 9.5 Post-mortem: the tui-stream-impl unrecoverable failure
+
+The session ended with `context still exhausted after in-session
+compact; stopping` followed by `the last-resort compaction did not
+recover the session`.
+
+Root cause: `estimate_request_tokens` anchored on the last measured
+`usage.input_tokens` in the kept region. After the overflow compact
+(`first_kept_seq = 1206`), that reading (228821, taken before the
+compact) sat inside the kept region. The estimate was 228821 plus
+825 trailing tokens = 229646, which exceeds the 229376 input budget
+by 270 tokens. The true post-compact kept region was 32023 tokens
+and fit the budget with room to spare. The stale estimate produced a
+false `context_exhausted` form, the last-resort compact found no old
+region to summarize, and the loop stopped.
+
+Fix: when a compaction boundary exists, the last reading predates the
+boundary and is stale. `estimate_request_tokens` now skips the anchor
+and estimates the full kept region from scratch, plus the framing
+item. `estimate_context` in `step.rs` applies the same rule so the
+threshold trigger and the silent-overflow backstop see the same
+number.
+
+Verification: the pre-fix release `assemble` emits the
+`context_exhausted` form on a copy of the dead session. The fixed
+release `assemble` emits a normal request for the same session. All
+58 e2e scenarios pass.
+
+The `last-resort` e2e fixture had the same shape of bug. The old
+fixture put a 24000-char result in the kept tail, which exceeded the
+whole 3904 input budget. No compact could make that fit, so the
+scenario could never pass. The fixture now keeps the heavy result
+in the old region: a 4000-char result (1000 tokens) in the old
+region, a 14000-char result (3500 tokens) in the kept tail group.
+The cut puts the 1000-token result in the old region, the kept tail
+(3510) plus the framing summary fits under the budget, and the loop
+recovers to idle.
+
+### 9.6 Unclamp: the pi-parity wire budget (2026-09-07)
+
+The `context_budget` base still left one clamp: `assemble` clamped
+its wire budget to `context_tokens - max_output_tokens` (229376 for
+the 262144 window). The `context_exhausted` gate and the summary
+call ran on that clamped budget, so a pi-parity session declared
+exhausted at 229376, below the 245760 trigger. The pi reference
+reserves no `maxTokens` from the window: `shouldCompact` compares
+against `contextWindow - reserveTokens`, and its session logs show
+requests measured up to 266837 input.
+
+Fix: `resolve_budget_tokens` in `bin/assemble`. The default
+`input_budget` base keeps the clamp (output reservation). The
+`context_budget` base clamps only to the model window (262144).
+Under pi parity the `context_exhausted` gate now sits at the model
+window and the proactive trigger at 245760 remains the first
+compaction point.
+
+- `scripts/compact-e2e.sh`: the `pi-parity-no-exhaust` scenario.
+- Unit: the `budget_*` tests in `bin/assemble/src/main.rs`.
 
 ## Properties
 

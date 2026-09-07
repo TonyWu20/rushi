@@ -292,6 +292,30 @@ fn resolve_model_settings(config: &toml::Value, name: &str) -> ModelSettings {
     }
 }
 
+/// The wire budget for the context budget gate and the summary call.
+///
+/// The default `input_budget` base reserves `max_output_tokens` for
+/// output: the budget clamps to the window minus that reservation.
+/// The `context_budget` base is pi parity (docs/auto-compact-plan.md
+/// 4.5 and 9): the whole context window is available for input, so
+/// the budget clamps only to the window, never to the input-only
+/// window. An unset or unknown base keeps the default.
+fn resolve_budget_tokens(limits: &toml::Value, model_settings: &ModelSettings) -> usize {
+    let window_input_tokens = model_settings
+        .context_tokens
+        .saturating_sub(model_settings.max_output_tokens as usize);
+    let trigger_base = val_str(limits, "compact_trigger_base")
+        .unwrap_or_else(|| "input_budget".to_string());
+    let context_budget_raw = val_int(limits, "context_budget_tokens")
+        .map(|v| v.max(1) as usize)
+        .unwrap_or(window_input_tokens);
+    if trigger_base == "context_budget" {
+        context_budget_raw.min(model_settings.context_tokens.max(1))
+    } else {
+        context_budget_raw.min(window_input_tokens.max(1))
+    }
+}
+
 /// Split a string into a head and a tail that together hold at most
 /// `limit` chars. The head takes the first half, the tail the rest.
 /// A string that fits comes back whole with zero elided. The cut
@@ -695,23 +719,31 @@ fn estimate_ev_tokens(ev: &Ev) -> u64 {
 }
 
 /// Estimate the input-token cost of the assembled request for the
-/// context-budget gate.  Anchors on the last provider-measured
-/// `usage.input_tokens` so that the structural overhead of the
-/// serialized JSON (system prompt, tool schemas, etc.) is already
-/// accounted for.  Only the trailing events that appear *after* the
-/// last measurement are estimated at ~4 chars/token.
+/// context-budget gate.  Without a compaction boundary, anchors on
+/// the last provider-measured `usage.input_tokens` so that the
+/// structural overhead of the serialized JSON (system prompt, tool
+/// schemas, etc.) is already accounted for.  Only the trailing
+/// events that appear *after* the last measurement are estimated at
+/// ~4 chars/token.
 ///
-/// When no measured anchor exists (e.g. first turn before any
-/// assistant response), the function falls back to a plain
-/// chars/4-of-everything heuristic plus the framing-item size.
+/// When a compaction boundary exists (framing is present), the last
+/// measured usage in the kept region may predate the compaction and
+/// is stale.  In that case the full kept region is estimated from
+/// scratch (chars/4) plus the framing-item size.
 fn estimate_request_tokens(
     kept_events: &[&Ev],
     framing: &Option<serde_json::Value>,
 ) -> u64 {
-    // Find the last assistant event that carries a measured usage.
-    let last_meas_idx = kept_events.iter().rposition(|ev| {
-        matches!(ev, Ev::Assistant { usage_input: Some(_), .. })
-    });
+    // When a compaction boundary exists, the last measured usage in
+    // the kept region predates the compaction and is stale.  Skip
+    // the anchor and estimate the full region from scratch.
+    let last_meas_idx = if framing.is_some() {
+        None
+    } else {
+        kept_events.iter().rposition(|ev| {
+            matches!(ev, Ev::Assistant { usage_input: Some(_), .. })
+        })
+    };
 
     let (anchor, trailing_start) = match last_meas_idx {
         Some(idx) => {
@@ -814,13 +846,7 @@ fn main() {
     // output reservation.
     let active_model = resolve_active_model(&config);
     let model_settings = resolve_model_settings(&config, &active_model);
-    let window_input_tokens = model_settings
-        .context_tokens
-        .saturating_sub(model_settings.max_output_tokens as usize);
-    let budget_tokens = val_int(&limits, "context_budget_tokens")
-        .map(|v| v.max(1) as usize)
-        .unwrap_or(window_input_tokens)
-        .min(window_input_tokens.max(1));
+    let budget_tokens = resolve_budget_tokens(&limits, &model_settings);
 
     // Read events
     let log_path = PathBuf::from(&args.session).join("events.jsonl");
@@ -1250,6 +1276,73 @@ fn toml_to_json(val: &toml::Value) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ms(context_tokens: usize, max_output_tokens: u64) -> ModelSettings {
+        ModelSettings {
+            model_id: "m".to_string(),
+            max_output_tokens,
+            context_tokens,
+        }
+    }
+
+    #[test]
+    fn budget_default_base_clamps_to_the_input_only_window() {
+        // window 262144, output 32768 -> input window 229376.
+        // An unset base clamps a larger context_budget to 229376.
+        let limits = toml::Value::String(String::new());
+        assert_eq!(resolve_budget_tokens(&limits, &ms(262144, 32768)), 229376);
+    }
+
+    #[test]
+    fn budget_default_base_keeps_a_smaller_explicit_budget() {
+        let toml = r#"
+[limits]
+context_budget_tokens = 100000
+"#;
+        let v: toml::Value = toml.parse().unwrap();
+        let limits = v.get("limits").unwrap();
+        assert_eq!(resolve_budget_tokens(limits, &ms(262144, 32768)), 100000);
+    }
+
+    #[test]
+    fn budget_pi_parity_base_uses_the_full_window() {
+        // context_budget base: no clamp to the input-only window.
+        // budget = min(context_budget_tokens, context_tokens).
+        let toml = r#"
+[limits]
+context_budget_tokens = 262144
+compact_trigger_base = "context_budget"
+"#;
+        let v: toml::Value = toml.parse().unwrap();
+        let limits = v.get("limits").unwrap();
+        assert_eq!(resolve_budget_tokens(limits, &ms(262144, 32768)), 262144);
+    }
+
+    #[test]
+    fn budget_pi_parity_base_clamps_to_the_model_window() {
+        // A context_budget above the window clamps to the window.
+        let toml = r#"
+[limits]
+context_budget_tokens = 999999
+compact_trigger_base = "context_budget"
+"#;
+        let v: toml::Value = toml.parse().unwrap();
+        let limits = v.get("limits").unwrap();
+        assert_eq!(resolve_budget_tokens(limits, &ms(262144, 32768)), 262144);
+    }
+
+    #[test]
+    fn budget_unknown_base_falls_back_to_the_default() {
+        let toml = r#"
+[limits]
+context_budget_tokens = 262144
+compact_trigger_base = "nonsense"
+"#;
+        let v: toml::Value = toml.parse().unwrap();
+        let limits = v.get("limits").unwrap();
+        // Unknown base -> default input_budget clamp -> 229376.
+        assert_eq!(resolve_budget_tokens(limits, &ms(262144, 32768)), 229376);
+    }
 
     fn ev_res(id: &str, text: &str) -> Ev {
         Ev::ToolResult {

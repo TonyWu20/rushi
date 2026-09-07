@@ -469,9 +469,16 @@ fn estimate_context(cfg: &HarnessConfig, session_dir: &Path) -> u64 {
         .filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok())
         .collect();
 
+    // The last compaction boundary, if any.  Events after it make up
+    // the kept region; the summary framing item rides the request.
+    let boundary = events.iter().rposition(|v| {
+        v.get("type").and_then(|t| t.as_str()) == Some("compaction_summary")
+    });
+
     // Find the LAST assistant_message that carries a measured
     // input_tokens reading. That reading reflects the provider's
-    // actual context size after any compaction boundary.
+    // actual context size, but only while it postdates the last
+    // compaction boundary.
     let last_meas_idx = events.iter().rposition(|v| {
         v.get("type").and_then(|t| t.as_str()) == Some("assistant_message")
             && v.get("usage")
@@ -480,6 +487,33 @@ fn estimate_context(cfg: &HarnessConfig, session_dir: &Path) -> u64 {
                 .is_some()
     });
 
+    // A reading predating the boundary is stale: the provider's
+    // context was rebuilt from the kept region plus framing, so the
+    // reading still reflects the pre-compaction size.  Right after a
+    // compaction no fresh reading exists yet.  In both cases
+    // estimate the kept region from scratch, matching bin/assemble's
+    // estimate_request_tokens (docs/auto-compact-plan.md 4.3).
+    let stale = match (last_meas_idx, boundary) {
+        (Some(mi), Some(b)) => mi <= b,
+        (None, Some(_)) => true,
+        _ => false,
+    };
+
+    if stale {
+        let start = boundary.map(|b| b + 1).unwrap_or(0);
+        let evs: Vec<compact_math::Ev> =
+            events[start..].iter().map(compact_math::project_event).collect();
+        let mut est = compact_math::full_form_estimate(&evs, &caps);
+        if let Some(b) = boundary {
+            if let Some(s) = events[b].get("summary").and_then(|s| s.as_str()) {
+                est += s.chars().count() as u64 / 4;
+            }
+        }
+        return est;
+    }
+
+    // No measurement yet and no boundary: the log is empty or has no
+    // assistant calls.  Nothing to estimate.
     let Some(idx) = last_meas_idx else {
         return 0;
     };
@@ -504,9 +538,6 @@ fn estimate_context(cfg: &HarnessConfig, session_dir: &Path) -> u64 {
     // full-form estimate of the kept region so the trigger sees the
     // real context size instead of starving on shrunken readings.
     if cfg.compact_trigger_base == TriggerBase::ContextBudget {
-        let boundary = events.iter().rposition(|v| {
-            v.get("type").and_then(|t| t.as_str()) == Some("compaction_summary")
-        });
         let region = &events[boundary.map(|i| i + 1).unwrap_or(0)..];
         let evs: Vec<compact_math::Ev> =
             region.iter().map(compact_math::project_event).collect();
