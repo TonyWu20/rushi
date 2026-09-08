@@ -52,6 +52,14 @@ struct Args {
     /// included.
     #[arg(long)]
     inject_follow: bool,
+
+    /// Prompt fragments to append to the system prompt
+    /// (docs/system-prompt-generation.md D5). A JSON array of
+    /// `[id, text]` pairs, e.g. `["goal", "<goal_instructions>…"]`.
+    /// The kernel joins the text values in order and appends them
+    /// after the cwd line. Absent: no-op.
+    #[arg(long)]
+    fragments: Option<String>,
 }
 
 struct ModelSettings {
@@ -901,7 +909,7 @@ fn main() {
         }
     };
 
-    let mut system_prompt = config
+    let base_prompt = config
         .get("system_prompt")
         .and_then(|p| p.get("text"))
         .and_then(|t| t.as_str())
@@ -914,12 +922,6 @@ fn main() {
         .ok()
         .map(|c| c.trim().to_string())
         .filter(|c| !c.is_empty());
-    if let Some(cwd) = &cwd {
-        system_prompt.push_str(&format!(
-            "\n\nCurrent working directory: {cwd}\n\
-             Relative paths in tool calls resolve against this directory."
-        ));
-    }
 
     let limits = config
         .get("limits")
@@ -1167,10 +1169,22 @@ fn main() {
         }))
     }
 
+    // Collect (name, description) pairs for the generated tool list
+    // (docs/system-prompt-generation.md D4). The list renders after
+    // the base prompt and before the cwd line.
+    let mut tool_list_entries: Vec<(String, String)> = Vec::new();
+
     for name in tool_names_in(&tools_root_path) {
         let tool_toml = tools_root_path.join(&name).join("tool.toml");
         if let Some(schema) = load_tool_schema(&tool_toml, &name) {
-            tool_schemas.push(schema);
+            tool_schemas.push(schema.clone());
+            let desc = schema
+                .get("description")
+                .and_then(|d| d.as_str())
+                .filter(|d| !d.is_empty())
+                .unwrap_or(name.as_str())
+                .to_string();
+            tool_list_entries.push((name, desc));
         }
     }
 
@@ -1196,7 +1210,57 @@ fn main() {
             }
             let tool_toml = extra_root.join(&name).join("tool.toml");
             if let Some(schema) = load_tool_schema(&tool_toml, &name) {
-                tool_schemas.push(schema);
+                tool_schemas.push(schema.clone());
+                let desc = schema
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .filter(|d| !d.is_empty())
+                    .unwrap_or(name.as_str())
+                    .to_string();
+                tool_list_entries.push((name, desc));
+            }
+        }
+    }
+
+    // Build the full system prompt (docs/system-prompt-generation.md):
+    // base_prompt + generated_tool_list + cwd_line + fragments.
+    // The generated tool list is byte-stable per session: it is a
+    // pure function of the config and the on-disk manifests (D4).
+    let mut system_prompt = base_prompt;
+
+    if !tool_list_entries.is_empty() {
+        let tool_list = tool_list_entries
+            .iter()
+            .map(|(name, desc)| format!("- {name}: {desc}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        system_prompt.push_str(&format!("\n\nAvailable tools:\n{tool_list}"));
+    }
+
+    if let Some(cwd) = &cwd {
+        system_prompt.push_str(&format!(
+            "\n\nCurrent working directory: {cwd}\n\
+             Relative paths in tool calls resolve against this directory."
+        ));
+    }
+
+    // Append prompt fragments (docs/system-prompt-generation.md D5).
+    // The wire form is an ordered array of [id, text] pairs.
+    // The kernel joins the text values in order and appends them
+    // after the cwd line. When the argument is absent, this is a
+    // no-op.
+    if let Some(fragments_json) = &args.fragments {
+        if let Ok(fragments) =
+            serde_json::from_str::<Vec<Vec<serde_json::Value>>>(fragments_json)
+        {
+            for pair in &fragments {
+                if pair.len() >= 2 {
+                    if let Some(text) = pair[1].as_str() {
+                        if !text.is_empty() {
+                            system_prompt.push_str(&format!("\n\n{text}"));
+                        }
+                    }
+                }
             }
         }
     }

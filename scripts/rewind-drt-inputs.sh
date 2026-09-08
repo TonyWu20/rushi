@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Deterministic input generator for the RewindSpec DRT gate — the
 # `lean-verify` op=drt / op=check-inputs `input_gen` for the
-# lean/RewindDrt.lean vs bin/rewind-drt pair (docs/rewind-fork-design.md
-# "Verification").
+# lean/RewindDrt.lean vs verification/rewind-drt pair
+# (docs/rewind-fork-design.md "Verification").
 #
 # Emits N well-formed one-line scenarios of the shared protocol:
 #   END <pos> [<seq>:<target>:<mode> ...]

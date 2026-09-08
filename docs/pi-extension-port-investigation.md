@@ -123,8 +123,9 @@ The user said this one is not needed yet. I note the fit anyway.
   pi autocomplete provider.
 
 This is the cleanest fit for the OS + App model. A native app on the
-PATH. The agent discovers it with `tools --list` once that catalog
-lands.
+PATH. The agent sees it in the generated tool list in the system
+prompt prefix; `tools --list` remains available for TUI and human
+inspection.
 
 **Verdict: Medium and optional.** The search tools are easy and native.
 The autocomplete is pi-only and is already covered by the file picker.
