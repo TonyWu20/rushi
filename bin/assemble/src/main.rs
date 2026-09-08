@@ -942,6 +942,21 @@ fn main() {
         .and_then(|t| t.as_str())
         .unwrap_or("tools");
 
+    // Extra tools roots (extension-provided tool manifests, e.g. the
+    // exts repo's goal-tools/ group; docs/tui-ext-repo-split.md
+    // section 4, item 16)
+    let extra_tools_roots = config
+        .get("paths")
+        .and_then(|p| p.get("extra_tools_roots"))
+        .and_then(|l| l.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(PathBuf::from)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
     // Resolve the active model. The context budget is in tokens
     // (correction 62): the user knob is `context_budget_tokens`.
     // No char mechanism. The default is the model window minus the
@@ -1159,16 +1174,23 @@ fn main() {
         }
     }
 
-    // Extension-provided tool roots (RUSHI_EXTRA_TOOLS_ROOT — the exts
-    // repo's goal-tools/ group): additive discovery, same as route.
-    // The primary root wins on a name collision.
+    // Extension-provided tool roots (config `[paths]
+    // extra_tools_roots` plus the RUSHI_EXTRA_TOOLS_ROOT env-var
+    // fallback — the exts repo's goal-tools/ group): additive
+    // discovery, same as route. The primary root wins on a name
+    // collision.
+    let mut extra_roots: Vec<PathBuf> = extra_tools_roots;
     if let Ok(extra_root_str) = std::env::var("RUSHI_EXTRA_TOOLS_ROOT") {
-        let extra_root = PathBuf::from(&extra_root_str);
+        if !extra_root_str.is_empty() {
+            extra_roots.push(PathBuf::from(extra_root_str));
+        }
+    }
+    for extra_root in &extra_roots {
         let known: HashSet<String> = tool_schemas
             .iter()
             .filter_map(|s| s.get("name").and_then(|n| n.as_str()).map(str::to_string))
             .collect();
-        for name in tool_names_in(&extra_root) {
+        for name in tool_names_in(extra_root) {
             if known.contains(name.as_str()) {
                 continue;
             }

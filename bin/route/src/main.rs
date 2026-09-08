@@ -17,6 +17,13 @@ struct Args {
     #[arg(long, default_value = "tools")]
     tools: String,
 
+    /// Extra tools roots (extension-provided tool manifests, from the
+    /// config's `[paths] extra_tools_roots`). Repeated; each is scanned
+    /// after the primary `--tools` root — on a tool-name collision the
+    /// higher-precedence root wins.
+    #[arg(long)]
+    extra_tools: Vec<PathBuf>,
+
     /// Tool result max chars
     #[arg(long, default_value = "20000")]
     tool_result_max_chars: usize,
@@ -250,13 +257,18 @@ fn main() {
     // Load tool manifests and validate arguments
     let mut tool_manifests: HashMap<String, (String, serde_json::Value)> = HashMap::new();
     // Roots are scanned in precedence order: first the primary
-    // `--tools` root, then the optional extra root supplied by the
-    // extension (RUSHI_EXTRA_TOOLS_ROOT — the exts repo's goal-tools/
-    // group; docs/tui-ext-repo-split.md section 4, item 16: goal-mode
-    // loop tools are extension-owned; exts' .envrc / ext-env.sh set the
-    // var and put the tool binaries on PATH). On a tool-name collision
-    // the higher-precedence root wins.
+    // `--tools` root, then the extra roots from the config's
+    // `[paths] extra_tools_roots` (passed as `--extra-tools`; the
+    // exts repo's goal-tools/ group — goal-mode loop tools are
+    // extension-owned, docs/tui-ext-repo-split.md section 4,
+    // item 16), then the optional `RUSHI_EXTRA_TOOLS_ROOT` env var
+    // (a fallback override; exts' .envrc / e2e still set it). The
+    // binaries resolve on PATH from the exts build. On a tool-name
+    // collision the higher-precedence root wins.
     let mut roots: Vec<PathBuf> = vec![tools_root.clone()];
+    for extra in &args.extra_tools {
+        roots.push(extra.clone());
+    }
     if let Ok(extra) = std::env::var("RUSHI_EXTRA_TOOLS_ROOT") {
         if !extra.is_empty() {
             roots.push(PathBuf::from(extra));

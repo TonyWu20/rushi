@@ -35,6 +35,9 @@ model = "Qwen3.8-27B-NVFP4-RTX5090-DFlash2"
 [paths]
 sessions_root = "sessions"
 tools_root = "tools"
+# Extension-provided tool manifests (the exts checkout's goal-tools/
+# group); see config.toml's [paths] extra_tools_roots.
+extra_tools_roots = ["../rushi-exts/goal-tools"]
 
 # The TUI's global extension layer tree now lives in the sibling
 # rushi-exts checkout (rushi-tui/docs/tui-ext-repo-split.md section

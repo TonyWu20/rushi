@@ -43,6 +43,21 @@ fn main() {
         .and_then(|t| t.as_str())
         .unwrap_or("tools");
 
+    // Extra tools roots (extension-provided tool manifests, e.g. the
+    // exts repo's goal-tools/ group; docs/tui-ext-repo-split.md
+    // section 4, item 16)
+    let extra_tools_roots = config
+        .get("paths")
+        .and_then(|p| p.get("extra_tools_roots"))
+        .and_then(|l| l.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(PathBuf::from)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
     // Read model output from stdin
     let mut input_str = String::new();
     io::stdin()
@@ -74,10 +89,18 @@ fn main() {
         }
     }
 
-    // Extension-provided tool roots (RUSHI_EXTRA_TOOLS_ROOT — e.g. the
-    // exts repo's goal-tools/ group): additive discovery, same as route.
-    // Names only; dispatch is route's business.
+    // Extension-provided tool roots (config `[paths]
+    // extra_tools_roots` plus the RUSHI_EXTRA_TOOLS_ROOT env-var
+    // fallback — e.g. the exts repo's goal-tools/ group): additive
+    // discovery, same as route. Names only; dispatch is route's
+    // business.
+    let mut extra_roots: Vec<PathBuf> = extra_tools_roots.clone();
     if let Ok(extra_root) = std::env::var("RUSHI_EXTRA_TOOLS_ROOT") {
+        if !extra_root.is_empty() {
+            extra_roots.push(PathBuf::from(extra_root));
+        }
+    }
+    for extra_root in &extra_roots {
         if let Ok(entries) = fs::read_dir(extra_root) {
             for entry in entries.flatten() {
                 let tool_path = entry.path();

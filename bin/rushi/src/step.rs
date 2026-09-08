@@ -1564,6 +1564,7 @@ fn route_batch(
 
     let env = RouteEnv {
         tools_root: cfg.tools_root.clone(),
+        extra_tools_roots: cfg.extra_tools_roots.clone(),
         cwd,
         tool_log: Some(session.path.join("tools.jsonl")),
         tool_result_max_chars: 20000,
