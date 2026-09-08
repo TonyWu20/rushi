@@ -2,7 +2,12 @@
 
 Problems to solve.
 
-## LogLine is a four-way copy (2026-08-30)
+## LogLine is a four-way copy (2026-08-30) → resolved 2026-09-08
+
+At the Phase 2 split, `LogLine` moved to the shared
+`rushi-common` crate (`crates/rushi/src/logline.rs`). All kernel
+producers (`bin/log`, `bin/user`, `bin/route`, `bin/rushi`) import
+it. The TUI copy moved to the `rushi-tui` repo. This itch is closed.
 
 `LogLine`, the only type that may write a session log (FT-005),
 lives in four places:
@@ -18,7 +23,12 @@ joins the validator as a promotion candidate for a shared
 `core`/`bin/common` crate. Keep the four copies in sync. Do not
 grow them in parallel.
 
-## Event schema validator is now a third copy (2026-08-27)
+## Event schema validator is now a third copy (2026-08-27) → resolved 2026-09-08
+
+At the Phase 2 split the validator moved to the shared `rushi-common`
+crate (`crates/rushi/src/event_validation.rs`). All kernel producers
+(`bin/user`, `bin/log`, `bin/rushi`) call it. The old TUI copy moved
+with the TUI to the `rushi-tui` repo. This itch is closed.
 
 Producer-side G3 validation (check the event against
 `schemas/events/v1/<type>.json` before append) exists in three
