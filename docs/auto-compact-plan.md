@@ -540,6 +540,12 @@ idle session.
   call run on the full window. That matches pi, which does not
   reserve `maxTokens` from the window.
   `compact_overflow_budget` returns `context_budget_tokens`.
+- The trigger estimate counts `usage.output_tokens` of the last
+  measured assistant message. The model's response is part of the
+  next request's context. Omitting it let a session ride past the
+  trigger into a real overflow (the 277483-token failure). Both
+  `estimate_context` in `bin/rushi` and `estimate_request_tokens`
+  in `bin/assemble` add `usage_input + usage_output` at the anchor.
 
 `context_budget_tokens` stays the cap of the reactive trim form.
 The trigger sits at `context_budget_tokens - compact_reserve_tokens`.
@@ -1015,6 +1021,10 @@ knob. The `compact_trigger_base` interface was removed entirely.
 - `compact_overflow_budget` returns `context_budget_tokens`.
   The silent-overflow backstop compares the measured input to the
   full context budget (the provider wall).
+- The trigger estimate counts `usage.output_tokens` of the last
+  measured assistant message. The model's response is part of the
+  next request's context. Omitting it let a session ride past the
+  trigger into a real overflow (the 277483-token failure).
 
 The live `config.toml` carries no `compact_trigger_base` line.
 No config file carries the knob.
@@ -1030,8 +1040,10 @@ No config file carries the knob.
   and `compact_overflow_budget()` (always returns `context_budget`).
   The `compact_trigger_base` load was removed.
 - `bin/rushi/src/step.rs`: `estimate_context` always takes the max of
-  the measured plus trailing estimate and the full-form estimate.
-  The silent overflow backstop uses `compact_overflow_budget()`.
+  the measured plus trailing estimate and the full-form estimate. A
+  last reading that predates the boundary is stale and is replaced
+  by the full-form estimate of the kept region. The silent overflow
+  backstop uses `compact_overflow_budget()`.
 - `bin/compact/src/main.rs`: the trigger decision always uses the
   `context_budget` base. The full-form reading of the kept region
   always joins the trigger readings.
@@ -1040,10 +1052,8 @@ No config file carries the knob.
   and estimates the full kept region from scratch instead (see 9.5).
   `resolve_budget_tokens` always clamps to the full model window.
   The `context_exhausted` gate and the summary call budget always use
-  the full window (see 9.6).
-- `bin/rushi/src/step.rs`: `estimate_context` applies the same rule.
-  A last reading that predates the boundary is stale and is replaced
-  by the full-form estimate of the kept region.
+  the full window (see 9.6). The anchor adds `usage_input +
+  usage_output`, so the response tokens count toward the trigger.
 - `scripts/compact-e2e.sh`: the `last-resort` fixture was re-calibrated
   so the heavy result lands in the old region, not the kept tail
   (see 9.5).
@@ -1211,6 +1221,59 @@ budget and cut the last call mid-stream.
 - `bin/rushi/src/step.rs`: the unchanged length-stop recovery
   now runs.
 - Unit: the parse length-stop tests in `bin/parse/src/main.rs`.
+
+### 9.10 Concrete compact rescue design (user-specified, 2026-09-17)
+
+This section records the user's concrete target for context rescue.
+It covers the trigger, the cut point, the post-compact state, and
+the rescue loop for a session that already overflowed.
+
+**Edge cases the design must cover.**
+
+- Last round was safe. This round's response arrives and the
+  context is still under threshold. Assemble the context, inject
+  hooks, then compare the total to the trigger. Fire the compact
+  only when it now exceeds the threshold.
+- Last round was safe. This round's response pushes the context
+  past the threshold. Start the compact immediately.
+- This round's response arrived truncated (a length stop). The
+  response plus the sent context already fills the model window.
+  Even sending back the current context may be rejected. A rescue
+  compact is required.
+
+**The compact call is one-shot.** During the compact step, the
+harness may reshape the context freely. It does not need to keep
+the prompt cache warm. The cache-preservation argument against
+trimming does not apply to the compact step itself.
+
+**Trigger calculation.** The next request's token count is
+`input_tokens + output_tokens + estimated_hook_injected_tokens`.
+All three come from the `usage` field in `events.jsonl`.
+Compare that total to the compact threshold
+(`context_budget_tokens - compact_reserve_tokens`). Fire when it
+exceeds the threshold.
+
+**Cut-point walk-back.** Walk back through the log. Find the node
+where `usage(input_tokens + output_tokens) - compact_keep_tokens +
+hook_request_context` sits just below the threshold. The region
+after that node is the compact target. Send that region to the
+model for summarization.
+
+**Post-compact state.** The active context becomes the new
+handoff plus the `compact_keep_tokens` protected rounds. The next
+turn sends that active context plus the hook-injected content,
+as usual.
+
+**Rescue for an already-overflowed session.** When the loop starts
+on a session whose context already exceeds the model window,
+start the same rescue. Find the cut point where the context fits
+under `max_context - compact_reserve_tokens - compact_keep_tokens`
+(262144 - 16384 - 20000 = 225760) and send that region to the
+model. If the handoff (roughly 22k to 27k tokens) plus the
+remaining tail still exceeds `max_context`, repeat the procedure
+on the remaining tail. This is the part-by-part compact rescue.
+It only fails when the session has grown to about twice the
+model window.
 
 ## Properties
 
