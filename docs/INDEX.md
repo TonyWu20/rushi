@@ -21,8 +21,8 @@ dependency; `config-exts.example.toml` shows how to re-enable the
 exts wiring.
 
 **Not yet done.** No CI. No shared `core` crate (by design, per
-Phase 3). The schema validator is now a fourth copy
-(`notes/itches.md`).
+Phase 3). The `LogLine` and validator duplication itches are closed:
+both now live once in `crates/rushi/` (`notes/itches.md`).
 
 ## Doc inventory
 
