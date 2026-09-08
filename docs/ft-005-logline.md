@@ -129,7 +129,7 @@ appends to. Two live writers, by design of the current phase.
   and an embedded `mod logline` in `bin/tui/src/port_file.rs`.
   Guardrail 3 (`docs/tui.md` section 10) makes `port_file.rs` the
   only TUI module that may know the storage layout, so the TUI
-  copy lives there. `notes/itches.md` records the duplication as
+  copy lives there. `docs/itches.md` records the duplication as
   a promotion candidate alongside the schema validator.
 
 ## 5. Implementation (commit `60b88e2`)
@@ -145,7 +145,7 @@ appends to. Two live writers, by design of the current phase.
 - Reader side is unchanged. FT-001 tail-drop still covers the
   single-writer in-progress tail. The tailer holds a partial
   line until its newline.
-- `docs/tui.md` spec line updated. `notes/itches.md` gained the
+- `docs/tui.md` spec line updated. `docs/itches.md` gained the
   three-way-copy entry.
 
 ## 6. Verification
@@ -197,8 +197,8 @@ and passes. `open` names the blocker and what unblocks it.
 
 | P# | Property | Proof | Status |
 |----|----------|-------|--------|
-| P1 | complete-unit | `commit_appends_one_complete_line_per_event` in `crates/common/src/logline.rs` | proven |
-| P2 | line-granular-concurrency | `concurrent_commits_stay_line_granular` in `crates/common/src/logline.rs` | proven |
+| P1 | complete-unit | `commit_appends_one_complete_line_per_event` in `crates/rushi/src/logline.rs` | proven |
+| P2 | line-granular-concurrency | `concurrent_commits_stay_line_granular` in `crates/rushi/src/logline.rs` | proven |
 | P3 | no-wedge | Blocked: no test kills the holder and re-commits. Unblocked by a flock-release test that kills the holder, then asserts the next commit succeeds | open |
 
 ## Gate

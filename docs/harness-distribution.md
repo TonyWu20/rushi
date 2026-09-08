@@ -31,7 +31,7 @@ changes.
 
 ## 2. One kernel repo
 
-The kernel is a single git repo. Its components share `crates/common`
+The kernel is a single git repo. Its components share `crates/rushi`
 and evolve in lockstep. The loop, `route`, and tool discovery are one
 mechanism. Split the kernel into multiple repos and the mechanism
 breaks. The repo ships: the loop stage binaries, the base tool
@@ -353,7 +353,7 @@ own name.
 |---|---|---|
 | `bin/harness` | `bin/rushi` | The totem. Loop engine and composition root. Gains `setup` and `tui` subcommands (§3). The binary a user installs and invokes. |
 | `bin/tui` | `bin/tui` (unchanged) | Tier-2 front-end. Launched by `rushi tui` (or inlined later). A different front-end can replace it without renaming anything. |
-| `crates/common` (crate `harness-common`) | `crates/rushi` (crate `rushi-common`) | Shared kernel types, event vocabulary, `SessionPort`. Crate name follows the distribution name. |
+| `crates/rushi` (crate `rushi-common`) | `crates/rushi` (crate `rushi-common`) | Shared kernel types, event vocabulary, `SessionPort`. Crate name follows the distribution name. |
 | `config.toml` | `rushi.toml` (user-edited manifest) + `config.toml` (generated) | The user edits `rushi.toml`; `rushi setup` generates `config.toml` from it (§5, §7). |
 
 What does **not** get renamed:
@@ -368,7 +368,7 @@ What does **not** get renamed:
   rename; it does not have to track the binary name.
 
 Mechanical blast radius: the crate rename touches every
-`Cargo.toml` that depends on `harness-common` (~10 files) and the
+`Cargo.toml` that depends on `rushi-common` (~10 files) and the
 workspace root. The binary rename touches `.envrc`, the flake, and
 any script that spawns `harness` by name.
 

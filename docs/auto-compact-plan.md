@@ -710,7 +710,7 @@ input, and the second compaction merging the first summary.
   and the cut walk from `assemble`. The projection core stays in
   `assemble` through the `--summary-input` mode. No second copy
   of the projection. Track the estimator copy in
-  `notes/itches.md` as a shared-crate candidate.
+  `docs/itches.md` as a shared-crate candidate.
 - The overflow pattern table starts from pi's regexes. The
   `sessions/` logs hold no provider overflow error. The repo has
   no observed SGLang or DeepSeek phrasing. The SGLang overflow
@@ -727,7 +727,7 @@ input, and the second compaction merging the first summary.
 - Schema keywords `enum` and `minimum` are outside the minimal
   validator subset (the TUI copy and the `log` copy both skip
   unknown keys). The producers self-check (section 4.1). Track
-  the validator subset in `notes/itches.md`.
+  the validator subset in `docs/itches.md`.
 
 ## 7. Phases
 
@@ -1255,10 +1255,10 @@ P9. iterative-merge: given a prior `compaction_summary`, observe the next summar
 
 | P# | Property | Proof | Status |
 |----|----------|-------|--------|
-| P1 | threshold-trigger | `trigger_fires_above_level` in `crates/common/src/compact_math.rs`; `scenario_threshold` in `scripts/compact-e2e.sh` | proven |
-| P2 | cut-snap | `cut_snaps_to_the_group_start` in `crates/common/src/compact_math.rs` | proven |
-| P3 | orphan-pull | `cut_pulls_in_the_orphan_user` in `crates/common/src/compact_math.rs` | proven |
-| P4 | empty-region-noop | `cut_at_zero_is_the_empty_region` in `crates/common/src/compact_math.rs`; `summary_input_empty_region_is_the_ask_alone` in `bin/assemble/src/main.rs` | proven |
+| P1 | threshold-trigger | `trigger_fires_above_level` in `crates/rushi/src/compact_math.rs`; `scenario_threshold` in `scripts/compact-e2e.sh` | proven |
+| P2 | cut-snap | `cut_snaps_to_the_group_start` in `crates/rushi/src/compact_math.rs` | proven |
+| P3 | orphan-pull | `cut_pulls_in_the_orphan_user` in `crates/rushi/src/compact_math.rs` | proven |
+| P4 | empty-region-noop | `cut_at_zero_is_the_empty_region` in `crates/rushi/src/compact_math.rs`; `summary_input_empty_region_is_the_ask_alone` in `bin/assemble/src/main.rs` | proven |
 | P5 | summary-fits-budget | `summary_input_drop_search_bounds_at_the_budget` in `bin/assemble/src/main.rs` | proven |
 | P6 | failure-marker | `scenario_compact_failure`, `scenario_empty_summary` in `scripts/compact-e2e.sh` | proven |
 | P7 | silent-overflow | `scenario_silent_overflow` in `scripts/compact-e2e.sh` | proven |

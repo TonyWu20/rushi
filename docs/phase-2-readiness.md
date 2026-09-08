@@ -55,7 +55,7 @@ Commands run in the repo root on 2026-09-03:
   `DEEPSEEK_API_KEY`, which is not set in this shell.
 - `sessions/` holds 28 session directories. The heaviest real
   session is `better-ui-colors_h1` at 6,909 events. The recorded
-  analysis in `notes/harness-vs-pi-model-latency.md` counts 426
+  analysis in `docs/harness-vs-pi-model-latency.md` counts 426
   assistant turns in it.
 
 The compact e2e locks the auto-compact state machine. The
@@ -95,7 +95,7 @@ The knob set is `context_budget_tokens`, the `compact_*` knobs,
 `max_output_tokens`, and the per-model `context_tokens`.
 
 **R7 — The shared-crate tension is the main decision.** Phase 1
-forbids a shared crate. The itch list (`notes/itches.md`) has passed
+forbids a shared crate. The itch list (`docs/itches.md`) has passed
 the rule of three: `LogLine` in four copies, the validator in three,
 the compact trigger math in two, the marker schema list in two. The
 new binary becomes the fifth `LogLine` copy and the fourth validator

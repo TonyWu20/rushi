@@ -1,4 +1,4 @@
-# Goal prompt injection: one-time system-prompt block
+# Goal prompt injection: one-time system-prompt block (Superseded by `system-prompt-generation.md`)
 
 Status: Superseded (2026-09-13). This doc's mechanism section is
 superseded by `system-prompt-generation.md` (D5, kernel-join model).

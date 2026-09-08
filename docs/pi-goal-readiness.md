@@ -29,7 +29,7 @@ All three seams are built into the `harness` loop binary.
 | Per-turn prompt injection | `model.before` decision window (`transform`) | `bin/harness/src/step.rs` `model_retry_loop` | Built |
 | Tool guardrails (`tool_call`, `tool_execution_end`) | `tool.before` (`block`/`approve`) + `tool.after` | `bin/harness/src/step.rs` L983–1147 | Built |
 | Session start / shutdown | `session.start` / `session.end` | `bin/harness/src/run_loop.rs` | Built |
-| Hook ABI (spawn, JSON in/out, exit codes, timeout) | `crates/common/src/hooks.rs` | 450 lines, tested | Built |
+| Hook ABI (spawn, JSON in/out, exit codes, timeout) | `crates/rushi/src/hooks.rs` | 450 lines, tested | Built |
 | Approval round-trip (for `goal_blocked` veto) | `approval_request` + `approval` schemas, `awaiting_approval` claim state | `schemas/events/v1/`, `bin/claim`, `step.rs` | Built |
 | Tool registration | `tools/<name>/tool.toml` + binary on PATH | `tools/`, `bin/route`, `bin/assemble` | Built |
 | Goal state persistence | Session dir file (`goal.json` beside `events.jsonl`) | Event-log model | Built |

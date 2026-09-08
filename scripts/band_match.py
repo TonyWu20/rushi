@@ -4,7 +4,7 @@ r"""band_match: what the harness-vs-pi model-time comparison shows.
 An application (docs/skill-remapped-to-os-apps.md sections 1-4): a
 project-specific, short-lived command on the agent-visible path
 (`scripts/`), needed only when re-checking harness-vs-pi model
-latency (`notes/harness-vs-pi-model-latency.md`). It is not in the
+latency (`docs/harness-vs-pi-model-latency.md`). It is not in the
 base distribution. Discovery is on demand: `ls scripts/`, then this
 `--help`. There is no SKILL.md: the interface below is the
 documentation.
@@ -27,7 +27,7 @@ USAGE
   band_match.py HARNESS_EVENTS [--pi-dir PATH]
 
 EXAMPLES
-  # the 2026-08-31 analysis (notes/harness-vs-pi-model-latency.md):
+  # the 2026-08-31 analysis (docs/harness-vs-pi-model-latency.md):
   band_match.py sessions/better-ui-colors_h1/events.jsonl
   # a different pi session store:
   band_match.py sessions/x/events.jsonl --pi-dir /tmp/pi-sessions

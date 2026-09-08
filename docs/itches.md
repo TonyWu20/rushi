@@ -63,9 +63,9 @@ the backward cut walk each lived in both binaries. The estimator
 copy is noted in the `find_cut` doc comment. Keep the two copies in
 sync. Do not grow them in parallel.
 
-Resolved: the math now lives once in `crates/common/src/compact_math.rs`
-(the shared `harness-common` crate, docs/phase-2-plan.md section 6).
-`bin/compact` imports `harness_common::compact_math`; the local
+Resolved: the math now lives once in `crates/rushi/src/compact_math.rs`
+(the shared `rushi-common` crate, docs/phase-2-plan.md section 6).
+`bin/compact` imports `rushi_common::compact_math`; the local
 copies are removed.
 
 ## The compact strategy is not a port (2026-09-07) → resolved 2026-09-08

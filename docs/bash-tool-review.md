@@ -1,4 +1,4 @@
-# bash-tool.md — Adversarial Spec Review
+# bash-tool.md — Adversarial Spec Review (Superseded by `bash-tool-review-2.md`)
 
 - Reviewed: `docs/bash-tool.md` (2026-08-26)
 - Rubric: `docs/spec-review-criteria.md` (9 criteria)

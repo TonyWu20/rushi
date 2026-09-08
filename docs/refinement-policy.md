@@ -14,7 +14,7 @@ Every framework change must cite a recorded episode:
 - a correctness bug (lost event, double side effect, deadlock).
 
 "No current task needs it" is a rejection reason. Speculative improvements are
-written to `notes/itches.md`, not built.
+written to `docs/itches.md`, not built.
 
 ## P1. Event vocabulary policy
 
@@ -208,7 +208,7 @@ If any section is missing, the proposal is incomplete.
 | Shared Rust type | 3+ duplicated copies, or a divergence bug |
 | `core` crate | Schemas stable 20 sessions + replay-tested reducer |
 | Retry/timeout on a stage | A real transient failure observed (e.g., model API 5xx) |
-| Daemon + attachable TUI | TUI restart killing the loop becomes unacceptable |
+| Daemon + attachable TUI | TUI restart killing the loop becomes unacceptable | **Done** (loop.pid reattach) |
 | In-process compiled tool | A specific tool's process overhead measured and exceeds G8 budget |
 | NDJSON streaming tools | A tool must emit progress that changes control flow |
 | Plugin/dynamic-loading system | Hot reload beyond editing scripts is a real requirement |
@@ -217,7 +217,7 @@ If any section is missing, the proposal is incomplete.
 
 - Shared Rust `core` crate (see P3)
 - Compiled-in tools (see P7)
-- Daemon/TUI split (see P7)
+- ~~Daemon/TUI split~~ — **done**: `rushi run` runs the loop as a standalone process; the TUI binary attaches via `loop.pid` and can reattach after restart to send SIGINT/SIGTERM
 - HTTP/WebSocket API (until a non-terminal/remote client is a current requirement)
 - Plugin system / dynamic loading (until script editing is insufficient)
 - NDJSON streaming for tools (until progress affects control flow)
@@ -227,7 +227,7 @@ If any section is missing, the proposal is incomplete.
 ## P9. Itches (parking lot)
 
 When a proposal is rejected as speculative, it is parked as an itch in
-`notes/itches.md` with the date and the triggering episode (if any). Three
+`docs/itches.md` with the date and the triggering episode (if any). Three
 recorded episodes for the same itch convert it into a proposal.
 
 ## P10. Spec-driven (Lean) gate

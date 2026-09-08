@@ -56,7 +56,7 @@ rust-unix-harness/
 ├── sessions/                   # created at runtime
 │   └── <id>/
 │       └── events.jsonl
-└── notes/
+└── docs/
     └── itches.md
 ```
 

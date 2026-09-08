@@ -42,7 +42,7 @@ The plan keeps the hexagonal property for **stage runners** and
   Phase 4 swaps in in-process and wasm runners. No loop rewrite.
 - The composition root is the `harness` binary. The `[loop]`
   config table is the switch. See plan section 5.
-- `harness-common` stays pure and wasm-safe. See
+- `rushi-common` stays pure and wasm-safe. See
   `docs/phase-2-crate-research.md` section 6.
 
 The property does **not** hold for the **compact strategy**.
@@ -89,7 +89,7 @@ retirement intact. The schema still requires `new_session`.
 ### 2.3 Is the swap clumsy?
 
 As the plan stands, the swap touches four modules:
-- `harness-common`: the outcome type.
+- `rushi-common`: the outcome type.
 - `bin/harness`: the strategy branch, the rebind, the lock swap.
 - the session-creation path.
 - `bin/tui`: auto-follow.

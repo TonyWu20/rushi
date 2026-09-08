@@ -379,7 +379,7 @@ authorizes.
 - **Section 3.2 (config surface):** add `[hooks]` with `timeout_ms`
   and the ordered `hooks.on` list. The loop reads it once per step.
 - **Section 3.3 (the seam):** add a `hooks` module to
-  `harness-common`, next to `stage`. It holds the window registry,
+  `rushi-common`, next to `stage`. It holds the window registry,
   the spawn-and-fold dispatcher, and the decision types. It is
   I/O-light: it spawns a command and reads one line. The fs and lock
   work stays in the loop through the `SessionStore` and `SessionLock`
@@ -437,7 +437,7 @@ recommendation to add `ContextStrategy` and `SessionStore` ports is
 superseded by the window + dispatcher + `SessionStore` design.
 `SessionStore` survives as the fs port behind `exhausted.handle`.
 
-`notes/itches.md`, the entry "The compact strategy is not a port
+`docs/itches.md`, the entry "The compact strategy is not a port
 (2026-09-07)", is resolved by this document. The trigger and the
 episode notes stay as history. The fix it proposed (one seam in
 section 3.3) is implemented here as the window + dispatcher seam,
@@ -460,7 +460,7 @@ points, not just the terminal action.
   default. No wedge. No hang. No new event type.
 - The `hooks` module is I/O-light: it spawns a command and reads one
   line. The fs and lock work stays in the loop through ports.
-- `cargo tree -p harness-common` shows no HTTP and no new process
+- `cargo tree -p rushi-common` shows no HTTP and no new process
   spawn beyond the stage runners and the hook spawn. The guardrails
   in `architecture.md` section 7 hold.
 
@@ -497,10 +497,10 @@ and passes. `open` names the blocker and what unblocks it.
 | P# | Property | Proof | Status |
 |----|----------|-------|--------|
 | P1 | no-hooks-identical | the `default` scenario in `scripts/model-before-transform-e2e.sh` and the no-hooks runs in `scripts/compact-e2e.sh` assert a marker-free byte-identical default | proven |
-| P2 | decision-fold | `fold_prefers_the_first_explicit_decision`, `window_roundtrip` in `crates/common/src/hooks.rs`; the `transform` scenario in `scripts/model-before-transform-e2e.sh` | proven |
+| P2 | decision-fold | `fold_prefers_the_first_explicit_decision`, `window_roundtrip` in `crates/rushi/src/hooks.rs`; the `transform` scenario in `scripts/model-before-transform-e2e.sh` | proven |
 | P3 | tool-block | Blocked: no e2e drives a `tool.before` block decision to synthesized `tool_result`s. Unblocked by a `tool.before`-block e2e row | open |
-| P4 | nonblocking-fail | `fold_failed_hooks_yield_no_decision` in `crates/common/src/hooks.rs` | proven |
-| P5 | hook-timeout | `a_slow_hook_times_out` in `crates/common/src/hooks.rs` | proven |
+| P4 | nonblocking-fail | `fold_failed_hooks_yield_no_decision` in `crates/rushi/src/hooks.rs` | proven |
+| P5 | hook-timeout | `a_slow_hook_times_out` in `crates/rushi/src/hooks.rs` | proven |
 | P6 | shadow-compact | Blocked: the shadow-compact conformance row (one `compaction_summary`, one `handoff.md`, shadowed range, next `assemble` skips it) is not yet an e2e. Unblocked by adding that row to `scripts/compact-e2e.sh` | open |
 
 ## Gate

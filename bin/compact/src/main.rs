@@ -757,7 +757,7 @@ fn fail_and_exit(
 
 /// The config loader: the toml value the compact knobs read. The
 /// model resolution is copied from bin/assemble (correction 4: no
-/// shared crate). The copy is noted in notes/itches.md.
+/// shared crate). The copy is noted in docs/itches.md.
 fn load_config(path: &Path) -> toml::Value {
     let raw = std::fs::read_to_string(path).unwrap_or_default();
     toml::from_str(&raw).unwrap_or(toml::Value::Table(toml::map::Map::new()))

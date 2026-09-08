@@ -234,7 +234,7 @@ re-invoke the compact step.
 This section lists the edits the plan takes. No new event type. Two new
 config keys: `compact_strategy` and `[hooks]`. No `v` bump.
 
-- **§3.3** — add the `hooks` module to `harness-common`, next to
+- **§3.3** — add the `hooks` module to `rushi-common`, next to
   `stage`. It holds the lifecycle-window dispatcher and decision
   types. It is I/O-light: spawn a command, read one stdout line.
   The `SessionStore` port remains the fs boundary. Both move to
@@ -277,7 +277,7 @@ because the strategy is not a port. This document makes it one.
   contracts.
 - The only new module work is the `hooks` dispatcher plus the
   `SessionStore` port. Both are small and I/O-light in
-  `harness-common`. The fs writes in `SessionStore::save_handoff`
+  `rushi-common`. The fs writes in `SessionStore::save_handoff`
   are the one I/O call. It stays out of the pure core.
 
 The cost of deferring the seam to Phase 3 is higher. It means the
@@ -319,14 +319,14 @@ P5. summary-failure: given a failed summary call, observe no handoff doc written
 | P# | Property | Proof | Status |
 |----|----------|-------|--------|
 | P1 | reactive-only | Blocked: no test asserts the proactive threshold hook stays loop-dead. Unblock when the threshold path is confirmed unused by the loop. | open |
-| P2 | windows | `scenario_overflow`, `scenario_threshold` in `scripts/compact-e2e.sh`; the `overflow.resolve` and `exhausted.handle` windows in `bin/hook-compact` and `crates/common/src/hooks.rs` | proven |
-| P3 | in-session-continue | Blocked: `SessionStore::save_handoff` and the `handoff.md` write are not yet built. Unblock when the in-session shadow-compact hook lands. | open |
+| P2 | windows | `scenario_overflow`, `scenario_threshold` in `scripts/compact-e2e.sh`; the `overflow.resolve` and `exhausted.handle` windows in `bin/hook-compact` and `crates/rushi/src/hooks.rs` | proven |
+| P3 | in-session-continue | Built: `write_handoff` in `bin/rushi/src/step.rs` writes `sessions/<n>/handoff.md`; the in-session shadow-compact hook `bin/hook-compact` lands on the `overflow.resolve`/`exhausted.handle` windows; `bin/assemble` reads the doc back as the framing item. No dedicated e2e row yet observes the next request carrying the handoff content plus post-`first_kept_seq` events. Unblock with that conformance row. | open |
 | P4 | shadowed-readable | Blocked: no test reads a shadowed region back through a tool. Unblock with a test that `read` returns a shadowed `events.jsonl` line after a compact. | open |
 | P5 | summary-failure | `scenario_compact_failure` in `scripts/compact-e2e.sh` | proven |
 
 ## Gate
 
-Gate: blocked — the in-session shadow-compact hook and `SessionStore::save_handoff` are not yet implemented.
+Gate: the in-session shadow-compact hook (`bin/hook-compact`) and the `handoff.md` write (`bin/rushi/src/step.rs`) are implemented. The `SessionStore` trait was not materialized; the fs write lives directly in `step.rs`. P3 stays open only on the dedicated conformance row that observes the full round-trip.
 
 ```
 cargo build
