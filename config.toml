@@ -40,6 +40,15 @@ model = "Qwen3.8-27B-NVFP4-RTX5090-DFlash2"
 sessions_root = "sessions"
 tools_root = "tools"
 
+# The TUI's global extension layer tree (docs/ui-extension.md
+# section 3). The tree moved to the sibling rushi-exts checkout at
+# the repo split (rushi-tui/docs/tui-ext-repo-split.md section 4,
+# item 4); the relative path resolves against this config's
+# directory. The host degrades to no global layer if the tree is
+# absent (e.g. a kernel-only checkout).
+[ext]
+dir = "../rushi-exts/ui_extensions"
+
 [limits]
 # The cap of the model request in input tokens. It matches the
 # context window of the active model (the [model] context_tokens,
