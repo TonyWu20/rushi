@@ -1327,40 +1327,23 @@ fn main() {
     }
 
     // The request-time exclusion of the last assistant group.
-    // The `sel_seqs` parallel array maps each projected event to its
-    // 1-based log sequence: the hard-trim marker names the first
-    // kept sequence so the log and the request stay aligned.
-    let mut sel_events: Vec<&Ev>;
-    let sel_seqs: Vec<usize>;
-    if args.drop_last_assistant {
+    let sel_events: Vec<&Ev> = if args.drop_last_assistant {
         let groups = step_groups(&kept_events);
         match groups
             .iter()
             .rev()
             .find(|&&(start, _)| matches!(kept_events[start], Ev::Assistant { .. }))
         {
-            Some(&(start, end)) => {
-                sel_events = kept_events
-                    .iter()
-                    .take(start)
-                    .chain(kept_events.iter().skip(end))
-                    .cloned()
-                    .collect();
-                sel_seqs = kept_seqs
-                    .iter()
-                    .take(start)
-                    .chain(kept_seqs.iter().skip(end))
-                    .cloned()
-                    .collect();
-            }
-            None => {
-                sel_events = kept_events.clone();
-                sel_seqs = kept_seqs.clone();
-            }
+            Some(&(start, end)) => kept_events
+                .iter()
+                .take(start)
+                .chain(kept_events.iter().skip(end))
+                .cloned()
+                .collect(),
+            None => kept_events.clone(),
         }
     } else {
-        sel_events = kept_events.clone();
-        sel_seqs = kept_seqs.clone();
+        kept_events.clone()
     };
 
     // The framing item: the handoff document when present, else the
@@ -1381,62 +1364,45 @@ fn main() {
     // the masked context: a pair masked out of the context is out of
     // the set (docs/rewind-fork-design.md section 3).
 
-    // The hard-trim backstop (docs/auto-compact-plan.md section
-    // 9.8): the LLM compaction leads at the trigger level. When the
-    // full-form estimate of this request still exceeds that level,
-    // drop the oldest step groups until the request fits. The log
-    // keeps every event (the append-only source of truth); the
-    // request is the projection that fits. The trim marker rides the
-    // request JSON; the harness logs it and strips it before the
-    // model call. When even the framing alone exceeds the level,
-    // emit the `context_exhausted` form: the last-resort in-session
-    // compaction takes over (docs/phase-2-plan.md 4.3 step 5).
+    // Context-exhausted fallback (docs/phase-2-plan.md 4.3 step 5):
+    // if even the framing alone exceeds the compact trigger target, no
+    // in-request trim can help. Emit the `context_exhausted` form so
+    // the last-resort in-session compaction takes over.
+    //
+    // The hard-trim backstop that previously dropped the oldest step
+    // groups here is disabled: dropping groups rewrites the request
+    // prefix, which invalidates the server prompt cache on long
+    // contexts and forces a full re-prefill. True overflow beyond the
+    // model window is recovered by the compact overflow path in the
+    // agent loop (the `overflow` reason fires unconditionally), so the
+    // full context is kept and left for compaction to reduce.
     let compact_reserve: u64 = val_int(&limits, "compact_reserve_tokens")
         .unwrap_or(16384)
         .max(0) as u64;
     let trim_target = trigger_level_for(budget_tokens as u64, compact_reserve);
     let est_before = estimate_request_tokens(&sel_events, &framing);
-    let mut hard_trim: Option<serde_json::Value> = None;
-    if est_before > trim_target {
-        match hard_trim_groups(&sel_events, &framing, trim_target) {
-            Some(drop) => {
-                if drop > 0 {
-                    let groups = step_groups(&sel_events);
-                    let start = groups.get(drop).map(|g| g.0).unwrap_or(sel_events.len());
-                    sel_events = sel_events.iter().skip(start).cloned().collect();
-                    let est_after = estimate_request_tokens(&sel_events, &framing);
-                    hard_trim = Some(serde_json::json!({
-                        "dropped_groups": drop,
-                        "first_kept_seq": sel_seqs.get(start).copied(),
-                        "est_tokens_before": est_before,
-                        "est_tokens_after": est_after,
-                    }));
-                }
-            }
-            None => {
-                let drop_pairs = drop_pair_ids(&kept_events, kept_events.len());
-                let mut items = build_items(
-                    &sel_events,
-                    sel_events.len(),
-                    &Caps { text: 0 },
-                    &drop_pairs,
-                    &ptrs,
-                );
-                if let Some(f) = &framing {
-                    items.insert(0, f.clone());
-                }
-                let request = make_request(&items);
-                let exhausted = serde_json::json!({
-                    "v": 1,
-                    "type": "context_exhausted",
-                    "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                    "message": "Context budget exhausted. The last-resort in-session compaction takes over.",
-                    "request": request,
-                });
-                println!("{}", exhausted);
-                return;
-            }
+    if est_before > trim_target && hard_trim_groups(&sel_events, &framing, trim_target).is_none() {
+        let drop_pairs = drop_pair_ids(&kept_events, kept_events.len());
+        let mut items = build_items(
+            &sel_events,
+            sel_events.len(),
+            &Caps { text: 0 },
+            &drop_pairs,
+            &ptrs,
+        );
+        if let Some(f) = &framing {
+            items.insert(0, f.clone());
         }
+        let request = make_request(&items);
+        let exhausted = serde_json::json!({
+            "v": 1,
+            "type": "context_exhausted",
+            "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "message": "Context budget exhausted. The last-resort in-session compaction takes over.",
+            "request": request,
+        });
+        println!("{}", exhausted);
+        return;
     }
 
     let drop_pairs = drop_pair_ids(&kept_events, kept_events.len());
@@ -1450,10 +1416,7 @@ fn main() {
     if let Some(f) = &framing {
         items.insert(0, f.clone());
     }
-    let mut request = make_request(&items);
-    if let Some(marker) = &hard_trim {
-        request["hard_trim"] = marker.clone();
-    }
+    let request = make_request(&items);
 
     println!("{}", request);
 }
