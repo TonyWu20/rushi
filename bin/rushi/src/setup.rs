@@ -359,14 +359,33 @@ pub fn render_config(manifest: &RushiManifest, version: &str, kernel_commit: &st
     out.push('\n');
 
     out.push_str(
+        "# [loop]\n\
+         # Opaque loop command the TUI spawns for each session\n\
+         # (docs/tui.md section 2.3). `rushi run <session>` is the\n\
+         # kernel turn-loop runner, resolved on PATH.\n\
+         # command = \"rushi\"\n\
+         # args = [\"run\"]\n\
+         # arg_style = \"append_session\"\n\
+         #\n",
+    );
+    out.push('\n');
+
+    out.push_str(
         "# [system_prompt]\n\
          # text = \"You are an expert coding assistant...\"\n\
+         #\n\
+         # [tui]\n\
+         # binary = \"target/release/tui\"   # path to the TUI binary the launcher spawns (relative to this config)\n\
+         # color = \"truecolor\"              # force color level: truecolor, 256, 8, 16 (default: detect)\n\
+         # color_scheme = \"catppuccin macchiato\"\n\
          #\n\
          # [tui.tool_display]\n\
          # preset = \"opencode\"\n\
          # preview_lines = 8\n\
          # bash_collapsed_lines = 5\n\
-         # diff_collapsed_lines = 24\n",
+         # diff_collapsed_lines = 24\n\
+         # expanded_preview_max_lines = 50\n\
+         # diff_view = \"auto\"\n",
     );
 
     out
