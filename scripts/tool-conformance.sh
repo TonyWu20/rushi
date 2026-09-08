@@ -486,13 +486,14 @@ else
   run_test "lean-verify: init invalid name" 1 "invalid package name" '' '{"op":"init","name":"1bad"}' "$LV_BIN"
 
   # P1 route discovery: route resolves the lean-verify manifest from
-  # the exts extra tools root (RUSHI_EXTRA_TOOLS_ROOT) to the binary
-  # (on PATH) and surfaces the tool-level diagnostic.
+  # the exts extra tools root (--extra-tools, the config's [paths]
+  # extra_tools_roots) to the binary (on PATH) and surfaces the
+  # tool-level diagnostic.
   ROUTE_BIN="$(cd "$SCRIPT_DIR/../target/debug" 2>/dev/null && pwd)/route"
   if [ -x "$ROUTE_BIN" ] && [ -n "$EXTS_ROOT" ] && [ -d "$EXTS_ROOT/goal-tools" ]; then
     ROUTE_OUT=$(printf '%s' '{"type":"tool_call","id":"lv-1","name":"lean-verify","arguments":{"op":"init","name":"1bad"}}' \
-      | env RUSHI_EXTRA_TOOLS_ROOT="$EXTS_ROOT/goal-tools" PATH="$(dirname "$LV_BIN"):$PATH" \
-        "$ROUTE_BIN" --tools "$TOOLS_DIR" --cwd "$TEST_DIR" 2>/dev/null || true)
+      | env PATH="$(dirname "$LV_BIN"):$PATH" \
+        "$ROUTE_BIN" --tools "$TOOLS_DIR" --extra-tools "$EXTS_ROOT/goal-tools" --cwd "$TEST_DIR" 2>/dev/null || true)
     if printf '%s' "$ROUTE_OUT" | rg --fixed-strings "invalid package name" > /dev/null 2>&1; then
       echo "PASS: lean-verify: route discovery (tool ran via route, diagnostic surfaced)"
       PASSED=$((PASSED + 1))

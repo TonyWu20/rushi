@@ -22,6 +22,12 @@ pub struct HarnessConfig {
     pub sessions_root: PathBuf,
     /// Root directory for tool manifests.
     pub tools_root: PathBuf,
+    /// Extra roots for tool manifests (extension-provided tools, e.g.
+    /// the exts repo's `goal-tools/` group), if `[paths]
+    /// extra_tools_roots` is set. Scanned after `tools_root`; the
+    /// primary root wins a name collision. Relative entries resolve
+    /// against the stage CWD (the config dir).
+    pub extra_tools_roots: Vec<PathBuf>,
     /// Directory containing event schemas.
     pub schemas_dir: PathBuf,
 
@@ -105,6 +111,21 @@ impl HarnessConfig {
             .and_then(|s| s.as_str())
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("tools"));
+
+        // Extra tools roots (extension-provided tool manifests, e.g.
+        // the exts repo's goal-tools/ group; docs/tui-ext-repo-split.md
+        // section 4, item 16).
+        let extra_tools_roots = cfg
+            .get("paths")
+            .and_then(|p| p.get("extra_tools_roots"))
+            .and_then(|l| l.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(PathBuf::from)
+                    .collect()
+            })
+            .unwrap_or_default();
 
         // Schemas directory: sibling of the config file
         let schemas_dir = config_dir.join("schemas/events/v1");
@@ -239,6 +260,7 @@ impl HarnessConfig {
             config_dir,
             sessions_root,
             tools_root,
+            extra_tools_roots,
             schemas_dir,
             active_model,
             model_id,

@@ -297,6 +297,9 @@ impl StageRunner for SubprocessRunner {
 
         let mut cmd = Command::new(&self.route_bin);
         cmd.arg("--tools").arg(&env.tools_root);
+        for extra in &env.extra_tools_roots {
+            cmd.arg("--extra-tools").arg(extra);
+        }
         if let Some(cwd) = &env.cwd {
             cmd.arg("--cwd").arg(cwd);
         }

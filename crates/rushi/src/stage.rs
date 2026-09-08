@@ -193,6 +193,8 @@ pub struct ToolCallEvent {
 pub struct RouteEnv {
     /// The tools root directory.
     pub tools_root: PathBuf,
+    /// Extra roots for tool manifests (`[paths] extra_tools_roots`).
+    pub extra_tools_roots: Vec<PathBuf>,
     /// The working directory for tool subprocesses.
     pub cwd: Option<PathBuf>,
     /// The per-session tool log path.
