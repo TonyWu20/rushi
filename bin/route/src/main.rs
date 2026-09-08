@@ -366,7 +366,18 @@ fn main() {
         {
             Ok(c) => c,
             Err(e) => {
-                let o = Outcome::not_run(format!("Failed to spawn tool: {e}"));
+                // Log the tool name and the exact binary path the dispatch
+                // expected, so a spawn failure (usually a binary that is
+                // missing from PATH) is debuggable from the tool log. The
+                // bare `{e}` alone ("No such file or directory") says nothing
+                // about which binary the call was trying to run.
+                //
+                // `command` is the resolved command from the manifest: either
+                // an absolute/relative path to the tool binary, or a bare
+                // name that `Command::new` looked up on PATH.
+                let o = Outcome::not_run(format!(
+                    "Failed to spawn tool '{tc_name}': expected binary `{command}` ({e})"
+                ));
                 println!("{}", emit_result(&o, &ts, tc_id, &args));
                 continue;
             }
@@ -499,8 +510,11 @@ fn scan_tool_root(
                                 // shadows a system tool on PATH), otherwise the
                                 // tool dir name. Prefer the cargo build output
                                 // (this binary's own directory), then the
-                                // tools/<name>/bin/ copy, then a bare PATH
-                                // lookup.
+                                // tools/<name>/bin/ copy, then the tool
+                                // package's own cargo target/{release,debug} dir
+                                // (extension-owned tools like goal-tools/ are
+                                // built in place and have no bin/ copy), then
+                                // a bare PATH lookup.
                                 let binary_name = if raw_command == name_str {
                                     name_str.clone()
                                 } else {
@@ -512,11 +526,21 @@ fn scan_tool_root(
                                 let candidates = [
                                     exe_dir.as_ref().map(|d| d.join(&binary_name)),
                                     Some(tool_path.join("bin").join(&binary_name)),
+                                    Some(tool_path.join("target").join("release").join(&binary_name)),
+                                    Some(tool_path.join("target").join("debug").join(&binary_name)),
                                 ];
                                 let command = candidates
                                     .iter()
                                     .flatten()
                                     .find(|p| p.is_file())
+                                    .map(|p| {
+                                        // Canonicalize to an absolute path so
+                                        // the spawn is independent of the tool
+                                        // subprocess's CWD (which may differ from
+                                        // this process's CWD). Fall back to the
+                                        // raw candidate if canonicalization fails.
+                                        p.canonicalize().unwrap_or_else(|_| p.clone())
+                                    })
                                     .map(|p| p.to_string_lossy().to_string())
                                     .unwrap_or(raw_command);
                                 let args_val = config
@@ -881,5 +905,62 @@ mod tests {
         let ev: serde_json::Value = serde_json::from_str(&ev).unwrap();
         assert_eq!(ev["tool_log"], "tools.jsonl");
         assert_eq!(ev["value"]["text"], "line one\nline two");
+    }
+
+    /// A tool package with no `bin/` copy but a cargo build output in its
+    /// own `target/release` dir must resolve to that in-tree binary, not a
+    // bare PATH lookup. This is the goal-tools/ layout
+    // (docs/tui-ext-repo-split.md section 4, item 16).
+    #[test]
+    fn scan_tool_root_resolves_binary_from_cargo_target_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // goal-tools/<name> layout: a tool.toml plus a built binary in the
+        // package's own target/release dir, no bin/ copy.
+        let tool_dir = root.join("goal_complete");
+        let rel_dir = tool_dir.join("target").join("release");
+        std::fs::create_dir_all(&rel_dir).unwrap();
+        let bin_path = rel_dir.join("goal_complete");
+        std::fs::write(&bin_path, "#!/bin/sh\necho ok\n").unwrap();
+        std::fs::write(
+            tool_dir.join("tool.toml"),
+            "[tool]\ncommand = \"goal_complete\"\nargs = []\n",
+        )
+        .unwrap();
+
+        let mut manifests: HashMap<String, (String, serde_json::Value)> = HashMap::new();
+        scan_tool_root(root, &mut manifests);
+
+        let (command, _meta) =
+            manifests.get("goal_complete").expect("goal_complete must be registered");
+        let resolved = PathBuf::from(command);
+        // The in-tree cargo build output wins over a bare PATH lookup.
+        assert!(
+            resolved.ends_with("goal_complete/target/release/goal_complete"),
+            "expected the target/release binary, got: {command}"
+        );
+        assert!(resolved.is_file(), "resolved path must exist: {command}");
+    }
+
+    /// When no candidate file exists, resolution falls back to the bare
+    // manifest `command` (a PATH lookup) exactly as before.
+    #[test]
+    fn scan_tool_root_falls_back_to_bare_command_when_no_candidate_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool_dir = dir.path().join("nope_tool");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(
+            tool_dir.join("tool.toml"),
+            "[tool]\ncommand = \"nope_tool\"\nargs = []\n",
+        )
+        .unwrap();
+
+        let mut manifests: HashMap<String, (String, serde_json::Value)> = HashMap::new();
+        scan_tool_root(dir.path(), &mut manifests);
+
+        let (command, _meta) =
+            manifests.get("nope_tool").expect("nope_tool must be registered");
+        // No bin/, no target build: keep the bare name so it resolves on PATH.
+        assert_eq!(command, "nope_tool");
     }
 }
