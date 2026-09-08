@@ -3,6 +3,7 @@
 use clap::Parser;
 use bon::builder;
 use rushi_common::compact_math::trigger_level_for;
+use rushi_common::model_settings::{ModelSettings, resolve_active_model, resolve_model_settings, val_int, val_str};
 use rushi_common::rewind;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -60,12 +61,6 @@ struct Args {
     /// after the cwd line. Absent: no-op.
     #[arg(long)]
     fragments: Option<String>,
-}
-
-struct ModelSettings {
-    model_id: String,
-    max_output_tokens: u64,
-    context_tokens: usize,
 }
 
 /// One log event, projected to model input items.
@@ -265,42 +260,7 @@ fn drop_last_assistant_group<'a>(events: &[&'a Ev]) -> Vec<&'a Ev> {
     }
 }
 
-/// Resolve the active model name from the MODEL env var or config.
-fn resolve_active_model(config: &toml::Value) -> String {
-    std::env::var("MODEL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            config
-                .get("active")
-                .and_then(|a| a.get("model"))
-                .and_then(|m| m.as_str())
-                .unwrap_or("deepseek")
-                .to_string()
-        })
-}
 
-fn val_str(v: &toml::Value, key: &str) -> Option<String> {
-    v.get(key).and_then(|x| x.as_str()).map(|s| s.to_string())
-}
-
-fn val_int(v: &toml::Value, key: &str) -> Option<i64> {
-    v.get(key).and_then(|x| x.as_integer())
-}
-
-/// Resolve settings for a named model. Per-model values override defaults.
-fn resolve_model_settings(config: &toml::Value, name: &str) -> ModelSettings {
-    let empty = toml::Value::Table(toml::map::Map::new());
-    let model_root = config.get("model").unwrap_or(&empty);
-    let mdl = model_root.get(name).unwrap_or(&empty);
-    ModelSettings {
-        model_id: val_str(mdl, "model_id").unwrap_or_else(|| name.to_string()),
-        max_output_tokens: val_int(mdl, "max_output_tokens")
-            .or_else(|| val_int(model_root, "max_output_tokens"))
-            .unwrap_or(4096) as u64,
-        context_tokens: val_int(mdl, "context_tokens").unwrap_or(131072) as usize,
-    }
-}
 
 /// The wire budget for the context budget gate and the summary call.
 ///
@@ -313,14 +273,16 @@ fn resolve_model_settings(config: &toml::Value, name: &str) -> ModelSettings {
 fn resolve_budget_tokens(limits: &toml::Value, model_settings: &ModelSettings) -> usize {
     let window_input_tokens = model_settings
         .context_tokens
-        .saturating_sub(model_settings.max_output_tokens as usize);
+        .saturating_sub(model_settings.max_output_tokens)
+        .max(1)
+        as usize;
     let trigger_base = val_str(limits, "compact_trigger_base")
         .unwrap_or_else(|| "input_budget".to_string());
     let context_budget_raw = val_int(limits, "context_budget_tokens")
         .map(|v| v.max(1) as usize)
         .unwrap_or(window_input_tokens);
     if trigger_base == "context_budget" {
-        context_budget_raw.min(model_settings.context_tokens.max(1))
+        context_budget_raw.min(model_settings.context_tokens.max(1) as usize)
     } else {
         context_budget_raw.min(window_input_tokens.max(1))
     }
@@ -1340,10 +1302,10 @@ fn main() {
         // input at the input-only window (docs/auto-compact-plan.md
         // section 9.8). Under the default base the budget is already
         // clamped, and the minimum is a no-op.
-        let window_input = model_settings
+        let window_input = (model_settings
             .context_tokens
-            .saturating_sub(model_settings.max_output_tokens as usize)
-            .max(1);
+            .saturating_sub(model_settings.max_output_tokens)
+            .max(1)) as usize;
         let summary_input_target = budget_tokens.min(window_input);
         let builder = summary_input_request()
             .old(&old_region)
@@ -1597,11 +1559,15 @@ fn toml_to_json(val: &toml::Value) -> serde_json::Value {
 mod tests {
     use super::*;
 
-    fn ms(context_tokens: usize, max_output_tokens: u64) -> ModelSettings {
+    fn ms(context_tokens: u64, max_output_tokens: u64) -> ModelSettings {
         ModelSettings {
             model_id: "m".to_string(),
+            base_url: String::new(),
             max_output_tokens,
             context_tokens,
+            reasoning_effort: String::new(),
+            api_key_env: String::new(),
+            timeout_s: 0,
         }
     }
 

@@ -9,6 +9,22 @@ At the Phase 2 split, `LogLine` moved to the shared
 producers (`bin/log`, `bin/user`, `bin/route`, `bin/rushi`) import
 it. The TUI copy moved to the `rushi-tui` repo. This itch is closed.
 
+**Resolution details (2026-09-08).** The single `LogLine`
+definition now lives at `crates/rushi/src/logline.rs` (module
+`rushi_common::logline`). The four old copies are gone:
+
+- `bin/log`, `bin/user`, `bin/route`, `bin/rushi` — each now
+  imports `use rushi_common::logline::LogLine;` (one import line,
+  no local `logline.rs`).
+- `bin/tui` — the TUI moved to the `rushi-tui` repo in commit
+  `9fb0a5e` ("Trim the TUI + ui-extension layers out of the
+  kernel"). The TUI's `port_file.rs` imports the same shared type
+  via a path dep: `rushi-common = { path =
+  "../../../rust-unix-harness/crates/rushi" }`. The old embedded
+  `mod logline` in `port_file.rs` was removed when the TUI
+  joined the shared-crate import. No second `LogLine` definition
+  exists in `rushi-tui`.
+
 `LogLine`, the only type that may write a session log (FT-005),
 lives in four places:
 
@@ -190,3 +206,41 @@ with drt. The invariant "the generator emits well-formed lines"
 moved from human discipline to an automated check. Covered by the
 check-inputs steps of `scripts/lean-verify-drt-e2e.sh` and
 `scripts/lean-verify-e2e.sh`.
+
+## Model-settings defaults drift across binaries (2026-09-12) → resolved 2026-09-12
+
+**Observed.** Model-settings resolution (per-model section lookup,
+`max_output_tokens` / `context_tokens` fallbacks) lived in four
+binaries with independent defaults. The stage binaries (`model`,
+`assemble`, `compact`) used `max_output_tokens = 4096` and
+`context_tokens = 131072`. The kernel and the `rushi setup`
+template use 32768 and 262144. The 4096 cap truncated large
+tool-call arguments mid-JSON. The parse stage logged
+"Model emitted malformed tool arguments" on every retry. The
+goal-continuation hook re-injects the goal each cycle, and the
+loop stalls in a tight failure cycle.
+
+**Reproduce.** Run a session against a local model with the
+4096-token output cap. Ask the model to emit a tool call whose
+arguments exceed 4096 tokens (a large `edit` or `write`). The
+response cuts off mid-JSON. The parse stage hard-fails and the
+loop retries indefinitely.
+
+**Resolution (2026-09-12).** Two changes:
+
+1. **Truncation detection in the model stage.**
+   `bin/model/src/main.rs` now detects incomplete JSON in
+   tool-call arguments. When `stop_reason` is `"stop"` and an
+   argument is incomplete JSON, the model stage reclassifies to
+   `"length"`. The parse stage's length-stop path logs the
+   truncated group and emits a "re-issue with shorter arguments"
+   tool result. The loop recovers instead of looping on a hard
+   error.
+
+2. **Shared model-settings resolution.**
+   `crates/rushi/src/model_settings.rs` now owns the
+   `ModelSettings` struct, the resolver functions, and the TOML
+   helpers. All four binaries import from this module instead of
+   keeping local copies. Defaults are `max_output_tokens = 32768`
+   and `context_tokens = 262144`, matching the `rushi setup`
+   template. A default change is now a single edit in one file.
