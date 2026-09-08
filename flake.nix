@@ -54,6 +54,13 @@
           # split; docs/tui-ext-repo-split.md section 4, item 6.)
           cargoBuildFlags = [ "--workspace" ];
           doCheck = false;
+          # Ship tools/ alongside bin/ so the side-by-side check in
+          # resolve_kernel_tools_dir (<exe>/../tools) finds them without
+          # needing RUSHI_KERNEL.
+          postInstall = ''
+            mkdir -p $out/tools
+            cp -r $src/tools/. $out/tools/
+          '';
         };
       in
       {
