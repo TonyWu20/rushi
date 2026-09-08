@@ -1,0 +1,4 @@
+# rushi.lock (machine-generated, do not edit by hand)
+[lock]
+version = "0.1"
+kernel_commit = "dev"
