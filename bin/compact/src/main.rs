@@ -19,6 +19,7 @@ use std::process::Command;
 
 use clap::Parser;
 use rushi_common::compact_math::{self, Caps, Ev, TriggerBase};
+use rushi_common::model_settings::{resolve_active_model, resolve_model_settings, val_bool, val_int, val_str};
 use serde_json::Value;
 
 /// The one-shot auto-compaction call. It exits 0 with a status JSON on
@@ -763,48 +764,13 @@ fn load_config(path: &Path) -> toml::Value {
     toml::from_str(&raw).unwrap_or(toml::Value::Table(toml::map::Map::new()))
 }
 
-fn val_int(v: &toml::Value, key: &str) -> Option<i64> {
-    v.get(key).and_then(|x| x.as_integer())
-}
-
-/// The string value. Copied with the int form from bin/assemble so
-/// the knob additions stay one edit apart.
-#[allow(dead_code)]
-fn val_str(v: &toml::Value, key: &str) -> Option<String> {
-    v.get(key).and_then(|x| x.as_str()).map(|s| s.to_string())
-}
-
-fn val_bool(v: &toml::Value, key: &str) -> Option<bool> {
-    v.get(key).and_then(|x| x.as_bool())
-}
-
-/// The active model name: the MODEL env var or the config.
-fn resolve_active_model(config: &toml::Value) -> String {
-    std::env::var("MODEL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            config
-                .get("active")
-                .and_then(|a| a.get("model"))
-                .and_then(|m| m.as_str())
-                .unwrap_or("deepseek")
-                .to_string()
-        })
-}
-
 /// The context budget: the model window minus the output
 /// reservation, clamped by the user knob (the assemble rule).
 fn resolve_budget(config: &toml::Value) -> u64 {
     let active = resolve_active_model(config);
+    let ms = resolve_model_settings(config, &active);
+    let window_input = ms.context_tokens.saturating_sub(ms.max_output_tokens);
     let empty = toml::Value::Table(toml::map::Map::new());
-    let model_root = config.get("model").unwrap_or(&empty);
-    let mdl = model_root.get(&active).unwrap_or(&empty);
-    let max_out = val_int(mdl, "max_output_tokens")
-        .or_else(|| val_int(model_root, "max_output_tokens"))
-        .unwrap_or(4096) as u64;
-    let window = val_int(mdl, "context_tokens").unwrap_or(131072) as u64;
-    let window_input = window.saturating_sub(max_out);
     let budget = val_int(config.get("limits").unwrap_or(&empty), "context_budget_tokens")
         .map(|v| (v.max(1)) as u64)
         .unwrap_or(window_input)
@@ -817,10 +783,9 @@ fn resolve_budget(config: &toml::Value) -> u64 {
 /// the input budget (the pi-parity trigger base).
 fn resolve_context_budget(config: &toml::Value) -> u64 {
     let active = resolve_active_model(config);
+    let ms = resolve_model_settings(config, &active);
+    let window = ms.context_tokens;
     let empty = toml::Value::Table(toml::map::Map::new());
-    let model_root = config.get("model").unwrap_or(&empty);
-    let mdl = model_root.get(&active).unwrap_or(&empty);
-    let window = val_int(mdl, "context_tokens").unwrap_or(131072) as u64;
     val_int(config.get("limits").unwrap_or(&empty), "context_budget_tokens")
         .map(|v| (v.max(1)) as u64)
         .unwrap_or(window)

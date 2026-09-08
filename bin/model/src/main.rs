@@ -1,6 +1,7 @@
 #![deny(clippy::todo, clippy::unimplemented, clippy::unreachable)]
 
 use clap::Parser;
+use rushi_common::model_settings;
 use rushi_common::stage::ModelDelta;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -58,29 +59,6 @@ impl<W: Write> StreamWriter<W> {
     }
 }
 
-/// Resolve the active model name from the MODEL env var or config.
-fn resolve_active_model(config: &toml::Value) -> String {
-    std::env::var("MODEL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            config
-                .get("active")
-                .and_then(|a| a.get("model"))
-                .and_then(|m| m.as_str())
-                .unwrap_or("deepseek")
-                .to_string()
-        })
-}
-
-fn val_str(v: &toml::Value, key: &str) -> Option<String> {
-    v.get(key).and_then(|x| x.as_str()).map(|s| s.to_string())
-}
-
-fn val_int(v: &toml::Value, key: &str) -> Option<i64> {
-    v.get(key).and_then(|x| x.as_integer())
-}
-
 /// Map the resolved reasoning effort to the 0-4 thinking level of
 /// docs/tui.md section 7.2: 0 no thinking (the default), 1 low,
 /// 2 medium, 3 high, 4+ highest. The level is what the loop
@@ -118,36 +96,19 @@ fn main() {
         }
     };
 
-    // Resolve the active model and its settings.
-    let active_model = resolve_active_model(&config);
-    let empty = toml::Value::Table(toml::map::Map::new());
-    let model_root = config.get("model").unwrap_or(&empty);
-    let mdl = model_root.get(&active_model).unwrap_or(&empty);
+    // Resolve the active model and its settings via the shared module
+    // (single source of truth, docs/itches.md).
+    let active_model = model_settings::resolve_active_model(&config);
+    let ms = model_settings::resolve_model_settings(&config, &active_model);
 
-    let base_url = val_str(mdl, "base_url").unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
+    let base_url = ms.base_url;
+    let model_name = ms.model_id;
+    let max_output_tokens = ms.max_output_tokens;
+    let reasoning_effort = ms.reasoning_effort;
+    let api_key_env = ms.api_key_env;
+    let model_timeout_s = ms.timeout_s;
 
-    let model_name = val_str(mdl, "model_id").unwrap_or_else(|| active_model.clone());
-
-    let max_output_tokens = val_int(mdl, "max_output_tokens")
-        .or_else(|| val_int(model_root, "max_output_tokens"))
-        .unwrap_or(4096) as u64;
-
-    let reasoning_effort = val_str(mdl, "reasoning_effort")
-        .or_else(|| val_str(model_root, "reasoning_effort"))
-        .unwrap_or_else(|| "medium".to_string());
-
-    let api_key_env = val_str(mdl, "api_key_env").unwrap_or_else(|| "MODEL_API_KEY".to_string());
-
-    let api_key = std::env::var(api_key_env).unwrap_or_default();
-
-    // Overall request timeout in seconds: the per-model `timeout_s`
-    // overrides the global `[model] model_timeout_s`. 0 disables the
-    // cap (the historical behavior). The default 3600 keeps long
-    // thinking streams safe while a stalled provider can no longer
-    // hang the loop or a compaction summary call forever.
-    let model_timeout_s = val_int(mdl, "timeout_s")
-        .or_else(|| val_int(model_root, "model_timeout_s"))
-        .unwrap_or(3600) as u64;
+    let api_key = std::env::var(&api_key_env).unwrap_or_default();
 
     if args.describe {
         // The resolved call config, one JSON object. The loop reads
@@ -914,10 +875,31 @@ impl SseParser {
             "usage": usage
         });
 
+        // Reclassify a "stop" or "tool_calls" response whose tool-call
+        // arguments are truncated JSON as a length stop. Some local
+        // model servers (e.g. vLLM) report `response.completed` even
+        // when the output hit the token cap mid-arguments; without
+        // this the parse stage would hard-fail on "malformed tool
+        // arguments" instead of treating it as a recoverable
+        // truncation.
+        if matches!(stop_reason.as_str(), "stop" | "tool_calls") {
+            for tc in &tool_calls {
+                if let Some(args_str) = tc.get("arguments").and_then(|a| a.as_str()) {
+                    if is_truncated_json(args_str) {
+                        output["stop_reason"] = serde_json::json!("length");
+                        output["detail"] = serde_json::json!(
+                            "Tool-call arguments were truncated (incomplete JSON); the response hit the output token limit."
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+
         // Mark a cut stream as an error with a detail, so the caller
         // can tell a truncated transport apart from a genuine empty
         // model turn.
-        if !self.saw_terminal {
+        if !self.saw_terminal && output["stop_reason"] == "stop" {
             output["stop_reason"] = serde_json::json!("error");
             output["detail"] = serde_json::json!(
                 "SSE stream ended without a terminal event (response.completed/incomplete/failed); the response was truncated."
@@ -994,6 +976,47 @@ fn reasoning_item_fallback(
     }
     item["type"] = serde_json::json!("reasoning");
     item
+}
+
+/// Returns true when `s` looks like a JSON string that was cut off
+/// mid-structure: it is not valid JSON and has more opening than
+/// closing brackets/braces, or ends inside an open string literal.
+/// A string that parses as valid JSON (even if not an object) is NOT
+/// considered truncated — that is a genuine model error, not a cut.
+fn is_truncated_json(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() {
+        return false;
+    }
+    // Already valid JSON? Not a truncation.
+    if serde_json::from_str::<serde_json::Value>(s).is_ok() {
+        return false;
+    }
+    // Walk the string counting unmatched openers, skipping the
+    // contents of JSON string literals.
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in s.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+        } else {
+            match ch {
+                '"' => in_string = true,
+                '{' | '[' => depth += 1,
+                '}' | ']' => depth -= 1,
+                _ => {}
+            }
+        }
+    }
+    // Still inside a string or has unclosed structures.
+    in_string || depth > 0
 }
 
 fn parse_chat_response<W: Write>(
@@ -1594,5 +1617,71 @@ mod tests {
             "none",
             "the config off normalizes"
         );
+    }
+
+    /// A terminal stream whose tool-call arguments are cut off mid-JSON
+    /// reclassifies to a length stop, so the parse stage treats it as a
+    /// recoverable truncation instead of a hard malformed-args failure.
+    #[test]
+    fn completed_stream_with_truncated_args_reports_length() {
+        let mut s = String::new();
+        s.push_str(
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"output\":[{\"id\":\"fc_1\",\"type\":\"function_call\",\"name\":\"edit\",\"arguments\":\"{\\\"file_path\\\": \\\"/tmp/x.rs\\\", \\\"old\\\"\"}]}}\n\n",
+        );
+        let out: serde_json::Value =
+            serde_json::from_str(&parse_sse_response(&s, &mut empty_stream()).unwrap()).unwrap();
+        assert_eq!(out["stop_reason"], "length");
+        assert!(out["detail"].as_str().unwrap().contains("truncated"));
+    }
+
+    /// The same terminal stream with well-formed arguments keeps the
+    /// stop reason: a valid JSON object is not a truncation.
+    #[test]
+    fn completed_stream_with_valid_args_stays_stop() {
+        let mut s = String::new();
+        s.push_str(
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"output\":[{\"id\":\"fc_1\",\"type\":\"function_call\",\"name\":\"bash\",\"arguments\":\"{\\\"command\\\": \\\"ls\\\"}\"}]}}\n\n",
+        );
+        let out: serde_json::Value =
+            serde_json::from_str(&parse_sse_response(&s, &mut empty_stream()).unwrap()).unwrap();
+        assert_eq!(out["stop_reason"], "stop");
+        assert!(out.get("detail").is_none());
+    }
+
+    /// When no terminal event arrives, the streaming delta args are the
+    /// fallback; truncated deltas are reclassified as length.
+    #[test]
+    fn streaming_fallback_truncated_args_reports_length() {
+        let mut s = String::new();
+        s.push_str(
+            "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"name\":\"edit\"}}\n\n",
+        );
+        s.push_str(
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"{\\\"file_path\\\": \\\"/tmp/x.rs\\\", \\\"old\"}\n\n",
+        );
+        // No terminal event: the stream was cut mid-arguments.
+        let out: serde_json::Value =
+            serde_json::from_str(&parse_sse_response(&s, &mut empty_stream()).unwrap()).unwrap();
+        assert_eq!(out["stop_reason"], "length");
+        assert!(out["detail"].as_str().unwrap().contains("truncated"));
+    }
+
+    #[test]
+    fn is_truncated_json_flags_cut_off_structures() {
+        assert!(is_truncated_json("{\"file_path\": \"/tmp/x.rs\", \"old"));
+        assert!(is_truncated_json("{\"a\": [1, 2, 3"));
+        assert!(is_truncated_json("{\"a\": {"));
+        assert!(is_truncated_json("{\"key\": \"unterminated"));
+    }
+
+    #[test]
+    fn is_truncated_json_rejects_complete_and_non_json() {
+        assert!(!is_truncated_json("{\"command\": \"ls\"}"));
+        assert!(!is_truncated_json("{}"));
+        assert!(!is_truncated_json(""));
+        // A complete string literal is valid JSON: not a truncation.
+        assert!(!is_truncated_json("\"hello\""));
+        // Plain text that is not JSON is not a truncated JSON value.
+        assert!(!is_truncated_json("hello world"));
     }
 }

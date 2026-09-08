@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use toml::Value;
 
 use rushi_common::hooks::HookRegistration;
+use rushi_common::model_settings;
 use rushi_common::compact_math::TriggerBase;
 
 /// Resolved harness configuration for one run.
@@ -130,31 +131,17 @@ impl HarnessConfig {
         // Schemas directory: sibling of the config file
         let schemas_dir = config_dir.join("schemas/events/v1");
 
-        // Active model
-        let active_model = cfg
-            .get("active")
-            .and_then(|a| a.get("model"))
-            .and_then(|m| m.as_str())
-            .unwrap_or("deepseek")
-            .to_string();
+        // Active model (config-only resolution; the kernel is the
+        // source of truth — stage binaries use resolve_active_model
+        // which also honours the MODEL env var).
+        let active_model = model_settings::active_model_from_config(&cfg);
 
-        // Model section resolution
-        let empty = Value::Table(toml::map::Map::new());
-        let model_root = cfg.get("model").unwrap_or(&empty);
-        let mdl = model_root.get(&active_model).unwrap_or(model_root);
-
-        let max_output_tokens = val_int(mdl, "max_output_tokens")
-            .or_else(|| val_int(model_root, "max_output_tokens"))
-            .unwrap_or(32768) as u64;
-
-        let context_tokens = val_int(mdl, "context_tokens").unwrap_or(131072) as u64;
-
-        // Model id: prefer explicit `model_id`, fall back to the section name.
-        let model_id = mdl
-            .get("model_id")
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .unwrap_or_else(|| active_model.clone());
+        // Model section resolution via the shared module (single source
+        // of truth for defaults — docs/itches.md).
+        let ms = model_settings::resolve_model_settings(&cfg, &active_model);
+        let max_output_tokens = ms.max_output_tokens;
+        let context_tokens = ms.context_tokens;
+        let model_id = ms.model_id;
 
         // Input budget: context_budget_tokens clamped to window minus output
         let window_input = context_tokens.saturating_sub(max_output_tokens);
@@ -193,9 +180,9 @@ impl HarnessConfig {
                 TriggerBase::InputBudget
             }
         };
-        let compact_reserve_tokens = val_int(limits, "compact_reserve_tokens").unwrap_or(16384) as u64;
-        let compact_keep_tokens = val_int(limits, "compact_keep_tokens").unwrap_or(20000) as u64;
-        let compact_text_chars = val_int(limits, "compact_text_chars").unwrap_or(200) as u64;
+        let compact_reserve_tokens = model_settings::val_int(limits, "compact_reserve_tokens").unwrap_or(16384) as u64;
+        let compact_keep_tokens = model_settings::val_int(limits, "compact_keep_tokens").unwrap_or(20000) as u64;
+        let compact_text_chars = model_settings::val_int(limits, "compact_text_chars").unwrap_or(200) as u64;
 
         let approval_timeout_s = limits
             .get("approval_timeout_s")
@@ -319,10 +306,6 @@ impl HarnessConfig {
             TriggerBase::ContextBudget => self.context_budget,
         }
     }
-}
-
-fn val_int(v: &Value, key: &str) -> Option<i64> {
-    v.get(key).and_then(|x| x.as_integer())
 }
 
 #[cfg(test)]
