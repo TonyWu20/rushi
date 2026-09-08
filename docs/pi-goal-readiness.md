@@ -50,12 +50,12 @@ pieces are now implemented:
 | `goal` CLI + `tool.toml` (start or edit goal) | `goal-tools/goal/` (rushi-exts) | Small |
 | `goal_complete` CLI + `tool.toml` | `goal-tools/goal_complete/` (rushi-exts) | Small |
 | `goal_blocked` CLI + `tool.toml` | `goal-tools/goal_blocked/` (rushi-exts) | Small |
-| Goal state file (`sessions/<n>/goal.json`) + read/write | `crates/goal-state/` | Medium |
+| Goal state file (`sessions/<n>/goal.json`) + read/write | `../rushi-exts/goal-state/` | Medium |
 | `run.idle` hook binary (continue loop when goal open) | `goal-hooks/hook-goal-idle/` (rushi-exts) | Medium |
 | `compact.before` hook binary (preserve goal across compaction) | `goal-hooks/hook-goal-compact/` (rushi-exts) | Small |
 | `tool.before` hook binary (block stale goal tool calls) | `goal-hooks/hook-goal-tools/` (rushi-exts) | Small |
 | `model.before` hook binary (inject goal-mode instruction) | `goal-hooks/hook-goal-arm/` (rushi-exts) | Small |
-| Token / budget accounting | `crates/goal-state/` (budget_tokens, used_tokens) | Medium |
+| Token / budget accounting | `../rushi-exts/goal-state/` (budget_tokens, used_tokens) | Medium |
 | User-facing goal commands (`goal`, `goal edit`, `goal resume`) | `ui_extensions/goal/` | Done |
 | Conformance test: `run.idle` continue e2e | `run-idle-continue-e2e.sh` (rushi-exts root) | Done |
 
@@ -122,8 +122,8 @@ and event-log persistence are in place.
 
 The application-level pieces are complete:
 
-- `crates/goal-state/` — `GoalState` over `goal.json` in the session
-  dir; supports `new/load/save/is_open/pause/resume/
+- `../rushi-exts/goal-state/` — `GoalState` over `goal.json` in the
+  session dir; supports `new/load/save/is_open/pause/resume/
   mark_complete/mark_blocked/edit_goal/build_continue_prompt/
   build_goal_block/format_duration/format_token_count`.
   No budget cap (user decision, docs/goal-ux.md §1.6).

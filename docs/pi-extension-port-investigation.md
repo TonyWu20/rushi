@@ -66,7 +66,7 @@ port is really a re-host of the loop, not a tool.
 **Status: Ported (2026-07-04).** The goal tools
 (`goal-tools/goal/`, `goal-tools/goal_complete/`,
 `goal-tools/goal_blocked/` in the rushi-exts repo), the goal-state crate
-(`crates/goal-state/`), the four hook binaries
+(`rushi-exts/goal-state/`), the four hook binaries
 (`goal-hooks/hook-goal-idle/`, `goal-hooks/hook-goal-compact/`,
 `goal-hooks/hook-goal-tools/`, `goal-hooks/hook-goal-arm/` in the
 rushi-exts repo), the TUI command-palette
