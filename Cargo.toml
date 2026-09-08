@@ -12,7 +12,6 @@ members = [
     "bin/rushi",
     "verification/rewind-drt",
     "bin/hook-compact",
-    "bin/hook-handoff",
     "tools/read",
     "tools/write",
     "tools/edit",

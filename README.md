@@ -30,7 +30,7 @@ charm of our Unix-style architecture.
 - `bin/rushi/` — the `rushi` loop binary (`run`, `step`, `setup`).
 - `bin/{claim,assemble,model,parse,route,log,compact,user}/` — the
   stage binaries the loop spawns.
-- `bin/hook-compact/`, `bin/hook-handoff/` — built-in hook binaries
+- `bin/hook-compact/` — built-in hook binary
   registered on the lifecycle windows.
 - `verification/rewind-drt/` — DRT verification tooling (not part of
   the rushi runtime): the Rust production-side executable that the
