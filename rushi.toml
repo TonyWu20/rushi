@@ -1,0 +1,27 @@
+# rushi.toml — declarative project manifest for `rushi setup`.
+# docs/harness-distribution.md section 5.
+#
+# `rushi setup` reads this file from the project root. It materializes the
+# selected kernel tools into ./tools/, then writes rushi.lock, .envrc,
+# and config.toml (additive: an existing config.toml is left untouched).
+
+[rushi]
+version = "0.1"
+
+[tools]
+# Kernel tools materialized into ./tools/ by `rushi setup`.
+# Valid names for this kernel checkout: bash, edit, read, write.
+# setup fails when a name is in neither the kernel nor ./tools/.
+enabled = ["read", "write", "edit", "bash"]
+
+[ui_extensions]
+# Declared only: `rushi setup` records these, it does not materialize
+# them. Entries live in the sibling rushi-exts checkout
+# (ui_extensions/ + ext-rs/). Tool binaries resolve on PATH from the
+# exts build (see rushi-exts ext-env.sh).
+enabled = ["statusline-rs", "mermaid"]
+
+[loop]
+# Overrides compact_reserve_tokens in the generated config.toml.
+# Absent: the config default stands.
+compact_reserve_tokens = 16384
