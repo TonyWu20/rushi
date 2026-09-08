@@ -7,7 +7,7 @@ guardrails). `phase-2-readiness.md` (the evidence and findings R1-R10
 that triggered this spec). `refinement-policy.md` (P0, P3, P4).
 `tui.md` §2.2-§2.3 and §13.3 (the event vocabulary, the opaque loop
 command, loop supervision). `auto-compact-plan.md` §4.4 (the step
-semantics this spec ports). `notes/itches.md` (the recorded
+semantics this spec ports). `docs/itches.md` (the recorded
 promotion candidates). `scripts/overflow-classify.sh` (the table this
 spec ports). `coding-conventions.md` (the code rules the new Rust
 must follow).
@@ -38,7 +38,7 @@ The trigger pressure is recorded, not anticipated (P0):
   `[loop]` command. Two entry points, one coupled, one decoupled
   (finding R2).
 - The `LogLine` type is a four-way copy, the event validator a
-  third, the compact trigger math a second. `notes/itches.md`
+  third, the compact trigger math a second. `docs/itches.md`
   records all three past the rule of three.
 
 The necessary-change checklist (P4) passes: the change unblocks a
@@ -57,7 +57,7 @@ Two new workspace members:
   It still spawns the stage binaries: `claim`, `assemble`, `model`,
   `parse`, `route`, and `compact`. `log` stays available to humans
   and e2e. The tools under `tools/` stay untouched.
-- `crates/common` (package `harness-common`) — the shared utility
+- `crates/rushi` (package `rushi-common`) — the shared utility
   crate. Modules: `logline` (the one `LogLine`), `event_validation`
   (the one validator), `compact_math` (the pure trigger math and
   cut walk), `stage` (the `StageRunner` trait and its payload
@@ -140,7 +140,7 @@ for. Phase 3 implements it over `crates/core`. Phase 4 swaps in
 in-process and wasm runners. The state-machine code written against
 the trait moves to Phase 3 without rewrite. The trait is structure,
 not a feature. No second runner ships in Phase 2.
-The trait and its payload types live in `harness-common` as the
+The trait and its payload types live in `rushi-common` as the
 `stage` module. Phase 3 moves them to `crates/core` with the
 state machine. Appends are not a stage: the loop appends
 in-process through the shared `LogLine` and validator, one
@@ -578,7 +578,7 @@ directory as working dir, the absolute `CONFIG`). The hardcoded
 `scripts/turn.sh` path goes. A missing `[loop]` table is a hard
 error. `--no-run` is unchanged.
 
-## 6. The `harness-common` crate
+## 6. The `rushi-common` crate
 
 Modules, and the copies they replace:
 
@@ -611,7 +611,7 @@ docs/loop-lifecycle-hooks.md for the full window set and ABI.
 
 Crate boundary rules (guardrail §7 stays intact):
 
-- `harness-common` is a utility crate, not the Phase 3 `core`
+- `rushi-common` is a utility crate, not the Phase 3 `core`
   crate. It holds no event vocabulary type, no reducer, no loop
   state machine. Those move to `crates/core` in Phase 3, where
   `compact_math` and the event types join them.
@@ -736,9 +736,9 @@ YAGNI guard):
 Each stage ships green before the next starts. "Green" is the
 stage gate, not a promise.
 
-### Stage 0 — `harness-common` and the migration
+### Stage 0 — `rushi-common` and the migration
 
-Build `crates/common` with the four modules. Migrate `log`,
+Build `crates/rushi` with the four modules. Migrate `log`,
 `user`, `route`, `tui`, `assemble`, `compact`. The local copies
 and the hardcoded schema list go.
 
@@ -749,7 +749,7 @@ are removed. The Phase 1 sticky state re-fired the compact on every
 step once engaged, causing the repeated-compaction cascade in
 `tui-picker-follow-up`.
 
-- `compact_math` in `harness-common` stays pure. The trigger
+- `compact_math` in `rushi-common` stays pure. The trigger
   decision uses only measured `usage.input_tokens` from the log
   plus a chars/4 estimate of trailing messages, matching pi's
   `estimateContextTokens`. The cut-point walk keeps a local
@@ -867,7 +867,7 @@ model session to completion through the TUI.
 
 Affected:
 
-- New: `bin/harness`, `crates/common`.
+- New: `bin/harness`, `crates/rushi`.
 - New schema files: `schemas/events/v1/approval_request.json`,
   `schemas/events/v1/approval.json`. The validator glob picks
   them up; no code change in `log` or the validator.

@@ -15,12 +15,12 @@ in the plan section 9.
 ## 1. Scope
 
 The Phase 2 plan moves the loop into a Rust binary named `harness`. It also
-builds one shared utility crate named `harness-common`. This document lists the
+builds one shared utility crate named `rushi-common`. This document lists the
 crates that each part of the shell layer can hand off.
 
 Two layers change:
 
-- `harness-common`: pure logic. No I/O. Must stay wasm-safe for Phase 4.
+- `rushi-common`: pure logic. No I/O. Must stay wasm-safe for Phase 4.
 - `bin/harness`: host process. May use Unix I/O, process spawn, and locks.
 
 The `tools/*` binaries stay unchanged in Phase 2. Native tool candidates live
@@ -244,9 +244,9 @@ fails fast on a bad key.
 ## 6. Placement map
 
 This map shows which crate lands where. It keeps the guardrail that
-`harness-common` is pure and wasm-safe.
+`rushi-common` is pure and wasm-safe.
 
-| Crate | `harness-common` | `bin/harness` | `tools/*` (later) |
+| Crate | `rushi-common` | `bin/harness` | `tools/*` (later) |
 |---|---|---|---|
 | `toml` | yes | yes | no |
 | `regex` | yes | yes | yes (search tool) |
@@ -263,7 +263,7 @@ This map shows which crate lands where. It keeps the guardrail that
 | `tempfile` | no | yes | no |
 | Token counts | yes (the math consumes counts) | yes (the probe call and the measured count) | no |
 
-The rule: pure logic goes to `harness-common`. It must stay wasm-safe. Unix
+The rule: pure logic goes to `rushi-common`. It must stay wasm-safe. Unix
 I/O, process spawn, and locks stay in `bin/harness`. Search and query crates
 stay in the later tool layer. They are not Phase 2 core.
 
@@ -291,7 +291,7 @@ These are out of scope for Phase 2. I list them so the guardrail is clear.
 | `jaq-all` churn | It is 0.1.x and moves fast. | Build on `jaq-core`, `jaq-stdlib`, `jaq-json` directly. |
 | `jsonschema` build time | It is a large crate. The build is around a minute. | Accept it. It replaces three validator copies. |
 | `toml` version split | The repo mixes 0.7 and 1.x. | Pick one line. Put it in `[workspace.dependencies]`. |
-| wasm Phase 4 | `libc` and `flock` are Unix-only. | Keep them in `bin/harness`. Keep `harness-common` pure. |
+| wasm Phase 4 | `libc` and `flock` are Unix-only. | Keep them in `bin/harness`. Keep `rushi-common` pure. |
 | Pattern mismatch | A regex that is valid ERE may differ from bash `=~`. | Run the ten self-test rows as unit tests before merge. |
 | Probe cost | One extra model call per step the trigger runs. | Gate the probe behind the measured last-count screen. It sends one output token over a cached prefix. |
 | Byte-stable migration gate | Swapping `ns/4` for measured/probed counts changes the compact candidate and breaks the Stage 0 byte-identity check on `assemble` output. | Land the byte-identical move first (Stage 0). Land the counting swap as a separate, gated step after Stage 0, with its own e2e gate on trigger timing. |

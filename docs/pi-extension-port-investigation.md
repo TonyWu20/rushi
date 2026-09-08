@@ -26,7 +26,7 @@ for the `no-find-grep` class.
 
 Two gaps existed that several extensions need:
 
-- The lifecycle hook ABI. `bin/harness` and `crates/common` do not
+- The lifecycle hook ABI. `bin/harness` and `crates/rushi` do not
   exist. There is no `[hooks]` in `config.toml`.
 - The approval round-trip. The TUI renders a banner. But no code emits
   an `approval_request`. No loop code waits for the answer. No schema
@@ -293,7 +293,7 @@ Two infra pieces decide the whole set.
 
 1. **The lifecycle hook ABI.** This is the `tool.before` window and
    its friends. It is named in `loop-lifecycle-hooks.md`. It is built:
-   `crates/common/src/hooks.rs` holds the dispatcher and
+   `crates/rushi/src/hooks.rs` holds the dispatcher and
    `bin/harness` fires all 13 windows.
 2. **The approval round-trip.** The `approval_request` and `approval`
    schema files exist in `schemas/events/v1/`, `bin/claim` derives the
@@ -302,7 +302,7 @@ Two infra pieces decide the whole set.
 
 Both were on the Phase 2 path. As of 2026-09-13 both are built:
 
-- The hook ABI is in `crates/common/src/hooks.rs` and fires from the
+- The hook ABI is in `crates/rushi/src/hooks.rs` and fires from the
   `harness` loop. All 13 windows (including `tool.before`,
   `compact.before`, `model.before`, and `run.idle`) are wired and
   gated by `scripts/model-before-transform-e2e.sh` and the compact
@@ -339,7 +339,7 @@ and the `model.before` transform path all ship in `harness`.
 ## 6. Sources
 
 - `~/programming/pi-config/flake.nix` — the extension set.
-- `docs/phase-2-plan.md` — the `harness` and `harness-common` spec.
+- `docs/phase-2-plan.md` — the `harness` and `rushi-common` spec.
 - `docs/skill-remapped-to-os-apps.md` — the OS + App model.
 - `docs/loop-lifecycle-hooks.md` — the hook ABI and the windows.
 - `docs/ui-extension.md` — the UI extension host and caps.

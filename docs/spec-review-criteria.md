@@ -149,7 +149,7 @@ A failing doc gate returns the spec to the author.
    criteria 5 and 9 against `architecture.md` and
    `refinement-policy.md`.
 4. **Human pass.** The human checks intent: is this the right thing to
-   build now, or is it an itch that belongs in `notes/itches.md`?
+   build now, or is it an itch that belongs in `docs/itches.md`?
 
 A spec that fails any criterion is not implementable. Return it to the
 author with the failing criterion named.

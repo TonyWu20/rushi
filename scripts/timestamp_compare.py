@@ -5,7 +5,7 @@ vs one or more pi sessions.
 An application (docs/skill-remapped-to-os-apps.md sections 1-4): a
 project-specific, short-lived command on the agent-visible path
 (`scripts/`), needed only when re-checking harness-vs-pi model
-latency (`notes/harness-vs-pi-model-latency.md`). It is not in the
+latency (`docs/harness-vs-pi-model-latency.md`). It is not in the
 base distribution. Discovery is on demand: `ls scripts/`, then this
 `--help`. There is no SKILL.md: the interface below is the
 documentation.
