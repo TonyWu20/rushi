@@ -1,0 +1,146 @@
+# config-exts.example.toml — kernel + sibling rushi-exts layout.
+#
+# Copy this file over config.toml when the rushi-exts sibling repo is
+# checked out and built next to this kernel. It enables the exts
+# wiring that the kernel-only config.toml leaves off:
+#
+#   - [paths] extra_tools_roots: the exts goal-tools/ group
+#     (goal, goal_blocked, goal_complete, lean-verify)
+#   - [ext] dir: the TUI's global ui_extensions layer
+#   - [[hooks.on]] goal-continuation hooks (rushi-exts/goal-hooks)
+#
+# Preconditions:
+#   - rushi-exts is checked out one level above this repo, so the
+#     "../rushi-exts/..." paths resolve against this config's
+#     directory.
+#   - The exts hook binaries (harness-hook-goal-*) are built and on
+#     PATH. A hook that fails to spawn is a non-blocking failure:
+#     the window default applies and a hook.<window>.error marker
+#     lands in the session log.
+#   - The tool binaries (goal, goal_blocked, goal_complete,
+#     lean-verify) resolve on PATH from the exts build.
+
+# Opaque loop command the TUI supervises (docs/tui.md section 2.3).
+[loop]
+command = "rushi"
+args = ["run"]
+arg_style = "append_session"
+
+[model]
+api = "responses"
+max_output_tokens = 32768
+reasoning_effort = "xhigh"
+
+[model.deepseek]
+model_id = "deepseek-v4-flash"
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+context_tokens = 131072
+
+[model."Qwen3.8-27B-NVFP4-DFlash2"]
+model_id = "Qwen3.8-27B-NVFP4"
+base_url = "http://127.0.0.1:30000"
+api_key_env = "LLAMA_API_KEY"
+context_tokens = 262144
+
+[model."Qwen3.8-27B-NVFP4-RTX5090-DFlash2"]
+model_id = "Qwen3.8-27B-NVFP4-RTX5090-DFlash2"
+base_url = "http://127.0.0.1:30000"
+api_key_env = "LLAMA_API_KEY"
+context_tokens = 262144
+
+[active]
+model = "Qwen3.8-27B-NVFP4-RTX5090-DFlash2"
+
+[paths]
+sessions_root = "sessions"
+tools_root = "tools"
+extra_tools_roots = ["../rushi-exts/goal-tools"]
+
+[ext]
+dir = "../rushi-exts/ui_extensions"
+
+[limits]
+context_budget_tokens = 262144
+read_limit = 2000
+read_max_line_length = 2000
+read_max_bytes = 51200
+read_stream_min_size = 10485760
+write_max_bytes = 1048576
+tool_result_max_chars = 20000
+bash_max_output_bytes = 16000
+bash_timeout_default = 60
+bash_timeout_max = 300
+
+compact_enabled = true
+compact_reserve_tokens = 16384
+compact_keep_tokens = 20000
+compact_trigger_base = "context_budget"
+compact_strategy = "compact"
+
+# Lifecycle hook registration (docs/loop-lifecycle-hooks.md 4.1).
+[hooks]
+timeout_ms = 30000
+
+# Built-in overflow strategies.
+[[hooks.on]]
+window  = "exhausted.handle"
+command = "harness-hook-compact"
+
+[[hooks.on]]
+window  = "overflow.resolve"
+command = "harness-hook-compact"
+args    = []
+
+# Goal-continuation hooks (pi-goal port, rushi-exts).
+[[hooks.on]]
+window  = "run.idle"
+command = "harness-hook-goal-idle"
+args    = []
+
+[[hooks.on]]
+window  = "compact.before"
+command = "harness-hook-goal-compact"
+args    = []
+
+[[hooks.on]]
+window  = "tool.before"
+command = "harness-hook-goal-tools"
+args    = []
+
+[[hooks.on]]
+window  = "model.before"
+command = "harness-hook-goal-arm"
+args    = []
+
+[system_prompt]
+text = """You are an expert coding assistant in `rushi`, a Unix agent harness.
+You help the user by reading files, running commands, editing code,
+and writing new files.
+
+Available tools:
+- read: Read file contents. Results carry line numbers.
+- write: Create or overwrite files.
+- edit: Make exact text replacements in a file.
+- bash: Execute bash commands (builds, tests, git, file search).
+
+The project can add custom tools to the list above.
+
+Guidelines:
+- Plan first. Split the task into steps before you code.
+- Complete the steps until the task is done.
+- Build and test after changes. Run the commands that prove the change.
+- Do not stop with the work unfinished. State what remains and why.
+- Prefer read, edit, and write over bash for file work.
+- Use read to examine files instead of cat or sed.
+- Use offset and limit to continue reading large files.
+- Keep replies short. Show file paths clearly in your replies."""
+
+[model.Qwen3.8-27B-NVFP4-RTX5090-DFlash2]
+reasoning_effort = "max"
+
+[tui.tool_display]
+preset = "opencode"
+preview_lines = 8
+bash_collapsed_lines = 5
+diff_collapsed_lines = 24

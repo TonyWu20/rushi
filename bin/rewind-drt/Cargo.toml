@@ -1,0 +1,20 @@
+[package]
+name = "rewind-drt"
+version = "0.1.0"
+edition = "2021"
+
+# The Rust production executable of the RewindSpec Lean mirror
+# (lean/RewindSpec.lean + the model CLI lean/RewindDrt.lean; the
+# `lean-verify` op=drt production executable). Unlike the model exe,
+# this calls the real production function
+# `rushi_common::rewind::active_ranges`; std-only otherwise. The
+# differential gate (docs/rewind-fork-design.md, "Verification")
+# compares this binary against `lean/.lake/build/bin/RewindDrt` on
+# every generated input.
+
+[[bin]]
+name = "rewind-drt"
+path = "src/main.rs"
+
+[dependencies]
+rushi-common = { path = "../../crates/rushi" }

@@ -864,6 +864,7 @@ mod tests {
         let log_path = dir.path().join("tools.jsonl");
         let args = Args {
             tools: "tools".to_string(),
+            extra_tools: vec![],
             tool_result_max_chars: 20000,
             cwd: None,
             tool_log: Some(log_path.clone()),
