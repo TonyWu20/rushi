@@ -24,5 +24,11 @@ fi
 mkdir -p "$PREFIX/bin"
 cp "$OUT_DIR/rushi" "$PREFIX/bin/rushi"
 
+# Ship tools/ alongside bin/ so resolve_kernel_tools_dir's side-by-side
+# check (<exe>/../tools) works without RUSHI_KERNEL.
+mkdir -p "$PREFIX/tools"
+cp -r tools/ "$PREFIX/tools/"
+
 echo "rushi: installed to $PREFIX/bin/rushi"
+echo "rushi: tools shipped to $PREFIX/tools/"
 echo "rushi: add $PREFIX/bin to your PATH if not already present."
