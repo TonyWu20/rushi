@@ -214,7 +214,7 @@ pub fn render_loop_config(manifest: &RushiManifest) -> String {
 /// - Resolves which tools to copy from `kernel_tools_dir`.
 /// - Materializes `tools/<name>/` for each missing kernel tool.
 /// - Writes `rushi.lock` (or verifies in `--locked` mode).
-/// - Writes `.envrc`.
+/// - Writes `.envrc` only if it does not already exist (P6: additive).
 /// - Generates `config.toml` only if it does not already exist.
 ///
 /// In `--locked` mode, reads `rushi.lock` and verifies the kernel
@@ -328,9 +328,13 @@ pub fn do_setup(locked: bool, project_dir: &Path, kernel_tools_dir: &Path) -> Re
     // Write .envrc.
     let envrc_path = cwd.join(".envrc");
     let envrc_content = render_envrc(&local_tools_dir);
-    std::fs::write(&envrc_path, envrc_content)
-        .with_context(|| format!("cannot write {}", envrc_path.display()))?;
-    eprintln!("setup: wrote .envrc");
+    if !envrc_path.exists() {
+        std::fs::write(&envrc_path, &envrc_content)
+            .with_context(|| format!("cannot write {}", envrc_path.display()))?;
+        eprintln!("setup: wrote .envrc");
+    } else {
+        eprintln!("setup: .envrc already exists, leaving it untouched");
+    }
 
     // Generate config.toml only if it does not exist (P6: additive).
     let config_path = cwd.join("config.toml");
@@ -724,6 +728,25 @@ mod tests {
         assert!(
             !pdir.join("rushi.lock").exists(),
             "no lock file written on failure"
+        );
+    }
+
+    #[test]
+    fn p6_envrc_not_overwritten() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kdir = make_kernel(tmp.path(), &["read", "bash"]);
+        let pdir = make_project(tmp.path(), &[]);
+
+        // Pre-create a user-authored .envrc with custom content.
+        let user_envrc = "# my custom envrc\nexport FOO=bar\n";
+        std::fs::write(pdir.join(".envrc"), user_envrc).unwrap();
+
+        do_setup(false, &pdir, &kdir).unwrap();
+
+        let content = std::fs::read_to_string(pdir.join(".envrc")).unwrap();
+        assert_eq!(
+            content, user_envrc,
+            "user .envrc must not be overwritten by setup"
         );
     }
 }
