@@ -72,7 +72,7 @@ fn main() {
 
     match cmd {
         Command::Tui { session } => {
-            let tui_bin = resolve_tui_binary();
+            let tui_bin = resolve_tui_binary(&config_path);
             let mut child = std::process::Command::new(&tui_bin);
             if let Some(s) = &session {
                 child.arg(s);
@@ -121,9 +121,15 @@ fn resolve_config_path(args: &Args) -> String {
 }
 
 /// Find the `tui` binary. Resolution order:
-/// 1. Next to the `rushi` executable (side-by-side install)
-/// 2. On `PATH`
-fn resolve_tui_binary() -> String {
+/// 1. `[tui].binary` in the config file (resolved relative to the config
+///    directory). This is the recommended way to point `rushi` at a
+///    locally-built TUI without editing the launcher.
+/// 2. Next to the `rushi` executable (side-by-side install).
+/// 3. `tui` on `PATH`.
+fn resolve_tui_binary(config_path: &str) -> String {
+    if let Some(p) = config_tui_binary(config_path) {
+        return p;
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let candidate = dir.join("tui");
@@ -133,4 +139,24 @@ fn resolve_tui_binary() -> String {
         }
     }
     "tui".into()
+}
+
+/// Read `[tui].binary` from the config file. The value is resolved
+/// relative to the config directory; `None` when the key is absent
+/// or the resolved path does not exist.
+fn config_tui_binary(config_path: &str) -> Option<String> {
+    let raw = std::fs::read_to_string(config_path).ok()?;
+    let cfg: toml::Value = raw.parse().ok()?;
+    let rel = cfg.get("tui")?.get("binary")?.as_str()?;
+    let config_dir = std::path::Path::new(config_path)
+        .canonicalize()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let p = config_dir.join(rel);
+    if p.exists() {
+        Some(p.to_string_lossy().into_owned())
+    } else {
+        None
+    }
 }

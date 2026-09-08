@@ -33,3 +33,6 @@ scratch/
 ## `git add -A`)
 scratch/refs/pi-vim
 .direnv/
+
+## Nix build artifact
+result
