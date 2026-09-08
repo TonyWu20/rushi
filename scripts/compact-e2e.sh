@@ -76,12 +76,8 @@ EOF
 }
 
 # ── The work config ──────────────────────────────────────────────
-# window 8000, output 4096, input budget 3904, trigger 3404.
-# The optional COMPACT_TRIGGER_BASE moves the trigger to the full
-# context budget (8000 - 500 = 7500, the pi-parity base).
+# window 8000, output 4096, trigger 7500 (context_budget - reserve).
 work_config() {
-  local base_line=""
-  [[ -n "${COMPACT_TRIGGER_BASE:-}" ]] && base_line="compact_trigger_base = \"${COMPACT_TRIGGER_BASE}\""
   cat > "$WORK/config.toml" <<EOF
 [model]
 api = "responses"
@@ -105,7 +101,6 @@ context_budget_tokens = 8000
 compact_reserve_tokens = 500
 compact_keep_tokens = 2000
 compact_enabled = $COMPACT_ENABLED
-$base_line
 
 [system_prompt]
 text = "test"
@@ -207,7 +202,6 @@ NEW_WORK() {
   SESSIONS_DIR="$WORK/sessions/session"
   SLOG="$SESSIONS_DIR/events.jsonl"
   mkdir -p "$SESSIONS_DIR" "$WORK/sessions"
-  COMPACT_TRIGGER_BASE=""
   echo "==== scenario: $1"
 }
 
@@ -239,17 +233,13 @@ scenario_threshold() {
   assert_eq "${n_hit:-0}" 0 "the old region is out of the next request"
 }
 
-# ── Scenario 1b: the pi-parity trigger base ─────────────────────
-# `compact_trigger_base = "context_budget"`: the trigger sits at the
-# full context budget minus the reserve (8000 - 500 = 7500), above
-# the input budget (3904). The trigger reading is the full-form
-# estimate of the kept region (~9000 tokens), so it crosses 7500
-# even while the measured readings (300-380) stay below the
-# default trigger (3404).
+# ── Scenario 1b: the trigger fires at the context budget ────────
+# The trigger sits at context_budget - reserve (8000 - 500 = 7500).
+# The full-form estimate of the kept region (~9000 tokens) crosses
+# 7500 even while the measured readings (300-380) stay far below.
 scenario_pi_parity() {
   NEW_WORK pi-parity
   COMPACT_ENABLED=true
-  COMPACT_TRIGGER_BASE=context_budget
   work_config
   seed_session 300 350 380 6000
   echo "$NORMAL_STOP" >"$WORK/plan"
@@ -262,27 +252,8 @@ scenario_pi_parity() {
   if [[ -n "$tb" && "$tb" -ge 7500 ]]; then
     ok
   else
-    ko "tokens_before $tb sits at the pi-parity threshold (>= 7500)"
+    ko "tokens_before $tb sits at the context-budget threshold (>= 7500)"
   fi
-  assert_no_context_exhausted
-  assert_eq "$(claim_state)" "idle" "the loop runs to idle"
-}
-
-# ── Scenario 1c: the same wide session, the default base ────────
-# The default `input_budget` base keeps the trigger at 3404. The
-# measured reading (380) plus the trailing result (~3000 tokens)
-# stays under 3404, so no compact fires despite the ~9000-token
-# full-form context. Only the pi-parity base reaches the higher
-# threshold.
-scenario_pi_parity_cold() {
-  NEW_WORK pi-parity-cold
-  COMPACT_ENABLED=true
-  work_config
-  seed_session 300 350 380 6000
-  echo "$NORMAL_STOP" >"$WORK/plan"
-  make_stub
-  run_step
-  assert_eq "$(count_events compaction_summary)" 0 "the default base stays cold"
   assert_no_context_exhausted
   assert_eq "$(claim_state)" "idle" "the loop runs to idle"
 }
@@ -297,7 +268,6 @@ scenario_pi_parity_cold() {
 scenario_pi_parity_no_exhaust() {
   NEW_WORK pi-parity-no-exhaust
   COMPACT_ENABLED=false
-  COMPACT_TRIGGER_BASE=context_budget
   work_config
   local R
   R="$(printf 'q%.0s' {1..16000})"  # 16000 chars = 4000 tokens
@@ -329,9 +299,9 @@ scenario_overflow() {
   NEW_WORK overflow
   COMPACT_ENABLED=true
   work_config
-  # Below the trigger: the threshold hook is cold. The model call
-  # fails with the SGLang overflow shape, then succeeds.
-  seed_session 2800 2900 3000
+  # Below the trigger (7500): the threshold hook is cold. The model
+  # call fails with the SGLang overflow shape, then succeeds.
+  seed_session 2800 2900 3000 2000
   cat >"$WORK/plan" <<'EOF'
 {"text":"","tool_calls":[],"reasoning":[],"stop_reason":"error","usage":null,"detail":"The input (4500 tokens) is longer than the model's context length (3904 tokens)."}
 {"text":"done","tool_calls":[],"reasoning":[],"stop_reason":"stop","usage":{"input_tokens":100,"output_tokens":10}}
@@ -350,16 +320,15 @@ scenario_silent_overflow() {
   NEW_WORK silent-overflow
   COMPACT_ENABLED=true
   work_config
-  # The successful call measures over the input budget (3904).
+  # The successful call measures over the context budget (8000).
   # The compact runs, the call is not re-run.
-  seed_session 4000 4200
+  seed_session 4000 4200 4300 2000
   cat >"$WORK/plan" <<'EOF'
-{"text":"done","tool_calls":[],"reasoning":[],"stop_reason":"stop","usage":{"input_tokens":5000,"output_tokens":10}}
+{"text":"done","tool_calls":[],"reasoning":[],"stop_reason":"stop","usage":{"input_tokens":8500,"output_tokens":10}}
 EOF
   make_stub
   run_step
-  # The threshold hook compacted at the trigger. The silent
-  # overflow path compacted again at the usage crossing.
+  # The silent-overflow path fires on the usage reading.
   local n_summary
   n_summary=$(count_events compaction_summary)
   if [ "$n_summary" -ge 1 ]; then
@@ -387,15 +356,16 @@ scenario_silent_overflow_post_engage() {
   NEW_WORK silent-post-engage
   COMPACT_ENABLED=true
   work_config
-  seed_session 2800 2900 3000
+  seed_session 2800 2900 3000 2000
   cat >"$WORK/plan" <<'EOF'
-{"text":"done","tool_calls":[],"reasoning":[],"stop_reason":"stop","usage":{"input_tokens":5000,"output_tokens":10}}
+{"text":"done","tool_calls":[],"reasoning":[],"stop_reason":"stop","usage":{"input_tokens":8500,"output_tokens":10}}
 EOF
   make_stub
   run_step
-  # The seed readings (2800-3000) stay below the 3404 trigger, so the
-  # threshold check is cold. But the model reports input_tokens=5000,
-  # which exceeds the 3904 budget: the silent-overflow path fires.
+  # The seed estimate stays below the 7500 trigger, so the
+  # threshold check is cold. But the model reports input_tokens=8500,
+  # which exceeds the 8000 context budget: the silent-overflow path
+  # fires.
   local n_summary
   n_summary=$(count_events compaction_summary)
   assert_eq "$n_summary" 1 "one compaction_summary on the silent overflow"
@@ -412,7 +382,7 @@ scenario_length_stop() {
   NEW_WORK length-stop
   COMPACT_ENABLED=true
   work_config
-  seed_session 2800 2900 3000
+  seed_session 2800 2900 3000 2000
   # The length stop with the partial tool call: the group lands in
   # the log, the compact strips it, the retry succeeds.
   cat >"$WORK/plan" <<'EOF'
@@ -497,7 +467,7 @@ scenario_iterative() {
   NEW_WORK iterative
   COMPACT_ENABLED=true
   work_config
-  seed_session 4000 4200
+  seed_session 4000 4200 4300 6000
   echo "$NORMAL_STOP" >"$WORK/plan"
   make_stub
   run_step
@@ -505,7 +475,7 @@ scenario_iterative() {
   # boundary, the second compact carries the first summary. The
   # batch ends on a user turn so the claim is awaiting_model.
   local A
-  A="$(printf 'd%.0s' {1..4000})$(printf 'd1%.0s' {1..4000})"
+  A="$(printf 'd%.0s' $(seq 1 24000))"
   cat >>"$SLOG" <<EOF
 {"v":1,"type":"user_message","ts":"t14","seq":14,"content":"more work"}
 {"v":1,"type":"assistant_message","ts":"t15","seq":15,"content":"step four","reasoning":[],"tool_calls":[{"id":"c4","name":"bash","arguments":{"command":"ls"}}],"usage":{"input_tokens":5000,"output_tokens":50}}
@@ -541,15 +511,15 @@ EOF
 scenario_no_trim() {
   NEW_WORK no-trim
   # A compaction_summary boundary already exists (first_kept_seq 6).
-  # The kept region carries a 14000-char result (~3500 tokens): the
-  # estimate exceeds the 3404 trigger level, so the threshold compact
-  # fires before the model call.  With the hard-trim backstop
+  # The kept region carries an 8000-char and a 28000-char result:
+  # the estimate exceeds the 7500 trigger level, so the threshold
+  # compact fires before the model call.  With the hard-trim backstop
   # disabled, no group is dropped and no hard_trim marker is logged.
   COMPACT_ENABLED=true
   work_config
   local OLD_D NEW_D
-  OLD_D="$(printf 'o%.0s' {1..4000})"
-  NEW_D="$(printf 'n%.0s' {1..14000})"
+  OLD_D="$(printf 'o%.0s' {1..8000})"
+  NEW_D="$(printf 'n%.0s' {1..28000})"
   cat > "$SLOG" <<EOF
 {"v":1,"type":"user_message","ts":"t1","seq":1,"content":"do the task"}
 {"v":1,"type":"assistant_message","ts":"t2","seq":2,"content":"step one","reasoning":[],"tool_calls":[{"id":"c1","name":"read","arguments":{"file_path":"a.txt"}}],"usage":{"input_tokens":200,"output_tokens":50}}
@@ -593,8 +563,8 @@ scenario_context_exhausted() {
   COMPACT_ENABLED=true
   work_config
   local MID_D BIG_SUMMARY
-  MID_D="$(printf 'm%.0s' {1..4000})"
-  BIG_SUMMARY="$(printf 's%.0s' {1..20000})"
+  MID_D="$(printf 'm%.0s' {1..8000})"
+  BIG_SUMMARY="$(printf 's%.0s' {1..40000})"
   cat > "$SLOG" <<EOF
 {"v":1,"type":"user_message","ts":"t1","seq":1,"content":"do the task"}
 {"v":1,"type":"assistant_message","ts":"t2","seq":2,"content":"step one","reasoning":[],"tool_calls":[{"id":"c1","name":"read","arguments":{"file_path":"a.txt"}}],"usage":{"input_tokens":200,"output_tokens":50}}
@@ -619,9 +589,8 @@ EOF
   make_stub
   run_step
   # The context_exhausted form fired: the forced compact ran and
-  # added a second compaction_summary. The hard-trim failed (the
-  # framing alone exceeded the target) so the hard_trim marker
-  # is absent.
+  # added a second compaction_summary.  No hard_trim marker because
+  # the hard-trim backstop is disabled.
   assert_eq "$(count_events compaction_summary)" 2 "two compaction_summaries (seed + forced)"
   local n_trim
   n_trim=$(jq -c 'select(.type == "ext_status" and .id == "hard_trim")' "$SLOG" 2>/dev/null | wc -l)
@@ -637,7 +606,7 @@ scenario_failed_retry() {
   NEW_WORK failed-retry
   COMPACT_ENABLED=true
   work_config
-  seed_session 2800 2900 3000
+  seed_session 2800 2900 3000 2000
   # Every normal call overflows. The recovery compact fails on its
   # two summary calls (the fail-2 counter), the last-resort forced
   # compact succeeds, the retry overflows again, and the terminal
@@ -674,7 +643,7 @@ scenario_kill_switch() {
   NEW_WORK kill-switch
   COMPACT_ENABLED=false
   work_config
-  seed_session 2800 2900 3000
+  seed_session 2800 2900 3000 2000
   local OVFEVENT
   OVFEVENT='{"text":"","tool_calls":[],"reasoning":[],"stop_reason":"error","usage":null,"detail":"exceeds the context window"}'
   cat >"$WORK/plan" <<EOF
@@ -699,7 +668,7 @@ scenario_no_detail() {
   NEW_WORK no-detail
   COMPACT_ENABLED=true
   work_config
-  seed_session 2800 2900 3000
+  seed_session 2800 2900 3000 2000
   # The error stop without a detail: the transport path. Two
   # retries, both fail: the terminal event stops the loop. No
   # compact marker lands.
@@ -719,6 +688,95 @@ EOF
   assert_contains "$last_err" "model API call failed" "the terminal event is the transport failure"
 }
 
+# ── Scenario 12: real-fixture pressure test ─────────────────────
+# Uses the real select-and-yank-impl session log (~2800 events,
+# ~1.8 MB, last measured input_tokens ≈ 167 k) to verify that the
+# compact mechanism can summarise a large real log without the
+# summary call itself overflowing the model window.
+scenario_real_fixture_pressure() {
+  NEW_WORK real-fixture-pressure
+  local fixture="$(dirname "$ROOT")/rushi-tui/sessions/select-and-yank-impl/events.jsonl"
+  if [[ ! -f "$fixture" ]]; then
+    echo "SKIP: fixture not found at $fixture"
+    return 0
+  fi
+  cp "$fixture" "$SLOG"
+  # The fixture ends with a user_message + cancel. Append a fresh
+  # user message so the step has a pending user turn to process.
+  local nlines
+  nlines=$(wc -l < "$SLOG")
+  local next_seq=$((nlines + 1))
+  echo "{\"v\":1,\"type\":\"user_message\",\"ts\":\"t_pressure\",\"seq\":$next_seq,\"content\":\"continue\"}" >> "$SLOG"
+
+  # Use the user's real config: the trigger sits at the context
+  # budget minus the reserve:
+  #   trigger = context_budget_tokens - compact_reserve_tokens
+  #           = 262144 - 16384 = 245760 (pi-parity).
+  # The fixture's last measured input is ~167k, below 245760, so we
+  # append a large tool_result to push the full-form estimate past
+  # the trigger level.
+  cat > "$WORK/config.toml" <<EOF
+[model]
+api = "responses"
+max_output_tokens = 32768
+
+[model.stub]
+model_id = "stub-model"
+base_url = "http://127.0.0.1:1"
+api_key_env = "DUMMY"
+context_tokens = 262144
+
+[active]
+model = "stub"
+
+[paths]
+sessions_root = "sessions"
+
+[limits]
+context_budget_tokens = 262144
+compact_reserve_tokens = 16384
+compact_keep_tokens = 20000
+compact_enabled = true
+
+[system_prompt]
+text = "test"
+EOF
+
+  # Append a large tool_result (~80k tokens) so the full-form
+  # estimate of the kept region exceeds the 245760 trigger.
+  local bigtext
+  bigtext=$(printf 'Z%.0s' $(seq 1 320000))
+  echo "{\"v\":1,\"type\":\"tool_result\",\"ts\":\"t_pressure2\",\"id\":\"c_big\",\"seq\":$((next_seq+1)),\"value\":{\"text\":\"$bigtext\"},\"is_error\":false}" >> "$SLOG"
+  echo "{\"v\":1,\"type\":\"stop\",\"ts\":\"t_pressure3\",\"seq\":$((next_seq+2)),\"stop_reason\":\"end_turn\"}" >> "$SLOG"
+
+  echo "$NORMAL_STOP" > "$WORK/plan"
+  make_stub
+  run_step
+
+  # The fixture already carries one compaction_summary; a new one
+  # must appear from this step's threshold compact.
+  local n_summary
+  n_summary=$(count_events compaction_summary)
+  if [ "$n_summary" -ge 2 ]; then
+    ok
+  else
+    ko "expected ≥2 compaction_summaries (seed + pressure compact), got $n_summary"
+  fi
+  assert_no_context_exhausted
+  local n_err
+  n_err=$(jq -c 'select(.type == "error")' "$SLOG" | wc -l)
+  # The fixture already has 28 pre-existing error events; count only
+  # new ones beyond the fixture baseline.
+  local fixture_errors
+  fixture_errors=$(rg -c '"type":"error"' "$fixture" 2>/dev/null || echo 0)
+  if [ "$n_err" -le "$fixture_errors" ]; then
+    ok
+  else
+    ko "unexpected new error events: $n_err total, $fixture_errors from fixture"
+  fi
+  assert_eq "$(claim_state)" "idle" "the loop runs to idle"
+}
+
 # The scenario filter: run one scenario by name.
 run_scenario() {
   local name="$1"
@@ -732,7 +790,6 @@ run_scenario() {
 # ── Run ──────────────────────────────────────────────────────────
 run_scenario threshold scenario_threshold
 run_scenario pi-parity scenario_pi_parity
-run_scenario pi-parity-cold scenario_pi_parity_cold
 run_scenario pi-parity-no-exhaust scenario_pi_parity_no_exhaust
 run_scenario overflow scenario_overflow
 run_scenario silent-overflow scenario_silent_overflow
@@ -746,6 +803,7 @@ run_scenario context-exhausted scenario_context_exhausted
 run_scenario failed-retry scenario_failed_retry
 run_scenario kill-switch scenario_kill_switch
 run_scenario no-detail scenario_no_detail
+run_scenario real-fixture-pressure scenario_real_fixture_pressure
 
 echo
 echo "compact e2e: $PASS passed, $FAIL failed"

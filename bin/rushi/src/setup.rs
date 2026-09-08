@@ -234,7 +234,6 @@ pub fn render_config(manifest: &RushiManifest, version: &str, kernel_commit: &st
         compact_enabled: bool,
         compact_reserve_tokens: u64,
         compact_keep_tokens: u64,
-        compact_trigger_base: String,
         compact_strategy: String,
     }
     #[derive(Serialize)]
@@ -257,7 +256,6 @@ pub fn render_config(manifest: &RushiManifest, version: &str, kernel_commit: &st
         compact_enabled: true,
         compact_reserve_tokens: 16384,
         compact_keep_tokens: 20000,
-        compact_trigger_base: "input_budget".into(),
         compact_strategy: "compact".into(),
     };
     // Keys the manifest overrides stay active; the rest stay commented.

@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use clap::Parser;
-use rushi_common::compact_math::{self, Caps, Ev, TriggerBase};
-use rushi_common::model_settings::{resolve_active_model, resolve_model_settings, val_bool, val_int, val_str};
+use rushi_common::compact_math::{self, Caps, Ev};
+use rushi_common::model_settings::{resolve_active_model, resolve_model_settings, val_bool, val_int};
 use serde_json::Value;
 
 /// The one-shot auto-compaction call. It exits 0 with a status JSON on
@@ -375,14 +375,9 @@ fn main() {
     let reserve = val_int(limits, "compact_reserve_tokens").unwrap_or(16_384) as u64;
     let enabled = val_bool(limits, "compact_enabled").unwrap_or(true);
 
-    // The trigger base: the clamped input budget (default) or the
-    // full context budget (pi parity, `compact_trigger_base =
-    // "context_budget"`).
-    let trigger_base = resolve_trigger_base(&cfg);
-    let base = match trigger_base {
-        TriggerBase::ContextBudget => resolve_context_budget(&cfg),
-        TriggerBase::InputBudget => resolve_budget(&cfg),
-    };
+    // The trigger base is always the full context budget (pi parity):
+    // trigger = context_budget - compact_reserve_tokens.
+    let base = resolve_context_budget(&cfg);
 
     if reserve == 0 {
         eprintln!(
@@ -396,10 +391,10 @@ fn main() {
     // the newest reading of the kept region: the current context
     // size the compact replaces.
     let mut trigger_readings = measurements.clone();
-    // Pi-parity base: the measured readings read the clamped request.
-    // In the trim form that reading is shrunken. Add the full-form
-    // estimate of the kept region: the context the compact replaces.
-    if trigger_base == TriggerBase::ContextBudget {
+    // The full-form estimate of the kept region is the context the
+    // compact actually replaces. Use it so the trigger sees the real
+    // context size even when the measured reading is shrunken.
+    {
         let text_chars = val_int(limits, "compact_text_chars").unwrap_or(200) as u64;
         let caps = Caps { text: Some(text_chars) };
         let evs: Vec<Ev> = kept_events
@@ -764,23 +759,8 @@ fn load_config(path: &Path) -> toml::Value {
     toml::from_str(&raw).unwrap_or(toml::Value::Table(toml::map::Map::new()))
 }
 
-/// The context budget: the model window minus the output
-/// reservation, clamped by the user knob (the assemble rule).
-fn resolve_budget(config: &toml::Value) -> u64 {
-    let active = resolve_active_model(config);
-    let ms = resolve_model_settings(config, &active);
-    let window_input = ms.context_tokens.saturating_sub(ms.max_output_tokens);
-    let empty = toml::Value::Table(toml::map::Map::new());
-    let budget = val_int(config.get("limits").unwrap_or(&empty), "context_budget_tokens")
-        .map(|v| (v.max(1)) as u64)
-        .unwrap_or(window_input)
-        .min(window_input.max(1));
-    budget.max(1)
-}
-
 /// The raw context budget: the user knob `context_budget_tokens`, or
-/// the model window. Unlike `resolve_budget`, it is not clamped to
-/// the input budget (the pi-parity trigger base).
+/// the model window.
 fn resolve_context_budget(config: &toml::Value) -> u64 {
     let active = resolve_active_model(config);
     let ms = resolve_model_settings(config, &active);
@@ -792,23 +772,6 @@ fn resolve_context_budget(config: &toml::Value) -> u64 {
         .max(1)
 }
 
-/// The trigger base from the `compact_trigger_base` knob. An unknown
-/// value falls back to the default with a warning.
-fn resolve_trigger_base(config: &toml::Value) -> TriggerBase {
-    let empty = toml::Value::Table(toml::map::Map::new());
-    let limits = config.get("limits").unwrap_or(&empty);
-    let raw =
-        val_str(limits, "compact_trigger_base").unwrap_or_else(|| "input_budget".to_string());
-    match TriggerBase::parse(&raw) {
-        Some(base) => base,
-        None => {
-            eprintln!(
-                "Warning: unknown compact_trigger_base '{raw}', using input_budget"
-            );
-            TriggerBase::InputBudget
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -961,7 +924,7 @@ mod tests {
     }
 
     #[test]
-    fn the_default_trigger_base_is_the_input_budget() {
+    fn trigger_level_uses_context_budget() {
         let cfg = config_toml(
             r#"
             [model.stub]
@@ -975,49 +938,11 @@ mod tests {
             context_budget_tokens = 262144
             "#,
         );
-        assert_eq!(resolve_trigger_base(&cfg), TriggerBase::InputBudget);
-        assert_eq!(resolve_budget(&cfg), 229376);
-        assert_eq!(compact_math::trigger_level_for(resolve_budget(&cfg), 16384), 212992);
-    }
-
-    #[test]
-    fn the_context_budget_base_reaches_the_pi_threshold() {
-        let cfg = config_toml(
-            r#"
-            [model.stub]
-            context_tokens = 262144
-            max_output_tokens = 32768
-
-            [active]
-            model = "stub"
-
-            [limits]
-            context_budget_tokens = 262144
-            compact_trigger_base = "context_budget"
-            "#,
-        );
-        assert_eq!(resolve_trigger_base(&cfg), TriggerBase::ContextBudget);
-        assert_eq!(resolve_context_budget(&cfg), 262144);
+        let base = resolve_context_budget(&cfg);
+        assert_eq!(base, 262144);
         assert_eq!(
-            compact_math::trigger_level_for(resolve_context_budget(&cfg), 16384),
+            compact_math::trigger_level_for(base, 16384),
             245760,
         );
-    }
-
-    #[test]
-    fn an_unknown_trigger_base_falls_back_to_the_input_budget() {
-        let cfg = config_toml(
-            r#"
-            [model.stub]
-            context_tokens = 8000
-
-            [active]
-            model = "stub"
-
-            [limits]
-            compact_trigger_base = "bogus"
-            "#,
-        );
-        assert_eq!(resolve_trigger_base(&cfg), TriggerBase::InputBudget);
     }
 }

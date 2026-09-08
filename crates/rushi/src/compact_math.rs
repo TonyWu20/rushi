@@ -103,44 +103,6 @@ pub fn trigger_fired(current: u64, trigger_level: u64) -> bool {
     current > trigger_level
 }
 
-/// The base of the compact trigger level (`compact_trigger_base`).
-///
-/// `InputBudget` is the default. The trigger sits at
-/// `input_budget - reserve`, one reserve below the trim budget.
-/// The LLM compaction leads, the trim form is the backstop.
-///
-/// `ContextBudget` is the pi-parity base. The trigger sits at
-/// `context_budget - reserve`, above the input budget. The trigger
-/// estimate must use the full-form context, or the shrunken
-/// (trim-form) readings starve the LLM compaction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum TriggerBase {
-    /// `input_budget - reserve` (default).
-    #[default]
-    InputBudget,
-    /// `context_budget - reserve` (pi parity).
-    ContextBudget,
-}
-
-impl TriggerBase {
-    /// Parse the `compact_trigger_base` config value.
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "input_budget" => Some(Self::InputBudget),
-            "context_budget" => Some(Self::ContextBudget),
-            _ => None,
-        }
-    }
-
-    /// The config string form.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::InputBudget => "input_budget",
-            Self::ContextBudget => "context_budget",
-        }
-    }
-}
-
 /// The trigger level from a base: `base - reserve`. A zero reserve
 /// inverts the trigger; it clamps to one below the base.
 pub fn trigger_level_for(base: u64, reserve: u64) -> u64 {
@@ -438,15 +400,7 @@ mod tests {
         assert_eq!(trigger_level_for(1, 0), 0);
     }
 
-    #[test]
-    fn trigger_base_parses_the_config_values() {
-        assert_eq!(TriggerBase::parse("input_budget"), Some(TriggerBase::InputBudget));
-        assert_eq!(TriggerBase::parse("context_budget"), Some(TriggerBase::ContextBudget));
-        assert_eq!(TriggerBase::parse("other"), None);
-        assert_eq!(TriggerBase::default(), TriggerBase::InputBudget);
-        assert_eq!(TriggerBase::InputBudget.as_str(), "input_budget");
-        assert_eq!(TriggerBase::ContextBudget.as_str(), "context_budget");
-    }
+
 
     #[test]
     fn full_form_estimate_sums_the_projected_events() {
