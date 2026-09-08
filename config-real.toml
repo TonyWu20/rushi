@@ -92,7 +92,6 @@ bash_timeout_max = 300
 compact_enabled = true
 compact_reserve_tokens = 16384
 compact_keep_tokens = 20000
-compact_trigger_base = "context_budget"
 # The context-overflow strategy (docs/phase-2-plan.md 3.2). The
 # only shipped value is `compact`: in-session shadow compact. The
 # key is a seam for future strategies.

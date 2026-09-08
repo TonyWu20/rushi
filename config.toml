@@ -36,7 +36,6 @@
 # compact_enabled = true
 compact_reserve_tokens = 16384
 # compact_keep_tokens = 20000
-# compact_trigger_base = "input_budget"
 # compact_strategy = "compact"
 # context_budget_tokens = 262144      # default: context_tokens - max_output_tokens
 # approval_timeout_s = 300             # absent: approval waits forever

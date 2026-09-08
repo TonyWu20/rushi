@@ -9,7 +9,6 @@ use toml::Value;
 
 use rushi_common::hooks::HookRegistration;
 use rushi_common::model_settings;
-use rushi_common::compact_math::TriggerBase;
 
 /// Resolved harness configuration for one run.
 #[derive(Debug, Clone)]
@@ -53,10 +52,6 @@ pub struct HarnessConfig {
     pub compact_enabled: bool,
     /// The compact strategy (only `compact` ships in Phase 2).
     pub compact_strategy: String,
-    /// The base of the compact trigger level. `InputBudget` is the
-    /// default; `ContextBudget` is the pi-parity base (the trigger may
-    /// sit above the input budget).
-    pub compact_trigger_base: TriggerBase,
     pub compact_reserve_tokens: u64,
     pub compact_keep_tokens: u64,
     pub compact_text_chars: u64,
@@ -167,19 +162,6 @@ impl HarnessConfig {
             .and_then(|v| v.as_str())
             .unwrap_or("compact")
             .to_string();
-        let compact_trigger_base = limits
-            .get("compact_trigger_base")
-            .and_then(|v| v.as_str())
-            .unwrap_or("input_budget");
-        let compact_trigger_base = match TriggerBase::parse(compact_trigger_base) {
-            Some(base) => base,
-            None => {
-                eprintln!(
-                    "Warning: unknown compact_trigger_base '{compact_trigger_base}', using input_budget"
-                );
-                TriggerBase::InputBudget
-            }
-        };
         let compact_reserve_tokens = model_settings::val_int(limits, "compact_reserve_tokens").unwrap_or(16384) as u64;
         let compact_keep_tokens = model_settings::val_int(limits, "compact_keep_tokens").unwrap_or(20000) as u64;
         let compact_text_chars = model_settings::val_int(limits, "compact_text_chars").unwrap_or(200) as u64;
@@ -258,7 +240,6 @@ impl HarnessConfig {
             last_measured_input: 0,
             compact_enabled,
             compact_strategy,
-            compact_trigger_base,
             compact_reserve_tokens,
             compact_keep_tokens,
             compact_text_chars,
@@ -285,26 +266,21 @@ impl HarnessConfig {
         }
     }
 
-    /// The base of the compact trigger level, resolved from config.
-    /// `InputBudget` is the default. `ContextBudget` is the pi-parity
-    /// base where the trigger sits at `context_budget - reserve`.
+    /// Trigger level: `context_budget - compact_reserve_tokens`.
+    /// The trigger sits at the full context budget minus the reserve,
+    /// giving the maximum useful context before compacting.
     pub fn trigger_level(&self) -> u64 {
-        let base = match self.compact_trigger_base {
-            TriggerBase::InputBudget => self.input_budget,
-            TriggerBase::ContextBudget => self.context_budget,
-        };
-        rushi_common::compact_math::trigger_level_for(base, self.compact_reserve_tokens)
+        rushi_common::compact_math::trigger_level_for(
+            self.context_budget,
+            self.compact_reserve_tokens,
+        )
     }
 
-    /// The budget the silent-overflow backstop compares against.
-    /// `InputBudget` base: the clamped input budget. `ContextBudget`
-    /// base (pi parity): the full context budget, so the backstop sits
-    /// at the provider wall instead of preempting the higher threshold.
+    /// The budget the silent-overflow backstop compares against:
+    /// the full context budget, so the backstop sits at the provider
+    /// wall instead of preempting the trigger threshold.
     pub fn compact_overflow_budget(&self) -> u64 {
-        match self.compact_trigger_base {
-            TriggerBase::InputBudget => self.input_budget,
-            TriggerBase::ContextBudget => self.context_budget,
-        }
+        self.context_budget
     }
 }
 
@@ -344,28 +320,12 @@ compact_reserve_tokens = 16384
     }
 
     #[test]
-    fn default_base_triggers_one_reserve_below_the_input_budget() {
+    fn trigger_level_uses_context_budget_base() {
         let cfg = load_toml("");
         assert_eq!(cfg.input_budget, 229376);
         assert_eq!(cfg.context_budget, 262144);
-        assert_eq!(cfg.compact_trigger_base, TriggerBase::InputBudget);
-        assert_eq!(cfg.trigger_level(), 212992);
-        assert_eq!(cfg.compact_overflow_budget(), 229376);
-    }
-
-    #[test]
-    fn context_budget_base_reaches_the_pi_threshold() {
-        let cfg = load_toml("compact_trigger_base = \"context_budget\"\n");
-        assert_eq!(cfg.compact_trigger_base, TriggerBase::ContextBudget);
-        // pi parity: context_budget - reserve = 262144 - 16384.
+        // Trigger is always context_budget - reserve = 262144 - 16384.
         assert_eq!(cfg.trigger_level(), 245760);
         assert_eq!(cfg.compact_overflow_budget(), 262144);
-    }
-
-    #[test]
-    fn an_unknown_base_falls_back_to_the_input_budget() {
-        let cfg = load_toml("compact_trigger_base = \"bogus\"\n");
-        assert_eq!(cfg.compact_trigger_base, TriggerBase::InputBudget);
-        assert_eq!(cfg.trigger_level(), 212992);
     }
 }

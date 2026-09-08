@@ -7,7 +7,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use rushi_common::compact_math::{self, TriggerBase};
+use rushi_common::compact_math::{self};
 use rushi_common::event_validation;
 use rushi_common::hooks::{self, Window};
 use rushi_common::logline::LogLine;
@@ -518,10 +518,16 @@ fn estimate_context(cfg: &HarnessConfig, session_dir: &Path) -> u64 {
     let Some(idx) = last_meas_idx else {
         return 0;
     };
-    let measured = events[idx]
-        .get("usage")
-        .and_then(|u| u.get("input_tokens"))
+    let usage = &events[idx]["usage"];
+    let measured_input = usage
+        .get("input_tokens")
         .and_then(|i| i.as_u64())
+        .unwrap_or(0);
+    // The model response of that turn (output tokens) joins the next
+    // request. Add it so the estimate matches the next call's context.
+    let measured_output = usage
+        .get("output_tokens")
+        .and_then(|o| o.as_u64())
         .unwrap_or(0);
 
     // Trailing events after the last measurement: estimate via chars/4.
@@ -531,14 +537,13 @@ fn estimate_context(cfg: &HarnessConfig, session_dir: &Path) -> u64 {
             compact_math::est_tokens(&compact_math::project_event(v), &caps)
         })
         .sum();
-    let mut est = measured + est;
+    let mut est = measured_input + measured_output + est;
 
-    // Pi-parity base (`compact_trigger_base = "context_budget"`): the
-    // trigger may sit above the input budget, where the request is in
-    // the trim form and the measured reading reads shrunken. Add the
-    // full-form estimate of the kept region so the trigger sees the
-    // real context size instead of starving on shrunken readings.
-    if cfg.compact_trigger_base == TriggerBase::ContextBudget {
+    // Pi-parity: the trigger sits at the full context budget minus the
+    // reserve, above the input budget. The full-form estimate of the
+    // kept region reflects the true context size; the measured reading
+    // of a clamped (trim-form) request reads shrunken.
+    {
         let region = &events[boundary.map(|i| i + 1).unwrap_or(0)..];
         let evs: Vec<compact_math::Ev> =
             region.iter().map(compact_math::project_event).collect();

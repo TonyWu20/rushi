@@ -795,6 +795,15 @@ and now runs with `compact_enabled=true`. The design doc section 9.8
 and property P10 are marked disabled.
 
 **Verification:** `cargo build` clean. `cargo test --workspace` passes.
-`scripts/compact-e2e.sh` passes 69 assertions including the new
+`scripts/compact-e2e.sh` passes 70 assertions including the new
 `no-trim` scenario.
+
+**Follow-up:** The `compact_trigger_base` configuration interface was
+removed. The trigger now always uses the `context_budget` base
+(`context_budget_tokens - compact_reserve_tokens`), with no user-
+configurable knob. The `TriggerBase` enum was deleted from
+`crates/rushi/src/compact_math.rs`. The `pi-parity-cold` e2e
+scenario (which tested the removed `input_budget` base) was
+removed. All e2e seed sizes were re-calibrated to the new trigger
+level of 7500 tokens in the test config.
 

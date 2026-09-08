@@ -71,15 +71,19 @@ enum Ev {
     /// `reasoning` holds the server's own items from this turn, kept
     /// verbatim. They sit in the request after the turn's user
     /// message and before the turn's function_call items.
-    /// `usage_input` is the measured `usage.input_tokens` of the
-    /// request that produced this turn (work item B). It drives the
-    /// token-based context budget.
+    /// `usage_input` / `usage_output` are the measured
+    /// `usage.input_tokens` / `usage.output_tokens` of the request
+    /// that produced this turn (work item B). Together they drive
+    /// the token-based context budget: the next request's context
+    /// is roughly `input + output + trailing events`.
     Assistant {
         text: String,
         calls: Vec<Call>,
         reasoning: Vec<serde_json::Value>,
         #[allow(dead_code)]
     usage_input: Option<usize>,
+        #[allow(dead_code)]
+    usage_output: Option<usize>,
     },
     ToolResult {
         id: String,
@@ -262,30 +266,13 @@ fn drop_last_assistant_group<'a>(events: &[&'a Ev]) -> Vec<&'a Ev> {
 
 
 
-/// The wire budget for the context budget gate and the summary call.
-///
-/// The default `input_budget` base reserves `max_output_tokens` for
-/// output: the budget clamps to the window minus that reservation.
-/// The `context_budget` base is pi parity (docs/auto-compact-plan.md
-/// 4.5 and 9): the whole context window is available for input, so
-/// the budget clamps only to the window, never to the input-only
-/// window. An unset or unknown base keeps the default.
+/// The context budget: the user knob `context_budget_tokens` or the
+/// model window, clamped to the window.
 fn resolve_budget_tokens(limits: &toml::Value, model_settings: &ModelSettings) -> usize {
-    let window_input_tokens = model_settings
-        .context_tokens
-        .saturating_sub(model_settings.max_output_tokens)
-        .max(1)
-        as usize;
-    let trigger_base = val_str(limits, "compact_trigger_base")
-        .unwrap_or_else(|| "input_budget".to_string());
     let context_budget_raw = val_int(limits, "context_budget_tokens")
         .map(|v| v.max(1) as usize)
-        .unwrap_or(window_input_tokens);
-    if trigger_base == "context_budget" {
-        context_budget_raw.min(model_settings.context_tokens.max(1) as usize)
-    } else {
-        context_budget_raw.min(window_input_tokens.max(1))
-    }
+        .unwrap_or(model_settings.context_tokens.max(1) as usize);
+    context_budget_raw.min(model_settings.context_tokens.max(1) as usize)
 }
 
 /// Split a string into a head and a tail that together hold at most
@@ -787,13 +774,18 @@ fn estimate_request_tokens(
         })
     };
 
+    // The anchor is the measured input tokens of the last model call
+    // that touched this region.  The model's own response (output
+    // tokens) rides into the next request, so the anchor adds both.
     let (anchor, trailing_start) = match last_meas_idx {
         Some(idx) => {
-            let measured = match kept_events[idx] {
-                Ev::Assistant { usage_input: Some(m), .. } => *m as u64,
-                _ => 0,
+            let (input, output) = match kept_events[idx] {
+                Ev::Assistant { usage_input: Some(i), usage_output: Some(o), .. } =>
+                    (*i as u64, *o as u64),
+                Ev::Assistant { usage_input: Some(i), .. } => (*i as u64, 0),
+                _ => (0, 0),
             };
-            (measured, idx + 1)
+            (input + output, idx + 1)
         }
         None => (0u64, 0usize),
     };
@@ -1029,11 +1021,20 @@ fn main() {
                     .and_then(|u| u.get("input_tokens"))
                     .and_then(|t| t.as_u64())
                     .map(|n| n as usize);
+                // The measured output tokens of this turn. They join
+                // the input on the next request, so the budget adds
+                // them to the anchor.
+                let usage_output = event
+                    .get("usage")
+                    .and_then(|u| u.get("output_tokens"))
+                    .and_then(|t| t.as_u64())
+                    .map(|n| n as usize);
                 events.push(Ev::Assistant {
                     text,
                     calls,
                     reasoning,
                     usage_input,
+                    usage_output,
                 });
                 event_seqs.push(seq);
             }
@@ -1535,11 +1536,11 @@ mod tests {
     }
 
     #[test]
-    fn budget_default_base_clamps_to_the_input_only_window() {
-        // window 262144, output 32768 -> input window 229376.
-        // An unset base clamps a larger context_budget to 229376.
+    fn budget_defaults_to_the_model_window() {
+        // No context_budget_tokens set: the budget defaults to the
+        // model's context window, clamped to the window.
         let limits = toml::Value::String(String::new());
-        assert_eq!(resolve_budget_tokens(&limits, &ms(262144, 32768)), 229376);
+        assert_eq!(resolve_budget_tokens(&limits, &ms(262144, 32768)), 262144);
     }
 
     #[test]
@@ -1554,13 +1555,11 @@ context_budget_tokens = 100000
     }
 
     #[test]
-    fn budget_pi_parity_base_uses_the_full_window() {
-        // context_budget base: no clamp to the input-only window.
-        // budget = min(context_budget_tokens, context_tokens).
+    fn budget_uses_the_context_budget_base() {
+        // The trigger base is always the full context budget.
         let toml = r#"
 [limits]
 context_budget_tokens = 262144
-compact_trigger_base = "context_budget"
 "#;
         let v: toml::Value = toml.parse().unwrap();
         let limits = v.get("limits").unwrap();
@@ -1568,29 +1567,15 @@ compact_trigger_base = "context_budget"
     }
 
     #[test]
-    fn budget_pi_parity_base_clamps_to_the_model_window() {
+    fn budget_clamps_to_the_model_window() {
         // A context_budget above the window clamps to the window.
         let toml = r#"
 [limits]
 context_budget_tokens = 999999
-compact_trigger_base = "context_budget"
 "#;
         let v: toml::Value = toml.parse().unwrap();
         let limits = v.get("limits").unwrap();
         assert_eq!(resolve_budget_tokens(limits, &ms(262144, 32768)), 262144);
-    }
-
-    #[test]
-    fn budget_unknown_base_falls_back_to_the_default() {
-        let toml = r#"
-[limits]
-context_budget_tokens = 262144
-compact_trigger_base = "nonsense"
-"#;
-        let v: toml::Value = toml.parse().unwrap();
-        let limits = v.get("limits").unwrap();
-        // Unknown base -> default input_budget clamp -> 229376.
-        assert_eq!(resolve_budget_tokens(limits, &ms(262144, 32768)), 229376);
     }
 
     /// The hard-trim walk of section 9.8. The events: user A
@@ -1610,6 +1595,7 @@ compact_trigger_base = "nonsense"
             }],
             reasoning: Vec::new(),
             usage_input: None,
+            usage_output: None,
         });
         evs.push(Ev::ToolResult {
             id: "c1".to_string(),
@@ -1692,6 +1678,7 @@ compact_trigger_base = "nonsense"
             calls: vec![],
             reasoning: vec![],
             usage_input: None,
+            usage_output: None,
         }
     }
 
@@ -1802,6 +1789,7 @@ not json at all
             calls,
             reasoning: vec![],
             usage_input: None,
+            usage_output: None,
         };
         let mut drop: HashSet<String> = HashSet::new();
         drop.insert("bad".to_string());
@@ -1829,6 +1817,7 @@ not json at all
             }],
             reasoning: vec![],
             usage_input: None,
+            usage_output: None,
         };
         // An empty drop set keeps the pair, even in the compact form.
         let items = compact_items(
@@ -1894,6 +1883,7 @@ not json at all
             }],
             reasoning: vec![],
             usage_input: None,
+            usage_output: None,
         });
         events.push(ev_schema_error("f1"));
         events.push(Ev::User {
@@ -2005,6 +1995,7 @@ not json at all
             }],
             reasoning: vec![],
             usage_input: None,
+            usage_output: None,
         };
         let items = compact_items(
             &ev,
@@ -2046,6 +2037,7 @@ not json at all
                     "encrypted_content": "enc-9"
                 })],
                 usage_input: None,
+            usage_output: None,
             },
             &HashSet::new(),
         );
@@ -2093,6 +2085,7 @@ not json at all
                     "encrypted_content": null
                 })],
                 usage_input: None,
+            usage_output: None,
             },
             &Caps {
                 text: 20,
@@ -2148,6 +2141,7 @@ not json at all
                     "id": "rs_1"
                 })],
                 usage_input: None,
+            usage_output: None,
             },
             ev_res("1", "r"),
         ];
@@ -2303,6 +2297,7 @@ not json at all
                 }],
                 reasoning: vec![],
                 usage_input: None,
+            usage_output: None,
             });
             events.push(ev_res(&format!("r{i}"), &big));
         }
@@ -2391,6 +2386,7 @@ not json at all
             }],
             reasoning: vec![],
             usage_input: None,
+            usage_output: None,
         });
         events.push(ev_res(
             "t1",
@@ -2542,6 +2538,7 @@ not json at all
             }],
             reasoning: vec![],
             usage_input: None,
+            usage_output: None,
         }
     }
 
@@ -2713,5 +2710,46 @@ not json at all
         let orphan: Vec<Ev> = vec![ev_user("task"), ev_res("c3", "orphan")];
         let refs: Vec<&Ev> = orphan.iter().collect();
         assert!(context_strands_pairs(&refs), "a call-less result strands");
+    }
+
+    /// The anchor includes both input and output tokens of the last
+    /// measured assistant message, matching the next request's actual
+    /// context size.
+    #[test]
+    fn estimate_anchor_includes_output_tokens() {
+        let evs: Vec<Ev> = vec![
+            Ev::User { text: "go".to_string() },
+            Ev::Assistant {
+                text: "thinking".to_string(),
+                calls: vec![],
+                reasoning: vec![],
+                usage_input: Some(1000),
+                usage_output: Some(500),
+            },
+        ];
+        let refs: Vec<&Ev> = evs.iter().collect();
+        // anchor = 1000 + 500 = 1500, no trailing events.
+        let est = estimate_request_tokens(&refs, &None);
+        assert_eq!(est, 1500, "anchor must add input + output tokens");
+    }
+
+    /// When only input is present (no output measured), the estimate
+    /// still works and falls back to input-only.
+    #[test]
+    fn estimate_anchor_falls_back_without_output() {
+        let evs: Vec<Ev> = vec![
+            Ev::User { text: "go".to_string() },
+            Ev::Assistant {
+                text: String::new(),
+                calls: vec![],
+                reasoning: vec![],
+                usage_input: Some(800),
+                usage_output: None,
+            },
+        ];
+        let refs: Vec<&Ev> = evs.iter().collect();
+        // anchor = 800 + 0 = 800.
+        let est = estimate_request_tokens(&refs, &None);
+        assert_eq!(est, 800, "no output: anchor is input only");
     }
 }

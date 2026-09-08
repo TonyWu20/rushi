@@ -75,7 +75,6 @@ bash_timeout_max = 300
 compact_enabled = true
 compact_reserve_tokens = 16384
 compact_keep_tokens = 20000
-compact_trigger_base = "context_budget"
 compact_strategy = "compact"
 
 # Lifecycle hook registration (docs/loop-lifecycle-hooks.md 4.1).
