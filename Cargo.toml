@@ -10,7 +10,7 @@ members = [
     "bin/log",
     "bin/user",
     "bin/rushi",
-    "bin/rewind-drt",
+    "verification/rewind-drt",
     "bin/hook-compact",
     "bin/hook-handoff",
     "tools/read",

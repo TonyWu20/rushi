@@ -1,10 +1,15 @@
 # Goal prompt injection: one-time system-prompt block
 
-Status: Proposal (2026-09-08). Supersedes the idle-rules-only proposal of
-2026-09-07. The goal-mode code lives in the sibling exts repo
-(`../rushi-exts/goal-hooks/`, `../rushi-exts/goal-tools/`,
-`../rushi-exts/ui_extensions/goal/`). The shared state crate moves from
-`crates/goal-state` to `../rushi-exts/goal-state/` (D3, below).
+Status: Superseded (2026-09-13). This doc's mechanism section is
+superseded by `system-prompt-generation.md` (D5, kernel-join model).
+The input-append design (goal block as a trailing `input` item) is
+superseded; the goal block now rides `prompt_fragments` in the
+request and the kernel joins it into `instructions` after the hook
+chain. D1-D3 and the cache tradeoff analysis are carried forward in
+`system-prompt-generation.md`. The goal-mode code lives in the sibling
+exts repo (`../rushi-exts/goal-hooks/`, `../rushi-exts/goal-tools/`,
+`../rushi-exts/ui_extensions/goal/`). The shared state crate lives at
+`../rushi-exts/goal-state/` (D3).
 
 ## Context
 

@@ -1,6 +1,6 @@
 # System prompt generation
 
-Status: Proposal (2026-09-13).
+Status: Implemented (2026-09-13).
 This doc replaces the mechanism in `goal-rule-reinject.md`.
 It keeps the decision items D1-D3 and the cache tradeoff analysis.
 
@@ -385,3 +385,55 @@ churn.
   false`).
 - `rushi-tui/docs/goal-ux.md` — properties P1-P17 (P6/P15/P16/P17
   need rewording for the new injection point).
+
+## Properties
+
+P1. generated-tool-list: given a `tools_root` with tool manifests
+    and optional `extra_tools_roots`, observe that `assemble`
+    renders a tool list in `instructions` with one `- name: desc`
+    line per tool, in manifest discovery order (primary root first,
+    then each extra root, alphabetical within each), inserted
+    between the config base text and the cwd line.
+
+P2. fragment-join: given a `model.before` transform that carries
+    `prompt_fragments` (an ordered array of `[id, text]` pairs),
+    observe that the kernel joins the text values in order and
+    appends them to `request.instructions`, removes the
+    `prompt_fragments` field from the request before the model
+    call, and logs the fragment key list (not the values) in a
+    `hook.model.before.transform` event.
+
+P3. fragment-stability: given the same fragment set and goal state,
+    observe that consecutive model calls produce byte-identical
+    `instructions`.
+
+P4. goal-fragment-lifecycle: observe that the `"goal"` fragment is
+    present when the goal is open or blocked, and absent when the
+    goal is completed or the goal file is missing. Only
+    `goal_complete` (or a manual `goal clear`) removes it;
+    `goal_blocked` keeps it.
+
+P5. tool-filter-d1: observe that the `goal` tool schema is filtered
+    from `request.tools` in every state. The `goal_complete` and
+    `goal_blocked` schemas are present only while a goal is open.
+
+## Verification
+
+| P# | Property | Proof | Status |
+|----|----------|-------|--------|
+| P1 | generated-tool-list | Code inspection of `bin/assemble/src/main.rs` (tool list rendering + insertion order) | open |
+| P2 | fragment-join | Code inspection of `bin/rushi/src/step.rs` `apply_model_before_transform` (join, strip, log) | open |
+| P3 | fragment-stability | `test_transform_is_idempotent_byte_stable` in `hook-goal-arm` + `test_block_byte_stable_across_turns` in `goal-state` | proven |
+| P4 | goal-fragment-lifecycle | `test_open_goal_sets_fragment_and_filters_tools`, `test_closed_goal_strips_fragment_and_close_tools`, `test_blocked_goal_keeps_fragment` in `hook-goal-arm` | proven |
+| P5 | tool-filter-d1 | Same tests as P4 (open: close tools present, `goal` absent; closed: close tools removed) | proven |
+
+## Gate
+
+```
+cargo build
+cargo test
+cd ../rushi-exts/goal-state && cargo test
+cd ../rushi-exts/goal-hooks/hook-goal-arm && cargo test
+cd ../rushi-exts/goal-hooks/hook-goal-idle && cargo test
+cd ../rushi-exts/goal-hooks/hook-goal-tools && cargo test
+```

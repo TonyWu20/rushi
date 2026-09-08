@@ -33,7 +33,8 @@ lean_lib «RewindSpec» where
 /-- Differential-random-testing CLI over the RewindSpec mirror of
     `rushi_common::rewind::active_ranges` (the lean-verify op=drt
     model executable): one `(pos, rewinds)` scenario in, the active
-    range list out. The Rust production mirror is bin/rewind-drt; the
+    range list out. The Rust production mirror is
+    verification/rewind-drt; the
     shared line protocol is documented in lean/RewindDrt.lean. -/
 lean_exe «RewindDrt» where
   -- module RewindDrt lives at ./RewindDrt.lean

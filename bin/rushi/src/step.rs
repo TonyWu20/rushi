@@ -621,6 +621,15 @@ fn fire_and_handle_exhausted(
 /// without an object `request` field is a non-blocking failure:
 /// the log carries `hook.model.before.error` and the original
 /// request proceeds.
+///
+/// Fragment join (docs/system-prompt-generation.md D5): when the
+/// transformed request carries `prompt_fragments` (an ordered array
+/// of `[id, text]` pairs), the kernel joins the text values in
+/// order and appends them to `request.instructions`, then removes
+/// the field so it never reaches the model. This is the generic
+/// kernel join step: one pass, no knowledge of fragment meaning.
+/// The fragment key list is logged as a `hook.model.before.transform`
+/// marker (keys only, never the values).
 fn apply_model_before_transform(
     cfg: &HarnessConfig,
     session: &SessionDir,
@@ -635,6 +644,67 @@ fn apply_model_before_transform(
     match new_request {
         Some(r) => {
             request.json = r;
+            // Join the hook-supplied `prompt_fragments` into
+            // `instructions`, then strip the field so the model call
+            // never sees it (docs/system-prompt-generation.md D5).
+            // The kernel joins generically: it walks the ordered
+            // `[id, text]` pairs, concatenates the text values, and
+            // appends them after the existing `instructions`. It has
+            // no knowledge of what any fragment means; each extension
+            // owns its own key. Only the key list is logged, never
+            // the values (cache + privacy discipline).
+            if let Some(fragments) = request.json
+                .get("prompt_fragments")
+                .and_then(|f| f.as_array())
+            {
+                let mut keys: Vec<String> = Vec::new();
+                let mut joined: String = String::new();
+                for pair in fragments {
+                    let n = pair.as_array().map_or(0, |a| a.len());
+                    if n < 2 {
+                        continue;
+                    }
+                    if let Some(id) = pair.get(0).and_then(|v| v.as_str()) {
+                        keys.push(id.to_string());
+                    }
+                    if let Some(text) = pair.get(1).and_then(|v| v.as_str()) {
+                        if !text.is_empty() {
+                            if !joined.is_empty() {
+                                joined.push_str("\n\n");
+                            }
+                            joined.push_str(text);
+                        }
+                    }
+                }
+                if !joined.is_empty() {
+                    let base = request
+                        .json
+                        .get("instructions")
+                        .and_then(|i| i.as_str())
+                        .unwrap_or("");
+                    let new_instructions = if base.is_empty() {
+                        joined
+                    } else {
+                        format!("{base}\n\n{joined}")
+                    };
+                    request.json["instructions"] = Value::String(new_instructions);
+                }
+                if let Some(obj) = request.json.as_object_mut() {
+                    obj.remove("prompt_fragments");
+                }
+                if !keys.is_empty() {
+                    let ts =
+                        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                    let marker = serde_json::json!({
+                        "v": 1,
+                        "type": "ext_status",
+                        "ts": ts,
+                        "id": "hook.model.before.transform",
+                        "value": { "fragments": keys },
+                    });
+                    append_event(cfg, &session.path, &marker);
+                }
+            }
             log_hook_window(cfg, session, "model.before", "transform", results);
             let applied_by = results
                 .iter()

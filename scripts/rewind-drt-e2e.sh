@@ -6,7 +6,7 @@
 # (`END <pos> [<seq>:<target>:<mode> ...]`), per docs/rewind-fork-design.md
 # "Verification":
 #   - model  side: lean/.lake/build/bin/RewindDrt (lean/RewindDrt.lean)
-#   - production: target/debug/rewind-drt (bin/rewind-drt, Rust)
+#   - production: target/debug/rewind-drt (verification/rewind-drt, Rust)
 #
 # A green run is the regression gate between the kernel-checked Lean
 # spec (RewindSpec) and the Rust implementation it mirrors.

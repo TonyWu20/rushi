@@ -4,7 +4,8 @@ RewindDrt — the differential-testing CLI for the RewindSpec mirror of
 executable).
 
 One scenario per input line; the Rust production mirror is
-`bin/rewind-drt` (same protocol, documented there too). The two sides
+`verification/rewind-drt` (same protocol, documented there too).
+The two sides
 must agree on every input: a green DRT run is the regression gate
 between the kernel-checked spec and its Rust implementation
 (docs/rewind-fork-design.md, "Verification").
