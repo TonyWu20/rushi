@@ -716,3 +716,60 @@ anonymous regions.
 holds at 22 MB with 62 threads and 0.0% CPU. No 128 MB
 anonymous region appears in pmap. All 576 TUI tests pass.
 
+## FT-019 — `goal_complete` / `goal_blocked` fail to spawn: missing
+binary path in the error and a resolver blind to in-tree builds
+
+**Symptom:** The `rushi-tui/sessions/select-and-yank` log holds
+repeated `goal_complete` and `goal_blocked` tool results with the text
+"Failed to spawn tool: No such file or directory (os error 2)". The
+`[paths] extra_tools_roots = ["../rushi-exts/goal-tools/"]` line in
+`config.toml` looked wrong. The model called the tools and they never
+ran.
+
+**Root cause:** Two separate issues. First, the resolver. The goal
+tools are standalone cargo packages under `rushi-exts/goal-tools/`.
+Each `tool.toml` names its binary by a bare command name. The old
+`scan_tool_root` resolver probed only the route binary's own directory
+and the tool's `bin/` copy. The goal-tools have no `bin/` copy. Their
+binaries live in `target/release/<name>` and `target/debug/<name>`.
+So the resolver fell back to a bare `PATH` lookup. Second, the PATH
+precondition. Those build dirs reach `PATH` only through the
+`rushi-exts` `.envrc` and `ext-env.sh` export, guarded by a `[ -d … ]`
+test. The select-and-yank shell had no such export. The `route`
+`Command::new` PATH lookup failed. Both facts combined: the config
+discovered the manifest and registered the tool name, but the spawn
+still failed. The error text held only the OS error. It named no
+binary, so the user could not tell what path was missing.
+
+**Fix:** Two changes in `bin/route/src/main.rs`.
+
+1. **Resolver:** `scan_tool_root` now probes the tool package's own
+   cargo output after the two old candidates:
+   `<tool>/target/release/<name>` and
+   `<tool>/target/debug/<name>`. It canonicalizes the winning path to
+   an absolute form, so the tool subprocess `CWD` cannot break it.
+   The bare `PATH` fallback stays last.
+
+2. **Error text:** the spawn-failure branch now names the tool and the
+   expected binary path. The new text is
+   `Failed to spawn tool '<name>': expected binary '<path>' (<io
+   error>)`.
+
+**Verification:** `cargo build` and `cargo build --release` pass for
+`route`. `cargo test -p route` passes all 16 tests, including the two
+new ones: `scan_tool_root_resolves_binary_from_cargo_target_release`
+and `scan_tool_root_falls_back_to_bare_command_when_no_candidate_exists`.
+An end-to-end probe of the rebuilt release `route` against the real
+`rushi-exts/goal-tools` root now runs `goal_complete` in-tree. It
+returns the domain error "HARNESS_SESSION_DIR is not set", not the
+`No such file or directory` text. A synthetic missing-binary probe
+prints the new error with the expected path: `Failed to spawn tool
+'fake_tool': expected binary 'definitely-missing-bin' (No such file or
+directory (os error 2))`.
+
+**Residual risk:** A tool with no `bin/` copy, no in-tree build, and
+no `PATH` entry still fails to spawn. The improved error text now
+names the tool and the expected binary path, so the user can add the
+dir to `PATH` (the `rushi-exts` `.envrc` / `ext-env.sh` export) or
+build the package in place.
+
