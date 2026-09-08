@@ -4,10 +4,10 @@
 # checked out and built next to this kernel. It enables the exts
 # wiring that the kernel-only config.toml leaves off:
 #
-#   - [paths] extra_tools_roots: the exts goal-tools/ group
-#     (goal, goal_blocked, goal_complete, lean-verify)
+#   - [paths] extra_tools_roots: the exts goal-app/goal-tools/ group
+#     (goal, goal_blocked, goal_complete) and the lean-verify tool
 #   - [ext] dir: the TUI's global ui_extensions layer
-#   - [[hooks.on]] goal-continuation hooks (rushi-exts/goal-hooks)
+#   - [[hooks.on]] goal-continuation hooks (rushi-exts/goal-app/goal-hooks)
 #
 # Preconditions:
 #   - rushi-exts is checked out one level above this repo, so the
@@ -55,7 +55,7 @@ model = "Qwen3.8-27B-NVFP4-RTX5090-DFlash2"
 [paths]
 sessions_root = "sessions"
 tools_root = "tools"
-extra_tools_roots = ["../rushi-exts/goal-tools"]
+extra_tools_roots = ["../rushi-exts/goal-app/goal-tools", "../rushi-exts/lean-verify"]
 
 [ext]
 dir = "../rushi-exts/ui_extensions"
