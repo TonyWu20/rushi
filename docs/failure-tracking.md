@@ -773,3 +773,28 @@ names the tool and the expected binary path, so the user can add the
 dir to `PATH` (the `rushi-exts` `.envrc` / `ext-env.sh` export) or
 build the package in place.
 
+## FT-020 — Hard-trim backstop invalidates prompt cache on long contexts
+
+**Symptom:** The `hard_trim` backstop in `bin/assemble` drops the oldest
+step groups whenever the request estimate exceeds the compact trigger
+level. In the `select-and-yank-impl` session, 52 trim events fired on a
+~240k-token context. Each trim rewrites the request prefix, invalidates
+the server prompt cache, and forces a full re-prefill.
+
+**Root cause:** The hard-trim target equals the compact trigger level
+(e.g. 212,992 or 245,760 tokens), which sits below the 262,144-token
+model window. The overflow compact in the agent loop already recovers
+true overflow unconditionally. The trim therefore fires preemptively
+and rewrites the prefix without preventing a failure that would not
+otherwise occur.
+
+**Fix:** Removed the group-drop branch in `bin/assemble/src/main.rs`.
+The `context_exhausted` fallback still fires when the framing alone
+exceeds the target. The e2e scenario `last-resort` became `no-trim`
+and now runs with `compact_enabled=true`. The design doc section 9.8
+and property P10 are marked disabled.
+
+**Verification:** `cargo build` clean. `cargo test --workspace` passes.
+`scripts/compact-e2e.sh` passes 69 assertions including the new
+`no-trim` scenario.
+
