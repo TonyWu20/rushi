@@ -76,11 +76,21 @@
             pkgs.lean4
             pkgs.z3
             pkgs.leanPackages.mathlib
+            # The Nix-built `rushi` binary on PATH (this flake's
+            # packages.default). The launcher finds `tui` on PATH after
+            # the side-by-side check (bin/rushi/src/main.rs, function
+            # resolve_tui_binary). The rushi-tui .envrc puts its
+            # target/release on PATH for that lookup.
+            rushi
           ];
-          #packages = [ rushi ];
-          #shellHook = ''
-          #  export RUSHI_KERNEL="${rushi}"
-          #'';
+          # Do not export RUSHI_KERNEL to the Nix store path: the
+          # built package has no tools/ dir, and `rushi setup` would
+          # materialize zero tools. From a dev checkout, `rushi setup`
+          # falls back to CWD/tools, which works without the variable.
+          # Uncomment only when a store copy carries tools/:
+          # shellHook = ''
+          #   export RUSHI_KERNEL="${rushi}"
+          # '';
         };
 
         # Lean 4 shell for the formal-verification backstop (docs/lean-driven-development.md §8).
