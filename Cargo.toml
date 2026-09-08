@@ -10,6 +10,7 @@ members = [
     "bin/log",
     "bin/user",
     "bin/rushi",
+    "bin/rewind-drt",
     "bin/hook-compact",
     "bin/hook-handoff",
     "tools/read",
@@ -17,7 +18,6 @@ members = [
     "tools/edit",
     "tools/bash",
     "crates/rushi",
-    "crates/goal-state",
 ]
 
 [workspace.dependencies]
