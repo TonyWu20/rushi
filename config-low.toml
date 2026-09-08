@@ -35,16 +35,17 @@ model = "Qwen3.8-27B-NVFP4-RTX5090-DFlash2"
 [paths]
 sessions_root = "sessions"
 tools_root = "tools"
-# Extension-provided tool manifests (the exts checkout's goal-tools/
-# group); see config.toml's [paths] extra_tools_roots.
-extra_tools_roots = ["../rushi-exts/goal-tools"]
+# Extension-provided tool manifests. In a kernel-only checkout the
+# list is empty. When running alongside the rushi-exts sibling repo,
+# uncomment the line below to scan its goal-tools/ group.
+extra_tools_roots = []
+# extra_tools_roots = ["../rushi-exts/goal-tools"]
 
-# The TUI's global extension layer tree now lives in the sibling
-# rushi-exts checkout (rushi-tui/docs/tui-ext-repo-split.md section
-# 4, item 4); the relative path resolves against this config's
-# directory.
-[ext]
-dir = "../rushi-exts/ui_extensions"
+# The TUI's global extension layer tree. In a kernel-only checkout
+# there is no global layer. When running alongside the rushi-exts
+# sibling repo, uncomment the [ext] section to enable it.
+# [ext]
+# dir = "../rushi-exts/ui_extensions"
 
 [limits]
 # The cap of the model request in input tokens. It matches the
@@ -117,26 +118,28 @@ timeout_ms = 30000
 # command = "harness-hook-compact"
 # args    = []
 
-# Goal-continuation hooks (pi-goal port).
-[[hooks.on]]
-window  = "run.idle"
-command = "harness-hook-goal-idle"
-args    = []
-
-[[hooks.on]]
-window  = "compact.before"
-command = "harness-hook-goal-compact"
-args    = []
-
-[[hooks.on]]
-window  = "tool.before"
-command = "harness-hook-goal-tools"
-args    = []
-
-[[hooks.on]]
-window  = "model.before"
-command = "harness-hook-goal-arm"
-args    = []
+# Goal-continuation hooks (pi-goal port, rushi-exts).
+# Uncomment when the rushi-exts sibling repo is built and its hook
+# binaries are on PATH.
+# [[hooks.on]]
+# window  = "run.idle"
+# command = "harness-hook-goal-idle"
+# args    = []
+#
+# [[hooks.on]]
+# window  = "compact.before"
+# command = "harness-hook-goal-compact"
+# args    = []
+#
+# [[hooks.on]]
+# window  = "tool.before"
+# command = "harness-hook-goal-tools"
+# args    = []
+#
+# [[hooks.on]]
+# window  = "model.before"
+# command = "harness-hook-goal-arm"
+# args    = []
 
 [system_prompt]
 # Borrowed from the pi coding agent default prompt.

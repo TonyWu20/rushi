@@ -3,28 +3,26 @@
 Authoritative entry point for any agent starting a new session.
 Read this first. It tells you what exists, what works, and what is next.
 
-## Repo state (2026-08-28)
+## Repo state (2026-09-08)
 
-**Working.** The Phase 1 pipeline runs end to end:
-`user` → `turn.sh` → `step.sh` → `claim` → `assemble` → `model` →
-`parse` → `route` → tools → `log`. Five tools are live:
-`read`, `write`, `edit`, `list`, `bash`. The session log uses
-append-only JSONL with JSON Schema validation. The model adapter
+**Working.** The Phase 2 pipeline runs end to end:
+`rushi` (loop) → `claim` → `assemble` → `model` →
+`parse` → `route` → tools → `log`. Base tools live in
+`tools/`: `read`, `write`, `edit`, `list`, `bash`. The session log
+uses append-only JSONL with JSON Schema validation. The model adapter
 speaks the DeepSeek Responses API with a Chat Completions fallback.
 
-**New: the TUI.** `bin/tui` renders the session log, appends
-`user_message`, `approval`, and `cancel` events, and supervises the
-opaque `[loop]` command from `config.toml`. See `tui.md` §13 and
-`tui-plan.html`.
-
-**Next: the UI extension mechanism.** Out-of-process UI extensions
-over a JSONL boundary, host-owned load order. Design in
-`ui-extension.md`, staged work in `ui-extension-plan.md`.
+**Post-split.** At the 2026-09-08 split this repo is the kernel
+(loop, base tools, extension host, hook ABI, distribution). The TUI
+and UI-extension layers moved to `../rushi-tui`; goal tools, goal
+hooks, and `lean-verify` moved to `../rushi-exts`. Their docs live in
+those repos. The kernel ships a default config with no sibling
+dependency; `config-exts.example.toml` shows how to re-enable the
+exts wiring.
 
 **Not yet done.** No CI. No shared `core` crate (by design, per
-Phase 1). The schema validator is now a third copy
-(`notes/itches.md`). No UI extension mechanism (designed, staged,
-not built).
+Phase 3). The schema validator is now a fourth copy
+(`notes/itches.md`).
 
 ## Doc inventory
 
@@ -32,7 +30,7 @@ not built).
 | --------------------------------------------- | ------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `architecture.md`                             | Active              | 2026-09-04   | Hexagonal architecture, phase roadmap, tool contract, guardrails. Lean sections: Properties P1-P8, Verification, Gate                                                                               |
 | `lean-driven-development.md`                  | Active              | 2026-09-04   | Lean-driven development workflow adapted to this repo: the Properties / Verification / Gate contract for spec docs, the no-unproven-claim rule, the build gate as acceptance authority, and the `scripts/verify-specs.sh` doc gate |
-| `auto-compact-plan.md`                        | Implemented       | 2026-09-16   | In-session auto-compaction: the `bin/compact` binary, the threshold trigger, the overflow and length-stop recovery in `step.sh`, the `context_exhausted` last-resort. Ported from the pi 0.84.2 compaction source. Reviewed, audited in three passes, and shipped: 62 e2e scenarios in `scripts/compact-e2e.sh`. The `compact_trigger_base` knob adds the pi-parity `context_budget` trigger base; the stale post-compact reading guard (sections 9, 9.5) keeps the last-resort path recoverable; the `context_budget` base unclamps the wire budget to the model window (section 9.6); reserve size controls next-response headroom and `model_timeout_s` bounds a stalled model call (section 9.7); the hard-trim backstop mechanically cuts the request to fit when the LLM compact lags (section 9.8); the parse length-stop gate lets truncated tool calls recover instead of hard-failing (section 9.9) | 
+| `auto-compact-plan.md`                        | Implemented       | 2026-09-16   | In-session auto-compaction: the `bin/compact` binary, the threshold trigger, the overflow and length-stop recovery in `step.sh`, the `context_exhausted` last-resort. Ported from the pi 0.84.2 compaction source. Reviewed, audited in three passes, and shipped: 62 e2e scenarios in `scripts/compact-e2e.sh`. The `compact_trigger_base` knob adds the pi-parity `context_budget` trigger base; the stale post-compact reading guard (sections 9, 9.5) keeps the last-resort path recoverable; the `context_budget` base unclamps the wire budget to the model window (section 9.6); reserve size controls next-response headroom and `model_timeout_s` bounds a stalled model call (section 9.7); the hard-trim backstop mechanically cuts the request to fit when the LLM compact lags (section 9.8); the parse length-stop gate lets truncated tool calls recover instead of hard-failing (section 9.9) |
 | `auto-compact-plan-review.md`                 | Review              | 2026-09-02   | Design review of `auto-compact-plan.md`: every claim verified against the repo code, config, and the pi source                                              |
 | `auto-compact-plan-audit.md`                  | Review              | 2026-09-02   | Second audit: re-derives each accepted cut and safety argument from the code, not the plan wording                                                        |
 | `auto-compact-plan-audit-2.md`                | Review              | 2026-09-02   | Third audit: B1-B6, all accepted. The fixes land in the plan sections 4-7                                                                                 |
@@ -46,49 +44,30 @@ not built).
 | `phase-2-readiness.md`                        | Review            | 2026-09-03   | Readiness review for `architecture.md` Phase 2 (the loop into a Rust binary): the loop behavior list, the stability evidence, ten findings (R1-R10), the verdict with six conditions |
 | `phase-2-plan.md`                             | Implemented       | 2026-09-13   | The Phase 2 spec and plan: the `harness` loop binary (`run`/`step`, the session lock, the cancellation handles, the ported retry and compact-branch semantics), the `harness-common` utility crate, the approval round-trip (`awaiting_approval` state, two new event types), the `run.idle` goal-continuation window, the `model.before` transform window, tool sidecar boundary, five stages with gates |
 | `phase-2-crate-research.md`                   | Proposal          | 2026-09-07   | Crate research for the Phase 2 core: maps the shell glue of `step.sh`/`turn.sh` and the bash-tool command surface to Rust crates (`grep` family, `jaq`, `jsonschema`, `toml`, `regex`, `chrono`), with a placement map and the deferred list |
-| `handoff-strategy.md`                           | Spec, not yet built | 2026-09-08   | The handoff context strategy: replaces the in-session last-resort compact with a summary handoff that seeds and auto-starts a new session. The `SessionStore` port, the handoff doc format (both session dirs), and the log-index convention. Strategy selection is a hook registration on the `exhausted.handle` window (see `loop-lifecycle-hooks.md`) |
-| `loop-lifecycle-hooks.md`                        | Spec, not yet built | 2026-09-13   | The lifecycle-window hook design: fine-grained control points on the loop (`session.start/end`, `step.start/end`, `model.before/after`, `compact.before/after`, `overflow.resolve`, `exhausted.handle`, `tool.before/after`, `run.idle`), a Unix-style hook ABI (command on a path, JSON stdin/stdout, exit-code decision with `block`/`approve` on `tool.before`, `transform` on `model.before`, and `continue` on `run.idle`), the two built-in overflow strategies as swappable hook registrations, and the Unix-philosophy reframe of "hooks" as applications on a path |
+| `handoff-strategy.md`                           | Implemented | 2026-09-13   | The handoff context strategy: replaces the in-session last-resort compact with a summary handoff that seeds and auto-starts a new session. The `SessionStore` port, the handoff doc format (both session dirs), and the log-index convention. Strategy selection is a hook registration on the `exhausted.handle` window (see `loop-lifecycle-hooks.md`) |
+| `loop-lifecycle-hooks.md`                        | Implemented | 2026-09-13   | The lifecycle-window hook design: fine-grained control points on the loop (`session.start/end`, `step.start/end`, `model.before/after`, `compact.before/after`, `overflow.resolve`, `exhausted.handle`, `tool.before/after`, `run.idle`), a Unix-style hook ABI (command on a path, JSON stdin/stdout, exit-code decision with `block`/`approve` on `tool.before`, `transform` on `model.before`, and `continue` on `run.idle`), the two built-in overflow strategies as swappable hook registrations, and the Unix-philosophy reframe of "hooks" as applications on a path. Built: `crates/rushi/src/hooks.rs`, `bin/hook-compact`, `bin/hook-handoff` |
 | `bash-tool.md`                                | Implemented   | 2026-08-26   | Deep spec for the `bash` tool: schema, timeout, output capping, conformance tests                                                                          |
 | `bash-tool-review.md`                         | Review              | 2026-08-26   | Adversarial review of `bash-tool.md` against the review criteria. Four blocking findings. Superseded by `bash-tool-review-2.md`.                           |
 | `bash-tool-review-2.md`                       | Review              | 2026-08-26   | Second review pass. Finds cap-semantics gaps A1-A6 in the fixed spec and names the review's incorrect judgments.                                           |
-| `tui.md`                                      | Implemented         | 2026-08-27   | TUI design: `SessionPort`, event rendering, key bindings, daemon split, §13 implementation record                                                          |
-| `tui-plan.html`                               | Implemented         | 2026-08-27   | Visual implementation plan and verification record for `tui.md`: architecture, event flow, loop lifecycle, tailer, layout, keys, dependencies, deviations  |
 | `empty-turn-root-cause.md`                    | Implemented         | 2026-08-27   | Root cause and fix for `model returned an empty turn after retries`: 30 s reqwest cap on streaming SSE, silent error swallow, loop-guard misclassification |
-| `tui_extension_design_questions_from_human.md` | Draft               | 2026-08-28   | Human design question: decoupling UI extensions from the Rust TUI. Seeds `ui-extension.md`                                                                 |
 | `tool-interface-registry-idea_from_human.md`  | Draft v2            | 2026-08-25   | User idea: clap-based tool registration and auto-discovery via the daemon                                                                                  |
-| `tui_feature_requests_from_human.md`          | Active              | 2026-09-08   | Slim index of user feature requests on the tui. One line per request. Each item links its detail doc                                                            |
-| `tui-model-wait-indicator.md`                 | Implemented       | 2026-09-01   | Spec for the loop-phase indicator: the loop publishes `loop_phase` (`wait`/`tools`) as an `ext_status` event, the TUI renders it as the title bit and the working row above the input box |
-| `tui-color-scheme.md`                         | Spec, not yet built | 2026-09-02   | Request doc for the custom TUI color scheme: `catppuccin macchiato` as the first internal scheme, a user-supplied custom scheme, capability lowering on every scheme  |
-| `tui-color-tones.md`                          | Spec, not yet built | 2026-09-02   | Request doc for the gray-abuse defect and the `Read` highlighting. Partial: the capability-aware tones shipped (commit `f652b89`). The reference renderer and the `Read` highlighting stay open |
-| `tui-color-pi-alignment.md`                   | Implemented         | 2026-09-05   | Case-by-case comparison of this TUI's color scheme against the `pi` TUI and the `pi-tool-display` extension: the 38-role table, the pi `syntax*` token mapping, the rebased `catppuccin macchiato` scheme and built-in palette, the frame and statusline alignment        |
-| `tui-command-palette.md`                       | Spec, not yet built | 2026-09-11   | Spec for the `:` command palette in normal mode: a floating two-pane window reusing the picker's fuzzy ranker and layout, the v1 command set (toggles, effort setter, session buffers b/bn/bp, new-session, edit-queue, quit), and the extension `commands` cap with an `invoke` op for extension-provided commands   |
-| `tui-conversation-browsing.md`                 | Spec, not yet built | 2026-09-05   | Spec for the 2026-09-05 requests: the right-edge position bar over the transcript, and the conversation browse mode. The double-`s` entry gate, the neovim-matched motions, the hybrid number gutter, `gg`/`G`. The regex log search discussion is stage 2 |
-| `tui-file-picker.md`                           | Implemented         | 2026-09-06   | Spec for the `@` file picker and the reusable completion window widget: fuzzy from day 0 via `frizbee`, the `picker/` middle layer (items, matcher, state, render, preview), the `@` trigger, the settled floating display with a file content preview pane, the `Ctrl+I`/`Tab` file-scope cycle (P9: default → git-ignored → also hidden → default; `Ctrl+I` and `Tab` are the same terminal key, byte 0x09), and the phased build plan |
-| `tui-file-picker-research.md`                  | Active              | 2026-09-08   | Library research for the file picker: `frizbee` (matcher API and scoring), `television` (Rust, background-worker snapshot model), `telescope.nvim` (floating-window UX and layout modes) |
-| `tui-conversation-browsing-review.md`          | Review              | 2026-09-05   | Spec review of `tui-conversation-browsing.md`: no YAGNI abuse, no harmful scope shortcutting; five findings (F1 the `s` disarm description is wrong against `vim_editor.rs`, F2 the wrap-cache pointers are off, F3 the transcript-cap gap, F4-F5 wording). Fixed in commit `8c7cb6a` |
-| `tui-malformed-line-flash.md`                 | Implemented       | 2026-09-02   | Root cause and shipped fix for the transient `[malformed log line]` flash on live loops. `read_events` drops the in-progress tail, the tailer holds partial lines |
-| `tui-markdown-render.md`                      | Spec, not yet built | 2026-09-02   | Request doc for marker-free markdown rendering in user and assistant messages: styled text, drawn grid tables, the `|` pipes out of the output                  |
-| `tui-pending-user-messages.md`                | Implemented       | 2026-09-03   | Staged plan for the pending `user_message` lists. Stage 1 (TUI steering block) shipped in `fc51f71`. Stage 2 (the loop-side `steer`/`follow` split) shipped in `cef8496` |
-| `tui-statusline-powerline.md`                 | Implemented       | 2026-09-02   | Record for the statusline powerline footer: rounded Nerd Font pills (`U+E0B4`/`U+E0B6`), per-span hex colors, overflow drops the lowest-priority pills |
-| `tui-thinking-block.md`                       | Spec, not yet built | 2026-09-02   | Request doc for the thinking (reasoning) block. Partial: the capture into the log shipped in `61cde02`. The TUI render, the toggle, and the effort control stay open |
-| `tui-thinking-level-input-box.md`             | Implemented       | 2026-09-02   | Record for docs/tui.md section 7.2: the loop publishes `model_thinking` (the resolved `reasoning_effort` mapped to 0-4, via `bin/model --describe`), the TUI colors the input-area border from the last value |
-| `tui-streaming-response.md`                   | Implemented       | 2026-09-05   | Spec for live streaming of the model response to the TUI: a session-local `.model-stream` file the model binary writes to during the SSE call, the TUI polls it each frame and renders a growing live block, cleared when the final `assistant_message` lands. Depends on Phase 2 (`harness` binary). No new log event type |
-| `tui-tool-display-port.md`                    | Spec, not yet built | 2026-09-02   | Request doc for the full `pi-tool-display` style port: the lighter result box, the fold/expand control, per-tool limits, presets, and config                    |
-| `tui-tool-result-truncation.md`               | Spec, not yet built | 2026-09-02   | Request doc for truncating `Read`/`Write` results and the `Edit` diff, plus the six "never truncate" comment rescopes                                        |
-| `tui-syntax-highlighting.md`                  | Implemented       | 2026-09-08   | Decision record for the shared syntax-highlight engine (`highlight.rs`): `language_from_path`, the stateful `CodeHighlighter`, the `highlight_text_lines` entry point, the two consumers (picker preview + `Read` body), and the hand-rolled vs `syntect` vs tree-sitter tradeoff |
-| `ui-extension.md`                             | Spec, not yet built | 2026-08-28   | Out-of-process UI extension design: JSONL host, five capabilities, host-owned load order. Review round 1 folded in                                        |
-| `tui-extension-design-review.md`              | Review              | 2026-08-28   | Round-1 critique of `ui-extension.md`. All findings folded into the spec                                                                                    |
-| `ui-extension-plan.md`                        | Plan                | 2026-08-28   | Staged work breakdown for `ui-extension.md`: stages 0-4, acceptance per stage                                                                                |
-| `user-message-editing.md`                      | Spec, not yet built | 2026-09-11   | Spec for recalling and editing pending user messages: `Alt+Up` bulk recall and the `:edit-queue` palette entry, the `user_message_retract` event and optional `id` field on `user_message`, the loop-side skip rules in `bin/claim` and `bin/assemble`, and the idle-on-retract behavior   |
-| `rewind-fork-design.md`                        | Implemented       | 2026-07-17   | Session rewind and fork (pi `/tree` style): the `rewind` event on the append-only log, the active-path mask in `bin/assemble` (the recursive computation that masks abandoned branches at every nesting depth), the rewind-aware `bin/claim` state, the TUI marker rendering, and the review of the proposed checkpoint+mask design (I1-I12). The TUI picker stage is spec'd, not built |
 | `ft-005-logline.md`                           | Implemented         | 2026-08-29   | Record for FT-005: motivation from the ruxe type-level-disjointness post, two-writer interleave analysis, LogLine capability design and tests             |
+| `rewind-fork-design.md`                        | Implemented       | 2026-09-08   | Session rewind and fork (pi `/tree` style): the `rewind` event on the append-only log, the active-path mask in `bin/assemble` (the recursive computation that masks abandoned branches at every nesting depth), the rewind-aware `bin/claim` state, and the review of the proposed checkpoint+mask design (I1-I12). Lean backstop: `lean/RewindSpec.lean` + DRT gate in `scripts/rewind-drt-e2e.sh`. The TUI picker stage lives in `rushi-tui` |
 | `skill-remapped-to-os-apps.md`                  | Proposal            | 2026-09-02   | Feature request: the OS + Applications split. Base distribution (kernel: loop core + base tools + growth machinery; default-swappable `tui` front-end, the WM tier). A tool registers by being on the agent-visible PATH and self-documents via `--help` (no `SKILL.md`; a procedure is a script). Discovery is an on-demand `tools --list` catalog (reads `tool.toml` `description`), never prompt content. First application is `tui-capture` |
 | `pi-extension-port-investigation.md`            | Investigation       | 2026-09-13   | Portability assessment of the `pi-config` extension set (pi-goal, rpiv-ask-user-question, pi-fff, agent-simple-english, no-find-grep, no-bare-python, pi-lynx, pi-terminal-browser, pi-automode) onto the harness: tool/hook/UI/loop mapping, difficulty verdict, blockers, and suggested order. pi-goal verdict updated to "Ready" (2026-09-13). |
 | `pi-goal-readiness.md`                           | Investigation     | 2026-09-13   | Readiness assessment for porting `pi-goal` as a harness extension: all three loop seams (`run.idle`, `compact.before`, `model.before` transform) are built and gated; the remaining work is application-level (goal tools, hook binaries, state file); gaps G2-G4 with workarounds |
-| `goal-ux.md`                                     | Spec, not yet built | 2026-09-05 | Goal UX redesign: goal set by user action (TUI ext writes goal.json on send, not agent tool call), pi-goal prompt template port (goal-mode rules, trust boundary, goal_id stale-turn guard), completion guard, `goal pause` / `goal clear` commands, goal status display via the goal extension's row slot (goal status line + armed hint; the TUI itself has no goal-state coupling). The goal block is a byte-stable pure function of (goal, goal_id), injected as a trailing `input` item (after the conversation) so the `[system][history…]` cache prefix survives goal set/clear. Properties P1-P17 with verification table and gate |
 | `goal-rule-reinject.md`                           | Proposal          | 2026-09-08   | Supersedes the idle-rules-only proposal: inject the goal block (goal_id, objective, rules, trust boundary, goal-tool hint) into `request.instructions` once per goal lifetime via a byte-stable `model.before` transform (append on open, strip on close). The `goal` tool schema is invisible to the agent in every state. `goal_complete` and `goal_blocked` are present only while a goal is open. `goal resume` targets blocked goals only. `run.idle` (hook-goal-idle) keeps the idle nudge. Cache tradeoff: two re-prefills per goal (set + close), for no per-turn re-acknowledgement. Superseded proposal archived in git history (2026-09-07) |
-| `prompt-fragment-map.md`                          | Proposal          | 2026-09-13   | Supersedes goal-rule-reinject's *mechanism* (keeps its D1-D3 + cache analysis): (1) `assemble` generates the "Available tools" prose from discovered `tools_root`+`extra_tools_roots` manifests instead of the hand-maintained `[system_prompt]` list; (2) the system prompt is composed as `base + generated_tool_list + cwd + prompt_fragments`, where `prompt_fragments` is an ordered map of `[id,text]` pairs owned by extensions (goal owns `"goal"`); the kernel flattens generically after the hook chain, so add/remove is O(1) per extension. Only `goal_complete` clears the goal fragment |
+| `system-prompt-generation.md`                    | Proposal          | 2026-09-13   | How the system prompt is built: the kernel starts from the user config `[system_prompt]` field, adds a generated tool list and cwd line, then extension hooks add or remove named fragments (e.g. goal block). The kernel joins all parts into `request.instructions`. Supersedes the mechanism in `goal-rule-reinject.md` (keeps D1-D3 and cache analysis). |
 | `deepseek-harness-compaction-research.md`       | Investigation       | 2026-09-04   | Cross-codebase research: how the dsh compaction system keeps the session log append-only while replacing surface ranges with summary checkpoints, and how the stable request prefix and prefix-aligned summarization call maximize KV cache prefix hits |
+| `user-message-editing.md`                      | Implemented | 2026-09-11   | Spec for recalling and editing pending user messages: `Alt+Up` bulk recall and the `:edit-queue` palette entry, the `user_message_retract` event and optional `id` field on `user_message`, the loop-side skip rules in `bin/claim` and `bin/assemble`, and the idle-on-retract behavior. Kernel-side retract event and skip rules are in the kernel; the TUI side is in `rushi-tui` |
+| `harness-distribution.md`                        | Implemented       | 2026-09-05   | Distribution model: `rushi setup`, `rushi.toml` manifest, `rushi.lock` pinning, global install + per-project registration, `install.sh` plain path, Nix flake primary path. Properties P1-P10 with verification table and gate |
+| `aeneas-rust-to-lean.md`                       | Investigation       | 2026-09-04   | Aeneas Rust-to-Lean toolchain: charon MIR extraction + aeneas translation, the functional-core/imperative-shell pattern shared with this harness |
+| `better-ui-root-cause.md`                        | Historical          | 2026-08-27   | Root-cause analysis for TUI responsiveness issues (pre-split; TUI now in `rushi-tui`) |
+| `failure-tracking.md`                           | Active              | 2026-08-29   | How to track and report harness failures: the `error` event, `hook.<window>.error` markers, and the fenced-failure report format |
+| `goal-ui_feedback_from_human.md`                | Historical          | 2026-09-05   | Feedback notes on the goal UX redesign (pre-split; goal-ux.md now lives in `rushi-tui/docs/`) |
+| `handoff-compaction-request-format.md`          | Active              | 2026-09-06   | Wire format for the handoff/compact request: the summary-call shape, token budget, and the boundary summary fallback |
+| `tool-log-design_from_human.md`                  | Active              | 2026-08-25   | Per-session tool log design: full output in `tools.jsonl`, slim index in the session log |
+| `vim-editor-design.md`                           | Implemented         | 2026-09-02   | Design for the TUI's built-in vim-like editor: keymap, mode machine, register model. TUI code lives in `rushi-tui` |
 
 Status legend:
 
@@ -107,6 +86,14 @@ Status legend:
 - **Plan** — a staged work breakdown of an approved spec.
   Work the stages in order. Update the status as stages land.
 
+## Sibling repos
+
+The TUI and UI-extension layers live in `../rushi-tui`. Goal tools,
+goal hooks, and `lean-verify` live in `../rushi-exts`. Their docs
+(`tui.md`, `ui-extension.md`, `goal-ux.md`, etc.) live in those repos.
+The kernel does not depend on them at build time. `config-exts.example.toml`
+shows how to wire the kernel to the exts tree for development.
+
 ## Reading order for a new session
 
 1. This file (`INDEX.md`).
@@ -116,8 +103,7 @@ Status legend:
    before code, a proof per property, the build gate as acceptance.
 5. `coding-conventions.md` — the standing code rules for the Rust.
 6. The spec for the feature you are working on (see the status
-   column). UI extension work reads `ui-extension.md` with
-   `ui-extension-plan.md`. Every spec doc ends with its Properties,
+   column). Every spec doc ends with its Properties,
    Verification, and Gate sections.
 7. `spec-review-criteria.md` — check your spec against these before implementing.
 8. `SPEC_CONTRACT_TESTS.md` — how to split the implementer and tester roles.
@@ -130,14 +116,19 @@ cross-reference checks on the docs). The code gate is the command list
 in each Gate section: `cargo build`, `cargo test`, and the named e2e
 scripts. A clean gate with zero open properties is the guarantee.
 
-A real Lean 4 backstop lives in `lean/RushiSpec.lean`. It mirrors the
-`rushi setup` resolver and is checked by `scripts/lean-gate.sh`
-(wraps `nix develop .#lean` + `lake build RushiSpec`). The Lean
-backstop is optional; the house gate remains the conformance and e2e
-scripts. See `docs/lean-driven-development.md` §8.
+Lean backstops live in `lean/`: `RushiSpec.lean` mirrors the `rushi setup`
+resolver; `RewindSpec.lean` mirrors the fork-recursion active-path
+computation; `RewindDrt.lean` is the DRT model executable.
+`scripts/lean-gate.sh` runs `lake build` over all three and enforces
+zero `sorry`. The Lean backstop is optional; the house gate remains
+the conformance and e2e scripts. See `docs/lean-driven-development.md` §8.
 
 - `scripts/verify-specs.sh` — run before pushing doc changes. Exit 0
   is clean; exit 1 names the failing doc and section.
+- `scripts/rewind-drt-e2e.sh` — differential-random-test gate comparing
+  the Lean `RewindDrt` model against `bin/rewind-drt` on generated
+  inputs. Run after any change to `crates/rushi/src/rewind.rs` or
+  `lean/RewindSpec.lean`.
 
 ## Maintenance rules
 
