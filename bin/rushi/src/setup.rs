@@ -318,7 +318,7 @@ pub fn render_config(manifest: &RushiManifest, version: &str, kernel_commit: &st
     out.push_str(&comment_defaults(&toml::to_string(&model).unwrap(), &active_keys));
     out.push('\n');
     out.push_str(
-        "# Per-model overrides, one section per model, e.g.:\n\
+        "# EXAMPLE ONLY, not activated by default — copy and edit to add per-model overrides:\n\
          # [model.my-model]\n\
          # model_id = \"my-model\"\n\
          # base_url = \"http://127.0.0.1:8080\"\n\
@@ -337,7 +337,8 @@ pub fn render_config(manifest: &RushiManifest, version: &str, kernel_commit: &st
     out.push_str(&comment_defaults(&toml::to_string(&limits).unwrap(), &active_keys));
     out.push('\n');
     out.push_str(
-        "# context_budget_tokens = 262144      # default: context_tokens - max_output_tokens\n\
+        "# EXAMPLE ONLY, not activated by default — uncomment to override:\n\
+         # context_budget_tokens = 262144      # default: context_tokens - max_output_tokens\n\
          # approval_timeout_s = 300             # absent: approval waits forever\n\
          # compact_reasoning_effort = \"low\"    # absent: inherit session effort\n",
     );
@@ -347,7 +348,7 @@ pub fn render_config(manifest: &RushiManifest, version: &str, kernel_commit: &st
     out.push_str(&comment_defaults(&toml::to_string(&hooks).unwrap(), &active_keys));
     out.push('\n');
     out.push_str(
-        "# Hook registrations, one [[hooks.on]] table per entry:\n\
+        "# EXAMPLE ONLY, not activated by default — one [[hooks.on]] table per entry:\n\
          # [[hooks.on]]\n\
          # window  = \"exhausted.handle\"\n\
          # command = \"harness-hook-compact\"\n\
@@ -359,7 +360,8 @@ pub fn render_config(manifest: &RushiManifest, version: &str, kernel_commit: &st
     out.push('\n');
 
     out.push_str(
-        "# [loop]\n\
+        "# EXAMPLE ONLY, not activated by default — uncomment to override the loop command:\n\
+         # [loop]\n\
          # Opaque loop command the TUI spawns for each session\n\
          # (docs/tui.md section 2.3). `rushi run <session>` is the\n\
          # kernel turn-loop runner, resolved on PATH.\n\
@@ -371,7 +373,8 @@ pub fn render_config(manifest: &RushiManifest, version: &str, kernel_commit: &st
     out.push('\n');
 
     out.push_str(
-        "# [system_prompt]\n\
+        "# EXAMPLE ONLY, not activated by default — uncomment to customize:\n\
+         # [system_prompt]\n\
          # text = \"You are an expert coding assistant...\"\n\
          #\n\
          # [tui]\n\

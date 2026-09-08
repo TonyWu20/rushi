@@ -320,7 +320,7 @@ P5. summary-failure: given a failed summary call, observe no handoff doc written
 |----|----------|-------|--------|
 | P1 | reactive-only | Blocked: no test asserts the proactive threshold hook stays loop-dead. Unblock when the threshold path is confirmed unused by the loop. | open |
 | P2 | windows | `scenario_overflow`, `scenario_threshold` in `scripts/compact-e2e.sh`; the `overflow.resolve` and `exhausted.handle` windows in `bin/hook-compact` and `crates/common/src/hooks.rs` | proven |
-| P3 | in-session-continue | Blocked: `SessionStore::save_handoff` and the `handoff.md` write are not yet built. `hook-handoff` is a reserved seam. Unblock when the in-session shadow-compact hook lands. | open |
+| P3 | in-session-continue | Blocked: `SessionStore::save_handoff` and the `handoff.md` write are not yet built. Unblock when the in-session shadow-compact hook lands. | open |
 | P4 | shadowed-readable | Blocked: no test reads a shadowed region back through a tool. Unblock with a test that `read` returns a shadowed `events.jsonl` line after a compact. | open |
 | P5 | summary-failure | `scenario_compact_failure` in `scripts/compact-e2e.sh` | proven |
 

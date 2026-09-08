@@ -36,9 +36,8 @@ All three seams are built into the `harness` loop binary.
 
 `cargo build` and `cargo test` (497/497) pass as of this writing.
 
-Two reference hook binaries exist: `bin/hook-compact` (compact
-strategy) and `bin/hook-handoff` (reserved handoff seam). They
-demonstrate the exact pattern a goal hook would follow.
+The `bin/hook-compact` binary demonstrates the exact pattern a goal
+hook would follow.
 
 ## 3. What was built (application-level)
 
