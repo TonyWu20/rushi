@@ -144,11 +144,8 @@ rushi = {
         diff_view = "auto";
       };
     };
-
-    # [ext] — TUI global UI-extension layer
-    ext = {
-      dir = "";   # path to ui_extensions/ dir ("" = none)
-    };
+    # ext_dirs (TUI global UI-extension layer) lives in the [tui]
+    # table; an empty list falls back to <config dir>/ui_extensions.
   };
 
   # ── Tools ──

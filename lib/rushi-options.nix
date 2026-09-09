@@ -64,8 +64,9 @@ in
           [hooks]         timeout_ms, on = [ { window, command, args } ]
           [loop]          command, args, arg_style
           [system_prompt] text (empty = kernel default)
-          [tui]           binary, color, color_scheme, tool_display.*
-          [ext]           dir (UI extension directory)
+          [tui]           binary, color, color_scheme, ext_dirs,
+                         tool_display.*   (TUI-owned; the harness
+                         ignores these)
 
         Nested attrsets are deep-merged with the kernel defaults
         (via `lib.recursiveUpdate` in mk-rushi.nix); lists and

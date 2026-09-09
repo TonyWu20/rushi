@@ -611,7 +611,7 @@ all extension cases. 544 TUI unit tests pass.
 **Residual risk:** The `ext-rs/` layer still uses bare command
 names (`statusline-ext`, `tool_result-ext`, `notify-ext`) that
 resolve on `PATH`. A user who activates that layer via
-`[ext] dir` must put those dirs on `PATH` (via
+`[tui] ext_dirs` must put those dirs on `PATH` (via
 `scripts/ext-env.sh` or the `.envrc`). A future pass could convert
 those manifests to relative paths as well.
 

@@ -1,9 +1,9 @@
 # ext-fixture
 
 Bash extension fixtures for the PTY smoke test
-(`scripts/tui-pty-smoke.py`). Each subdirectory is one `[ext] dir`
-layer holding a single extension entry (`ext.toml` plus the script
-the manifest runs).
+(`scripts/tui-pty-smoke.py`). Each subdirectory is one `[tui]
+ext_dirs` layer holding a single extension entry (`ext.toml` plus the
+script the manifest runs).
 
 | Case              | Fixture            | What it proves                                   |
 | ---------------- | ------------------ | ------------------------------------------------ |
@@ -14,7 +14,7 @@ the manifest runs).
 | ext-append-reject| `append-reject/` | whitelist reject flash, whitelisted append lands |
 
 The smoke test points a temp config at one of these directories via
-`[ext] dir` (an absolute path) and starts the TUI on a fresh
+`[tui] ext_dirs` (a list of paths) and starts the TUI on a fresh
 session. Every case also checks that no fixture process is left
 running after the TUI quits (no orphans, docs/ui-extension.md
 section 7).
