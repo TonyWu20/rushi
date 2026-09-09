@@ -2,7 +2,7 @@
 # The TUI never sees the internals of this command; it starts it,
 # streams its output, and stops it on request.
 [loop]
-command = "rushi"
+command = "target/release/rushi"
 args = ["run"]
 arg_style = "append_session"
 
@@ -45,64 +45,33 @@ tools_root = "tools"
 # (goal, goal_blocked, goal_complete) and the lean-verify tool.
 # route/parse/assemble scan these roots after tools_root; the primary
 # root wins a name collision. Tool binaries resolve on PATH from the exts build.
-extra_tools_roots = []
+extra_tools_roots = ["../rushi-exts/goal-app/goal-tools/", "../rushi-exts/lean-verify/"]
+
 # extra_tools_roots = ["../rushi-exts/goal-app/goal-tools", "../rushi-exts/lean-verify"]
 
 # The TUI's global extension layer tree. In a kernel-only checkout
 # there is no global layer. When running alongside the rushi-exts
 # sibling repo, uncomment the [ext] section to enable it.
-# [ext]
-# dir = "../rushi-exts/ui_extensions"
+[ext]
+dir = "../rushi-exts/ui_extensions/"
 
 [limits]
-# The cap of the model request in input tokens. It matches the
-# context window of the active model (the [model] context_tokens,
-# 262144). `assemble` clamps it to the input budget: the window
-# minus max_output_tokens (229376). The token-only decision compares
-# the measured usage.input_tokens growth against it. No char
-# mechanism. No chars-per-token rate. No char budget knob. The
-# proactive compact trigger is the design of docs/auto-compact-plan.md.
-context_budget_tokens = 262144
-read_limit = 2000
-read_max_line_length = 2000
-read_max_bytes = 51200
-read_stream_min_size = 10485760
-write_max_bytes = 1048576
-tool_result_max_chars = 20000
-bash_max_output_bytes = 16000
-bash_timeout_default = 60
-bash_timeout_max = 300
-
-# The in-session auto-compact (docs/auto-compact-plan.md).
-# compact_enabled is the kill switch: it gates the threshold hook
-# and the overflow compaction. Off sends the overflow path to the
-# last-resort forced compaction.
-# compact_reserve_tokens: the trigger sits at context_budget_tokens
-# minus the reserve. The reserve is the headroom left for the next
-# model response: keep it at least the expected response size, or
-# the trigger fires too late and the response overflows the window.
-# The pi default is 16384; 4096 pushes the trigger to 258048 but
-# leaves less headroom than this model's 4-8k responses.
-# The same value is the hard-trim backstop target
-# (docs/auto-compact-plan.md 9.8): when a request's estimate
-# exceeds the trigger level, the oldest step groups drop until the
-# request fits; when even the framing alone exceeds it, the
-# context_exhausted last-resort compaction takes over.
-# compact_keep_tokens: the keep window of the compact cut.
+# read_limit = 2000
+# read_max_line_length = 2000
+# read_max_bytes = 51200
+# read_stream_min_size = 10485760
+# write_max_bytes = 1048576
+# tool_result_max_chars = 20000
+# bash_max_output_bytes = 16000
+# bash_timeout_default = 60
+# bash_timeout_max = 300
 compact_enabled = true
 compact_reserve_tokens = 16384
 compact_keep_tokens = 20000
-# The context-overflow strategy (docs/phase-2-plan.md 3.2). The
-# only shipped value is `compact`: in-session shadow compact. The
-# key is a seam for future strategies.
 compact_strategy = "compact"
-# The awaiting_approval wait bound in seconds. Absent: the loop
-# waits for the answer without limit. Set: on timeout the loop
-# synthesizes a deny tool_result and continues.
-# approval_timeout_s = 300
-# compact_reasoning_effort: optional. The summary call's reasoning
-# effort. A cheaper value cuts the summary latency on a local GPU.
-# Omitted: the session effort stands.
+context_budget_tokens = 262144 # default: context_tokens - max_output_tokens
+# approval_timeout_s = 300             # absent: approval waits forever
+# compact_reasoning_effort = "low"    # absent: inherit session effort
 
 # Lifecycle hook registration (docs/loop-lifecycle-hooks.md 4.1).
 # The on list is ordered. Each entry binds one hook command to one
@@ -111,38 +80,39 @@ compact_strategy = "compact"
 # non-blocking failure (the window default applies).
 [hooks]
 timeout_ms = 30000
+
 # Example hook registrations (uncomment to enable):
-# [[hooks.on]]
-# window  = "exhausted.handle"
-# command = "harness-hook-compact"
-#
-# [[hooks.on]]
-# window  = "overflow.resolve"
-# command = "harness-hook-compact"
-# args    = []
+[[hooks.on]]
+window = "exhausted.handle"
+command = "harness-hook-compact"
+
+[[hooks.on]]
+window = "overflow.resolve"
+command = "harness-hook-compact"
+args = []
 
 # Goal-continuation hooks (pi-goal port, rushi-exts).
 # Uncomment when the rushi-exts sibling repo is built and its hook
 # binaries are on PATH.
-# [[hooks.on]]
-# window  = "run.idle"
-# command = "harness-hook-goal-idle"
-# args    = []
-#
-# [[hooks.on]]
-# window  = "compact.before"
-# command = "harness-hook-goal-compact"
-# args    = []
-#
-# [[hooks.on]]
-# window  = "tool.before"
-# command = "harness-hook-goal-tools"
-# args    = []
-#
-# [[hooks.on]]
-# window  = "model.before"
-# command = "harness-hook-goal-arm"
-# args    = []
+[[hooks.on]]
+window = "run.idle"
+command = "../rushi-exts/goal-app/goal-hooks/hook-goal-idle/target/release/harness-hook-goal-idle"
+args = []
+
+[[hooks.on]]
+window = "compact.before"
+command = "../rushi-exts/goal-app/goal-hooks/hook-goal-compact/target/release/harness-hook-goal-compact"
+args = []
+
+[[hooks.on]]
+window = "tool.before"
+command = "../rushi-exts/goal-app/goal-hooks/hook-goal-tools/target/release/harness-hook-goal-tools"
+args = []
+
+[[hooks.on]]
+window = "model.before"
+command = "../rushi-exts/goal-app/goal-hooks/hook-goal-arm/target/release/harness-hook-goal-arm"
+args = []
 
 [system_prompt]
 # Borrowed from the pi coding agent default prompt.
@@ -164,8 +134,9 @@ Guidelines:
 - Use offset and limit to continue reading large files.
 - Keep replies short. Show file paths clearly in your replies."""
 
-[model.Qwen3.8-27B-NVFP4-RTX5090-DFlash2]
-reasoning_effort = "max"
+[tui]
+# Where the launcher finds the TUI binary (relative to this config file).
+binary = "../rushi-tui/target/release/tui"
 
 [tui.tool_display]
 preset = "opencode"
