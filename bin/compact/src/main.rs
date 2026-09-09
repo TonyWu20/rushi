@@ -329,6 +329,14 @@ fn main() {
         .filter_map(parse_boundary)
         .next_back();
 
+    // Handoff versioning metadata (docs/handoff-versioning-design.md).
+    // The version is a session-global monotonic counter; parent_version
+    // is the version of the most recent boundary on the active path; the
+    // diverge_seq is that parent's first_kept_seq (0 when no parent).
+    let value_refs: Vec<Value> = events.iter().map(|e| e.value.clone()).collect();
+    let (version, parent_version, diverge_seq) =
+        compact_math::handoff_version_meta(&value_refs);
+
     // The cooldown anchor: the `last_user_seq` of the last
     // `compaction_failed` marker.
     let failed_user_seq: Option<usize> = events
@@ -404,21 +412,16 @@ fn main() {
     // the newest reading of the kept region: the current context
     // size the compact replaces.
     let mut trigger_readings = measurements.clone();
-    // The full-form estimate of the kept region is the context the
-    // compact actually replaces. Use it so the trigger sees the real
-    // context size even when the measured reading is shrunken.
-    {
-        let text_chars = val_int(limits, "compact_text_chars").unwrap_or(200) as u64;
-        let caps = Caps { text: Some(text_chars), chars_per_token };
-        let evs: Vec<Ev> = kept_events
-            .iter()
-            .map(|e| compact_math::project_event(&e.value))
-            .collect();
-        let full_form = compact_math::full_form_estimate(&evs, &caps);
-        if full_form > 0 {
-            let last_seq = kept_events.last().map(|e| e.seq).unwrap_or(0);
-            trigger_readings.push((last_seq.max(1), full_form));
-        }
+    // The context estimate must match the harness loop's proactive
+    // check (step.rs), or the binary noops while the loop believes
+    // the trigger fired. Both use estimate_from_events: uncapped
+    // full form, calibrated chars-per-token, rewind-aware, with the
+    // 25% safety margin on the boundary path.
+    let all_values: Vec<Value> = events.iter().map(|e| e.value.clone()).collect();
+    let full_form = compact_math::estimate_from_events(&all_values, chars_per_token);
+    if full_form > 0 {
+        let last_seq = events.last().map(|e| e.seq).unwrap_or(0);
+        trigger_readings.push((last_seq.max(1), full_form));
     }
     let last_measurement = trigger_readings.last().map(|m| m.1).unwrap_or(0);
     let decision = decide_trigger(&TriggerInput {
@@ -454,6 +457,9 @@ fn main() {
                 .tokens_before(last_measurement)
                 .overflow(overflow)
                 .last_user_seq(last_user_seq)
+                .version(version)
+                .parent_version(parent_version)
+                .diverge_seq(diverge_seq)
                 .call();
         }
     }
@@ -469,6 +475,9 @@ fn run_compaction(
     tokens_before: u64,
     overflow: bool,
     last_user_seq: usize,
+    version: u64,
+    parent_version: u64,
+    diverge_seq: u64,
 ) -> ! {
     let cfg = load_config(&args.config);
     let empty = toml::Value::Table(toml::map::Map::new());
@@ -708,6 +717,9 @@ fn run_compaction(
         "ts": ts_now(),
         "summary": summary,
         "first_kept_seq": first_kept_seq,
+        "version": version,
+        "parent_version": parent_version,
+        "diverge_seq": diverge_seq,
         "reason": reason_str,
         "tokens_before": tokens_before,
         "tokens_after": tokens_after,
@@ -728,6 +740,9 @@ fn run_compaction(
         "tokens_before": tokens_before,
         "tokens_after": tokens_after,
         "summary": summary,
+        "version": version,
+        "parent_version": parent_version,
+        "diverge_seq": diverge_seq,
     });
     println!("{}", serde_json::to_string(&status).unwrap());
     std::process::exit(0);

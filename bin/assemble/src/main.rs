@@ -150,6 +150,8 @@ struct Boundary {
     /// The file-op lists, carried forward across compactions.
     read_files: Vec<String>,
     modified_files: Vec<String>,
+    /// The handoff version number (1-based; 0 for legacy events).
+    version: u64,
 }
 
 /// Parse one `compaction_summary` event into the projection
@@ -169,12 +171,14 @@ fn parse_boundary(event: &serde_json::Value, seq: usize) -> Option<Boundary> {
             .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
             .unwrap_or_default()
     };
+    let version = event.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
     Some(Boundary {
         seq,
         first_kept_seq,
         summary,
         read_files: lists("read_files"),
         modified_files: lists("modified_files"),
+        version,
     })
 }
 
@@ -1318,7 +1322,8 @@ fn main() {
             .max_out_cap(model_settings.max_output_tokens)
             .caps(&base_caps)
             .input_budget(summary_input_target)
-            .ptrs(&ptrs);
+            .ptrs(&ptrs)
+            .chars_per_token(chars_per_token);
         // The optional request-level effort: the session effort stands
         // when the config leaves it unset.
         let request = if let Some(e) = compact_reasoning_effort.as_deref() {
@@ -1353,8 +1358,22 @@ fn main() {
     // The framing item: the handoff document when present, else the
     // boundary summary from the log. Both are user-role messages that
     // lead the post-boundary events (docs/phase-2-plan.md 4.3 step 5).
+    // Versioned handoff: when the boundary carries a version, read
+    // handoff/v<N>.md; fall back to handoff.md for legacy sessions
+    // (docs/handoff-versioning-design.md).
     let session_dir = Path::new(&args.session);
-    let handoff_doc = std::fs::read_to_string(session_dir.join("handoff.md")).ok();
+    let handoff_doc: Option<String> = if let Some(b) = &boundary {
+        if b.version > 0 {
+            let vpath = session_dir.join("handoff").join(format!("v{}.md", b.version));
+            std::fs::read_to_string(&vpath)
+                .ok()
+                .or_else(|| std::fs::read_to_string(session_dir.join("handoff.md")).ok())
+        } else {
+            std::fs::read_to_string(session_dir.join("handoff.md")).ok()
+        }
+    } else {
+        std::fs::read_to_string(session_dir.join("handoff.md")).ok()
+    };
     let framing: Option<serde_json::Value> = match (&handoff_doc, &boundary) {
         (Some(doc), _) => Some(summary_framing_item(doc.trim())),
         (None, Some(b)) => Some(summary_framing_item(&b.summary)),
@@ -1441,6 +1460,7 @@ fn summary_input_request(
     caps: &Caps,
     input_budget: usize,
     ptrs: &LogPointers,
+    chars_per_token: u64,
 ) -> serde_json::Value {
     // The droppable step groups of the old region: the assistant
     // groups, in order. User groups never drop.
@@ -1458,13 +1478,15 @@ fn summary_input_request(
         Some(b) => compact_update_instructions(b),
         None => COMPACT_INSTRUCTIONS_FIRST.to_string(),
     };
-    // The chars/4 estimate of one candidate, the same estimator pi
-    // uses for the compaction walk.
+    // The estimate of one candidate, in the calibrated
+    // chars-per-token ratio (docs/auto-compact-plan.md 4.3). The
+    // drop search must use the same ratio as the trigger estimate.
+    let cpts = chars_per_token.max(1) as usize;
     let estimate = |items: &[serde_json::Value]| -> usize {
         let chars = serde_json::to_string(items)
             .map(|s| s.chars().count())
             .unwrap_or(0);
-        (instructions.chars().count() + chars + ask.chars().count()) / 4
+        (instructions.chars().count() + chars + ask.chars().count()) / cpts
     };
     // The search: the smallest drop count that fits the input
     // budget, or the search max when none fits.
@@ -2225,6 +2247,7 @@ not json at all
             })
             .input_budget(1_000_000)
             .ptrs(&test_ptrs())
+            .chars_per_token(4)
             .call();
         assert_eq!(req["model"], "m");
         assert_eq!(req["tools"], serde_json::json!([]));
@@ -2256,6 +2279,7 @@ not json at all
             summary: "the previous summary".to_string(),
             read_files: vec!["a.txt".to_string()],
             modified_files: vec!["b.rs".to_string()],
+            version: 0,
         };
         let req: serde_json::Value = summary_input_request()
             .old(&refs)
@@ -2268,6 +2292,7 @@ not json at all
             })
             .input_budget(1_000_000)
             .ptrs(&test_ptrs())
+            .chars_per_token(4)
             .call();
         let inst = req["instructions"].as_str().unwrap();
         assert!(inst.contains("the previous summary"), "the previous summary rides in");
@@ -2317,6 +2342,7 @@ not json at all
             })
             .input_budget(6000)
             .ptrs(&test_ptrs())
+            .chars_per_token(4)
             .call();
         // The invariant: the input fits the input budget at the drop
         // cap. The chars/4 estimate of the serialized request holds.
@@ -2349,6 +2375,7 @@ not json at all
             })
             .input_budget(1_000_000)
             .ptrs(&test_ptrs())
+            .chars_per_token(4)
             .call();
         let input = req["input"].as_array().unwrap();
         assert_eq!(input.len(), 1, "only the summary ask");

@@ -163,30 +163,43 @@ pub fn estimate_from_events(events: &[Value], cpts: u64) -> u64 {
         .filter_map(|(i, v)| crate::rewind::parse_rewind_event(v, i + 1))
         .collect();
     let active = crate::rewind::active_ranges(events.len(), &rewinds);
-    let active_events: Vec<&Value> = events
+    // Keep the 1-based positional index alongside each active event so
+    // the boundary path can filter by first_kept_seq rather than by
+    // log-order position after the marker (the kept region sits *before*
+    // the marker in log order but still counts toward the live context).
+    let active_events: Vec<(usize, &Value)> = events
         .iter()
         .enumerate()
         .filter(|(i, _)| crate::rewind::seq_in_ranges(i + 1, &active))
-        .map(|(_, v)| v)
+        .map(|(i, v)| (i + 1, v))
         .collect();
 
-    let boundary = active_events.iter().rposition(|v| {
+    let boundary = active_events.iter().rposition(|(_, v)| {
         v.get("type").and_then(|t| t.as_str()) == Some("compaction_summary")
     });
 
     if let Some(b) = boundary {
-        let evs: Vec<Ev> = active_events[b + 1..]
+        let marker = active_events[b].1;
+        let first_kept: u64 = marker
+            .get("first_kept_seq")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1);
+        // Kept region = every active event whose seq is >= first_kept_seq.
+        // This covers both the original kept events (before the marker in
+        // log order) and any events appended after the marker.
+        let evs: Vec<Ev> = active_events
             .iter()
-            .map(|v| project_event(v))
+            .filter(|(pos, _)| *pos as u64 >= first_kept)
+            .map(|(_, v)| project_event(v))
             .collect();
         let raw = full_form_estimate(&evs, &caps);
         let mut est = raw;
-        if let Some(s) = active_events[b].get("summary").and_then(|s| s.as_str()) {
+        if let Some(s) = marker.get("summary").and_then(|s| s.as_str()) {
             est += s.chars().count() as u64 / cpts;
         }
         est * 5 / 4
     } else {
-        let last_meas_idx = active_events.iter().rposition(|v| {
+        let last_meas_idx = active_events.iter().rposition(|(_, v)| {
             v.get("type").and_then(|t| t.as_str()) == Some("assistant_message")
                 && v.get("usage")
                     .and_then(|u| u.get("input_tokens"))
@@ -196,7 +209,7 @@ pub fn estimate_from_events(events: &[Value], cpts: u64) -> u64 {
         let Some(idx) = last_meas_idx else {
             return 0;
         };
-        let usage = &active_events[idx]["usage"];
+        let usage = &active_events[idx].1["usage"];
         let measured_input = usage
             .get("input_tokens")
             .and_then(|i| i.as_u64())
@@ -207,7 +220,7 @@ pub fn estimate_from_events(events: &[Value], cpts: u64) -> u64 {
             .unwrap_or(0);
         let trailing: u64 = active_events[idx + 1..]
             .iter()
-            .map(|v| est_tokens(&project_event(v), &caps))
+            .map(|(_, v)| est_tokens(&project_event(v), &caps))
             .sum();
         measured_input + measured_output + trailing
     }
@@ -391,6 +404,37 @@ pub fn extract_file_ops(events: &[Value]) -> (Vec<String>, Vec<String>) {
     dedup(&mut reads);
     dedup(&mut modified);
     (reads, modified)
+}
+
+/// Handoff versioning metadata (docs/handoff-versioning-design.md).
+///
+/// Given the raw event log (in log order), derive:
+/// - `version`: the 1-based ordinal of the *next* compaction summary
+///   (i.e. the count of existing `compaction_summary` events plus one).
+/// - `parent_version`: the version of the most recent `compaction_summary`
+///   marker in the log (0 when there is none yet).
+/// - `diverge_seq`: the `first_kept_seq` of that parent boundary (0 when
+///   there is no parent). This is the log seq at which this new handoff
+///   diverges from its predecessor — the DAG link that gives each
+///   versioned handoff its identity.
+pub fn handoff_version_meta(events: &[Value]) -> (u64, u64, u64) {
+    let mut count: u64 = 0;
+    let mut parent_first_kept: u64 = 0;
+    for v in events {
+        if v.get("type").and_then(|t| t.as_str()) == Some("compaction_summary") {
+            count += 1;
+            // Track the most recent boundary's first_kept_seq.
+            if let Some(fk) = v
+                .get("first_kept_seq")
+                .and_then(|f| f.as_u64())
+            {
+                parent_first_kept = fk;
+            }
+        }
+    }
+    let version = count + 1;
+    let parent_version = count;
+    (version, parent_version, parent_first_kept)
 }
 
 #[cfg(test)]
@@ -704,5 +748,77 @@ mod tests {
         // Uncapped total (2003) > 1500 → walk stops at the long asst
         // (group start), orphan check sees a Result before it, no pull.
         assert_eq!(cut_uncapped, 3, "uncapped estimate exceeds budget, cut lands at the long assistant");
+    }
+
+    // ── handoff_version_meta tests ──────────────────────────────
+
+    fn jv_compaction_v2(version: u64, first_kept_seq: u64) -> Value {
+        serde_json::json!({
+            "v": 1,
+            "type": "compaction_summary",
+            "ts": "t",
+            "summary": "s",
+            "first_kept_seq": first_kept_seq,
+            "version": version,
+            "parent_version": 0,
+            "diverge_seq": 0,
+            "reason": "threshold",
+            "tokens_before": 0
+        })
+    }
+
+    #[test]
+    fn version_meta_no_boundaries() {
+        let events: Vec<Value> = vec![
+            jv_user(1, "hello"),
+            serde_json::json!({"type":"assistant_message","content":"hi"}),
+        ];
+        let (v, pv, ds) = handoff_version_meta(&events);
+        assert_eq!(v, 1, "first compaction is version 1");
+        assert_eq!(pv, 0, "no parent for first compaction");
+        assert_eq!(ds, 0, "no diverge point for first compaction");
+    }
+
+    #[test]
+    fn version_meta_one_boundary() {
+        let events: Vec<Value> = vec![
+            jv_user(1, "hello"),
+            jv_compaction_v2(1, 8),
+            jv_user(9, "more"),
+        ];
+        let (v, pv, ds) = handoff_version_meta(&events);
+        assert_eq!(v, 2, "second compaction is version 2");
+        assert_eq!(pv, 1, "parent is version 1");
+        assert_eq!(ds, 8, "diverge point is parent's first_kept_seq");
+    }
+
+    #[test]
+    fn version_meta_two_boundaries() {
+        let events: Vec<Value> = vec![
+            jv_user(1, "hello"),
+            jv_compaction_v2(1, 8),
+            jv_user(9, "more"),
+            jv_compaction_v2(2, 15),
+        ];
+        let (v, pv, ds) = handoff_version_meta(&events);
+        assert_eq!(v, 3, "third compaction is version 3");
+        assert_eq!(pv, 2, "parent is the most recent boundary");
+        assert_eq!(ds, 15, "diverge point is the last boundary's first_kept_seq");
+    }
+
+    #[test]
+    fn version_meta_legacy_events_without_version() {
+        // Simulate old events that lack the version field.
+        let events: Vec<Value> = vec![
+            serde_json::json!({
+                "v": 1, "type": "compaction_summary", "ts": "t",
+                "summary": "s", "first_kept_seq": 10,
+                "reason": "threshold", "tokens_before": 0
+            }),
+        ];
+        let (v, pv, ds) = handoff_version_meta(&events);
+        assert_eq!(v, 2, "version is count+1 regardless of field presence");
+        assert_eq!(pv, 1, "parent is the one existing boundary");
+        assert_eq!(ds, 10, "diverge point from legacy first_kept_seq");
     }
 }
