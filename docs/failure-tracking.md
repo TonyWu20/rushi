@@ -807,3 +807,73 @@ scenario (which tested the removed `input_budget` base) was
 removed. All e2e seed sizes were re-calibrated to the new trigger
 level of 7500 tokens in the test config.
 
+## FT-021 — Boundary-path estimate misses the kept region
+
+**Symptom:** After a `compaction_summary` marker is written, the
+next `estimate_context` call returns a value that is too low by the
+size of the kept region. The proactive threshold check and the
+post-failure rescue check both undercount, so compact never fires
+when the true context is above the trigger.
+
+**Root cause:** `estimate_from_events` (in
+`crates/rushi/src/compact_math.rs`) identified the boundary by log
+position. It then sliced `active_events[b+1..]`, which is only the
+events *after* the marker in log order. The kept events
+(`seq >= first_kept_seq`) sit *before* the marker in log order
+because the marker is appended at the end of the log. The kept
+region was therefore excluded from the estimate.
+
+**Fix:** `estimate_from_events` now carries the 1-based positional
+index alongside each active event. The boundary path filters by
+`first_kept_seq` instead of log-order position: it keeps every
+active event whose position is `>= first_kept_seq`, covering both
+the original kept events and any events appended after the marker.
+
+**Verification:** Unit tests `boundary_path_applies_margin_no_boundary_does_not`
+and `estimate_excludes_masked_branch_events` in
+`crates/rushi/src/compact_math.rs`. The `select-and-yank-impl`
+session now estimates 303 563 tokens (above the 245 760 trigger)
+instead of the old ~281 000 that missed the kept region.
+
+## FT-022 — Compact binary trigger mismatch causes silent noop
+
+**Symptom:** The loop\'s proactive threshold check fires
+(uncapped estimate > trigger), but the compact binary noops with
+"the trigger is cold" and writes no `compaction_summary`. The model
+call then proceeds with an oversized context and the provider
+rejects it. The session log shows `hook.compact.before = proceed`
+but no `compaction_summary` marker.
+
+**Root cause:** The compact binary computed its own trigger reading
+with a capped full-form estimate (`text: Some(200)` chars cap on
+assistant text and tool-call args, `chars_per_token = 4`). For
+code-heavy sessions the capped estimate is far lower than the
+uncapped one. The loop used `estimate_from_events` (uncapped, with
+25% margin), the binary used a capped local estimate. The two
+disagreed: the loop saw 303 563 > 245 760, the binary saw
+216 493 < 245 760.
+
+**Fix:** The compact binary now calls `estimate_from_events` (the
+same function the loop uses) for its trigger reading. Both paths
+share one estimator: uncapped, calibrated `chars_per_token`,
+rewind-aware, with the 25% margin on the boundary path. The
+capped estimate survives only inside the `find_cut` walk and the
+summary-input drop search, where capping assistant text is
+intentional.
+
+**Post-failure rescue.** A second safety net was added to
+`step.rs`: when model API retries are exhausted and the error
+detail does not match `is_overflow`, the loop re-runs
+`estimate_context`. If the estimate exceeds the trigger, it fires
+a compact (Overflow, then LastResort) and resets the retry counter
+instead of writing a terminal error. This catches the case where a
+provider rejects an oversized request with an opaque error that
+the overflow classifier does not recognise.
+
+**Verification:** All 197 unit tests, 86 compact e2e assertions
+(including the new `silent-failure-rescue` scenario), and 19
+rewind e2e assertions pass. The live `select-and-yank-impl`
+session now compacts on the next step: `compaction_summary` is
+written with `tokens_before = 303563`, `tokens_after = 21795`,
+`version = 2`, `parent_version = 1`, `diverge_seq = 771`.
+

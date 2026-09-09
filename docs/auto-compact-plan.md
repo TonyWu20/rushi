@@ -530,9 +530,14 @@ idle session.
   (pi parity: `contextWindow - reserveTokens`; 245760 for the 262144
   window). No user-facing knob. The `compact_trigger_base` interface
   was removed: the trigger estimate always adds the full-form estimate
-  of the kept region (chars/4 since the last compaction boundary),
-  because the measured readings of the clamped (trim-form) request
-  read shrunken and starve the LLM compaction.
+  of the kept region (chars / `estimate_chars_per_token` since the
+  last compaction boundary), because the measured readings of the
+  clamped (trim-form) request read shrunken and starve the LLM
+  compaction. `estimate_chars_per_token` is configurable under
+  `[model]` (default 4); a code-heavy session sets a lower value so
+  the estimate does not undercount. Both the loop and the compact
+  binary call the same `estimate_from_events` so their trigger
+  decisions agree.
   The silent-overflow backstop compares the measured input to the
   full context budget (the provider wall).
   The `assemble` wire budget clamps to the full model window
@@ -1033,30 +1038,44 @@ No config file carries the knob.
 
 - `crates/rushi/src/compact_math.rs`: `trigger_level_for` (the
   `TriggerBase` enum was later removed) and
-  `full_form_estimate` (chars/4 over the kept region, with the
-  handoff framing).
+  `full_form_estimate` (chars/`estimate_chars_per_token` over the
+  kept region, with the handoff framing). `estimate_from_events`
+  selects the kept region by `first_kept_seq` (not log position) so
+  the kept events, which sit before the marker in log order, are
+  counted. `handoff_version_meta` derives `version`,
+  `parent_version`, and `diverge_seq` from the existing
+  `compaction_summary` markers.
 - `bin/rushi/src/config.rs`: `context_budget`, and the now-fixed
   `trigger_level()` (always `context_budget - compact_reserve_tokens`)
   and `compact_overflow_budget()` (always returns `context_budget`).
-  The `compact_trigger_base` load was removed.
-- `bin/rushi/src/step.rs`: `estimate_context` always takes the max of
-  the measured plus trailing estimate and the full-form estimate. A
-  last reading that predates the boundary is stale and is replaced
-  by the full-form estimate of the kept region. The silent overflow
-  backstop uses `compact_overflow_budget()`.
+  The `compact_trigger_base` load was removed. `estimate_chars_per_token`
+  is loadable from `[model]` (default 4).
+- `bin/rushi/src/step.rs`: `estimate_context` delegates to
+  `compact_math::estimate_from_events`. The post-failure rescue
+  re-runs `estimate_context` after transport retries are exhausted
+  and fires a compact when the estimate exceeds the trigger (see
+  9.11). `write_handoff` writes `handoff/v<N>.md` plus a
+  `handoff.md` copy; `append_compaction_summary` records the
+  versioning fields.
 - `bin/compact/src/main.rs`: the trigger decision always uses the
-  `context_budget` base. The full-form reading of the kept region
-  always joins the trigger readings.
-- `bin/assemble/src/main.rs`: `estimate_request_tokens` skips the
-  measured anchor when a compaction boundary exists (`framing.is_some()`)
-  and estimates the full kept region from scratch instead (see 9.5).
-  `resolve_budget_tokens` always clamps to the full model window.
-  The `context_exhausted` gate and the summary call budget always use
-  the full window (see 9.6). The anchor adds `usage_input +
-  usage_output`, so the response tokens count toward the trigger.
+  `context_budget` base. The trigger reading now comes from
+  `compact_math::estimate_from_events` (the same estimator the loop
+  uses) instead of a local capped full-form estimate, so the binary
+  and the loop agree. `run_compaction` records the versioning
+  fields in the marker and status.
+- `bin/assemble/src/main.rs`: `estimate_request_tokens` uses the
+  calibrated `estimate_chars_per_token` for the drop-search estimate
+  and reads the versioned `handoff/v<N>.md` when the boundary
+  carries a `version`.
+- `bin/rushi/src/stage_runner.rs`: `CompactStatus` gains
+  `version`, `parent_version`, and `diverge_seq`, parsed from the
+  compact status JSON.
+- `schemas/events/v1/compaction_summary.json`: adds the required
+  `version`, `parent_version`, and `diverge_seq` fields.
 - `scripts/compact-e2e.sh`: the `last-resort` fixture was re-calibrated
   so the heavy result lands in the old region, not the kept tail
-  (see 9.5).
+  (see 9.5). The new `silent-failure-rescue` scenario covers the
+  post-failure rescue (P13).
 - `scripts/compact-e2e.sh`: the `pi-parity` scenario was updated to
   reflect the always-on `context_budget` base. The `pi-parity-cold`
   scenario was removed (no longer meaningful without the old
@@ -1107,11 +1126,16 @@ false `context_exhausted` form, the last-resort compact found no old
 region to summarize, and the loop stopped.
 
 Fix: when a compaction boundary exists, the last reading predates the
-boundary and is stale. `estimate_request_tokens` now skips the anchor
-and estimates the full kept region from scratch, plus the framing
-item. `estimate_context` in `step.rs` applies the same rule so the
-threshold trigger and the silent-overflow backstop see the same
-number.
+boundary and is stale. `estimate_from_events` now filters the kept
+region by `first_kept_seq` (every active event whose position is
+`>= first_kept_seq`), not by log-order position after the marker.
+The kept region sits *before* the marker in log order because the
+marker is appended at the end; the old slice `active_events[b+1..]`
+missed it entirely. The estimate is the full-form sum of the kept
+region plus the summary framing, times 5/4 safety margin.
+`estimate_context` in `step.rs` delegates to the same
+`estimate_from_events` function so the threshold trigger and the
+silent-overflow backstop see the same number.
 
 Verification: the pre-fix release `assemble` emits the
 `context_exhausted` form on a copy of the dead session. The fixed
@@ -1275,6 +1299,29 @@ on the remaining tail. This is the part-by-part compact rescue.
 It only fails when the session has grown to about twice the
 model window.
 
+### 9.11 Post-failure estimate rescue (2026-09-17)
+
+**Problem.** A provider can reject an oversized request with an
+opaque error (empty detail, HTTP 400) that `is_overflow`
+(`bin/rushi/src/classifier.rs`) does not recognise. The transport
+retry path retries twice and then writes a terminal error, even
+when the context estimate still exceeds the compact trigger and a
+compact would have recovered the session.
+
+**Fix.** In `bin/rushi/src/step.rs` the transport-failure branch now
+re-runs `estimate_context` after the retry budget is spent. If the
+estimate exceeds `trigger_level()` and compact is enabled, the loop
+fires a `CompactReason::Overflow` compact (and a `LastResort`
+force-compact when that no-ops), resets the retry counter, and
+continues instead of writing a terminal error. `overflow_recovered`
+gates the rescue to at most one attempt per model-call failure.
+
+**Verification.** `scenario_silent_failure_rescue` in
+`scripts/compact-e2e.sh`: the stub model returns three empty-detail
+errors, the post-failure check fires the compact, and the fourth
+call (a success) completes the turn with no terminal error event and
+claim state `idle`.
+
 ## Properties
 
 Lean-style invariants for this spec (see `lean-driven-development.md`).
@@ -1288,6 +1335,7 @@ P6. failure-marker: given a failed summary call, observe a `compaction_failed` m
 P7. silent-overflow: given a successful call whose input usage meets the input budget, observe compact only, with no model re-run.
 P8. overflow-retry: given a recoverable overflow or length stop, observe one `compact --reason overflow` then one model re-run. A second overflow runs the last-resort compact then a terminal `error`.
 P9. iterative-merge: given a prior `compaction_summary`, observe the next summary request carry the previous summary and its file-op lists.
+P13. post-failure-rescue: given a model API failure whose detail does not match `is_overflow`, observe the loop re-check `estimate_context` after retries and fire a compact when the estimate exceeds the trigger, instead of writing a terminal error.
 
 ## Verification
 
@@ -1305,6 +1353,7 @@ P9. iterative-merge: given a prior `compaction_summary`, observe the next summar
 | P10 | hard-trim-backstop (disabled): the mechanical group-drop backstop is removed; the threshold compact and overflow compact handle context reduction. The `context_exhausted` fallback still fires when the framing alone exceeds the target | `scenario_no_trim`, `scenario_context_exhausted` in `scripts/compact-e2e.sh` | disabled |
 | P11 | hard-trim-fallback: given a framing alone that exceeds the target, observe the `context_exhausted` form fire the last-resort compaction | `hard_trim_fails_when_the_framing_alone_exceeds_the_target`, `scenario_context_exhausted` in `scripts/compact-e2e.sh` | proven |
 | P12 | length-stop-recovery: given a `length` stop that truncates a tool call, observe parse record the turn without a hard-fail and the loop re-issue via compact | the parse length-stop tests in `bin/parse/src/main.rs` | proven |
+| P13 | post-failure-rescue: after a non-overflow API failure exhausts retries, the loop re-checks `estimate_context` and fires compact when the estimate exceeds the trigger | `scenario_silent_failure_rescue` in `scripts/compact-e2e.sh` | proven |
 
 ## Gate
 

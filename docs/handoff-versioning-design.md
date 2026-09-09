@@ -138,8 +138,8 @@ P6. **Append-only invariant.** Adding versioning adds fields to new
 |----|----------|-------|--------|
 | P1 | version uniqueness | `handoff_version_meta` unit tests in `compact_math.rs` | proven |
 | P2 | parent link | `handoff_version_meta_one_boundary`, `_two_boundaries` | proven |
-| P3 | file persistence | e2e `compact-e2e.sh` scenario-1 checks `handoff/v1.md` | open |
-| P4 | correct version | e2e `e2e-rewind.sh` boundary scenario + assemble unit test | open |
+| P3 | file persistence | e2e `compact-e2e.sh` scenario-1 checks `handoff/v1.md`; scenario-iterative checks `v2.md` | proven |
+| P4 | correct version | e2e `compact-e2e.sh` threshold scenario checks `handoff/v1.md` matches `handoff.md` | proven |
 | P5 | backward compat | `handoff_version_meta_legacy_events_without_version` test | proven |
 | P6 | append-only | Inherited from FT-005; no new write path | proven |
 
