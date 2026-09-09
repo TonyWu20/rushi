@@ -150,6 +150,32 @@ in
       '';
     };
 
+    # TUI binary (separate from the kernel; lives in the rushi-tui
+    # repo). When set, the binary is shipped at $out/bin/tui so the
+    # kernel's side-by-side resolver finds it. When null, the user
+    # must provide a TUI on PATH or via [tui].binary in config.
+    tui = lib.mkOption {
+      type = lib.types.raw;
+      default = null;
+      description = ''
+        Nix derivation (or store-path string) for the TUI binary.
+        The derivation must expose the binary at `$out/bin/tui`
+        (standard Nix package layout).
+
+        When set, the `tui` binary is copied into the package at
+        `$out/bin/tui`, so the kernel's side-by-side resolver
+        (`<exe_dir>/tui`) finds it automatically.
+
+        When `null` (the default), no TUI is shipped. The user must
+        either place a `tui` binary on `PATH` or set
+        `[tui].binary` in `rushi.config` to a resolvable path.
+
+        Example (consumer flake):
+          rushi.tui = rushi-tui-flake.packages.<system>.default;
+      '';
+      example = null;
+    };
+
     # Environment variables exported into the rushi process at
     # runtime (mirrors pi-flake's `pi.coding-agent.environment`).
     #
