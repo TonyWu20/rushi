@@ -145,18 +145,39 @@ fn preview(text: &str) -> String {
     format!("{head}\n[{elided} of {total} chars elided; full body in the tool log]\n{tail}")
 }
 
+/// The tool's structured stdout: the parsed JSON when a *successful* run
+/// (exit 0) emitted valid JSON on stdout. Returns `Value::Null` when the
+/// tool did not run, exited non-zero, or emitted non-JSON output. This
+/// becomes `value.details` in the `tool_result` event so extension
+/// renderers can do tool-specific rendering (e.g. diff view for edit /
+/// write) without reading the tool log.
+fn structured_output(o: &Outcome) -> serde_json::Value {
+    if o.exit != Some(0) {
+        return serde_json::Value::Null;
+    }
+    let trimmed = o.stdout.trim();
+    if trimmed.is_empty() {
+        return serde_json::Value::Null;
+    }
+    match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(v) => v,
+        Err(_) => serde_json::Value::Null,
+    }
+}
+
 /// The slim `tool_result` index event for the session log: status,
 /// byte length, the tool-log pointer, and a head/tail preview. The
 /// full body lives in the tool log, keyed by the same call id.
 fn slim_result_event(o: &Outcome, ts: &str, id: &str, log_name: &str) -> String {
     let text = o.display_text(usize::MAX);
     let bytes = text.len();
+    let details = structured_output(o);
     serde_json::to_string(&serde_json::json!({
         "v": 1,
         "type": "tool_result",
         "ts": ts,
         "id": id,
-        "value": { "text": preview(&text) },
+        "value": { "text": preview(&text), "details": details },
         "is_error": o.is_error(),
         "bytes": bytes,
         "tool_log": log_name,
@@ -186,12 +207,13 @@ fn legacy_result_event(o: &Outcome, ts: &str, id: &str, max_chars: usize) -> Str
             None => String::new(),
         },
     };
+    let details = structured_output(o);
     serde_json::to_string(&serde_json::json!({
         "v": 1,
         "type": "tool_result",
         "ts": ts,
         "id": id,
-        "value": { "text": text },
+        "value": { "text": text, "details": details },
         "is_error": o.is_error(),
     }))
     .unwrap_or_default()
@@ -833,6 +855,60 @@ mod tests {
         assert!(ev["bytes"].is_u64());
         // Short body: the preview is the whole text, no elision marker.
         assert_eq!(ev["value"]["text"], "line one\nline two");
+        // Non-JSON stdout → details is null.
+        assert_eq!(ev["value"]["details"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn slim_event_carries_structured_details_for_json_tool() {
+        let o = Outcome {
+            exit: Some(0),
+            stdout: r#"{"text":"The file foo.rs has been updated successfully.","path":"foo.rs","before":"let x = 1;","after":"let x = 2;","replace_all":false}"#.to_string(),
+            stderr: String::new(),
+            error: None,
+        };
+        let ev: serde_json::Value =
+            serde_json::from_str(&slim_result_event(&o, "t", "c1", "tools.jsonl")).unwrap();
+        assert_eq!(ev["value"]["details"]["path"], "foo.rs");
+        assert_eq!(ev["value"]["details"]["before"], "let x = 1;");
+        assert_eq!(ev["value"]["details"]["after"], "let x = 2;");
+        assert_eq!(ev["value"]["details"]["replace_all"], false);
+    }
+
+    #[test]
+    fn details_is_null_on_error_exit() {
+        let o = Outcome {
+            exit: Some(1),
+            stdout: r#"{"error":"file not found"}"#.to_string(),
+            stderr: "Error: cannot read file: foo.rs".to_string(),
+            error: None,
+        };
+        let ev: serde_json::Value =
+            serde_json::from_str(&slim_result_event(&o, "t", "c1", "tools.jsonl")).unwrap();
+        assert_eq!(ev["is_error"], true);
+        assert_eq!(ev["value"]["details"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn details_is_null_for_not_run() {
+        let o = Outcome::not_run("Unknown tool nope.".to_string());
+        let ev: serde_json::Value =
+            serde_json::from_str(&slim_result_event(&o, "t", "c2", "tools.jsonl")).unwrap();
+        assert_eq!(ev["value"]["details"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn legacy_event_includes_details_for_json_tool() {
+        let o = Outcome {
+            exit: Some(0),
+            stdout: r#"{"text":"ok","path":"bar.txt"}"#.to_string(),
+            stderr: String::new(),
+            error: None,
+        };
+        let ev: serde_json::Value =
+            serde_json::from_str(&legacy_result_event(&o, "t", "c1", 20000)).unwrap();
+        assert_eq!(ev["value"]["details"]["path"], "bar.txt");
+        assert!(ev.get("tool_log").is_none());
     }
 
     #[test]
