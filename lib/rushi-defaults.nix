@@ -109,4 +109,11 @@
 
   # External hook binaries.
   external_hooks = [ ];
+
+  # TUI binary source (Nix derivation or store-path string).
+  # When non-null, the TUI binary is copied into the package at
+  # $out/bin/tui so the kernel's side-by-side resolver finds it.
+  # When null, the user must provide a TUI on PATH or via
+  # [tui].binary in the config.
+  tui = null;
 }

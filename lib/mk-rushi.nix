@@ -121,6 +121,7 @@ let
   extTools     = evaluated.config.rushi.external_tools;
   extUiExts    = evaluated.config.rushi.external_ui_extensions;
   extHooks     = evaluated.config.rushi.external_hooks;
+  tuiPkg       = evaluated.config.rushi.tui or null;
 
   # ── 2. Deep-merge rushi.config ──
   #
@@ -270,6 +271,27 @@ let
     || (builtins.isString x && (builtins.match ''/nix/store/.*'' x) != null)
   ) allExternalDeps;
 
+  # TUI binary (rushi.tui): add Nix derivation to build inputs.
+  tuiNixDep = if tuiPkg != null && (
+      (builtins.isAttrs tuiPkg)
+      || (builtins.isString tuiPkg && (builtins.match ''/nix/store/.*'' tuiPkg) != null)
+    ) then [ tuiPkg ] else [ ];
+
+  # Shell script to copy the TUI binary into the package.
+  tuiInstallScript = if tuiPkg != null then
+    let tuiPath = toShellPath tuiPkg; in
+    ''
+      # ── TUI binary (rushi.tui) ──
+      TUI_SRC="${tuiPath}"
+      if [ -f "$TUI_SRC/bin/tui" ]; then
+        cp "$TUI_SRC/bin/tui" "$out/bin/tui"
+        chmod +x "$out/bin/tui"
+      else
+        echo "WARNING: rushi.tui (${tuiPath}) has no bin/tui; TUI unavailable." >&2
+      fi
+    ''
+  else "";
+
   package = pkgs.stdenv.mkDerivation {
     pname = "rushi-configured";
     inherit version;
@@ -278,7 +300,7 @@ let
     buildInputs = [ rushi ];
 
     # External sources (derivations only; string paths are used as-is).
-    nativeBuildInputs = nixDeps ++ envFileNixDeps;
+    nativeBuildInputs = nixDeps ++ envFileNixDeps ++ tuiNixDep;
 
     # Pass generated text files via file descriptors (avoids long
     # Nix store paths in the shell command).
@@ -317,6 +339,9 @@ let
 
       # ── External hook binaries (add to hooks/) ──
       ${extHookScript}
+
+      # ── TUI binary (rushi.tui) ──
+      ${tuiInstallScript}
 
       # ── Generated config.toml ──
       cp "${configTomlFile}" $out/config.toml
