@@ -216,8 +216,7 @@ Existing examples from the pi extension port:
 - `no-bare-python` blocks bare `python` and `python3`. It steers the
   agent to `uv run`.
 
-See `docs/loop-lifecycle-hooks.md` for the hook ABI. See
-`docs/pi-extension-port-investigation.md` for the port notes.
+See `docs/loop-lifecycle-hooks.md` for the hook ABI. See `../rushi-exts/docs/pi-extension-port-investigation.md` for the port notes.
 
 The harness does not auto-install user tools. A missing tool is a
 user decision. The agent may request an install via `bash`. The

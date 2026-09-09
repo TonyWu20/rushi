@@ -31,8 +31,6 @@ IN_SCOPE=(
   "loop-lifecycle-hooks.md"
   "phase-2-plan.md"
   "skill-remapped-to-os-apps.md"
-  "user-message-editing.md"
-  "vim-editor-design.md"
 )
 
 check_doc() {

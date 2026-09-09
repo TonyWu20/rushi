@@ -301,7 +301,7 @@ on the agent-visible path with a `tool.toml` manifest, self-documenting via
 `--help`, with no SKILL.md. Its multi-step spec-driven workflow is one
 short-lived command with ops (`init`, `build`, `drt`, `translate`), and
 every environment dependency is a flake devShell, never an ad-hoc install
-(docs/aeneas-rust-to-lean.md). The `--help` output also carries the
+(../rushi-exts/docs/aeneas-rust-to-lean.md). The `--help` output also carries the
 spec-driven loop itself — including the "follow the proven spec to
 implement the Rust" step that `docs/lean-driven-development.md` §3.3
 defines — so the instruction travels with the tool, not in a SKILL.md.
