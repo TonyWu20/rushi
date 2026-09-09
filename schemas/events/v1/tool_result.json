@@ -7,7 +7,15 @@
     "type": { "type": "string", "const": "tool_result" },
     "ts": { "type": "string", "format": "date-time" },
     "id": { "type": "string" },
-    "value": { "type": "object" },
+    "value": {
+      "type": "object",
+      "properties": {
+        "text": { "type": "string" },
+        "details": {
+          "description": "The tool's structured stdout as parsed JSON. Present when the tool emitted valid JSON on a successful run; null when the tool emitted no JSON, ran in legacy mode, or exited non-zero. Extension renderers use this for tool-specific rendering (e.g. diff view) without reading the tool log."
+        }
+      }
+    },
     "is_error": { "type": "boolean" },
     "bytes": { "type": "integer" },
     "tool_log": { "type": "string" }
