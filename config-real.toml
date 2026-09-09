@@ -49,11 +49,9 @@ extra_tools_roots = ["../rushi-exts/goal-app/goal-tools/", "../rushi-exts/lean-v
 
 # extra_tools_roots = ["../rushi-exts/goal-app/goal-tools", "../rushi-exts/lean-verify"]
 
-# The TUI's global extension layer tree. In a kernel-only checkout
-# there is no global layer. When running alongside the rushi-exts
-# sibling repo, uncomment the [ext] section to enable it.
-[ext]
-dir = "../rushi-exts/ui_extensions/"
+# The TUI's global extension layer tree lives in `[tui] ext_dirs` below.
+# In a kernel-only checkout there is no global layer. When running
+# alongside the rushi-exts sibling repo, set `ext_dirs` in `[tui]`.
 
 [limits]
 # read_limit = 2000
@@ -137,6 +135,9 @@ Guidelines:
 [tui]
 # Where the launcher finds the TUI binary (relative to this config file).
 binary = "../rushi-tui/target/release/tui"
+# Global UI-extension layer directories (docs/ui-extension.md section 3).
+# Later entries override earlier ones by extension name.
+ext_dirs = ["../rushi-exts/ui_extensions/"]
 
 [tui.tool_display]
 preset = "opencode"

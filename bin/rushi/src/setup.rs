@@ -382,6 +382,7 @@ pub fn render_config(manifest: &RushiManifest, version: &str, kernel_commit: &st
          # color = \"truecolor\"              # force color level: truecolor, 256, 8, 16 (default: detect)\n\
          # color_scheme = \"catppuccin macchiato\"\n\
          #\n\
+         # ext_dirs = [\"ui_extensions\"]    # global UI-extension layer dirs; empty = <config dir>/ui_extensions\n\
          # [tui.tool_display]\n\
          # preset = \"opencode\"\n\
          # preview_lines = 8\n\

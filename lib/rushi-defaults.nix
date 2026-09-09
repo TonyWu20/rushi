@@ -80,6 +80,10 @@
       binary = "";
       color = "";
       color_scheme = "";
+      # Global UI-extension layer directories. An empty list falls back
+      # to the built-in default (<config dir>/ui_extensions), which is
+      # where the Nix package ships its ui_extensions.
+      ext_dirs = [ ];
       tool_display = {
         preset = "";
         # preview_lines = 0;
@@ -88,11 +92,6 @@
         # expanded_preview_max_lines = 0;
         diff_view = "auto";
       };
-    };
-
-    # [ext]
-    ext = {
-      dir = "";
     };
   };
 

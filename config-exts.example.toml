@@ -6,7 +6,7 @@
 #
 #   - [paths] extra_tools_roots: the exts goal-app/goal-tools/ group
 #     (goal, goal_blocked, goal_complete) and the lean-verify tool
-#   - [ext] dir: the TUI's global ui_extensions layer
+#   - [tui] ext_dirs: the TUI's global ui_extensions layer
 #   - [[hooks.on]] goal-continuation hooks (rushi-exts/goal-app/goal-hooks)
 #
 # Preconditions:
@@ -57,8 +57,11 @@ sessions_root = "sessions"
 tools_root = "tools"
 extra_tools_roots = ["../rushi-exts/goal-app/goal-tools", "../rushi-exts/lean-verify"]
 
-[ext]
-dir = "../rushi-exts/ui_extensions"
+# TUI-only section (the harness ignores it). Global UI-extension
+# layer directories; later entries override earlier ones by extension
+# name (docs/ui-extension.md section 3).
+[tui]
+ext_dirs = ["../rushi-exts/ui_extensions"]
 
 [limits]
 context_budget_tokens = 262144
