@@ -25,9 +25,10 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "rushi", about = "The rushi distribution: TUI entry point and project setup")]
 struct Args {
-    /// Path to config file (for loop subcommands)
-    #[arg(long, default_value = "config.toml", global = true)]
-    config: PathBuf,
+    /// Path to config file (for loop subcommands).
+    /// When omitted, falls back to the Nix side-by-side config or CWD.
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
 
     /// Subcommand. Omit to open the TUI.
     #[command(subcommand)]
@@ -115,9 +116,38 @@ fn main() {
     }
 }
 
-/// Resolve the config path: `$CONFIG` env var overrides the CLI flag.
+/// Resolve the config path.
+///
+/// Priority (highest to lowest):
+/// 1. `$CONFIG` env var — explicit user/system override
+/// 2. `--config` CLI flag — user-specified path
+/// 3. Side-by-side `<exe_dir>/../config.toml` — Nix package layout
+///    (`$out/bin/rushi` finds `$out/config.toml`)
+/// 4. `config.toml` in CWD — dev checkout fallback
 fn resolve_config_path(args: &Args) -> String {
-    std::env::var("CONFIG").unwrap_or_else(|_| args.config.to_string_lossy().into_owned())
+    // 1. $CONFIG env var (set by `user` binary, or by the user)
+    if let Ok(p) = std::env::var("CONFIG") {
+        return p;
+    }
+
+    // 2. Explicit --config flag
+    if let Some(ref p) = args.config {
+        return p.to_string_lossy().into_owned();
+    }
+
+    // 3. Side-by-side: <exe_dir>/../config.toml (Nix: $out/config.toml)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(bin_dir) = exe.parent() {
+            if let Some(candidate) = bin_dir.parent().map(|p| p.join("config.toml")) {
+                if candidate.exists() {
+                    return candidate.to_string_lossy().into_owned();
+                }
+            }
+        }
+    }
+
+    // 4. CWD fallback (dev checkout)
+    "config.toml".into()
 }
 
 /// Find the `tui` binary. Resolution order:
