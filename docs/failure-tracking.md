@@ -877,3 +877,70 @@ session now compacts on the next step: `compaction_summary` is
 written with `tokens_before = 303563`, `tokens_after = 21795`,
 `version = 2`, `parent_version = 1`, `diverge_seq = 771`.
 
+## FT-023 — Estimator undercount and silent SSE overflow prevent
+compaction
+
+**Symptom:** The `select-and-yank-impl` session logged two terminal
+errors (`model API call failed after retries: `, empty detail)
+at 13:34 and 13:35 UTC. The SGLang server returned HTTP 200 with
+an SSE `response.failed` event whose `response.error` field was
+`null`. The harness never compacted; the session died.
+
+**Root cause:** Two compounding defects.
+
+1. **Estimator undercount (Bug A).** The boundary path of
+   `estimate_from_events` (`crates/rushi/src/compact_math.rs`)
+   computed a pure chars/cpts estimate over the kept region and
+   multiplied by 5/4. For code-heavy sessions the real
+   chars-per-token ratio is ~2.6, not 4, so the estimate
+   undercounted by ~18 %. On the affected session the estimate was
+   213 260 vs. a trigger of 212 992 — only 268 tokens above. The
+   post-failure rescue check (`est > trigger`) sat on the knife's
+   edge and could easily miss. The proactive threshold check
+   likewise fired too late, after the context had already grown
+   past the model's 262 144-token window.
+
+2. **Silent SSE overflow (Bug B).** SGLang's `/v1/responses`
+   endpoint (see sglang#12081) reports a context overflow as an
+   HTTP-200 SSE stream ending in `response.failed` with
+   `response.error = null`. The actual ValueError text appears
+   only in the server's stderr, not in the client-visible payload.
+   The model binary's `SseParser` fell through to the `_ => {}`
+   catch-all and dropped the event silently. The harness received
+   `stop_reason = "error"` with an empty `detail`, so
+   `is_overflow("")` returned false and the reactive overflow
+   recovery never fired.
+
+**Fix:** Three changes.
+
+1. **`crates/rushi/src/compact_math.rs`** — the boundary path of
+   `estimate_from_events` now anchors on the last measured
+   `assistant_message` usage (input + output tokens) within the
+   kept region, plus a chars/cpts estimate of events appended after
+   that reading. The 25 %-margin chars/cpts fallback is used only
+   when no measured reading exists in the kept region. This makes
+   the estimate track the provider's own count (261 477 on the
+   affected session, well above the 212 992 trigger).
+
+2. **`bin/model/src/main.rs`** — `SseParser` now captures the
+   `error` field from a bare SSE `data: {"error":{...}}` event
+   (no `type` field) and from `response.failed` events whose
+   `response.error` is a non-null string or object. The captured
+   text is surfaced in `finalize` as the `detail` field so the
+   overflow classifier in `step.rs` can match it.
+
+3. **`bin/rushi/src/step.rs`** — a new *silent-overflow early
+   detection* block runs before the transport-retry loop. When the
+   model error detail is empty, the context estimate exceeds the
+   trigger, and no prior overflow recovery has occurred, the loop
+   fires an immediate compact (Overflow, falling back to
+   LastResort) instead of burning three futile retries.
+
+**Verification:** `cargo test` passes all 204 tests (including new
+`boundary_path_anchors_on_measured_reading_in_kept_region` and
+`estimate_excludes_masked_branch_events`). `est_probe` on the
+`select-and-yank-impl` log reports 261 477 tokens (was 213 260).
+`compact --reason overflow` on a sandbox copy of the session
+compacts successfully: `tokens_before = 261477`,
+`tokens_after = 22793`, `version = 5`.
+

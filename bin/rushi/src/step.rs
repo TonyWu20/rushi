@@ -985,6 +985,42 @@ fn model_retry_loop(
                 reassemble(cfg, runner, session, request, false);
                 continue;
             }
+            // Silent-overflow early detection.  Some providers (e.g.
+            // SGLang) report a context overflow as an HTTP-200 SSE
+            // stream that ends in `response.failed` with a null error
+            // body.  The `detail` field is empty, so the
+            // `is_overflow` pattern match above sees no signal.  When
+            // the context estimate already exceeds the trigger, compact
+            // immediately instead of burning 3 futile retries.
+            if detail.trim().is_empty()
+                && cfg.compact_enabled
+                && !overflow_recovered
+                && !last_resort
+            {
+                let est = estimate_context(cfg, &session.path);
+                let trigger = cfg.trigger_level();
+                if trigger > 0 && est > trigger {
+                    eprintln!(
+                        "rushi: silent overflow suspected (empty detail, estimate {est} > trigger {trigger}); compacting before retry"
+                    );
+                    overflow_recovered = true;
+                    let status = try_compact_with_hooks(
+                        cfg, runner, session, CompactReason::Overflow, false, false,
+                    );
+                    if status.outcome == CompactOutcome::Compacted {
+                        reassemble(cfg, runner, session, request, false);
+                        model_err_retries = 0;
+                        continue;
+                    }
+                    last_resort = true;
+                    let _ = try_compact_with_hooks(
+                        cfg, runner, session, CompactReason::LastResort, true, false,
+                    );
+                    reassemble(cfg, runner, session, request, false);
+                    model_err_retries = 0;
+                    continue;
+                }
+            }
             // Transport-level model failure.
             model_err_retries += 1;
             if last_resort {

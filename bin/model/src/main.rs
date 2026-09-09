@@ -531,6 +531,11 @@ struct SseParser {
     // One `done` line per stream, on the first terminal event (or in
     // `finalize`, on a cut stream): the channel's close marker.
     done_emitted: bool,
+    // Provider error message captured from an SSE error event that has
+    // no `type` field (SGLang-style: HTTP 200 + {"error":{...}} +
+    // [DONE], see sglang#12081).  Surfaced in `finalize` as `detail`
+    // so the overflow classifier in the loop can see the real error.
+    error_detail: Option<String>,
 
     // Streaming fallback state: item_id -> function name / arguments
     fc_names: HashMap<String, String>,
@@ -558,6 +563,7 @@ impl SseParser {
             final_response: None,
             saw_terminal: false,
             done_emitted: false,
+            error_detail: None,
             fc_names: HashMap::new(),
             fc_args: HashMap::new(),
             fc_order: Vec::new(),
@@ -586,6 +592,28 @@ impl SseParser {
         };
 
         let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+        // SGLang-style error delivery (sglang#12081): a failed request
+        // returns HTTP 200 with an SSE body containing a bare
+        // {"error":{...}} event (no `type` field) followed by [DONE].
+        // Without this, the error falls into the `_ => {}` catch-all
+        // and is silently dropped.  Capture the message so `finalize`
+        // can surface it in `detail` for the overflow classifier.
+        if event.get("type").is_none() {
+            if let Some(err) = event.get("error") {
+                let msg = err
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| err.to_string());
+                if !msg.is_empty() {
+                    self.error_detail = Some(msg);
+                    self.stop_reason = "error".to_string();
+                    self.saw_terminal = true;
+                    return;
+                }
+            }
+        }
 
         match event_type {
             "response.output_text.delta" => {
@@ -716,6 +744,29 @@ impl SseParser {
                     } else {
                         "error".to_string()
                     };
+                }
+                // SGLang's /v1/responses reports a context overflow as a
+                // terminal response.failed event. When the provider populates
+                // response.error, capture it for the overflow classifier.
+                if event_type == "response.failed" {
+                    if let Some(err) = event
+                        .get("response")
+                        .and_then(|r| r.get("error"))
+                    {
+                        let msg = err
+                            .as_str()
+                            .map(str::to_string)
+                            .or_else(|| {
+                                err.get("message")
+                                    .and_then(|m| m.as_str())
+                                    .map(str::to_string)
+                            });
+                        if let Some(m) = msg {
+                            if !m.is_empty() {
+                                self.error_detail = Some(m);
+                            }
+                        }
+                    }
                 }
                 self.saw_terminal = true;
                 self.final_response = event.get("response").cloned();
@@ -893,6 +944,19 @@ impl SseParser {
                         break;
                     }
                 }
+            }
+        }
+
+        // Surface an SSE-captured provider error in `detail` so the
+        // overflow classifier (step.rs is_overflow) can recognise it.
+        if stop_reason == "error"
+            && output
+                .get("detail")
+                .and_then(|d| d.as_str())
+                .map_or(true, str::is_empty)
+        {
+            if let Some(msg) = self.error_detail.take() {
+                output["detail"] = serde_json::json!(msg);
             }
         }
 
