@@ -189,7 +189,10 @@ workspace. This repo keeps it in the session dir alongside
 
 - `sessions/<n>/handoff.md` — the shadow summary. It is the entry
   point for the next `assemble` cycle. It sits next to the log it
-  shadows.
+  shadows. Since handoff versioning (see
+  `handoff-versioning-design.md`), the authoritative history lives
+  under `sessions/<n>/handoff/v<N>.md`; `handoff.md` remains as a
+  copy of the latest version for backward compatibility.
 
 The doc is a file, not an event. No new event type. The
 `compaction_summary` event carries `first_kept_seq`. The file is
