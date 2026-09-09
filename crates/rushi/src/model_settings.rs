@@ -5,6 +5,10 @@
 
 use toml::Value;
 
+/// Default chars-per-token ratio used by the estimator when the config
+/// omits `estimate_chars_per_token`.
+pub const DEFAULT_ESTIMATE_CHARS_PER_TOKEN: u64 = 4;
+
 /// Default `max_output_tokens` when the config omits it.
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 32768;
 /// Default `context_tokens` when the config omits it.
@@ -34,6 +38,10 @@ pub struct ModelSettings {
     pub context_tokens: u64,
     /// Reasoning effort as sent in the request.
     pub reasoning_effort: String,
+    /// Chars-per-token ratio for the estimator. The default of 4 is a
+    /// rough heuristic for English prose. Code-heavy content often runs
+    /// closer to 3, so a user-calibrated value improves trigger accuracy.
+    pub estimate_chars_per_token: u64,
     /// Name of the env var that holds the API key.
     pub api_key_env: String,
     /// Request timeout in seconds.
@@ -48,6 +56,7 @@ impl Default for ModelSettings {
             max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
             context_tokens: DEFAULT_CONTEXT_TOKENS,
             reasoning_effort: DEFAULT_REASONING_EFFORT.to_string(),
+            estimate_chars_per_token: DEFAULT_ESTIMATE_CHARS_PER_TOKEN,
             api_key_env: DEFAULT_API_KEY_ENV.to_string(),
             timeout_s: DEFAULT_MODEL_TIMEOUT_S,
         }
@@ -111,6 +120,10 @@ pub fn resolve_model_settings(config: &Value, name: &str) -> ModelSettings {
         reasoning_effort: val_str(mdl, "reasoning_effort")
             .or_else(|| val_str(model_root, "reasoning_effort"))
             .unwrap_or_else(|| DEFAULT_REASONING_EFFORT.to_string()),
+        estimate_chars_per_token: val_int(mdl, "estimate_chars_per_token")
+            .or_else(|| val_int(model_root, "estimate_chars_per_token"))
+            .unwrap_or(DEFAULT_ESTIMATE_CHARS_PER_TOKEN as i64)
+            .max(1) as u64,
         api_key_env: val_str(mdl, "api_key_env")
             .unwrap_or_else(|| DEFAULT_API_KEY_ENV.to_string()),
         timeout_s: val_int(mdl, "timeout_s")

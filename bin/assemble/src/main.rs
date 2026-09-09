@@ -721,7 +721,7 @@ fn user_event_rides(
 /// budget check. Tool results count their full length. Reasoning
 /// items are counted by their JSON-serialized size (the same payload
 /// the request carries).
-fn estimate_ev_tokens(ev: &Ev) -> u64 {
+fn estimate_ev_tokens(ev: &Ev, chars_per_token: u64) -> u64 {
     let chars = match ev {
         Ev::User { text } => text.chars().count() as u64,
         Ev::Assistant {
@@ -744,7 +744,7 @@ fn estimate_ev_tokens(ev: &Ev) -> u64 {
         }
         Ev::ToolResult { text, .. } => text.chars().count() as u64,
     };
-    chars / 4
+    chars / chars_per_token.max(1)
 }
 
 /// Estimate the input-token cost of the assembled request for the
@@ -762,6 +762,7 @@ fn estimate_ev_tokens(ev: &Ev) -> u64 {
 fn estimate_request_tokens(
     kept_events: &[&Ev],
     framing: &Option<serde_json::Value>,
+    chars_per_token: u64,
 ) -> u64 {
     // When a compaction boundary exists, the last measured usage in
     // the kept region predates the compaction and is stale.  Skip
@@ -794,7 +795,7 @@ fn estimate_request_tokens(
     // request.  In the None case the whole log is "trailing".
     let mut trailing: u64 = 0;
     for ev in &kept_events[trailing_start..] {
-        trailing += estimate_ev_tokens(ev);
+        trailing += estimate_ev_tokens(ev, chars_per_token);
     }
 
     // Add the framing item's cost when it is present and the anchor
@@ -823,8 +824,9 @@ fn hard_trim_groups(
     events: &[&Ev],
     framing: &Option<serde_json::Value>,
     target: u64,
+    chars_per_token: u64,
 ) -> Option<usize> {
-    if estimate_request_tokens(events, framing) <= target {
+    if estimate_request_tokens(events, framing, chars_per_token) <= target {
         return Some(0);
     }
     let groups = step_groups(events);
@@ -834,7 +836,7 @@ fn hard_trim_groups(
         } else {
             events.len()
         };
-        if estimate_request_tokens(&events[start..], framing) <= target {
+        if estimate_request_tokens(&events[start..], framing, chars_per_token) <= target {
             return Some(drop);
         }
     }
@@ -920,6 +922,7 @@ fn main() {
     let active_model = resolve_active_model(&config);
     let model_settings = resolve_model_settings(&config, &active_model);
     let budget_tokens = resolve_budget_tokens(&limits, &model_settings);
+    let chars_per_token = model_settings.estimate_chars_per_token.max(1);
 
     // Read events
     let log_path = PathBuf::from(&args.session).join("events.jsonl");
@@ -1381,8 +1384,8 @@ fn main() {
         .unwrap_or(16384)
         .max(0) as u64;
     let trim_target = trigger_level_for(budget_tokens as u64, compact_reserve);
-    let est_before = estimate_request_tokens(&sel_events, &framing);
-    if est_before > trim_target && hard_trim_groups(&sel_events, &framing, trim_target).is_none() {
+    let est_before = estimate_request_tokens(&sel_events, &framing, chars_per_token);
+    if est_before > trim_target && hard_trim_groups(&sel_events, &framing, trim_target, chars_per_token).is_none() {
         let drop_pairs = drop_pair_ids(&kept_events, kept_events.len());
         let mut items = build_items(
             &sel_events,
@@ -1532,6 +1535,7 @@ mod tests {
             reasoning_effort: String::new(),
             api_key_env: String::new(),
             timeout_s: 0,
+            estimate_chars_per_token: 4,
         }
     }
 
@@ -1616,8 +1620,8 @@ context_budget_tokens = 999999
         let evs = hard_trim_events();
         let refs = hard_trim_refs(&evs);
         let framing: Option<serde_json::Value> = None;
-        assert_eq!(hard_trim_groups(&refs, &framing, 4000), Some(0));
-        assert_eq!(hard_trim_groups(&refs, &framing, 4001), Some(0));
+        assert_eq!(hard_trim_groups(&refs, &framing, 4000, 4), Some(0));
+        assert_eq!(hard_trim_groups(&refs, &framing, 4001, 4), Some(0));
     }
 
     #[test]
@@ -1630,9 +1634,9 @@ context_budget_tokens = 999999
         // 999 drops nothing that fits: even the smallest non-empty
         // suffix (user B, 1000) exceeds 999, so the walk drops to
         // the empty suffix, which is 0 tokens.
-        assert_eq!(hard_trim_groups(&refs, &framing, 3000), Some(1));
-        assert_eq!(hard_trim_groups(&refs, &framing, 1500), Some(2));
-        assert_eq!(hard_trim_groups(&refs, &framing, 999), Some(3));
+        assert_eq!(hard_trim_groups(&refs, &framing, 3000, 4), Some(1));
+        assert_eq!(hard_trim_groups(&refs, &framing, 1500, 4), Some(2));
+        assert_eq!(hard_trim_groups(&refs, &framing, 999, 4), Some(3));
     }
 
     #[test]
@@ -1644,7 +1648,7 @@ context_budget_tokens = 999999
         // assistant message (the head of the call/result group) or a
         // user message. A target that fits exactly one group keeps
         // the group whole.
-        let drop = hard_trim_groups(&refs, &framing, 2000).expect("trims to one group");
+        let drop = hard_trim_groups(&refs, &framing, 2000, 4).expect("trims to one group");
         let start = step_groups(&refs)[drop].0;
         assert!(matches!(refs[start], Ev::Assistant { .. } | Ev::User { .. }));
     }
@@ -1660,9 +1664,9 @@ context_budget_tokens = 999999
             "role": "user",
             "content": "f".repeat(20000)
         }));
-        assert_eq!(hard_trim_groups(&refs, &framing, 4000), None);
+        assert_eq!(hard_trim_groups(&refs, &framing, 4000, 4), None);
         // A target above the framing cost fits with zero events kept.
-        assert_eq!(hard_trim_groups(&refs, &framing, 5000), Some(3));
+        assert_eq!(hard_trim_groups(&refs, &framing, 5000, 4), Some(3));
     }
 
     fn ev_res(id: &str, text: &str) -> Ev {
@@ -2729,7 +2733,7 @@ not json at all
         ];
         let refs: Vec<&Ev> = evs.iter().collect();
         // anchor = 1000 + 500 = 1500, no trailing events.
-        let est = estimate_request_tokens(&refs, &None);
+        let est = estimate_request_tokens(&refs, &None, 4);
         assert_eq!(est, 1500, "anchor must add input + output tokens");
     }
 
@@ -2749,7 +2753,7 @@ not json at all
         ];
         let refs: Vec<&Ev> = evs.iter().collect();
         // anchor = 800 + 0 = 800.
-        let est = estimate_request_tokens(&refs, &None);
+        let est = estimate_request_tokens(&refs, &None, 4);
         assert_eq!(est, 800, "no output: anchor is input only");
     }
 }

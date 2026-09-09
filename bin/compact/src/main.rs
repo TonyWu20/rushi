@@ -20,6 +20,7 @@ use std::process::Command;
 use clap::Parser;
 use rushi_common::compact_math::{self, Caps, Ev};
 use rushi_common::model_settings::{resolve_active_model, resolve_model_settings, val_bool, val_int};
+use rushi_common::rewind;
 use serde_json::Value;
 
 /// The one-shot auto-compaction call. It exits 0 with a status JSON on
@@ -342,10 +343,19 @@ fn main() {
         .unwrap_or(0);
 
     // The kept region: after the boundary, or the whole log.
+    // Only events on the active path (after applying rewind masks)
+    // are kept; events masked by a rewind are excluded.
     let first_kept = boundary.as_ref().map(|b| b.first_kept_seq).unwrap_or(0);
+    let rewinds: Vec<rewind::RewindRef> = events
+        .iter()
+        .filter_map(|e| {
+            rewind::parse_rewind_event(&e.value, e.seq)
+        })
+        .collect();
+    let active = rewind::active_ranges(events.len(), &rewinds);
     let kept_events: Vec<LogEvent> = events
         .iter()
-        .filter(|e| e.seq >= first_kept)
+        .filter(|e| e.seq >= first_kept && rewind::seq_in_ranges(e.seq, &active))
         .cloned()
         .collect();
 
@@ -378,6 +388,9 @@ fn main() {
     // The trigger base is always the full context budget (pi parity):
     // trigger = context_budget - compact_reserve_tokens.
     let base = resolve_context_budget(&cfg);
+    let active_model = resolve_active_model(&cfg);
+    let model_settings = resolve_model_settings(&cfg, &active_model);
+    let chars_per_token = model_settings.estimate_chars_per_token.max(1);
 
     if reserve == 0 {
         eprintln!(
@@ -396,7 +409,7 @@ fn main() {
     // context size even when the measured reading is shrunken.
     {
         let text_chars = val_int(limits, "compact_text_chars").unwrap_or(200) as u64;
-        let caps = Caps { text: Some(text_chars) };
+        let caps = Caps { text: Some(text_chars), chars_per_token };
         let evs: Vec<Ev> = kept_events
             .iter()
             .map(|e| compact_math::project_event(&e.value))
@@ -461,6 +474,10 @@ fn run_compaction(
     let empty = toml::Value::Table(toml::map::Map::new());
     let limits = cfg.get("limits").unwrap_or(&empty);
     let keep_tokens: u64 = val_int(limits, "compact_keep_tokens").unwrap_or(20_000) as u64;
+    let cpts = {
+        let active = resolve_active_model(&cfg);
+        resolve_model_settings(&cfg, &active).estimate_chars_per_token.max(1)
+    };
 
     // The projected kept events, for the estimator. The marker
     // types project to an empty user: zero tokens, no group effect.
@@ -469,7 +486,7 @@ fn run_compaction(
         .map(|e| compact_math::project_event(&e.value))
         .collect();
 
-    let est_caps: Caps = Caps { text: None };
+    let est_caps: Caps = Caps { text: None, chars_per_token: cpts };
     let cut = compact_math::find_cut(&projected, keep_tokens, &est_caps);
     if cut == 0 {
         let status = serde_json::json!({
@@ -682,7 +699,8 @@ fn run_compaction(
     // The tokens after: the full-form estimate of the kept region
     // plus the summary framing.
     let kept_projected: Vec<Ev> = projected[cut..].to_vec();
-    let tokens_after = compact_math::est_tokens_after(&kept_projected, &summary);
+    let cpts_caps = Caps { text: None, chars_per_token: cpts };
+    let tokens_after = compact_math::est_tokens_after_with_caps(&kept_projected, &summary, &cpts_caps);
 
     let mut done = serde_json::json!({
         "v": 1,

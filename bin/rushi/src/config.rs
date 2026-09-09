@@ -55,6 +55,9 @@ pub struct HarnessConfig {
     pub compact_reserve_tokens: u64,
     pub compact_keep_tokens: u64,
     pub compact_text_chars: u64,
+    /// Chars-per-token ratio for context estimation (default 4).
+    /// Calibrate via `rushi calibrate` for your model.
+    pub estimate_chars_per_token: u64,
 
     /// The optional approval wait timeout in seconds. `None` = wait forever.
     pub approval_timeout_s: Option<u64>,
@@ -165,6 +168,8 @@ impl HarnessConfig {
         let compact_reserve_tokens = model_settings::val_int(limits, "compact_reserve_tokens").unwrap_or(16384) as u64;
         let compact_keep_tokens = model_settings::val_int(limits, "compact_keep_tokens").unwrap_or(20000) as u64;
         let compact_text_chars = model_settings::val_int(limits, "compact_text_chars").unwrap_or(200) as u64;
+        let estimate_chars_per_token = model_settings::resolve_model_settings(&cfg, &active_model)
+            .estimate_chars_per_token;
 
         let approval_timeout_s = limits
             .get("approval_timeout_s")
@@ -243,6 +248,7 @@ impl HarnessConfig {
             compact_reserve_tokens,
             compact_keep_tokens,
             compact_text_chars,
+            estimate_chars_per_token,
             approval_timeout_s,
             hooks_timeout_ms,
             hooks,

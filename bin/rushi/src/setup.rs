@@ -213,6 +213,7 @@ pub fn render_config(manifest: &RushiManifest, version: &str, kernel_commit: &st
         max_output_tokens: u64,
         reasoning_effort: String,
         model_timeout_s: u64,
+        estimate_chars_per_token: u64,
     }
     #[derive(Serialize)]
     struct TPaths {
@@ -273,6 +274,7 @@ pub fn render_config(manifest: &RushiManifest, version: &str, kernel_commit: &st
         max_output_tokens: 32768,
         reasoning_effort: "xhigh".into(),
         model_timeout_s: 3600,
+        estimate_chars_per_token: 4,
     };
     let paths = TPaths {
         sessions_root: "sessions".into(),
