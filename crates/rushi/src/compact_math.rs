@@ -187,17 +187,56 @@ pub fn estimate_from_events(events: &[Value], cpts: u64) -> u64 {
         // Kept region = every active event whose seq is >= first_kept_seq.
         // This covers both the original kept events (before the marker in
         // log order) and any events appended after the marker.
-        let evs: Vec<Ev> = active_events
+        let kept: Vec<(usize, &Value)> = active_events
             .iter()
             .filter(|(pos, _)| *pos as u64 >= first_kept)
-            .map(|(_, v)| project_event(v))
+            .cloned()
             .collect();
-        let raw = full_form_estimate(&evs, &caps);
-        let mut est = raw;
-        if let Some(s) = marker.get("summary").and_then(|s| s.as_str()) {
-            est += s.chars().count() as u64 / cpts;
+
+        // Anchor on the last measured reading in the kept region when
+        // available.  The provider's own token count is far more accurate
+        // than a chars/cpts estimate, especially for code-heavy content
+        // where the real chars-per-token ratio is well under 4
+        // (docs/auto-compact-plan.md section 9.1).
+        let last_meas_idx = kept.iter().rposition(|(_, v)| {
+            v.get("type").and_then(|t| t.as_str()) == Some("assistant_message")
+                && v.get("usage")
+                    .and_then(|u| u.get("input_tokens"))
+                    .and_then(|i| i.as_u64())
+                    .is_some()
+        });
+
+        match last_meas_idx {
+            Some(idx) => {
+                let (_, v) = &kept[idx];
+                let usage = &v["usage"];
+                let measured_input = usage
+                    .get("input_tokens")
+                    .and_then(|i| i.as_u64())
+                    .unwrap_or(0);
+                let measured_output = usage
+                    .get("output_tokens")
+                    .and_then(|o| o.as_u64())
+                    .unwrap_or(0);
+                let trailing: u64 = kept[idx + 1..]
+                    .iter()
+                    .map(|(_, v)| est_tokens(&project_event(v), &caps))
+                    .sum();
+                measured_input + measured_output + trailing
+            }
+            None => {
+                // No measured reading in the kept region: fall back to
+                // the chars/cpts full-form estimate with a 25 % safety
+                // margin for code-heavy content.
+                let evs: Vec<Ev> = kept.iter().map(|(_, v)| project_event(v)).collect();
+                let raw = full_form_estimate(&evs, &caps);
+                let mut est = raw;
+                if let Some(s) = marker.get("summary").and_then(|s| s.as_str()) {
+                    est += s.chars().count() as u64 / cpts;
+                }
+                est * 5 / 4
+            }
         }
-        est * 5 / 4
     } else {
         let last_meas_idx = active_events.iter().rposition(|(_, v)| {
             v.get("type").and_then(|t| t.as_str()) == Some("assistant_message")
@@ -707,6 +746,39 @@ mod tests {
         let est_b = estimate_from_events(&events_b, 4);
         // kept = [user "a"×800] → 200; summary = 100; raw=300; margin → 375
         assert_eq!(est_b, 375, "boundary path applies the 25% safety margin");
+    }
+
+    #[test]
+    fn boundary_path_anchors_on_measured_reading_in_kept_region() {
+        // Regression: a kept region that contains a measured assistant
+        // message must anchor on the provider's own token counts, not on
+        // a chars/cpts heuristic. This is what keeps the trigger honest
+        // for code-heavy sessions where chars/token is well under 4.
+        let big_summary = "s".repeat(400);
+        let events: Vec<Value> = vec![
+            jv_user(1, "hi"),
+            jv_assistant(2, "ok", 1000, 100),
+            jv_compaction(3, &big_summary, 2),
+            jv_assistant(4, "more", 5000, 300),
+            jv_user(5, &"a".repeat(800)),
+        ];
+        // kept (pos >= 2) = [asst(2), compaction(3), asst(4), user(5)]
+        // last measured in kept = asst(4): in=5000, out=300
+        // trailing after asst(4) = user(5, 800 chars) -> 200
+        // estimate = 5000 + 300 + 200 = 5500 (no margin, no summary re-add)
+        let est = estimate_from_events(&events, 4);
+        assert_eq!(est, 5500, "boundary path must anchor on the measured reading");
+
+        // Same shape, but the kept region holds no measured reading:
+        // the estimate must fall back to the chars/cpts + margin path.
+        let events_n: Vec<Value> = vec![
+            jv_user(1, "hi"),
+            jv_compaction(2, &big_summary, 3),
+            jv_user(3, &"a".repeat(800)),
+        ];
+        let est_n = estimate_from_events(&events_n, 4);
+        // kept = [user 800 chars -> 200]; summary = 100; raw = 300; margin -> 375
+        assert_eq!(est_n, 375, "no measured reading keeps the margin fallback");
     }
 
     // ── Gap 3: capped vs uncapped estimate divergence ───────────────
