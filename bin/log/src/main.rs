@@ -104,7 +104,7 @@ mod tests {
         let events = [
             r#"{"v":1,"type":"compaction_started","ts":"t","reason":"threshold","tokens_before":212000}"#,
             r#"{"v":1,"type":"compaction_failed","ts":"t","reason":"overflow","detail":"the summary call stopped with error","last_user_seq":7}"#,
-            r#"{"v":1,"type":"compaction_summary","ts":"t","summary":"s","first_kept_seq":312,"reason":"threshold","tokens_before":212000,"tokens_after":33000,"read_files":["a.txt"],"modified_files":["b.rs"],"usage":{"input_tokens":10,"output_tokens":5}}"#,
+            r#"{"v":1,"type":"compaction_summary","ts":"t","summary":"s","first_kept_seq":312,"version":1,"parent_version":0,"diverge_seq":0,"reason":"threshold","tokens_before":212000,"tokens_after":33000,"read_files":["a.txt"],"modified_files":["b.rs"],"usage":{"input_tokens":10,"output_tokens":5}}"#,
         ];
         for ev in &events {
             let parsed: serde_json::Value = serde_json::from_str(ev).unwrap();
@@ -134,7 +134,7 @@ mod tests {
         assert!(event_validation::validate_value(&ok, &schemas).is_ok());
 
         let marker: serde_json::Value = serde_json::from_str(
-            r#"{"v":1,"type":"compaction_summary","ts":"t","summary":"s","first_kept_seq":1,"reason":"threshold","tokens_before":0}"#,
+            r#"{"v":1,"type":"compaction_summary","ts":"t","summary":"s","first_kept_seq":1,"version":1,"parent_version":0,"diverge_seq":0,"reason":"threshold","tokens_before":0}"#,
         )
         .unwrap();
         assert!(

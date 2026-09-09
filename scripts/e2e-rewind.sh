@@ -216,7 +216,7 @@ cat > "$WORK/sD/events.jsonl" <<'EOF'
 {"v":1,"type":"assistant_message","ts":"t","content":"","tool_calls":[{"id":"c2","name":"bash","arguments":{"command":"y"}}],"stop_reason":"tool_calls"}
 {"v":1,"type":"tool_result","ts":"t","id":"c2","value":{"text":"R2 result"},"is_error":false}
 {"v":1,"type":"assistant_message","ts":"t","content":"step done","tool_calls":[],"stop_reason":"stop"}
-{"v":1,"type":"compaction_summary","ts":"t","summary":"the old summary","first_kept_seq":8,"reason":"threshold","tokens_before":0}
+{"v":1,"type":"compaction_summary","ts":"t","summary":"the old summary","first_kept_seq":8,"version":1,"parent_version":0,"diverge_seq":0,"reason":"threshold","tokens_before":0}
 {"v":1,"type":"user_message","ts":"t","content":"more"}
 {"v":1,"type":"assistant_message","ts":"t","content":"","tool_calls":[{"id":"c3","name":"bash","arguments":{"command":"z"}}],"stop_reason":"tool_calls"}
 {"v":1,"type":"tool_result","ts":"t","id":"c3","value":{"text":"R3 result"},"is_error":false}

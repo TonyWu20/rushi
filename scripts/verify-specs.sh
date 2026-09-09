@@ -25,6 +25,7 @@ IN_SCOPE=(
   "ft-005-logline.md"
   "harness-distribution.md"
   "handoff-strategy.md"
+  "handoff-versioning-design.md"
   "loop-and-edit-implementation.md"
   "loop-and-edit-tool.md"
   "loop-lifecycle-hooks.md"

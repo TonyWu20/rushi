@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["v", "type", "ts", "summary", "first_kept_seq", "reason", "tokens_before"],
+  "required": ["v", "type", "ts", "summary", "first_kept_seq", "reason", "tokens_before", "version", "parent_version", "diverge_seq"],
   "properties": {
     "v": { "type": "integer", "const": 1 },
     "type": { "type": "string", "const": "compaction_summary" },
@@ -14,6 +14,21 @@
       "type": "integer",
       "minimum": 1,
       "description": "the 1-based log sequence of the first event the summary does not cover. Projection replaces every earlier event with the summary. The minimum keyword is outside the validator subset; the producer (bin/compact) enforces it, and bin/assemble rejects an unparseable boundary value at read time."
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "the 1-based handoff version for this session. Monotonic across all compactions, including across forked branches. The handoff document is written to handoff/v<version>.md so every version is preserved for proof-reading. The minimum keyword is outside the validator subset; the producer enforces it."
+    },
+    "parent_version": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "the version this handoff diverges from. 0 for the first handoff in a session. The version and this field link the summary to its divergence point, forming the handoff DAG."
+    },
+    "diverge_seq": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "the log seq of the parent handoff's first_kept_seq (0 for the first handoff, which summarizes from the start). This is the divergence point where this version's summarized region begins relative to its parent."
     },
     "reason": {
       "type": "string",

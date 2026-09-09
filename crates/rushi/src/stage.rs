@@ -265,6 +265,13 @@ pub struct CompactStatus {
     /// The handoff summary text (the LLM-written summary of the
     /// shadowed region). Present only when the compact succeeded.
     pub summary: Option<String>,
+    /// The handoff version number assigned to this compaction (1-based).
+    pub version: Option<u64>,
+    /// The version this handoff diverges from (0 = first handoff).
+    pub parent_version: u64,
+    /// The log seq at which this handoff diverges from its parent
+    /// (0 = no parent; this handoff summarizes from the start).
+    pub diverge_seq: u64,
 }
 
 impl CompactStatus {
@@ -275,6 +282,9 @@ impl CompactStatus {
             tokens_before: None,
             tokens_after: None,
             summary: None,
+            version: None,
+            parent_version: 0,
+            diverge_seq: 0,
         }
     }
 }

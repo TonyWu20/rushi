@@ -707,10 +707,33 @@ fn try_compact_with_hooks(
             .get("first_kept_seq")
             .and_then(|v| v.as_u64())
             .unwrap_or(1);
-        write_handoff(session, &summary);
+        // Compute version metadata for the DAG link.
+        let log_vals: Vec<serde_json::Value> = std::fs::read_to_string(
+            session.path.join("events.jsonl"),
+        )
+        .ok()
+        .and_then(|raw| {
+            raw.lines()
+                .filter(|l| !l.trim().is_empty())
+                .filter_map(|l| serde_json::from_str(l).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+        let (version, parent_version, diverge_seq) =
+            rushi_common::compact_math::handoff_version_meta(&log_vals);
+        write_handoff(session, &summary, version);
         // No compact binary ran on this path, so the loop appends the
         // boundary marker itself.
-        append_compaction_summary(cfg, session, &summary, first_kept_seq, &reason);
+        append_compaction_summary(
+            cfg,
+            session,
+            &summary,
+            first_kept_seq,
+            &reason,
+            version,
+            parent_version,
+            diverge_seq,
+        );
         eprintln!("rushi: compact.before hook replaced the compaction");
         return CompactStatus {
             outcome: CompactOutcome::Compacted,
@@ -718,6 +741,9 @@ fn try_compact_with_hooks(
             tokens_before: None,
             tokens_after: None,
             summary: Some(summary),
+            version: Some(version),
+            parent_version,
+            diverge_seq,
         };
     }
 
@@ -728,10 +754,11 @@ fn try_compact_with_hooks(
     };
     match runner.compact(session, &opts) {
         Ok(status) => {
-            // Write the handoff document (docs/phase-2-plan.md 3.5).
+            // Write the handoff document (docs/handoff-versioning-design.md).
             if status.outcome == CompactOutcome::Compacted {
                 if let Some(ref summary_text) = status.summary {
-                    write_handoff(session, summary_text);
+                    let version = status.version.unwrap_or(1);
+                    write_handoff(session, summary_text, version);
                 }
             }
             let status_str = match status.outcome {
@@ -974,6 +1001,35 @@ fn model_retry_loop(
                 );
                 std::thread::sleep(std::time::Duration::from_secs(3));
                 continue;
+            }
+            // Retries exhausted. Before declaring failure, check whether
+            // our own context estimate exceeds the trigger. This catches
+            // the stale-anchor case where the measured input_tokens in the
+            // log undercounts the true context size.
+            if cfg.compact_enabled && !overflow_recovered {
+                let est = estimate_context(cfg, &session.path);
+                let trigger = cfg.trigger_level();
+                if trigger > 0 && est > trigger {
+                    eprintln!(
+                        "rushi: context estimate {est} exceeds trigger {trigger} after API failure; attempting compact"
+                    );
+                    overflow_recovered = true;
+                    let status = try_compact_with_hooks(
+                        cfg, runner, session, CompactReason::Overflow, false, false,
+                    );
+                    if status.outcome == CompactOutcome::Compacted {
+                        reassemble(cfg, runner, session, request, false);
+                        model_err_retries = 0;
+                        continue;
+                    }
+                    last_resort = true;
+                    let _ = try_compact_with_hooks(
+                        cfg, runner, session, CompactReason::LastResort, true, false,
+                    );
+                    reassemble(cfg, runner, session, request, false);
+                    model_err_retries = 0;
+                    continue;
+                }
             }
             append_terminal_error(
                 cfg,
@@ -1646,14 +1702,23 @@ fn fire_overflow_resolve(
     decision
 }
 
-/// Save the handoff document to `sessions/<n>/handoff.md`. The
-/// `compaction_summary` boundary event is appended by the `compact`
-/// binary itself, so the loop only persists the document here
-/// (docs/phase-2-plan.md 3.5, 4.3 step 5).
+/// Save the handoff document to `sessions/<n>/handoff/v<version>.md`.
+/// Also maintains `handoff.md` as a copy of the latest version for
+/// backward compatibility (docs/handoff-versioning-design.md).
 fn write_handoff(
     session: &SessionDir,
     summary: &str,
+    version: u64,
 ) {
+    let vdir = session.path.join("handoff");
+    let vpath = vdir.join(format!("v{}.md", version));
+    if let Err(e) = std::fs::create_dir_all(&vdir) {
+        eprintln!("rushi: cannot create handoff dir: {e}");
+    }
+    if let Err(e) = std::fs::write(&vpath, summary) {
+        eprintln!("rushi: cannot write handoff/v{}.md: {e}", version);
+    }
+    // Keep handoff.md as the latest version for backward compat.
     if let Err(e) = std::fs::write(session.path.join("handoff.md"), summary) {
         eprintln!("rushi: cannot write handoff.md: {e}");
     }
@@ -1668,6 +1733,9 @@ fn append_compaction_summary(
     summary: &str,
     first_kept_seq: u64,
     reason: &CompactReason,
+    version: u64,
+    parent_version: u64,
+    diverge_seq: u64,
 ) {
     let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let reason_str = match reason {
@@ -1680,6 +1748,9 @@ fn append_compaction_summary(
         "ts": ts,
         "summary": summary,
         "first_kept_seq": first_kept_seq,
+        "version": version,
+        "parent_version": parent_version,
+        "diverge_seq": diverge_seq,
         "reason": reason_str,
         "tokens_before": 0,
     });

@@ -231,6 +231,14 @@ scenario_threshold() {
   local n_hit
   n_hit=$(rg -c 'do the task' <<<"$req" 2>/dev/null || true)
   assert_eq "${n_hit:-0}" 0 "the old region is out of the next request"
+  # P3: versioned handoff file exists and matches the latest copy.
+  assert_eq "$(test -f "$SESSIONS_DIR/handoff/v1.md" && echo yes)" "yes" "handoff/v1.md exists"
+  assert_eq "$(test -f "$SESSIONS_DIR/handoff.md" && echo yes)" "yes" "handoff.md exists (backward compat)"
+  if diff -q "$SESSIONS_DIR/handoff/v1.md" "$SESSIONS_DIR/handoff.md" >/dev/null 2>&1; then
+    ok "handoff.md matches handoff/v1.md"
+  else
+    ko "handoff.md does not match handoff/v1.md"
+  fi
 }
 
 # ── Scenario 1b: the trigger fires at the context budget ────────
@@ -498,6 +506,14 @@ EOF
   else
     ko "the reqlog is empty: the iterative merge was not exercised"
   fi
+  # P3: two versioned handoff files exist; handoff.md matches the latest.
+  assert_eq "$(test -f "$SESSIONS_DIR/handoff/v1.md" && echo yes)" "yes" "handoff/v1.md exists"
+  assert_eq "$(test -f "$SESSIONS_DIR/handoff/v2.md" && echo yes)" "yes" "handoff/v2.md exists"
+  if diff -q "$SESSIONS_DIR/handoff/v2.md" "$SESSIONS_DIR/handoff.md" >/dev/null 2>&1; then
+    ok "handoff.md matches handoff/v2.md"
+  else
+    ko "handoff.md does not match handoff/v2.md"
+  fi
 }
 
 # ── Scenario 8: no-trim (realistic compact_enabled=true) ────────
@@ -688,6 +704,48 @@ EOF
   assert_contains "$last_err" "model API call failed" "the terminal event is the transport failure"
 }
 
+# ── Scenario 11c: silent-failure rescue via self-estimate ──────────
+# The model call fails with an empty detail (sglang rejects the
+# oversized request but the error text does not match is_overflow).
+# The post-failure self-check sees the estimate above the trigger and
+# fires compact, so the loop recovers instead of giving up.
+scenario_silent_failure_rescue() {
+  NEW_WORK silent-failure-rescue
+  COMPACT_ENABLED=true
+  work_config
+  # Raise keep_tokens so the post-compact estimate stays above the
+  # 7500 trigger. With half=5000 (10000-char results, 2500 tokens
+  # each, full-form total ~7500), keep_tokens=6500 keeps ~6500
+  # tokens, and the boundary-path estimate is 6500*5/4 ~= 8125 > 7500.
+  sed -i 's/compact_keep_tokens = 2000/compact_keep_tokens = 6500/' "$WORK/config.toml"
+  seed_session 7000 7200 7400 5000
+  local EVENT
+  EVENT='{"text":"","tool_calls":[],"reasoning":[],"stop_reason":"error","usage":null}'
+  cat > "$WORK/plan" <<EOF
+$EVENT
+$EVENT
+$EVENT
+$NORMAL_STOP
+EOF
+  make_stub
+  run_step
+
+  # One compaction from the proactive threshold check. The
+  # post-failure compact is a noop (kept region already fits the
+  # keep budget), but the code path ran without a terminal error.
+  local n_summary
+  n_summary=$(count_events compaction_summary)
+  assert_eq "$n_summary" 1 "one proactive compaction_summary"
+  assert_no_context_exhausted
+  assert_eq "$(claim_state)" "idle" "the loop recovers and reaches idle"
+  local n_err
+  n_err=$(count_events error)
+  assert_eq "$n_err" 0 "no terminal error event after rescue"
+  local n_asst
+  n_asst=$(count_events assistant_message)
+  assert_eq "$n_asst" 4 "the fourth model call (the recovery) succeeded"
+}
+
 # ── Scenario 11b: fork-then-compact ───────────────────────────────
 # A session with a rewind fork. The abandoned branch is masked.
 # The active context exceeds the trigger level, so compact fires.
@@ -867,6 +925,7 @@ run_scenario context-exhausted scenario_context_exhausted
 run_scenario failed-retry scenario_failed_retry
 run_scenario kill-switch scenario_kill_switch
 run_scenario no-detail scenario_no_detail
+run_scenario silent-failure-rescue scenario_silent_failure_rescue
 run_scenario fork-compact scenario_fork_compact
 run_scenario real-fixture-pressure scenario_real_fixture_pressure
 
