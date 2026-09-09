@@ -1,7 +1,7 @@
 # System prompt generation
 
 Status: Implemented (2026-09-13).
-This doc replaces the mechanism in `goal-rule-reinject.md`.
+This doc replaces the mechanism in `../rushi-exts/docs/goal-rule-reinject.md`.
 It keeps the decision items D1-D3 and the cache tradeoff analysis.
 
 ## How the prompt is built
@@ -53,7 +53,7 @@ The model re-acknowledges it every turn.
 
 The cleaner target: put the goal block in the system prompt.
 The model reads the goal context once.
-This is already the target in `goal-rule-reinject.md`.
+This is already the target in `../rushi-exts/docs/goal-rule-reinject.md`.
 
 ### 3. Many extensions will want prompt text
 
@@ -214,7 +214,7 @@ goal fragment**.
 
 ### The goal block content
 
-Unchanged from `goal-rule-reinject.md`.
+Unchanged from `../rushi-exts/docs/goal-rule-reinject.md`.
 The block is the fenced
 `<goal_instructions>…</goal_instructions>` region.
 It holds the objective, the 10 rules, `<goal_id>`, the
@@ -300,7 +300,7 @@ The hooks set its contents. The config does not.
 
 ### 6. `docs/` updates
 
-- `goal-rule-reinject.md`: point its mechanism section at this
+- `../rushi-exts/docs/goal-rule-reinject.md`: point its mechanism section at this
   doc. Mark the `input`-append path as superseded.
 - `goal-ux.md` (rushi-tui): reword P6/P15/P16/P17. The block
   sits in `instructions`, not in `input`.
@@ -313,7 +313,7 @@ The hooks set its contents. The config does not.
 
 ## Cache tradeoff
 
-Same as `goal-rule-reinject.md` §Cache tradeoff:
+Same as `../rushi-exts/docs/goal-rule-reinject.md` §Cache tradeoff:
 
 - Goal set: one re-prefill. The fragment appears, so the prefix
   changes.
@@ -372,7 +372,7 @@ churn.
 
 ## References
 
-- `docs/goal-rule-reinject.md` — decision items D1-D3, cache
+- `../rushi-exts/docs/goal-rule-reinject.md` — decision items D1-D3, cache
   tradeoff analysis, goal-block content.
 - `bin/assemble/src/main.rs` — current `instructions` build
   (line ~904) and `tool_schemas` build (line ~1123).

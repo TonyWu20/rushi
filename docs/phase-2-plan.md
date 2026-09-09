@@ -400,7 +400,7 @@ holder releases the lock.
 ### 4.8 The approval round-trip (human-in-the-loop)
 
 This section closes the gap identified in
-`docs/pi-extension-port-investigation.md` (the `rpiv-ask-user-question`
+`../rushi-exts/docs/pi-extension-port-investigation.md` (the `rpiv-ask-user-question`
 and `pi-automode` permission-ask requirements). It adds a bounded
 human-in-the-loop mechanism so that a `tool.before` hook or a tool
 itself can pause the loop and ask the user for a decision before a
@@ -474,7 +474,7 @@ the log.
 ### 4.9 Goal continuation (the `run.idle` window)
 
 This section closes the gap identified in
-`docs/pi-extension-port-investigation.md` (the `pi-goal` requirement
+`../rushi-exts/docs/pi-extension-port-investigation.md` (the `pi-goal` requirement
 for auto-continuation). It adds a single window so that an external
 hook can keep the loop going when it would otherwise stop on idle.
 

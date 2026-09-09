@@ -217,7 +217,7 @@ formal spec under `lean/`.
   LLBC -> pure Lean) and reports the generated model. The
   translation is the model half of the workflow only — the `build`
   kernel gate and the `drt` regression gate remain the guarantees
-  (docs/aeneas-rust-to-lean.md).
+  (../rushi-exts/docs/aeneas-rust-to-lean.md).
 - **The gate.** `scripts/lean-gate.sh` runs the Lean compiler over
   every spec in `lean/`. Exit 0 = every proof re-checked by the
   kernel. It is an optional backstop, not part of the main gate
