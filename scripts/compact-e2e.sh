@@ -213,7 +213,7 @@ scenario_threshold() {
   NEW_WORK threshold
   COMPACT_ENABLED=true
   work_config
-  seed_session 4000 4200
+  seed_session 6000 6200 6500
   echo "$NORMAL_STOP" >"$WORK/plan"
   make_stub
   run_step
@@ -235,13 +235,13 @@ scenario_threshold() {
 
 # ── Scenario 1b: the trigger fires at the context budget ────────
 # The trigger sits at context_budget - reserve (8000 - 500 = 7500).
-# The full-form estimate of the kept region (~9000 tokens) crosses
-# 7500 even while the measured readings (300-380) stay far below.
+# The measured readings (3000-3800) plus trailing tool results
+# push the estimate past 7500.
 scenario_pi_parity() {
   NEW_WORK pi-parity
   COMPACT_ENABLED=true
   work_config
-  seed_session 300 350 380 6000
+  seed_session 3000 3500 3800 6000
   echo "$NORMAL_STOP" >"$WORK/plan"
   make_stub
   run_step
@@ -415,7 +415,7 @@ scenario_compact_failure() {
   NEW_WORK compact-failure
   COMPACT_ENABLED=true
   work_config
-  seed_session 4000 4200
+  seed_session 6000 6200 6500
   echo "$NORMAL_STOP" >"$WORK/plan"
   make_stub
   STUB_SUMMARY_FAILS=1
@@ -441,7 +441,7 @@ scenario_empty_summary() {
   NEW_WORK empty-summary
   COMPACT_ENABLED=true
   work_config
-  seed_session 4000 4200
+  seed_session 6000 6200 6500
   echo "$NORMAL_STOP" >"$WORK/plan"
   make_stub
   (
@@ -688,6 +688,70 @@ EOF
   assert_contains "$last_err" "model API call failed" "the terminal event is the transport failure"
 }
 
+# ── Scenario 11b: fork-then-compact ───────────────────────────────
+# A session with a rewind fork. The abandoned branch is masked.
+# The active context exceeds the trigger level, so compact fires.
+# The assembled request after compact must NOT contain the masked
+# branch content, and MUST contain the summary.
+scenario_fork_compact() {
+  NEW_WORK fork-compact
+  COMPACT_ENABLED=true
+  work_config
+
+  # Session layout:
+  #   seq 1-3: initial work (user, assistant+tool_call, tool_result)
+  #   seq 4: stop
+  #   seq 5-8: branch A (user, assistant+tool_call, tool_result, stop)
+  #   seq 9: rewind to seq 3 (mode=on), masking seqs 4-8
+  #   seq 10-13: branch B (user, assistant+tool_call, tool_result, stop)
+  #   seq 14: user "next"
+  #
+  # Active path: [1,2,3, 10,11,12,13,14]
+  # Masked: [4,5,6,7,8]
+  local C_MASKED C_ACTIVE
+  C_MASKED="$(printf 'MASKED%.0s' $(seq 1 1000))"   # 8000 chars
+  C_ACTIVE="$(printf 'ACTIVE%.0s' $(seq 1 30000))"   # 240000 chars
+
+  cat > "$SLOG" <<EOF
+{"v":1,"type":"user_message","ts":"t1","seq":1,"content":"do the task"}
+{"v":1,"type":"assistant_message","ts":"t2","seq":2,"content":"step one","reasoning":[],"tool_calls":[{"id":"c1","name":"read","arguments":{"file_path":"a.txt"}}],"usage":{"input_tokens":2000,"output_tokens":50}}
+{"v":1,"type":"tool_result","ts":"t3","seq":3,"id":"c1","value":{"text":"$C_MASKED"},"is_error":false}
+{"v":1,"type":"stop","ts":"t4","seq":4,"stop_reason":"end_turn"}
+{"v":1,"type":"user_message","ts":"t5","seq":5,"content":"continue"}
+{"v":1,"type":"assistant_message","ts":"t6","seq":6,"content":"step two","reasoning":[],"tool_calls":[{"id":"c2","name":"bash","arguments":{"command":"ls"}}],"usage":{"input_tokens":2000,"output_tokens":50}}
+{"v":1,"type":"tool_result","ts":"t7","seq":7,"id":"c2","value":{"text":"$C_MASKED"},"is_error":false}
+{"v":1,"type":"stop","ts":"t8","seq":8,"stop_reason":"end_turn"}
+{"v":1,"type":"rewind","ts":"t9","seq":9,"target_seq":3,"mode":"on"}
+{"v":1,"type":"user_message","ts":"t10","seq":10,"content":"try different approach"}
+{"v":1,"type":"assistant_message","ts":"t11","seq":11,"content":"step three","reasoning":[],"tool_calls":[{"id":"c3","name":"bash","arguments":{"command":"ls"}}],"usage":{"input_tokens":2000,"output_tokens":50}}
+{"v":1,"type":"tool_result","ts":"t12","seq":12,"id":"c3","value":{"text":"$C_ACTIVE"},"is_error":false}
+{"v":1,"type":"stop","ts":"t13","seq":13,"stop_reason":"end_turn"}
+{"v":1,"type":"user_message","ts":"t14","seq":14,"content":"next"}
+EOF
+
+  echo "$NORMAL_STOP" > "$WORK/plan"
+  make_stub
+  run_step
+
+  # Compact should have fired (active context exceeds 7500 trigger).
+  local n_summary
+  n_summary=$(count_events compaction_summary)
+  assert_eq "$n_summary" 1 "one compaction_summary after fork-compact"
+  assert_no_context_exhausted
+  assert_eq "$(claim_state)" "idle" "the loop runs to idle"
+
+  # The next assembled request must carry the summary, not the
+  # masked branch content.
+  local req
+  req=$(cd "$WORK" && "$BIN_DIR/assemble" --session sessions/session --config config.toml 2>/dev/null)
+  assert_contains "$req" "the summary of the old region" "the next request carries the summary"
+  if echo "$req" | rg -q 'MASKED'; then
+    ko "masked branch content leaked into the next request"
+  else
+    ok "no masked branch content in the next request"
+  fi
+}
+
 # ── Scenario 12: real-fixture pressure test ─────────────────────
 # Uses the real select-and-yank-impl session log (~2800 events,
 # ~1.8 MB, last measured input_tokens ≈ 167 k) to verify that the
@@ -803,6 +867,7 @@ run_scenario context-exhausted scenario_context_exhausted
 run_scenario failed-retry scenario_failed_retry
 run_scenario kill-switch scenario_kill_switch
 run_scenario no-detail scenario_no_detail
+run_scenario fork-compact scenario_fork_compact
 run_scenario real-fixture-pressure scenario_real_fixture_pressure
 
 echo

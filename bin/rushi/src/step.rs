@@ -453,104 +453,23 @@ fn describe_model(cfg: &HarnessConfig) -> Describe {
     }
 }
 
-/// Estimate the context size: last measured input + trailing estimate.
+/// Estimate the context size from the session log.
+///
+/// Delegates to [`compact_math::estimate_from_events`] which applies
+/// rewind masking, boundary detection, and the appropriate estimation
+/// strategy (measured anchor for clean logs, full-form + margin for
+/// compacted logs).
 fn estimate_context(cfg: &HarnessConfig, session_dir: &Path) -> u64 {
     let path = session_dir.join("events.jsonl");
     let Ok(data) = std::fs::read_to_string(&path) else {
         return 0;
     };
-    let caps = rushi_common::compact_math::Caps {
-        text: Some(cfg.compact_text_chars),
-    };
-
-    // Parse all events once.
     let events: Vec<Value> = data
         .lines()
         .filter(|l| !l.trim().is_empty())
         .filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok())
         .collect();
-
-    // The last compaction boundary, if any.  Events after it make up
-    // the kept region; the summary framing item rides the request.
-    let boundary = events.iter().rposition(|v| {
-        v.get("type").and_then(|t| t.as_str()) == Some("compaction_summary")
-    });
-
-    // Find the LAST assistant_message that carries a measured
-    // input_tokens reading. That reading reflects the provider's
-    // actual context size, but only while it postdates the last
-    // compaction boundary.
-    let last_meas_idx = events.iter().rposition(|v| {
-        v.get("type").and_then(|t| t.as_str()) == Some("assistant_message")
-            && v.get("usage")
-                .and_then(|u| u.get("input_tokens"))
-                .and_then(|i| i.as_u64())
-                .is_some()
-    });
-
-    // A reading predating the boundary is stale: the provider's
-    // context was rebuilt from the kept region plus framing, so the
-    // reading still reflects the pre-compaction size.  Right after a
-    // compaction no fresh reading exists yet.  In both cases
-    // estimate the kept region from scratch, matching bin/assemble's
-    // estimate_request_tokens (docs/auto-compact-plan.md 4.3).
-    let stale = match (last_meas_idx, boundary) {
-        (Some(mi), Some(b)) => mi <= b,
-        (None, Some(_)) => true,
-        _ => false,
-    };
-
-    if stale {
-        let start = boundary.map(|b| b + 1).unwrap_or(0);
-        let evs: Vec<compact_math::Ev> =
-            events[start..].iter().map(compact_math::project_event).collect();
-        let mut est = compact_math::full_form_estimate(&evs, &caps);
-        if let Some(b) = boundary {
-            if let Some(s) = events[b].get("summary").and_then(|s| s.as_str()) {
-                est += s.chars().count() as u64 / 4;
-            }
-        }
-        return est;
-    }
-
-    // No measurement yet and no boundary: the log is empty or has no
-    // assistant calls.  Nothing to estimate.
-    let Some(idx) = last_meas_idx else {
-        return 0;
-    };
-    let usage = &events[idx]["usage"];
-    let measured_input = usage
-        .get("input_tokens")
-        .and_then(|i| i.as_u64())
-        .unwrap_or(0);
-    // The model response of that turn (output tokens) joins the next
-    // request. Add it so the estimate matches the next call's context.
-    let measured_output = usage
-        .get("output_tokens")
-        .and_then(|o| o.as_u64())
-        .unwrap_or(0);
-
-    // Trailing events after the last measurement: estimate via chars/4.
-    let est: u64 = events[idx + 1..]
-        .iter()
-        .map(|v| {
-            compact_math::est_tokens(&compact_math::project_event(v), &caps)
-        })
-        .sum();
-    let mut est = measured_input + measured_output + est;
-
-    // Pi-parity: the trigger sits at the full context budget minus the
-    // reserve, above the input budget. The full-form estimate of the
-    // kept region reflects the true context size; the measured reading
-    // of a clamped (trim-form) request reads shrunken.
-    {
-        let region = &events[boundary.map(|i| i + 1).unwrap_or(0)..];
-        let evs: Vec<compact_math::Ev> =
-            region.iter().map(compact_math::project_event).collect();
-        est = est.max(compact_math::full_form_estimate(&evs, &caps));
-    }
-
-    est
+    compact_math::estimate_from_events(&events, cfg.estimate_chars_per_token)
 }
 
 // ---------------------------------------------------------------------------

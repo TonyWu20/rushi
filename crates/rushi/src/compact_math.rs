@@ -42,13 +42,28 @@ pub struct Call {
     pub args_str: String,
 }
 
-/// Caps for the estimator. `None` means no cap.
-#[derive(Clone, Copy, Debug, Default)]
+/// Caps for the estimator. `text: None` means no per-event cap.
+#[derive(Clone, Copy, Debug)]
 pub struct Caps {
     pub text: Option<u64>,
+    /// Characters-per-token ratio used by `est_tokens`. Defaults to 4
+    /// (rough heuristic for English prose). Code-heavy content often
+    /// runs 3–3.5, so a calibratable value lets the user tighten the
+    /// estimate. Must be >= 1.
+    pub chars_per_token: u64,
 }
 
-/// The chars/4 estimator for one projected event.
+impl Default for Caps {
+    fn default() -> Self {
+        Self {
+            text: None,
+            chars_per_token: 4,
+        }
+    }
+}
+
+/// Estimate the token count for one projected event using the
+/// configured chars-per-token ratio.
 pub fn est_tokens(ev: &Ev, caps: &Caps) -> u64 {
     let chars: u64 = match ev {
         Ev::User { text } => text.chars().count() as u64,
@@ -75,7 +90,7 @@ pub fn est_tokens(ev: &Ev, caps: &Caps) -> u64 {
         }
         Ev::Result { chars, .. } => *chars,
     };
-    chars / 4
+    chars / caps.chars_per_token.max(1)
 }
 
 /// Estimate the context size in tokens for the current context.
@@ -120,6 +135,82 @@ pub fn trigger_level_for(base: u64, reserve: u64) -> u64 {
 /// the trigger base is the full context budget.
 pub fn full_form_estimate(evs: &[Ev], caps: &Caps) -> u64 {
     evs.iter().map(|e| est_tokens(e, caps)).sum()
+}
+
+/// Compute a context estimate from raw log events.
+///
+/// Applies rewind masking so only the active-path events contribute.
+/// Finds the last `compaction_summary` boundary, then:
+///
+/// - Boundary present: full-form estimate of the kept region plus the
+///   summary framing cost, with a 25 % safety margin (the margin
+///   compensates for chars-per-token underestimation on code-heavy
+///   content).
+/// - No boundary: the last measured `input_tokens` + `output_tokens`
+///   anchor plus the full-form estimate of trailing events. No margin:
+///   the measured anchor is the provider's own count for the same
+///   request shape.
+///
+/// Returns 0 when there are no measured-usage events on the active
+/// path (nothing to anchor on).
+pub fn estimate_from_events(events: &[Value], cpts: u64) -> u64 {
+    let cpts = cpts.max(1);
+    let caps = Caps { text: None, chars_per_token: cpts };
+
+    let rewinds: Vec<crate::rewind::RewindRef> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(i, v)| crate::rewind::parse_rewind_event(v, i + 1))
+        .collect();
+    let active = crate::rewind::active_ranges(events.len(), &rewinds);
+    let active_events: Vec<&Value> = events
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| crate::rewind::seq_in_ranges(i + 1, &active))
+        .map(|(_, v)| v)
+        .collect();
+
+    let boundary = active_events.iter().rposition(|v| {
+        v.get("type").and_then(|t| t.as_str()) == Some("compaction_summary")
+    });
+
+    if let Some(b) = boundary {
+        let evs: Vec<Ev> = active_events[b + 1..]
+            .iter()
+            .map(|v| project_event(v))
+            .collect();
+        let raw = full_form_estimate(&evs, &caps);
+        let mut est = raw;
+        if let Some(s) = active_events[b].get("summary").and_then(|s| s.as_str()) {
+            est += s.chars().count() as u64 / cpts;
+        }
+        est * 5 / 4
+    } else {
+        let last_meas_idx = active_events.iter().rposition(|v| {
+            v.get("type").and_then(|t| t.as_str()) == Some("assistant_message")
+                && v.get("usage")
+                    .and_then(|u| u.get("input_tokens"))
+                    .and_then(|i| i.as_u64())
+                    .is_some()
+        });
+        let Some(idx) = last_meas_idx else {
+            return 0;
+        };
+        let usage = &active_events[idx]["usage"];
+        let measured_input = usage
+            .get("input_tokens")
+            .and_then(|i| i.as_u64())
+            .unwrap_or(0);
+        let measured_output = usage
+            .get("output_tokens")
+            .and_then(|o| o.as_u64())
+            .unwrap_or(0);
+        let trailing: u64 = active_events[idx + 1..]
+            .iter()
+            .map(|v| est_tokens(&project_event(v), &caps))
+            .sum();
+        measured_input + measured_output + trailing
+    }
 }
 
 /// The backward cut walk. Given the kept events (from the boundary to
@@ -169,8 +260,18 @@ pub fn find_cut(kept: &[Ev], keep_tokens: u64, caps: &Caps) -> usize {
 /// The estimated tokens after the compact: the handoff document plus
 /// the kept events in the full form.
 pub fn est_tokens_after(kept: &[Ev], handoff_doc: &str) -> u64 {
-    let framing: u64 = handoff_doc.chars().count() as u64 / 4 + 64;
-    let full_caps = Caps { text: None };
+    est_tokens_after_with_caps(kept, handoff_doc, &Caps::default())
+}
+
+/// Same as `est_tokens_after` but with an explicit `Caps` so callers
+/// can override the chars-per-token ratio.
+pub fn est_tokens_after_with_caps(kept: &[Ev], handoff_doc: &str, caps: &Caps) -> u64 {
+    let full_caps = Caps {
+        text: None,
+        chars_per_token: caps.chars_per_token,
+    };
+    let framing: u64 =
+        handoff_doc.chars().count() as u64 / full_caps.chars_per_token.max(1) + 64;
     let mut total = framing;
     for ev in kept.iter() {
         total += est_tokens(ev, &full_caps);
@@ -315,10 +416,75 @@ mod tests {
         }
     }
 
+    /// Build a `serde_json::Value` for a `user_message` event.
+    fn jv_user(seq: u64, content: &str) -> Value {
+        serde_json::json!({
+            "v": 1,
+            "type": "user_message",
+            "ts": "t",
+            "seq": seq,
+            "content": content,
+        })
+    }
+
+    /// Build a `serde_json::Value` for an `assistant_message` event with
+    /// measured usage.
+    fn jv_assistant(seq: u64, content: &str, input_tokens: u64, output_tokens: u64) -> Value {
+        serde_json::json!({
+            "v": 1,
+            "type": "assistant_message",
+            "ts": "t",
+            "seq": seq,
+            "content": content,
+            "reasoning": [],
+            "tool_calls": [],
+            "usage": { "input_tokens": input_tokens, "output_tokens": output_tokens },
+        })
+    }
+
+    /// Build a `serde_json::Value` for a `tool_result` event.
+    fn jv_result(seq: u64, id: &str, text: &str) -> Value {
+        serde_json::json!({
+            "v": 1,
+            "type": "tool_result",
+            "ts": "t",
+            "seq": seq,
+            "id": id,
+            "value": { "text": text },
+            "is_error": false,
+        })
+    }
+
+    /// Build a `serde_json::Value` for a `rewind` event.
+    fn jv_rewind(seq: u64, target: u64, mode: &str) -> Value {
+        serde_json::json!({
+            "v": 1,
+            "type": "rewind",
+            "ts": "t",
+            "seq": seq,
+            "target_seq": target,
+            "mode": mode,
+        })
+    }
+
+    /// Build a `serde_json::Value` for a `compaction_summary` event.
+    fn jv_compaction(seq: u64, summary: &str, first_kept: u64) -> Value {
+        serde_json::json!({
+            "v": 1,
+            "type": "compaction_summary",
+            "ts": "t",
+            "seq": seq,
+            "summary": summary,
+            "first_kept_seq": first_kept,
+            "reason": "threshold",
+        })
+    }
+
     #[test]
     fn est_tokens_mirrors_the_assemble_estimator() {
         let caps = Caps {
             text: Some(100),
+            chars_per_token: 4,
         };
         assert_eq!(est_tokens(&ev_user(&"a".repeat(400)), &caps), 100);
         let big = "b".repeat(400);
@@ -355,6 +521,7 @@ mod tests {
         ];
         let caps = Caps {
             text: None,
+            chars_per_token: 4,
         };
         let cut = find_cut(&kept, 150, &caps);
         assert_eq!(cut, 3, "the cut sits at the second user");
@@ -369,6 +536,7 @@ mod tests {
         ];
         let caps = Caps {
             text: None,
+            chars_per_token: 4,
         };
         let cut = find_cut(&kept, 10, &caps);
         assert_eq!(cut, 0, "the orphan user sits behind the cut");
@@ -427,5 +595,114 @@ mod tests {
         // Handoff doc that's big enough to push past the trigger.
         let big_handoff = "x".repeat(8000);
         assert!(post_compact_sanity(&kept, &big_handoff, 100));
+    }
+
+    // ── Gap 1: rewind-aware estimation ─────────────────────────────
+
+    #[test]
+    fn estimate_excludes_masked_branch_events() {
+        // Log layout:
+        //   seq 1: user "task"
+        //   seq 2: assistant with usage (input=2000, output=50)
+        //   seq 3: tool_result 40 000 chars (= 10 000 tokens at cpts=4)
+        //   seq 4: rewind target=2, mode=on → masks seqs 3 (and 4 itself)
+        //   seq 5: user "next"
+        let big = "x".repeat(40_000);
+        let events: Vec<Value> = vec![
+            jv_user(1, "task"),
+            jv_assistant(2, "step", 2000, 50),
+            jv_result(3, "c1", &big),
+            jv_rewind(4, 2, "on"),
+            jv_user(5, "next"),
+        ];
+
+        // Active path after rewind(4, target=2): [1,2] ∪ [5,5]
+        // seq 3 (40 k result) and seq 4 (rewind marker) are masked.
+        // Measured anchor: seq 2 → 2000 + 50 = 2050
+        // Trailing on active path: seq 5 "next" → 4 chars / 4 = 1
+        // Total = 2051
+        let est = estimate_from_events(&events, 4);
+        assert_eq!(est, 2051, "masked branch events must not contribute");
+
+        // Without rewind masking the 40 000-char result would add 10 000:
+        let no_rewind: Vec<Value> = vec![
+            jv_user(1, "task"),
+            jv_assistant(2, "step", 2000, 50),
+            jv_result(3, "c1", &big),
+            jv_user(5, "next"),
+        ];
+        let est_no_rw = estimate_from_events(&no_rewind, 4);
+        assert!(est_no_rw > 12000, "without masking the big result inflates the estimate");
+        assert!(est < est_no_rw, "rewind-aware estimate must be smaller");
+    }
+
+    // ── Gap 2: boundary path applies 25 % margin, no-boundary does not ─
+
+    #[test]
+    fn boundary_path_applies_margin_no_boundary_does_not() {
+        // No-boundary: measured anchor 1000 + output 100 + trailing 200/4=50
+        let events_nb: Vec<Value> = vec![
+            jv_user(1, "hi"),
+            jv_assistant(2, "ok", 1000, 100),
+            jv_user(3, &"a".repeat(800)),
+        ];
+        let est_nb = estimate_from_events(&events_nb, 4);
+        assert_eq!(est_nb, 1000 + 100 + 200, "no margin on measured anchor");
+
+        // Boundary: same trailing region but behind a compaction_summary.
+        // full_form of kept: user(800 chars → 200) + result none → 200
+        // summary = 400 chars → 100
+        // raw = 300, margin = 300*5/4 = 375
+        let big_summary = "s".repeat(400);
+        let events_b: Vec<Value> = vec![
+            jv_user(1, "hi"),
+            jv_assistant(2, "ok", 1000, 100),
+            jv_compaction(3, &big_summary, 4),
+            jv_user(4, &"a".repeat(800)),
+        ];
+        let est_b = estimate_from_events(&events_b, 4);
+        // kept = [user "a"×800] → 200; summary = 100; raw=300; margin → 375
+        assert_eq!(est_b, 375, "boundary path applies the 25% safety margin");
+    }
+
+    // ── Gap 3: capped vs uncapped estimate divergence ───────────────
+
+    #[test]
+    fn find_cut_uses_capped_estimate_vs_full_form_uncapped() {
+        // Five events: user, small asst, big result, long asst, big result.
+        // The capped and uncapped totals straddle the keep budget, so
+        // find_cut produces different cut points under each cap set.
+        let evs = vec![
+            ev_user("task"),                              // 1 token
+            ev_asst("step one"),                          // 2 tokens
+            ev_res("1", &"x".repeat(2000)),               // 500 tokens
+            Ev::Assistant {
+                text: "a".repeat(4000),                   // 1000 uncapped, 50 capped
+                calls: vec![],
+                reasoning_chars: 0,
+            },
+            ev_res("2", &"y".repeat(2000)),               // 500 tokens
+        ];
+
+        let uncapped_caps = Caps { text: None, chars_per_token: 4 };
+        let capped_caps = Caps { text: Some(200), chars_per_token: 4 };
+
+        // Uncapped: 1 + 2 + 500 + 1000 + 500 = 2003
+        let full_total = full_form_estimate(&evs, &uncapped_caps);
+        assert_eq!(full_total, 2003);
+
+        // Capped: 1 + 2 + 500 + 50 + 500 = 1053
+        let capped_total = full_form_estimate(&evs, &capped_caps);
+        assert_eq!(capped_total, 1053, "capped total must be much lower");
+
+        // Keep budget between the two: capped fits, uncapped does not.
+        let keep = 1500u64;
+        let cut_capped = find_cut(&evs, keep, &capped_caps);
+        let cut_uncapped = find_cut(&evs, keep, &uncapped_caps);
+        // Capped total (1053) ≤ 1500 → keep everything, no cut.
+        assert_eq!(cut_capped, 0, "capped estimate fits, so nothing is cut");
+        // Uncapped total (2003) > 1500 → walk stops at the long asst
+        // (group start), orphan check sees a Result before it, no pull.
+        assert_eq!(cut_uncapped, 3, "uncapped estimate exceeds budget, cut lands at the long assistant");
     }
 }
