@@ -2,9 +2,11 @@
 
 use clap::Parser;
 use std::io::{self, Read};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -27,11 +29,120 @@ struct Args {
     /// Hard cap on the command timeout in seconds
     #[arg(long, default_value = "300")]
     timeout_max: u64,
+
+    /// Opt-in: scrub credential-shaped environment variables (names
+    /// containing KEY, PASSWORD, SECRET, or TOKEN, case-insensitive) from
+    /// the child environment. Off by default (open-core philosophy); enable
+    /// by adding `--env-scrub` to the tool's `args` in tool.toml.
+    #[arg(long)]
+    env_scrub: bool,
+
+    /// Pin the shell executable (pi-style `shellPath` operator override).
+    /// Must name an executable file; when absent the normal resolution
+    /// (`/bin/bash` -> PATH `bash` -> `sh`) applies.
+    #[arg(long)]
+    shell_path: Option<String>,
 }
 
 fn fail(msg: &str) -> ! {
     eprintln!("Error: {msg}");
     std::process::exit(1);
+}
+
+// Post-exit pipe-drain parameters (pi `waitForChildProcess` semantics):
+// quiet pipes release after DRAIN_IDLE_MS without data, an active writer
+// keeps the drain alive, and DRAIN_MAX_MS is the hard cap so a writer that
+// escaped the process group cannot hang the tool.
+const DRAIN_IDLE_MS: u64 = 100;
+const DRAIN_MAX_MS: u64 = 3_000;
+
+/// Resolve the command shell: prefer bash, fall back to POSIX sh.
+///
+/// Order: `--shell-path` pin (when given) -> `/bin/bash` -> first
+/// executable `bash` on `PATH` -> `sh`. Mirrors pi's `getShellConfig`
+/// (Unix branches). The fallback keeps the tool working on minimal
+/// systems without bash.
+fn resolve_shell(pin: Option<&str>) -> String {
+    if let Some(pin) = pin {
+        let p = Path::new(pin);
+        if is_executable_file(p) {
+            return pin.to_string();
+        }
+        fail(&format!("shell path {pin} is not an executable file."));
+    }
+    const FIXED: &str = "/bin/bash";
+    let fixed = Path::new(FIXED);
+    if is_executable_file(fixed) {
+        return FIXED.to_string();
+    }
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            let cand = dir.join("bash");
+            if is_executable_file(&cand) {
+                return cand.to_string_lossy().into_owned();
+            }
+        }
+    }
+    "sh".to_string()
+}
+
+fn is_executable_file(p: &Path) -> bool {
+    match std::fs::metadata(p) {
+        Ok(md) => md.is_file() && md.permissions().mode() & 0o111 != 0,
+        Err(_) => false,
+    }
+}
+
+/// One credential-shaped env name (dsh's SENSITIVE_ENV_PATTERN, rendered as
+/// case-insensitive substring match; Unix env names are case-sensitive, so
+/// this is the conservative superset).
+fn is_sensitive_env_name(name: &std::ffi::OsStr) -> bool {
+    let lower = name.to_string_lossy().to_ascii_lowercase();
+    lower.contains("key")
+        || lower.contains("password")
+        || lower.contains("secret")
+        || lower.contains("token")
+}
+
+/// Spawn a detached reader for one pipe. Reads chunks and flushes them to
+/// the shared buffer incrementally, so any data read so far is captured
+/// even if the pipe never reaches EOF (a lingering background writer that
+/// inherits the pipe keeps it open). A storage ceiling bounds memory: past
+/// it the pipe is still drained (read + discard) so writers never block on
+/// a full pipe, but no more bytes are stored. The activity clock is
+/// updated on every read so the idle-based drain can tell an active writer
+/// from a quiet one. The thread is never joined: it either exits on EOF or
+/// is killed when the tool process exits.
+fn spawn_pipe_reader(
+    pipe: impl Read + Send + 'static,
+    buf: Arc<Mutex<Vec<u8>>>,
+    done: Arc<AtomicBool>,
+    activity: Arc<AtomicU64>,
+    t0: Instant,
+    store_cap: usize,
+) {
+    thread::spawn(move || {
+        let mut pipe = pipe;
+        let mut chunk = [0u8; 8192];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) | Err(_) => {
+                    done.store(true, Ordering::Relaxed);
+                    break;
+                }
+                Ok(n) => {
+                    {
+                        let mut g = buf.lock().unwrap();
+                        if g.len() < store_cap {
+                            let take = n.min(store_cap - g.len());
+                            g.extend_from_slice(&chunk[..take]);
+                        }
+                    }
+                    activity.store(t0.elapsed().as_millis() as u64, Ordering::Relaxed);
+                }
+            }
+        }
+    });
 }
 
 fn main() {
@@ -74,14 +185,33 @@ fn main() {
         ));
     }
 
+    // Resolve the command shell: --shell-path pin -> /bin/bash -> PATH
+    // bash -> sh.
+    let shell = resolve_shell(args.shell_path.as_deref());
+
     // Spawn the command in its own process group so the whole group can be
     // killed on timeout. The working directory is inherited from the harness.
-    let mut cmd = Command::new("sh");
+    let mut cmd = Command::new(&shell);
     cmd.arg("-c")
         .arg(&command)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // POSIX shells auto-source $ENV (and bash $BASH_ENV) for non-interactive
+    // -c invocations. That is a silent code-execution channel: a hostile or
+    // leaking parent env could inject a command into every tool call. Close it.
+    cmd.env_remove("ENV");
+    cmd.env_remove("BASH_ENV");
+    if args.env_scrub {
+        let names: Vec<String> = std::env::vars_os()
+            .filter_map(|(k, _)| {
+                is_sensitive_env_name(&k).then(|| k.to_string_lossy().into_owned())
+            })
+            .collect();
+        for name in names {
+            cmd.env_remove(&name);
+        }
+    }
     unsafe {
         cmd.pre_exec(|| {
             // Make the child the leader of a new process group (pgid = pid).
@@ -98,41 +228,45 @@ fn main() {
     };
     let pid = child.id() as i32;
 
+    let t0 = Instant::now();
+
+    // Per-stream storage ceiling: keep enough to make the tail-truncation
+    // meaningful, bound memory for pathological outputs. Scales with the
+    // model-facing cap but never below 1 MiB.
+    let store_cap = args.max_output_bytes.saturating_mul(256).max(1 << 20);
+
     // Capture stdout and stderr concurrently.
     let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let out_done = Arc::new(AtomicBool::new(false));
     let err_done = Arc::new(AtomicBool::new(false));
+    let out_act = Arc::new(AtomicU64::new(0));
+    let err_act = Arc::new(AtomicU64::new(0));
 
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
-
-    let out_thread = {
-        let buf = Arc::clone(&stdout_buf);
-        let done = Arc::clone(&out_done);
-        let pipe = stdout_pipe;
-        thread::spawn(move || {
-            if let Some(mut p) = pipe {
-                let mut b = Vec::new();
-                let _ = p.read_to_end(&mut b);
-                *buf.lock().unwrap() = b;
-            }
-            done.store(true, Ordering::Relaxed);
-        })
-    };
-    let err_thread = {
-        let buf = Arc::clone(&stderr_buf);
-        let done = Arc::clone(&err_done);
-        let pipe = stderr_pipe;
-        thread::spawn(move || {
-            if let Some(mut p) = pipe {
-                let mut b = Vec::new();
-                let _ = p.read_to_end(&mut b);
-                *buf.lock().unwrap() = b;
-            }
-            done.store(true, Ordering::Relaxed);
-        })
-    };
+    if let Some(pipe) = child.stdout.take() {
+        spawn_pipe_reader(
+            pipe,
+            Arc::clone(&stdout_buf),
+            Arc::clone(&out_done),
+            Arc::clone(&out_act),
+            t0,
+            store_cap,
+        );
+    } else {
+        out_done.store(true, Ordering::Relaxed);
+    }
+    if let Some(pipe) = child.stderr.take() {
+        spawn_pipe_reader(
+            pipe,
+            Arc::clone(&stderr_buf),
+            Arc::clone(&err_done),
+            Arc::clone(&err_act),
+            t0,
+            store_cap,
+        );
+    } else {
+        err_done.store(true, Ordering::Relaxed);
+    }
 
     // Wait for the command with a deadline.
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
@@ -185,16 +319,31 @@ fn main() {
         }
     };
 
-    // Drain the captured pipes. Bound the wait so a lingering inherited pipe
-    // writer cannot hang the tool.
-    let drain_deadline = Instant::now() + Duration::from_secs(3);
-    while (!out_done.load(Ordering::Relaxed) || !err_done.load(Ordering::Relaxed))
-        && Instant::now() < drain_deadline
-    {
+    // Idle-based pipe drain. Quiet pipes release after DRAIN_IDLE_MS
+    // without new data; an active writer keeps the drain alive (its bytes
+    // are captured incrementally into the shared buffers); and the hard
+    // DRAIN_MAX_MS cap means a writer that escaped the process group
+    // cannot hang the tool.
+    let drain_t0 = Instant::now();
+    loop {
+        let out = out_done.load(Ordering::Relaxed);
+        let err = err_done.load(Ordering::Relaxed);
+        if out && err {
+            break;
+        }
+        let now = t0.elapsed().as_millis() as u64;
+        let out_quiet =
+            out || now.saturating_sub(out_act.load(Ordering::Relaxed)) >= DRAIN_IDLE_MS;
+        let err_quiet =
+            err || now.saturating_sub(err_act.load(Ordering::Relaxed)) >= DRAIN_IDLE_MS;
+        if out_quiet && err_quiet {
+            break;
+        }
+        if drain_t0.elapsed().as_millis() as u64 >= DRAIN_MAX_MS {
+            break;
+        }
         thread::sleep(Duration::from_millis(10));
     }
-    let _ = out_thread.join();
-    let _ = err_thread.join();
 
     let raw_stdout: Vec<u8> = stdout_buf.lock().unwrap().clone();
     let raw_stderr: Vec<u8> = stderr_buf.lock().unwrap().clone();
@@ -245,7 +394,8 @@ fn main() {
         "stdout": stdout_str,
         "stderr": stderr_str,
         "timed_out": timed_out,
-        "truncated": truncated
+        "truncated": truncated,
+        "shell": shell
     });
     println!("{}", serde_json::to_string(&output).unwrap());
 }
