@@ -1076,6 +1076,7 @@ dependencies = [
  "chrono",
  "clap",
  "glob",
+ "regex",
  "serde_json",
  "toml",
 ]

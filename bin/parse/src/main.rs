@@ -1,6 +1,7 @@
 #![deny(clippy::todo, clippy::unimplemented, clippy::unreachable)]
 
 use clap::Parser;
+use regex::Regex;
 use std::fs;
 use std::io::{self, Read};
 use std::path::PathBuf;
@@ -164,6 +165,12 @@ fn process(
             }
         }
     }
+
+    // Strip inline tag blocks that the model may have leaked into its
+    // text output.  Without this guard the tags travel into the
+    // event log and back into the model context on the next turn,
+    // which breaks the model's behaviour.
+    text = sanitize_text(&text);
 
     // Usage is optional. Omit it when the model returns null.
     let usage = model_output.get("usage").filter(|u| !u.is_null()).cloned();
@@ -643,6 +650,45 @@ fn parse_param_value(v: &str) -> serde_json::Value {
     serde_json::Value::String(v.to_string())
 }
 
+/// Tag names that models may emit as line-delimited blocks in their
+/// text output instead of using the structured `reasoning` or
+/// `tool_calls` fields.  Extend this list when a new model family
+/// introduces a new marker.
+const SANITIZE_TAGS: &[&str] = &[
+    "think",
+    "tool_call",
+];
+
+/// Remove every `tag … /tag` block (and any unterminated trailing
+/// block) from `text` for the tag names in [`SANITIZE_TAGS`].
+///
+/// A terminated block is a line that is exactly the tag name
+/// (after trim), followed by arbitrary content, followed by a line
+/// that is exactly `/tag_name`.  An unterminated opening tag drops
+/// everything from that line to end-of-text.
+///
+/// Runs unconditionally so that stray markers do not leak into the
+/// `assistant_message` event and get sent back to the model on the
+/// next turn.
+fn sanitize_text(text: &str) -> String {
+    let mut result = text.to_string();
+    for tag in SANITIZE_TAGS {
+        let terminated =
+            Regex::new(&format!(r"(?m)^[ \t]*{}[ \t]*\n[\s\S]*?\n[ \t]*/{}[ \t]*$", tag, tag))
+                .expect("hardcoded sanitize pattern");
+        result = terminated.replace_all(&result, "").to_string();
+
+        let unterminated =
+            Regex::new(&format!(r"(?m)^[ \t]*{}[ \t]*\n[\s\S]*$", tag)).expect("hardcoded sanitize pattern");
+        result = unterminated.replace_all(&result, "").to_string();
+    }
+    result = Regex::new(r"\n{3,}")
+        .expect("hardcoded sanitize pattern")
+        .replace_all(&result, "\n\n")
+        .to_string();
+    result.trim().to_string()
+}
+
 fn chrono_utc_now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
@@ -809,5 +855,109 @@ mod tests {
             !joined.contains("unknown tool"),
             "a length stop must not fail on the tool manifest: {joined}"
         );
+    }
+
+    // ── sanitize_text tests ────────────────────────────────────────
+
+    #[test]
+    fn sanitize_strips_think_block() {
+        // Fixture: real thinking block from pi session
+        // 2026-09-10T20-32-39-241Z, wrapped in the Qwen think/
+        // /think markers that the model binary would emit in `text`
+        // if it does not separate reasoning from output.
+        let text = r#"think
+The user is asking me to investigate whether `bin/parse/` in this
+ directory (a Rust project called rust-unix-harness) has a guard
+ that sanitizes any `think` or `tool call` tags that may leak into
+ responses when parsing streaming responses.
+
+First, let's explore the project structure.
+/think
+I am reading parse's main.rs, but I need to verify what happens to the text in the downstream loop."#;
+        let cleaned = sanitize_text(text);
+        assert_eq!(
+            cleaned,
+            "I am reading parse's main.rs, but I need to verify what happens to the text in the downstream loop."
+        );
+    }
+
+    #[test]
+    fn sanitize_strips_tool_call_block() {
+        let text = "\ntool_call\nbash\n{\"command\": \"ls\"}\n/tool_call\nDone.";
+        let cleaned = sanitize_text(text);
+        assert_eq!(cleaned, "Done.");
+    }
+
+    #[test]
+    fn sanitize_strips_multiple_blocks() {
+        // Two real thinking blocks from the same pi session, with a
+        // visible text line between them.
+        let text = r#"think
+The user is asking me to investigate whether `bin/parse/` has a
+ guard that sanitizes any `think` tags.
+/think
+Now let me look at the code.
+think
+Let's read the main.rs file and understand how the parsing works.
+/think"#;
+        let cleaned = sanitize_text(text);
+        assert_eq!(cleaned, "Now let me look at the code.");
+    }
+
+    #[test]
+    fn sanitize_strips_unterminated_think_block() {
+        // Simulates a length-stop truncation: the model was cut off
+        // mid-thinking, so no /think closing tag exists.
+        let text = r#"visible prefix
+think
+The user is asking me to investigate whether bin/parse/ in this
+directory (a Rust project called rust-unix-harness) has a guard that
+sanitizes any think or tool_call tags that may leak into responses"#;
+        let cleaned = sanitize_text(text);
+        assert_eq!(cleaned, "visible prefix");
+    }
+
+    #[test]
+    fn sanitize_preserves_plain_text() {
+        let text = "Hello world.\nLet me check the file.";
+        let cleaned = sanitize_text(text);
+        assert_eq!(cleaned, "Hello world.\nLet me check the file.");
+    }
+
+    #[test]
+    fn sanitize_ignores_tag_word_in_prose() {
+        // A line that merely *contains* the word is not a tag marker.
+        let text = "Let me think about this problem.\nDone.";
+        let cleaned = sanitize_text(text);
+        assert_eq!(cleaned, "Let me think about this problem.\nDone.");
+    }
+
+    #[test]
+    fn sanitize_handles_tag_with_surrounding_whitespace() {
+        let text = "  think  \npadded thinking\n  /think  \nresult";
+        let cleaned = sanitize_text(text);
+        assert_eq!(cleaned, "result");
+    }
+
+    #[test]
+    fn process_strips_think_tags_from_text() {
+        // End-to-end: model output with a real thinking block in `text`
+        // must not leak the block into the assistant_message event.
+        let raw = r#"{
+            "text": "think\nThe user is asking me to investigate whether `bin/parse/`\n has a guard that sanitizes any `think` tags.\n/think\nI am reading parse's main.rs, but I need to verify what happens to the text in the downstream loop.",
+            "tool_calls": [],
+            "stop_reason": "stop"
+        }"#;
+        let model_output: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let valid_tools: std::collections::HashSet<String> =
+            std::iter::once("bash".to_string()).collect();
+        let (code, lines) = process(&model_output, &valid_tools);
+        assert_eq!(code, 2);
+        let joined = lines.join("\n");
+        assert!(
+            !joined.contains("\nthink\n"),
+            "think block leaked: {joined}"
+        );
+        assert!(joined.contains("I am reading parse's main.rs"));
     }
 }
