@@ -10,7 +10,7 @@ required = ["command"]
 
 [tool.schema.properties.command]
 type = "string"
-description = "Shell command to execute via sh -c."
+description = "Shell command to execute via the resolved shell (bash preferred, POSIX sh fallback)."
 
 [tool.schema.properties.timeout_secs]
 type = "integer"
