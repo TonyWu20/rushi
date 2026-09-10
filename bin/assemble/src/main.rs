@@ -88,6 +88,7 @@ enum Ev {
     ToolResult {
         id: String,
         text: String,
+        image: Option<serde_json::Value>,
     },
 }
 
@@ -459,7 +460,7 @@ fn is_droppable_pair_text(text: &str) -> bool {
 fn drop_pair_ids(events: &[&Ev], split: usize) -> HashSet<String> {
     let mut ids: HashSet<String> = HashSet::new();
     for &ev in events.iter().take(split) {
-        if let Ev::ToolResult { id, text } = ev {
+        if let Ev::ToolResult { id, text, .. } = ev {
             if is_droppable_pair_text(text) {
                 ids.insert(id.clone());
             }
@@ -542,6 +543,7 @@ fn mask_active_path<'a>(
 fn full_items(
     ev: &Ev,
     drop_pairs: &HashSet<String>,
+    vision: bool,
 ) -> Vec<serde_json::Value> {
     match ev {
         Ev::User { text } => vec![serde_json::json!({
@@ -581,9 +583,30 @@ fn full_items(
             }
             items
         }
-        Ev::ToolResult { id, text } => {
+        Ev::ToolResult { id, text, image, .. } => {
             if drop_pairs.contains(id) {
                 return Vec::new();
+            }
+            if let Some(img) = image {
+                let mime = img.get("mime_type").and_then(|m| m.as_str()).unwrap_or("image/png");
+                let data = img.get("data").and_then(|d| d.as_str()).unwrap_or("");
+                if vision {
+                    // Responses API: array output with input_text + input_image.
+                    return vec![serde_json::json!({
+                        "type": "function_call_output",
+                        "call_id": id,
+                        "output": [
+                            { "type": "input_text", "text": text },
+                            { "type": "input_image", "image_url": format!("data:{mime};base64,{data}"), "detail": "auto" }
+                        ]
+                    })];
+                }
+                // Non-vision model: text only with a note.
+                return vec![serde_json::json!({
+                    "type": "function_call_output",
+                    "call_id": id,
+                    "output": format!("{text} [Image omitted: model does not support image input.]")
+                })];
             }
             vec![serde_json::json!({
                 "type": "function_call_output",
@@ -619,7 +642,7 @@ fn compact_items(
     ptrs: &LogPointers,
 ) -> Vec<serde_json::Value> {
     match ev {
-        Ev::User { .. } => full_items(ev, drop_pairs),
+        Ev::User { .. } => full_items(ev, drop_pairs, false),
         Ev::Assistant { text, calls, .. } => {
             let mut items = vec![serde_json::json!({
                 "type": "message",
@@ -639,7 +662,7 @@ fn compact_items(
             }
             items
         }
-        Ev::ToolResult { id, text } => {
+        Ev::ToolResult { id, text, .. } => {
             if drop_pairs.contains(id) {
                 return Vec::new();
             }
@@ -662,6 +685,7 @@ fn build_items_off(
     caps: &Caps,
     drop_pairs: &HashSet<String>,
     ptrs: &LogPointers,
+    vision: bool,
 ) -> (Vec<serde_json::Value>, Vec<usize>) {
     let split = events.len().saturating_sub(keep);
     let mut items: Vec<serde_json::Value> = Vec::new();
@@ -671,7 +695,7 @@ fn build_items_off(
         let ev_items = if i < split {
             compact_items(ev, caps, drop_pairs, ptrs)
         } else {
-            full_items(ev, drop_pairs)
+            full_items(ev, drop_pairs, vision)
         };
         items.extend(ev_items);
     }
@@ -691,8 +715,9 @@ fn build_items(
     caps: &Caps,
     drop_pairs: &HashSet<String>,
     ptrs: &LogPointers,
+    vision: bool,
 ) -> Vec<serde_json::Value> {
-    build_items_off(events, keep, caps, drop_pairs, ptrs).0
+    build_items_off(events, keep, caps, drop_pairs, ptrs, vision).0
 }
 
 /// The delivery-queue gate of the user event (docs/tui-pending-user-
@@ -746,7 +771,11 @@ fn estimate_ev_tokens(ev: &Ev, chars_per_token: u64) -> u64 {
                 .sum();
             t + c + r
         }
-        Ev::ToolResult { text, .. } => text.chars().count() as u64,
+        Ev::ToolResult { text, image, .. } => {
+            let base = text.chars().count() as u64;
+            let img = image.as_ref().map_or(0u64, |_| 4800);
+            (base + img) / chars_per_token.max(1)
+        }
     };
     chars / chars_per_token.max(1)
 }
@@ -1061,7 +1090,30 @@ fn main() {
                 // session has one; the index text is the legacy
                 // inline body or the short preview.
                 let text = tool_texts.get(&id).cloned().unwrap_or(index_text);
-                events.push(Ev::ToolResult { id, text });
+                // KISS: the image payload (base64 data + mime) lives in
+                // the event's value.details. Only carry it forward when
+                // it is actually an image result with non-empty data.
+                let image = {
+                    let details = event.get("value").and_then(|v| v.get("details"));
+                    let is_image = details
+                        .and_then(|d| d.get("type"))
+                        .and_then(|t| t.as_str())
+                        == Some("image");
+                    let has_data = details
+                        .and_then(|d| d.get("data"))
+                        .and_then(|d| d.as_str())
+                        .map_or(false, |s| !s.is_empty());
+                    if is_image && has_data {
+                        details.cloned()
+                    } else {
+                        None
+                    }
+                };
+                events.push(Ev::ToolResult {
+                    id,
+                    text,
+                    image,
+                });
                 event_seqs.push(seq);
             }
             "compaction_summary" => {
@@ -1412,6 +1464,7 @@ fn main() {
             &Caps { text: 0 },
             &drop_pairs,
             &ptrs,
+            model_settings.vision,
         );
         if let Some(f) = &framing {
             items.insert(0, f.clone());
@@ -1435,6 +1488,7 @@ fn main() {
         &Caps { text: 0 },
         &drop_pairs,
         &ptrs,
+        model_settings.vision,
     );
     if let Some(f) = &framing {
         items.insert(0, f.clone());
@@ -1495,14 +1549,14 @@ fn summary_input_request(
         chosen = d;
         let sel = drop_oldest_groups(old, &droppable, d);
         let drop_pairs = drop_pair_ids(&sel, sel.len());
-        let items = build_items(&sel, 0, caps, &drop_pairs, ptrs);
+        let items = build_items(&sel, 0, caps, &drop_pairs, ptrs, false);
         if estimate(&items) <= input_budget {
             break;
         }
     }
     let sel = drop_oldest_groups(old, &droppable, chosen);
     let drop_pairs = drop_pair_ids(&sel, sel.len());
-    let items = build_items(&sel, 0, caps, &drop_pairs, ptrs);
+    let items = build_items(&sel, 0, caps, &drop_pairs, ptrs, false);
     let mut input = items.to_vec();
     input.push(serde_json::json!({
         "type": "message",
@@ -1558,6 +1612,7 @@ mod tests {
             api_key_env: String::new(),
             timeout_s: 0,
             estimate_chars_per_token: 4,
+            vision: false,
         }
     }
 
@@ -1626,6 +1681,7 @@ context_budget_tokens = 999999
         evs.push(Ev::ToolResult {
             id: "c1".to_string(),
             text: "c".repeat(4000),
+            image: None,
         });
         evs.push(Ev::User {
             text: "d".repeat(4000),
@@ -1695,6 +1751,7 @@ context_budget_tokens = 999999
         Ev::ToolResult {
             id: id.to_string(),
             text: text.to_string(),
+            image: None,
         }
     }
 
@@ -1819,13 +1876,13 @@ not json at all
         };
         let mut drop: HashSet<String> = HashSet::new();
         drop.insert("bad".to_string());
-        let items = full_items(&ev, &drop);
+        let items = full_items(&ev, &drop, false);
         // The dropped call is gone; its call id appears nowhere.
         let s = items.iter().map(|i| i.to_string()).collect::<String>();
         assert!(!s.contains("\"bad\""), "the failed call must be out: {s}");
         assert!(s.contains("\"ok\""), "the clean call stays: {s}");
         // Its result goes out too.
-        let res = full_items(&ev_schema_error("bad"), &drop);
+        let res = full_items(&ev_schema_error("bad"), &drop, false);
         assert!(res.is_empty(), "the failed result must be out");
     }
 
@@ -1925,6 +1982,7 @@ not json at all
             &Caps { text: 0 },
             &drops,
             &test_ptrs(),
+            false,
         );
         let s = serde_json::to_string(&out).unwrap();
         assert!(s.contains("the task"), "the task statement survives");
@@ -1962,7 +2020,7 @@ not json at all
     fn keep_all_when_window_covers_log() {
         let events = [ev_res("a", "one"), ev_res("b", "two")];
         let refs: Vec<&Ev> = events.iter().collect();
-        let items = build_items(&refs, 10, &caps(), &HashSet::new(), &test_ptrs());
+        let items = build_items(&refs, 10, &caps(), &HashSet::new(), &test_ptrs(), false);
         // No compact marker, no clip marker, plain outputs.
         assert!(!items.iter().any(|i| i.to_string().contains("compacted")));
         assert_eq!(items.len(), 2);
@@ -1985,6 +2043,7 @@ not json at all
             },
             &HashSet::new(),
             &test_ptrs(),
+            false,
         );
         // Old tool results are no longer compacted; full body passes through.
         let first = &items[0];
@@ -2003,7 +2062,7 @@ not json at all
             ev_res("a", &"R".repeat(400)),
         ];
         let refs: Vec<&Ev> = events.iter().collect();
-        let items = build_items(&refs, 0, &caps(), &HashSet::new(), &test_ptrs());
+        let items = build_items(&refs, 0, &caps(), &HashSet::new(), &test_ptrs(), false);
         assert!(items[0].to_string().contains("do the task"));
         assert!(!items[1].to_string().contains("compacted"), "tool results are no longer compacted");
     }
@@ -2066,6 +2125,7 @@ not json at all
             usage_output: None,
             },
             &HashSet::new(),
+            false,
         );
         // Order: reasoning, assistant message, function_call.
         assert_eq!(items.len(), 3);
@@ -2180,6 +2240,7 @@ not json at all
             },
             &HashSet::new(),
             &test_ptrs(),
+            false,
         );
         assert_eq!(offsets.len(), 4, "one offset per event plus the end");
         assert_eq!(items.len(), offsets[3]);
@@ -2431,6 +2492,7 @@ not json at all
             &Caps { text: 0 },
             &drops,
             &test_ptrs(),
+            false,
         );
         let s = serde_json::to_string(&out).unwrap();
         assert!(s.contains("the task"), "the task statement survives");
@@ -2462,6 +2524,7 @@ not json at all
                 &Caps { text: 0 },
                 &HashSet::new(),
                 &test_ptrs(),
+                false,
             ),
         )
         .unwrap();

@@ -387,17 +387,28 @@ pub fn project_event(v: &Value) -> Ev {
                 reasoning_chars,
             }
         }
-        "tool_result" => Ev::Result {
-            call_id: v.get("id")
-                .and_then(|c| c.as_str())
-                .unwrap_or("")
-                .to_string(),
-            chars: v.get("value")
+        "tool_result" => {
+            let base_chars: u64 = v.get("value")
                 .and_then(|o| o.get("text"))
                 .and_then(|s| s.as_str())
                 .map(|s| s.chars().count() as u64)
-                .unwrap_or(0),
-        },
+                .unwrap_or(0);
+            // Flat per-image token estimate (mirrors pi's ESTIMATED_IMAGE_CHARS).
+            let image_chars: u64 = v
+                .get("value")
+                .and_then(|o| o.get("details"))
+                .and_then(|d| d.get("type"))
+                .and_then(|t| t.as_str())
+                .eq(&Some("image")) as u64
+                * 4800;
+            Ev::Result {
+                call_id: v.get("id")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                chars: base_chars + image_chars,
+            }
+        }
         _ => Ev::User {
             text: String::new(),
         },

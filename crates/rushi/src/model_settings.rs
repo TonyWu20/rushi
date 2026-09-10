@@ -46,6 +46,10 @@ pub struct ModelSettings {
     pub api_key_env: String,
     /// Request timeout in seconds.
     pub timeout_s: u64,
+    /// Whether the model accepts image input (e.g. base64 images in
+    /// tool results).  When false, `assemble` omits image content parts
+    /// and appends a note instead (docs/image-read-plan.md section 4.5).
+    pub vision: bool,
 }
 
 impl Default for ModelSettings {
@@ -59,6 +63,7 @@ impl Default for ModelSettings {
             estimate_chars_per_token: DEFAULT_ESTIMATE_CHARS_PER_TOKEN,
             api_key_env: DEFAULT_API_KEY_ENV.to_string(),
             timeout_s: DEFAULT_MODEL_TIMEOUT_S,
+            vision: false,
         }
     }
 }
@@ -130,5 +135,8 @@ pub fn resolve_model_settings(config: &Value, name: &str) -> ModelSettings {
             .or_else(|| val_int(model_root, "model_timeout_s"))
             .unwrap_or(DEFAULT_MODEL_TIMEOUT_S as i64)
             as u64,
+        vision: val_bool(mdl, "vision")
+            .or_else(|| val_bool(model_root, "vision"))
+            .unwrap_or(false),
     }
 }

@@ -456,12 +456,56 @@ fn convert_to_chat_format(request: &serde_json::Value) -> serde_json::Value {
                 }
                 Some("function_call_output") => {
                     let call_id = item.get("call_id").and_then(|c| c.as_str()).unwrap_or("");
-                    let output = item.get("output").and_then(|o| o.as_str()).unwrap_or("");
+                    // KISS: handle both string output (plain text) and array output
+                    // (input_text + input_image parts) from the Responses wire format.
+                    let output = item.get("output");
+                    let text = output
+                        .and_then(|o| o.as_str())
+                        .unwrap_or("")
+                        .to_string();
+
                     messages.push(serde_json::json!({
                         "role": "tool",
                         "tool_call_id": call_id,
-                        "content": output
+                        "content": text
                     }));
+
+                    // If output is an array, extract input_image parts and
+                    // emit a follow-up user message carrying image_url parts.
+                    if let Some(arr) = output.and_then(|o| o.as_array()) {
+                        let mut image_parts: Vec<serde_json::Value> = Vec::new();
+                        for part in arr {
+                            match part.get("type").and_then(|t| t.as_str()) {
+                                Some("input_text") => {
+                                    // Already captured in `text` above if it
+                                    // was the only content; nothing extra needed.
+                                }
+                                Some("input_image") => {
+                                    let img_url = part
+                                        .get("image_url")
+                                        .and_then(|u| u.as_str())
+                                        .unwrap_or("");
+                                    image_parts.push(serde_json::json!({
+                                        "type": "image_url",
+                                        "image_url": { "url": img_url }
+                                    }));
+                                }
+                                _ => {}
+                            }
+                        }
+                        if !image_parts.is_empty() {
+                            let mut content: Vec<serde_json::Value> =
+                                vec![serde_json::json!({
+                                    "type": "text",
+                                    "text": "Attached image(s) from tool result:"
+                                })];
+                            content.extend(image_parts);
+                            messages.push(serde_json::json!({
+                                "role": "user",
+                                "content": content
+                            }));
+                        }
+                    }
                 }
                 Some("reasoning") => {
                     let mut thinking = String::new();
