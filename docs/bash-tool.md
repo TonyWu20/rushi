@@ -41,7 +41,7 @@ required = ["command"]
 
 [tool.schema.properties.command]
 type = "string"
-description = "Shell command to execute via sh -c."
+description = "Shell command to execute in the resolved shell."
 
 [tool.schema.properties.timeout_secs]
 type = "integer"
@@ -70,7 +70,7 @@ Route and assemble present this schema to the model:
   "parameters": {
     "type": "object",
     "properties": {
-      "command": { "type": "string", "description": "Shell command to execute via sh -c." },
+      "command": { "type": "string", "description": "Shell command to execute in the resolved shell." },
       "timeout_secs": { "type": "integer", "description": "Kill after this many seconds. Default 60, max 300." }
     },
     "required": ["command"]
@@ -88,7 +88,15 @@ The rejection produces a `tool_result` with `is_error: true` and text
 
 ### 4.1 Spawn
 
-- Spawn `sh -c <command>`.
+- Shell resolution (pi model): `/bin/bash` first, then `bash` on `PATH`,
+  then `/bin/sh` as POSIX fallback. A `--shell-path` CLI flag pins a
+  specific interpreter. The resolved shell path is reported in the result
+  JSON as `shell` (dashed when the spawn fails).
+- Environment hygiene: `ENV` and `BASH_ENV` are removed from the spawn
+  environment, closing the silent auto-source channel for bash.
+- Opt-in `--env-scrub` strips env vars whose names match
+  `*KEY*|*PASSWORD*|*SECRET*|*TOKEN*` (dsh vocab, off by default;
+  see `docs/bash-tool-reference-study.md` 6.2).
 - The tool runs in the working directory the harness sets on the process.
   `step.sh` reads `sessions/<name>/cwd` and passes `--cwd` to `route`.
   `route` sets the child process working directory via `current_dir`.
@@ -114,6 +122,10 @@ The rejection produces a `tool_result` with `is_error: true` and text
   calling `setsid`) can survive the group kill. That is a known
   limitation. For ordinary commands, nothing the command spawned
   remains after the tool returns.
+- After the kill ladder, lingering pipes are drained on an idle basis:
+  quiet pipes release in a short idle window, still-active writers stay
+  open (their bytes are captured) under a hard cap, so a process-group
+  escapee cannot hang the tool.
 - A timeout is not a tool error. The command ran. It did not finish.
 - The tool exits 0 and sets `"timed_out": true` in the JSON output.
 - On timeout, `exit_code` is 143 (128 + SIGTERM, signal 15). The group
@@ -192,6 +204,7 @@ stdout is one JSON object:
 | `stderr` | string | Raw stderr. Kept tail when truncated. Shares the cap with `stdout`. |
 | `timed_out` | boolean | True if the timeout fired. |
 | `truncated` | boolean | True if the output exceeded the byte cap. |
+| `shell` | string | The resolved shell path (`bash` preferred, POSIX `sh` fallback). Dashed when the spawn failed. |
 
 The `text` field format:
 
@@ -382,7 +395,7 @@ Consumers of the new tool:
 
 ## 13. What this does not do
 
-- No persistent shell state. Each call is a fresh `sh -c` process.
+- No persistent shell state. Each call is a fresh process of the resolved shell.
 - No file writing. Use `write` and `edit` for that.
 - No file reading. Use `read` for that.
 - No directory listing. Use `list` for that.
