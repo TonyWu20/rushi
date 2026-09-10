@@ -112,23 +112,25 @@ run_bash_test() {
   local tmp_out="$TEST_DIR/bash_out.$$"
   local tmp_err="$TEST_DIR/bash_err.$$"
   local actual_exit=0
+  # EXTRA_ARGS: optional extra CLI args for the tool (e.g. "--shell-path /bin/sh")
+  local extra_args="${EXTRA_ARGS:-}"
 
   if [ -n "$env_spec" ]; then
     # shellcheck disable=SC2206
     local envs=($env_spec)
     if [ -n "$cwd" ]; then
-      ( cd "$cwd" && env "${envs[@]}" "$BASH_BIN" > "$tmp_out" 2> "$tmp_err" <<< "$input" )
+      ( cd "$cwd" && env "${envs[@]}" "$BASH_BIN" $extra_args > "$tmp_out" 2> "$tmp_err" <<< "$input" )
       actual_exit=$?
     else
-      env "${envs[@]}" "$BASH_BIN" > "$tmp_out" 2> "$tmp_err" <<< "$input"
+      env "${envs[@]}" "$BASH_BIN" $extra_args > "$tmp_out" 2> "$tmp_err" <<< "$input"
       actual_exit=$?
     fi
   else
     if [ -n "$cwd" ]; then
-      ( cd "$cwd" && "$BASH_BIN" > "$tmp_out" 2> "$tmp_err" <<< "$input" )
+      ( cd "$cwd" && "$BASH_BIN" $extra_args > "$tmp_out" 2> "$tmp_err" <<< "$input" )
       actual_exit=$?
     else
-      "$BASH_BIN" > "$tmp_out" 2> "$tmp_err" <<< "$input"
+      "$BASH_BIN" $extra_args > "$tmp_out" 2> "$tmp_err" <<< "$input"
       actual_exit=$?
     fi
   fi
@@ -422,8 +424,24 @@ run_bash_test "bash: cwd" 0 '{"command":"pwd"}' '' "$TEST_DIR/cwd" \
 # bash: pipeline - wc -c counts the echo output
 run_bash_test "bash: pipeline" 0 '{"command":"echo hello | wc -c"}' '' '' 'stdout_equals:6'
 
-# bash: spawn failure - PATH=/dev/null hides sh, tool-level failure
-run_bash_test "bash: spawn failure" nonzero '{"command":"echo hi"}' 'PATH=/dev/null' '' 'stderr_diag'
+# bash: spawn failure - a bad --shell-path pin is a tool-level failure
+EXTRA_ARGS='--shell-path /nonexistent-shell-xyz' \
+  run_bash_test "bash: spawn failure" nonzero '{"command":"echo hi"}' '' '' 'stderr_diag'
+unset EXTRA_ARGS
+
+# bash: spawn failure (empty PATH) - only meaningful when the resolver's
+# fixed /bin/bash is absent; on systems with /bin/bash the resolver uses it
+# regardless of PATH.
+if [ ! -e /bin/bash ]; then
+  run_bash_test "bash: spawn failure (empty PATH)" nonzero \
+    '{"command":"echo hi"}' 'PATH=/dev/null' '' 'stderr_diag'
+fi
+
+# bash: shell path pin - an explicit executable shell runs the command
+sh_pin="$(command -v sh)"
+EXTRA_ARGS="--shell-path $sh_pin" \
+  run_bash_test "bash: shell path pin" 0 '{"command":"echo pinned"}' '' '' 'stdout_contains:pinned'
+unset EXTRA_ARGS
 
 # bash: empty command - valid, exit 0, empty output
 run_bash_test "bash: empty command" 0 '{"command":""}' '' '' 'ec:0' 'stdout_empty'
