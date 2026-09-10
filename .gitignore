@@ -39,3 +39,6 @@ result
 
 ## Local config files (machine-specific; never commit)
 config*.toml
+
+## Local bash-only tool scaffolding (referenced only by config-bash-only.toml)
+tools-bash-only/
