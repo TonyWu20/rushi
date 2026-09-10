@@ -36,3 +36,6 @@ scratch/refs/pi-vim
 
 ## Nix build artifact
 result
+
+## Local config files (machine-specific; never commit)
+config*.toml
