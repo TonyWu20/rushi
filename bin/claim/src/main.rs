@@ -115,6 +115,14 @@ fn main() {
 /// message with no tool calls, an error, or a closed handoff)
 /// consumes the pending follow-ups: they ran as new turns through
 /// the boundary.
+///
+/// Delivery-boundary guard (P7, steer during an in-flight call):
+/// each model call writes a `model_call_context` ext_status marker
+/// carrying `user_seq`, the last user_message seq visible at call
+/// time. A steer user_message whose seq exceeds the marker value
+/// arrived after the call's context was assembled, so that call
+/// did not see it; the turn boundary must not idle the loop in
+/// that case.
 fn derive_state(
     lines: &str,
     schemas: &[(String, serde_json::Value)],
@@ -124,6 +132,11 @@ fn derive_state(
     let mut pending_tool_calls: Vec<serde_json::Value> = Vec::new();
     let mut pending_follow_ups: Vec<usize> = Vec::new();
     let mut pending_approval_request: Option<serde_json::Value> = None;
+    // P7: the last steer user_message seq and the delivery boundary
+    // of the most recent model call (from `model_call_context`
+    // markers). Absent markers keep legacy behavior.
+    let mut last_steered_user_seq: usize = 0;
+    let mut delivered_user_seq: Option<usize> = None;
     // The event type of each 1-based log seq: the rewind arm reads
     // its target's type to decide the owed state (docs/rewind-fork-
     // design.md section 5).
@@ -162,6 +175,7 @@ fn derive_state(
                 if follow {
                     pending_follow_ups.push(i);
                 } else {
+                    last_steered_user_seq = i;
                     state = "awaiting_model".to_string();
                 }
             }
@@ -184,12 +198,26 @@ fn derive_state(
                             state = "idle".to_string();
                             pending_tool_calls.clear();
                             pending_follow_ups.clear();
+                            // P7: a steer message logged after the
+                            // last call's delivery boundary was not
+                            // in that call's context; the loop
+                            // still owes it a model call.
+                            if let Some(d) = delivered_user_seq {
+                                if last_steered_user_seq > d {
+                                    state = "awaiting_model".to_string();
+                                }
+                            }
                         }
                     }
                 } else {
                     state = "idle".to_string();
                     pending_tool_calls.clear();
                     pending_follow_ups.clear();
+                    if let Some(d) = delivered_user_seq {
+                        if last_steered_user_seq > d {
+                            state = "awaiting_model".to_string();
+                        }
+                    }
                 }
             }
             "approval_request" => {
@@ -236,6 +264,10 @@ fn derive_state(
                 pending_tool_calls.clear();
                 pending_follow_ups.clear();
                 pending_approval_request = None;
+                // The fork masks the old path; rebase the P7
+                // delivery tracking on the new branch.
+                last_steered_user_seq = 0;
+                delivered_user_seq = None;
                 let target = event
                     .get("target_seq")
                     .and_then(|t| t.as_u64())
@@ -249,6 +281,20 @@ fn derive_state(
                 let owed = !before
                     && seq_types.get(&target).is_some_and(|t| t == "tool_result");
                 state = if owed { "awaiting_model".to_string() } else { "idle".to_string() };
+            }
+            "ext_status" => {
+                // P7 delivery-boundary marker (docs/tui-pending-user-
+                // messages.md): `value.user_seq` is the last user
+                // message seq the just-started model call saw.
+                if event.get("id").and_then(|s| s.as_str()) == Some("model_call_context") {
+                    if let Some(n) = event
+                        .get("value")
+                        .and_then(|v| v.get("user_seq"))
+                        .and_then(|n| n.as_u64())
+                    {
+                        delivered_user_seq = Some(n as usize);
+                    }
+                }
             }
             _ => {}
         }
@@ -502,6 +548,16 @@ mod tests {
                 "v":1,"type":"assistant_message","ts":"t","content":"",
                 "tool_calls":[{"id":"tc1","name":"bash","arguments":{"cmd":"x"}}],
                 "stop_reason":"tool_calls"
+            }),
+        )
+    }
+
+    fn assistant_no_call() -> String {
+        line(
+            &serde_json::json!({
+                "v":1,"type":"assistant_message","ts":"t","content":"done",
+                "tool_calls":[],
+                "stop_reason":"stop"
             }),
         )
     }
@@ -784,5 +840,114 @@ mod tests {
         let (state, seq, _, _) = derive_state(&log, &schemas());
         assert_eq!(state, "awaiting_model");
         assert_eq!(seq, 5, "the new-branch message counts");
+    }
+
+    // ── P7: delivery-boundary marker (model_call_context) ────────
+
+    fn marker(user_seq: u64) -> String {
+        let s = String::from(
+            "{\"v\":1,\"type\":\"ext_status\",\"ts\":\"t\",\"id\":\"model_call_context\",\"value\":{\"user_seq\":"
+        );
+        s + &user_seq.to_string() + "}}"
+    }
+
+    /// P7: a steer message logged AFTER the delivery boundary of an
+    /// in-flight call must keep the loop owed a model call; the
+    /// turn boundary must not idle the session.
+    #[test]
+    fn steer_logged_during_inflight_call_keeps_awaiting_model() {
+        let log = [
+            user_msg(),                      // seq 1: in the call context
+            marker(1),                       // call saw user msgs up to seq 1
+            user_msg(),                      // seq 3: typed while call runs
+            assistant_no_call(),             // seq 4: that call's turn boundary
+        ]
+        .join("\n");
+        let (state, _, pending, follows) = derive_state(&log, &schemas());
+        assert_eq!(state, "awaiting_model", "undelivered steer stays owed");
+        assert!(pending.is_empty());
+        assert!(follows.is_empty());
+    }
+
+    /// P7: when the call's delivery boundary already covers the last
+    /// steer message, the turn boundary idles the session as before.
+    #[test]
+    fn delivered_steer_message_turn_boundary_stays_idle() {
+        let log = [
+            user_msg(),
+            marker(1),
+            assistant_no_call(),
+        ]
+        .join("\n");
+        let (state, _, pending, _) = derive_state(&log, &schemas());
+        assert_eq!(state, "idle", "nothing owed after a fully delivered turn");
+        assert!(pending.is_empty());
+    }
+
+    /// Legacy logs (no markers) keep the historical behavior: a steer
+    /// message followed by its answer idles the session. No behavior
+    /// regression for pre-P7 sessions.
+    #[test]
+    fn legacy_log_without_markers_stays_idle() {
+        let log = [
+            user_msg(),
+            assistant_no_call(),
+        ]
+        .join("\n");
+        let (state, _, _, _) = derive_state(&log, &schemas());
+        assert_eq!(state, "idle");
+    }
+
+    /// P7 must not disturb the follow queue: a follow message logged
+    /// before the turn boundary is consumed by that boundary. The
+    /// state stays idle because the steer is already delivered.
+    #[test]
+    fn follow_message_consumed_at_turn_boundary() {
+        let follow = r#"{"v":1,"type":"user_message","ts":"t","content":"later","queue":"follow"}"#;
+        let log = [
+            user_msg(),
+            marker(1),
+            follow.to_string(),
+            assistant_no_call(),
+        ]
+        .join("\n");
+        let (state, _, _, follows) = derive_state(&log, &schemas());
+        assert_eq!(state, "idle", "follow messages never force awaiting_model");
+        assert!(follows.is_empty(), "the turn boundary consumed the follow");
+    }
+
+    /// P7: a rewind rebases the delivery tracking; a masked undelivered
+    /// steer must not resurrect the loop after a fork.
+    #[test]
+    fn rewind_resets_delivery_tracking() {
+        let log = [
+            user_msg(),
+            marker(1),
+            user_msg(),
+            rewind(1, "before"),
+            assistant_no_call(),
+        ]
+        .join("\n");
+        let (state, _, _, _) = derive_state(&log, &schemas());
+        assert_eq!(state, "idle", "masked steer owes nothing after the fork");
+    }
+
+    /// P7 and follow together: an undelivered steer after the boundary
+    /// keeps the state at awaiting_model; the turn boundary still
+    /// consumes the queued follow.
+    #[test]
+    fn steer_and_follow_after_boundary() {
+        let follow = r#"{"v":1,"type":"user_message","ts":"t","content":"later","queue":"follow"}"#;
+        let log = [
+            user_msg(),
+            marker(1),
+            user_msg(),
+            follow.to_string(),
+            assistant_no_call(),
+        ]
+        .join("\n");
+        let (state, _, _, follows) = derive_state(&log, &schemas());
+        assert_eq!(state, "awaiting_model", "undelivered steer still owed");
+        assert!(follows.is_empty(), "the turn boundary consumed the follow");
     }
 }

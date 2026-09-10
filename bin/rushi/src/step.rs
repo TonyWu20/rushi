@@ -879,6 +879,21 @@ fn model_retry_loop(
             log_hook_window(cfg, session, "model.before", "", &results);
         }
 
+        // Delivery-boundary marker (docs/tui-pending-user-messages.md P7):
+        // record the last user_message seq in the log. The claim state
+        // machine uses this to keep a steer message that arrived while
+        // this call ran pending for the next step.
+        let user_seq = last_user_message_seq(&session.path);
+        let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let marker = serde_json::json!({
+            "v": 1,
+            "type": "ext_status",
+            "ts": ts,
+            "id": "model_call_context",
+            "value": { "user_seq": user_seq },
+        });
+        append_event(cfg, &session.path, &marker);
+
         let output = match runner.model(request, delta_file) {
             Ok(o) => o,
             Err(e) => {
@@ -1351,16 +1366,16 @@ fn route_and_append(
             let unblocked: Vec<ToolCallEvent> =
                 calls.iter().filter(|c| c.id != call_id).cloned().collect();
             let unblocked_results = route_batch(cfg, runner, &unblocked, session);
-            for r in &unblocked_results {
+
+            // tool.after window: a hook may rewrite results by call id.
+            let final_unblocked = fire_tool_after(cfg, session, &unblocked, &unblocked_results);
+            for r in &final_unblocked {
                 append_line(
                     cfg,
                     &session.path,
-                    &serde_json::to_string(&r.value).unwrap_or_default(),
+                    &serde_json::to_string(r).unwrap_or_default(),
                 );
             }
-
-            // Fire tool.after for the unblocked results.
-            fire_tool_after(cfg, session, &unblocked_results);
 
             // Wait for the approval.
             if let Some(call) = blocked_call {
@@ -1374,42 +1389,127 @@ fn route_and_append(
     // Route the remaining calls.
     let routed = route_batch(cfg, runner, &to_route, session);
 
-    // tool.after observation window.
-    fire_tool_after(cfg, session, &routed);
+    // tool.after window: a hook may rewrite results by call id.
+    let final_results = fire_tool_after(cfg, session, &to_route, &routed);
 
     for v in &synthetic {
         append_event(cfg, &session.path, v);
     }
-    for r in &routed {
+    for r in &final_results {
         append_line(
             cfg,
             &session.path,
-            &serde_json::to_string(&r.value).unwrap_or_default(),
+            &serde_json::to_string(r).unwrap_or_default(),
         );
     }
 }
 
-/// Fire the `tool.after` observation window with the routed results.
+/// Fire the `tool.after` window and return the final result values to
+/// append to the log.
+///
+/// The hook receives the routed `calls` (with their original arguments,
+/// e.g. a read call's `file_path`) and the routed `results`. A hook may
+/// emit a `transform` decision carrying per-call result rewrites in
+/// `payload.results`, a keyed map from call id to new `tool_result`
+/// JSON. The kernel splices each entry into the routed results by
+/// matching the call id. Calls the hook does not mention keep their
+/// routed result. A transform that lists every call id is a whole
+/// swap. This is the extension point that turns a hard-rejected binary
+/// read (an oversized image) into a success carrying the compressed
+/// payload (docs/image-read-kiss.md).
+///
+/// One decision word, `transform`, is shared with the `model.before`
+/// window. There the payload is the whole request object instead of a
+/// keyed map, because a request is a single object (docs/loop-
+/// lifecycle-hooks.md section 4.3).
 fn fire_tool_after(
     cfg: &HarnessConfig,
     session: &SessionDir,
+    calls: &[rushi_common::stage::ToolCallEvent],
     results: &[rushi_common::stage::ToolResultEvent],
-) {
+) -> Vec<serde_json::Value> {
+    let calls_json: Vec<serde_json::Value> = calls
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "id": c.id,
+                "name": c.name,
+                "arguments": c.arguments,
+            })
+        })
+        .collect();
+    let results_json: Vec<serde_json::Value> =
+        results.iter().map(|r| r.value.clone()).collect();
     let after_payload = serde_json::json!({
         "window": "tool.after",
         "session": session.path.to_string_lossy(),
-        "results": results
-            .iter()
-            .map(|r| &r.value)
-            .collect::<Vec<_>>(),
+        "calls": calls_json,
+        "results": results_json,
     });
-    let _ = hooks::fire_hooks(
+    let results_out = hooks::fire_hooks(
         &cfg.hooks,
         Window::ToolAfter,
         &after_payload,
         &hook_env(cfg, session, "step", Window::ToolAfter),
         cfg.hooks_timeout_ms,
     );
+    let (decision, payload_val) = hooks::fold_decision(&results_out, Window::ToolAfter);
+    log_hook_window(
+        cfg,
+        session,
+        "tool.after",
+        decision.as_deref().unwrap_or(""),
+        &results_out,
+    );
+
+    let mut final_values: Vec<serde_json::Value> =
+        results.iter().map(|r| r.value.clone()).collect();
+
+    // `transform`: splice per-call result rewrites by call id.
+    // payload.results is a keyed map: call id -> new tool_result JSON.
+    // Listing every call id is a whole swap.
+    if decision.as_deref() == Some("transform") {
+        if let Some(results_map) = payload_val.get("results").and_then(|r| r.as_object()) {
+            for (id, new_result) in results_map {
+                if let Some(pos) = final_values
+                    .iter()
+                    .position(|v| v.get("id").and_then(|x| x.as_str()) == Some(id.as_str()))
+                {
+                    // Normalize the envelope so the spliced event passes
+                    // schema validation. A hook that omits `ts` would
+                    // otherwise be skipped by the claim main loop while
+                    // the resolved-id scan still settles the session,
+                    // hiding the owed model call.
+                    let mut r = new_result.clone();
+                    if let Some(obj) = r.as_object_mut() {
+                        if obj.get("ts").is_none() {
+                            let ts = chrono::Utc::now()
+                                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                            obj.insert("ts".to_string(), Value::String(ts));
+                        }
+                        if obj.get("v").is_none() {
+                            obj.insert("v".to_string(), Value::Number(1.into()));
+                        }
+                        if obj.get("type").is_none() {
+                            obj.insert(
+                                "type".to_string(),
+                                Value::String("tool_result".to_string()),
+                            );
+                        }
+                        if obj.get("is_error").is_none() {
+                            obj.insert("is_error".to_string(), Value::Bool(false));
+                        }
+                        if obj.get("id").is_none() {
+                            obj.insert("id".to_string(), Value::String(id.clone()));
+                        }
+                    }
+                    final_values[pos] = r;
+                }
+            }
+        }
+    }
+
+    final_values
 }
 
 // ---------------------------------------------------------------------------
@@ -1736,6 +1836,31 @@ fn fire_overflow_resolve(
         .unwrap_or_else(|| hooks::window_default(Window::OverflowResolve).to_string());
     log_hook_window(cfg, session, "overflow.resolve", &decision, &results);
     decision
+}
+
+/// The 1-based seq of the last `user_message` in the session log, 0
+/// when the log is absent or holds no user message. The count follows
+/// the claim convention: every non-empty line owns a seq, including
+/// lines that fail to parse (docs/tui-pending-user-messages.md P7).
+fn last_user_message_seq(session_dir: &Path) -> usize {
+    let Ok(data) = std::fs::read_to_string(session_dir.join("events.jsonl")) else {
+        return 0;
+    };
+    let mut last = 0usize;
+    let mut seq = 0usize;
+    for line in data.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        seq += 1;
+        if let Ok(v) = serde_json::from_str::<Value>(line) {
+            if v.get("type").and_then(|t| t.as_str()) == Some("user_message") {
+                last = seq;
+            }
+        }
+    }
+    last
 }
 
 /// Save the handoff document to `sessions/<n>/handoff/v<version>.md`.
