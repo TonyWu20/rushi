@@ -63,6 +63,10 @@ exts wiring.
 | `tool-log-design_from_human.md`                  | Active              | 2026-09-06   | Per-session tool log design: full output in `tools.jsonl`, slim index in the session log |
 | `itches.md`                                     | Active              | 2026-09-12   | Parked-itch log: open observations and promotion candidates (shared-crate extraction, validator unification, DRT ops). All current entries resolved |
 | `harness-vs-pi-model-latency.md`                 | Investigation       | 2026-09-02   | Model-latency comparison (harness vs pi) on the same sglang backend: prefix-cache hit rates, per-round-trip latencies, and recommendations |
+| `image-read-plan.md`                             | Superseded by `image-read-kiss.md` | 2026-09-10 | Original plan for image support in `tools/read`: return image files (PNG/JPEG/GIF/WebP/BMP) to the model as proper image content parts, not base64 text; kernel-side decode/resize/encode |
+| `image-read-evaluation.md`                       | Review              | 2026-09-10   | Evaluation of `image-read-plan.md` against every `crates/rushi/` module and `bin/` kernel member: data flow, per-component changes, and gaps the plan does not cover |
+| `image-read-pi-study.md`                         | Investigation      | 2026-09-10   | How pi 0.85.1 addresses each gap found in `image-read-plan.md`: EXIF orientation, storage, token budget, and image delivery in the Responses vs Chat-Completions wire forms |
+| `image-read-kiss.md`                             | Implemented         | 2026-09-10   | KISS decision: image reading as a kernel + extension split. Kernel: accept image tool results, the per-model `vision` flag, the Responses `input_image` / Chat-Completions `image_url` wire forms, the flat per-image token estimate, the `tool.after` `transform` decision, and the `hook_io` payload-builder helper for extensions. Extension: image detection/compression/re-encode. e2e in `scripts/tool-after-transform-e2e.sh` |
 
 Status legend:
 
