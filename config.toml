@@ -17,6 +17,7 @@
 # context_tokens = 131072
 # timeout_s = 3600
 # reasoning_effort = "medium"
+# vision = true   # send image tool results to the model (default false)
 
 [paths]
 # sessions_root = "sessions"

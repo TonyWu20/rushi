@@ -1,11 +1,3 @@
-# Opaque loop command the TUI supervises (docs/tui.md section 2.3).
-# The TUI never sees the internals of this command; it starts it,
-# streams its output, and stops it on request.
-[loop]
-command = "target/release/rushi"
-args = ["run"]
-arg_style = "append_session"
-
 [model]
 api = "responses"
 max_output_tokens = 32768
@@ -15,23 +7,12 @@ reasoning_effort = "xhigh"
 # `[model.<name>]` table overrides this global value.
 # model_timeout_s = 3600
 
-[model.deepseek]
-model_id = "deepseek-v4-flash"
-base_url = "https://api.deepseek.com"
-api_key_env = "DEEPSEEK_API_KEY"
-context_tokens = 131072
-
-[model."Qwen3.8-27B-NVFP4-DFlash2"]
-model_id = "Qwen3.8-27B-NVFP4"
-base_url = "http://127.0.0.1:30000"
-api_key_env = "LLAMA_API_KEY"
-context_tokens = 262144
-
 [model."Qwen3.8-27B-NVFP4-RTX5090-DFlash2"]
 model_id = "Qwen3.8-27B-NVFP4-RTX5090-DFlash2"
 base_url = "http://127.0.0.1:30000"
 api_key_env = "LLAMA_API_KEY"
 context_tokens = 262144
+vision = true
 
 [active]
 model = "Qwen3.8-27B-NVFP4-RTX5090-DFlash2"
@@ -45,7 +26,7 @@ tools_root = "tools"
 # (goal, goal_blocked, goal_complete) and the lean-verify tool.
 # route/parse/assemble scan these roots after tools_root; the primary
 # root wins a name collision. Tool binaries resolve on PATH from the exts build.
-extra_tools_roots = ["../rushi-exts/goal-app/goal-tools/", "../rushi-exts/lean-verify/"]
+extra_tools_roots = ["../rushi-exts/goal-app/goal-tools/"]
 
 # extra_tools_roots = ["../rushi-exts/goal-app/goal-tools", "../rushi-exts/lean-verify"]
 
@@ -112,6 +93,11 @@ window = "model.before"
 command = "../rushi-exts/goal-app/goal-hooks/hook-goal-arm/target/release/harness-hook-goal-arm"
 args = []
 
+[[hooks.on]]
+window = "tool.before"
+command = "../rushi-exts/no-find-grep/target/release/harness-hook-no-find-grep"
+args = []
+
 [system_prompt]
 # Borrowed from the pi coding agent default prompt.
 # Adapted to this harness's tool set and task discipline.
@@ -122,25 +108,50 @@ text = """You are an expert coding assistant in `rushi`, a Unix agent harness.
 You help the user by reading files, running commands, editing code,
 and writing new files.
 
+Codebase is the truth. @docs/ is the place for context documents, but they might be stale.
+Always confirm any claim against the code and written docs.
+
 Guidelines:
 - Plan first. Split the task into steps before you code.
-- Complete the steps until the task is done.
+- Never silently decide anything on your own. Report and brief to the users what you find needs consideration and decisions.
+- Actively bookkeeping user's decisions during the session to the local repo. Looks for where the documents are saved. If there is none, ask for user's opinion on creating one.
 - Build and test after changes. Run the commands that prove the change.
-- Do not stop with the work unfinished. State what remains and why.
 - Prefer read, edit, and write over bash for file work.
 - Use read to examine files instead of cat or sed.
 - Use offset and limit to continue reading large files.
-- Keep replies short. Show file paths clearly in your replies."""
+- Keep replies short. Show file paths clearly in your replies.
+- Report to user by straight plain statement of what is done, how it matches
+  the design spec, what behavior does your test expect.
+"""
 
-[tui]
+# ─── TUI-only sections (the harness does not read these) ──────────
+
+# The opaque loop command the TUI spawns for each session
+# (docs/tui.md section 2.3). `rushi run <session>` is the kernel's
+# turn loop runner, resolved on PATH.
+[loop]
+command = "target/release/rushi"
+args = ["run"]
+arg_style = "append_session"
+
 # Where the launcher finds the TUI binary (relative to this config file).
-binary = "../rushi-tui/target/release/tui"
-# Global UI-extension layer directories (docs/ui-extension.md section 3).
-# Later entries override earlier ones by extension name.
-ext_dirs = ["../rushi-exts/ui_extensions/"]
+# Global UI-extension layer directories: later entries override earlier
+# ones by extension name; an empty/absent list falls back to
+# <config-dir>/ui_extensions (docs/ui-extension.md section 3).
+[tui]
+binary = "../rushi-tui-ratatui-widget-based/target/release/tui"
+clipboard = "unnamed"
+ext_dirs = [
+  "../rushi-exts/ext-rs/statusline-rs/",
+  "../rushi-exts/ext-rs/notify-rs/",
+  "../rushi-exts/goal-app/goal-ext/",
+]
 
 [tui.tool_display]
 preset = "opencode"
-preview_lines = 8
+# preview_lines = 8
 bash_collapsed_lines = 5
-diff_collapsed_lines = 24
+highlight_engine = "tree-sitter" # real syntax colors behind the diff/preview
+expand_mode = "click" # focus-nearest auto-expand w/ smooth animation
+anim_ms = 400 # transition + fade-in duration
+diff_collapsed_lines = 12
