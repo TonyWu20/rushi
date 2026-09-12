@@ -137,11 +137,13 @@ raw log: the compaction re-arm compares "have we seen a newer user
 message than the failed marker", which the raw count answers.
 
 **I6. The projection''s side channels must follow the mask.**
-`drop_pairs` (FT-008 self-priming), `drop_last_assistant_group`
-(overflow retry), and `estimate_request_tokens` (the budget gate)
-all consumed the pre-mask region. A masked pair must be out of the
-drop set (it is out of the context); the last assistant group is
-the last group of the masked context; the estimate is the masked
+`drop_last_assistant_group` (overflow retry) and
+`estimate_request_tokens` (the budget gate) consume the pre-mask
+region. (The `drop_pairs` side channel of FT-008 self-priming was
+removed in correction 64 — no tool result is dropped from the
+model request — so it no longer follows the mask.) The last
+assistant group is the last group of the masked context; the
+estimate is the masked
 context. All three now take the masked lists.
 
 **I7. The `usage_input` anchor stays valid.**

@@ -254,10 +254,12 @@ full tool result body moves to the per-session tool log
 (`tools.jsonl`). The event log keeps the slim index with `bytes`,
 the `tool_log` pointer, and a head/tail preview. `assemble`
 resolves the body from the log, with the legacy fallback to the
-index text. The compact pass drops the old schema-error pairs
-outside the keep window, which kills the self-priming amplifier.
-Correction 60 extends the drop to the keep window and the full
-pass: every schema-error pair goes out of the model request. The
+index text. The compact pass dropped the old schema-error pairs
+outside the keep window, which killed the self-priming amplifier.
+Correction 60 extended the drop to the keep window and the full
+pass: every schema-error pair went out of the model request.
+(Correction 64 reversed it: no tool result, failure included, is
+hidden from the model — the drop mechanism was removed.) The
 TUI writes its own trace log (`tui-trace.jsonl`). The
 range-read line is back in the system prompt. The statusline
 matches the reference metrics.
@@ -265,9 +267,9 @@ matches the reference metrics.
 - [x] Implement `docs/tool-log-design_from_human.md`. Move tool
   result bodies out of `events.jsonl` into a per-session tool
   log. This also removes the old schema-error pairs from the
-  history. Correction 60 removes every schema-error pair from the
-  model request, keep window included. That kills the
-  self-priming amplifier.
+  history. Correction 60 removed every schema-error pair from the
+  model request, keep window included. (Correction 64 reversed it:
+  the pair drop is gone; failures reach the model.)
 - [x] Restore the range-read line in `[system_prompt]`: "Use
   offset and limit to continue reading large files."
 - [x] Finish or descope the TUI statusline extension. Its token
