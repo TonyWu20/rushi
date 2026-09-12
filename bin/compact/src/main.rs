@@ -47,11 +47,6 @@ struct Args {
     /// feature is disabled: the last-resort path.
     #[arg(long)]
     force: bool,
-    /// The event schema directory. The default is the sibling of the
-    // running binary's repo checkout: the e2e runs the loop from a
-    // work directory, where the repo-relative default does not exist.
-    #[arg(long)]
-    schemas: Option<PathBuf>,
     /// The path of the assemble binary (the sibling by default).
     #[arg(long)]
     assemble: Option<PathBuf>,
@@ -275,15 +270,12 @@ fn ts_now() -> String {
 fn append_event(
     log_bin: &Path,
     session: &Path,
-    schemas: &Path,
     event: &Value,
 ) -> Result<(), String> {
     let body = serde_json::to_string(event).map_err(|e| e.to_string())?;
     let mut child = Command::new(log_bin)
         .arg("--session")
         .arg(session)
-        .arg("--schemas")
-        .arg(schemas)
         .stdin(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("spawn log: {e}"))?
@@ -305,18 +297,6 @@ fn append_event(
 
 fn main() {
     let args = Args::parse();
-    // The schema directory: the explicit flag, then the repo layout
-    // next to the running binary (target/debug/../../schemas), then
-    // the repo-relative default for a checkout-local run.
-    let schemas_dir: PathBuf = match &args.schemas {
-        Some(p) => p.clone(),
-        None => std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("..").join("..").join("schemas").join("events").join("v1")))
-            .filter(|p| p.exists())
-            .unwrap_or_else(|| PathBuf::from("schemas/events/v1")),
-    };
-
     // The cooldown and the trigger need the log. The force and the
     // overflow skip the trigger test but still read the log for the
     // boundary and the cut.
@@ -451,7 +431,6 @@ fn main() {
             let _ = predicted;
             run_compaction()
                 .args(&args)
-                .schemas_dir(&schemas_dir)
                 .kept_events(&kept_events)
                 .boundary(&boundary)
                 .tokens_before(last_measurement)
@@ -469,7 +448,6 @@ fn main() {
 #[builder]
 fn run_compaction(
     args: &Args,
-    schemas_dir: &Path,
     kept_events: &[LogEvent],
     boundary: &Option<Boundary>,
     tokens_before: u64,
@@ -535,7 +513,7 @@ fn run_compaction(
         "tokens_before": tokens_before,
     });
     let log_bin = resolve_bin(&args.log, "LOG_BIN", "log");
-    if let Err(e) = append_event(&log_bin, &args.session, schemas_dir, &started) {
+    if let Err(e) = append_event(&log_bin, &args.session, &started) {
         eprintln!("compact: append compaction_started failed: {e}");
     }
 
@@ -555,12 +533,11 @@ fn run_compaction(
         cmd.arg("--drop-last-assistant");
     }
     let out = cmd.output().unwrap_or_else(|e| {
-        fail_and_exit(args, schemas_dir, overflow, last_user_seq, "the assemble call failed", &e.to_string());
+        fail_and_exit(args, overflow, last_user_seq, "the assemble call failed", &e.to_string());
     });
     if !out.status.success() {
         fail_and_exit(
             args,
-            schemas_dir,
             overflow,
             last_user_seq,
             "the assemble call failed",
@@ -571,7 +548,6 @@ fn run_compaction(
         Ok(v) => v,
         Err(e) => fail_and_exit(
             args,
-            schemas_dir,
             overflow,
             last_user_seq,
             "the assemble output is not a request",
@@ -659,7 +635,7 @@ fn run_compaction(
 
     let summary = match summary {
         Some(s) => s,
-        None => fail_and_exit(args, schemas_dir, overflow, last_user_seq, "both summary attempts failed", &last_err),
+        None => fail_and_exit(args, overflow, last_user_seq, "both summary attempts failed", &last_err),
     };
 
     // The file ops: merge with the previous boundary's lists, not
@@ -697,7 +673,6 @@ fn run_compaction(
     if first_kept_seq < 1 {
         fail_and_exit(
             args,
-            schemas_dir,
             overflow,
             last_user_seq,
             "the first_kept_seq is below 1",
@@ -729,7 +704,7 @@ fn run_compaction(
     if let Some(u) = summary_usage {
         done["usage"] = u;
     }
-    if let Err(e) = append_event(&log_bin, &args.session, schemas_dir, &done) {
+    if let Err(e) = append_event(&log_bin, &args.session, &done) {
         eprintln!("compact: append compaction_summary failed: {e}");
     }
 
@@ -753,7 +728,6 @@ fn run_compaction(
 /// anchors the cooldown of the next threshold trigger.
 fn fail_and_exit(
     args: &Args,
-    schemas_dir: &Path,
     overflow: bool,
     last_user_seq: usize,
     short: &str,
@@ -770,7 +744,7 @@ fn fail_and_exit(
         "detail": detail,
     });
     let log_bin = resolve_bin(&args.log, "LOG_BIN", "log");
-    if let Err(e) = append_event(&log_bin, &args.session, schemas_dir, &failed) {
+    if let Err(e) = append_event(&log_bin, &args.session, &failed) {
         eprintln!("compact: append compaction_failed failed: {e}");
     }
     eprintln!("compact: {short}: {detail}");

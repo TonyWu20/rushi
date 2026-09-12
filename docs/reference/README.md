@@ -98,6 +98,18 @@ All events share: `v` (schema version, currently `1`), `ts` (ISO-8601
 timestamp), `seq` (monotonically increasing sequence number assigned by
 the log stage).
 
+### Typed events
+
+The kernel also defines a typed vocabulary in
+`crates/rushi/src/event.rs` (`rushi-common`). An `Event` enum,
+internally tagged on `type`, has one struct per event type.
+`parse_event(line)` deserializes a JSONL line into an `Event`
+with `serde`.
+
+The JSON schema files remain the external contract. The kernel's
+own validation uses the typed enum. A log's `seq` field is
+assigned by the log stage and is ignored by the typed enum.
+
 ### Rewind / Fork
 
 A `rewind` event records a branch point. The active-path computation

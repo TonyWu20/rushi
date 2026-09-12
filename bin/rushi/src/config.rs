@@ -28,8 +28,6 @@ pub struct HarnessConfig {
     /// primary root wins a name collision. Relative entries resolve
     /// against the stage CWD (the config dir).
     pub extra_tools_roots: Vec<PathBuf>,
-    /// Directory containing event schemas.
-    pub schemas_dir: PathBuf,
 
     // -- model resolution --
     /// The active model section name (e.g. "deepseek", "Qwen3.8-27B-...").
@@ -125,9 +123,6 @@ impl HarnessConfig {
                     .collect()
             })
             .unwrap_or_default();
-
-        // Schemas directory: sibling of the config file
-        let schemas_dir = config_dir.join("schemas/events/v1");
 
         // Active model (config-only resolution; the kernel is the
         // source of truth — stage binaries use resolve_active_model
@@ -235,7 +230,6 @@ impl HarnessConfig {
             sessions_root,
             tools_root,
             extra_tools_roots,
-            schemas_dir,
             active_model,
             model_id,
             max_output_tokens,

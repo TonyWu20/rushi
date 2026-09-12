@@ -53,7 +53,6 @@ pub fn cancel_live_child() {
 /// The default `StageRunner` that spawns each stage as a subprocess.
 pub struct SubprocessRunner {
     config_path: PathBuf,
-    schemas_dir: PathBuf,
     model_bin: PathBuf,
     compact_bin: PathBuf,
     assemble_bin: PathBuf,
@@ -66,7 +65,6 @@ pub struct SubprocessRunner {
 #[builder]
 pub fn new_subprocess_runner(
     config_path: PathBuf,
-    schemas_dir: PathBuf,
     model_bin: PathBuf,
     compact_bin: PathBuf,
     assemble_bin: PathBuf,
@@ -76,7 +74,6 @@ pub fn new_subprocess_runner(
 ) -> SubprocessRunner {
     SubprocessRunner {
         config_path,
-        schemas_dir,
         model_bin,
         compact_bin,
         assemble_bin,
@@ -172,7 +169,6 @@ impl StageRunner for SubprocessRunner {
     fn claim(&self, session: &SessionDir) -> Result<Claim, StageError> {
         let mut cmd = Command::new(&self.claim_bin);
         cmd.arg("--session").arg(&session.path);
-        cmd.arg("--schemas").arg(&self.schemas_dir);
         let v = run_json(&mut cmd, "", "claim")?;
         Ok(Claim {
             state: v.get("state").and_then(|s| s.as_str()).unwrap_or("").to_string(),

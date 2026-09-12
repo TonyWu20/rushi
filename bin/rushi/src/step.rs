@@ -8,7 +8,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use rushi_common::compact_math::{self};
-use rushi_common::event_validation;
+use rushi_common::event;
 use rushi_common::hooks::{self, Window};
 use rushi_common::logline::LogLine;
 use rushi_common::stage::{
@@ -25,7 +25,6 @@ use crate::stage_runner::{new_subprocess_runner, SubprocessRunner};
 pub fn make_runner(cfg: &HarnessConfig) -> SubprocessRunner {
     new_subprocess_runner()
         .config_path(cfg.config_path.clone())
-        .schemas_dir(cfg.schemas_dir.clone())
         .model_bin(cfg.model_bin.clone())
         .compact_bin(cfg.compact_bin.clone())
         .assemble_bin(cfg.assemble_bin.clone())
@@ -192,16 +191,14 @@ fn read_last_model_thinking(session_dir: &Path) -> Option<u64> {
 // Appending helpers
 // ---------------------------------------------------------------------------
 
-/// Append one event through the shared `LogLine` and validator.
-pub fn append_event(cfg: &HarnessConfig, session_dir: &Path, event: &Value) {
+/// Append one event through the shared `LogLine` and the typed event
+/// validator (docs/typed-events.md).
+pub fn append_event(_cfg: &HarnessConfig, session_dir: &Path, event: &Value) {
     let json_line = serde_json::to_string(event).unwrap_or_else(|e| {
         eprintln!("rushi: cannot serialize event: {e}");
         std::process::exit(1);
     });
-    let schemas = event_validation::load_schemas(
-        cfg.schemas_dir.to_str().unwrap_or_default(),
-    );
-    if let Err(e) = event_validation::validate_value(event, &schemas) {
+    if let Err(e) = event::parse_event(&json_line) {
         eprintln!("rushi: event validation failed: {e}");
         std::process::exit(1);
     }
@@ -214,19 +211,12 @@ pub fn append_event(cfg: &HarnessConfig, session_dir: &Path, event: &Value) {
 }
 
 /// Append one already-serialized JSON line to the log.
-pub fn append_line(cfg: &HarnessConfig, session_dir: &Path, line: &str) {
+pub fn append_line(_cfg: &HarnessConfig, session_dir: &Path, line: &str) {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return;
     }
-    let schemas = event_validation::load_schemas(
-        cfg.schemas_dir.to_str().unwrap_or_default(),
-    );
-    let Ok(parsed) = serde_json::from_str::<Value>(trimmed) else {
-        eprintln!("rushi: log line is not valid JSON: {trimmed}");
-        std::process::exit(1);
-    };
-    if let Err(e) = event_validation::validate_value(&parsed, &schemas) {
+    if let Err(e) = event::parse_event(trimmed) {
         eprintln!("rushi: event validation failed: {e}");
         std::process::exit(1);
     }
@@ -788,13 +778,15 @@ fn try_compact_with_hooks(
             // failure path). Publish the failure so the session log shows
             // why the context stayed above the trigger.
             let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let detail = e.to_string();
             let event = serde_json::json!({
                 "v": 1,
                 "type": "ext_status",
                 "ts": ts,
                 "id": "compact.failed",
+                "value": detail,
                 "reason": reason.as_str(),
-                "detail": e.to_string(),
+                "detail": detail,
             });
             append_event(cfg, &session.path, &event);
             CompactStatus::noop()

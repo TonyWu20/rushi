@@ -2,7 +2,7 @@
 //!
 //! Modules:
 //! - `logline` — the one `LogLine` type (FT-005 atomic append).
-//! - `event_validation` — the one schema validator.
+//! - `event` — the typed event vocabulary (docs/typed-events.md).
 //! - `compact_math` — pure trigger math and cut walk.
 //! - `stage` — the `StageRunner` trait and payload types.
 //! - `hooks` — lifecycle-window dispatcher and decision types.
@@ -13,8 +13,8 @@
 //! - `model_settings` — shared model-section resolution and defaults
 //!   (docs/itches.md: the "hard copies" itch).
 
+pub mod event;
 pub mod logline;
-pub mod event_validation;
 pub mod compact_math;
 pub mod stage;
 pub mod hooks;

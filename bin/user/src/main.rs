@@ -1,7 +1,7 @@
 #![deny(clippy::todo, clippy::unimplemented, clippy::unreachable)]
 
 use clap::Parser;
-use rushi_common::event_validation;
+use rushi_common::event;
 use rushi_common::logline::LogLine;
 use std::fs;
 use std::io::{self, Read};
@@ -18,10 +18,6 @@ struct Args {
     /// Path to config file (used to resolve session names)
     #[arg(long, default_value = "config.toml")]
     config: String,
-
-    /// Path to schema directory (for validation)
-    #[arg(long, default_value = "schemas/events/v1")]
-    schemas: String,
 
     /// Do not run the agent loop after appending
     #[arg(long)]
@@ -81,13 +77,6 @@ fn main() {
         std::process::exit(1);
     }
 
-    // Validate the produced event against the schemas (G3).
-    let schemas = event_validation::load_schemas(&args.schemas);
-    if let Err(e) = event_validation::validate_value(&event, &schemas) {
-        eprintln!("Error: {e}");
-        std::process::exit(1);
-    }
-
     let session_dir = resolve_session_dir(&args.session, &args.config);
     let log_path = session_dir.join("events.jsonl");
 
@@ -112,6 +101,11 @@ fn main() {
     // One locked single-write append (FT-005). `LogLine` is the only
     // type that may write the session log.
     let line = serde_json::to_string(&event).unwrap();
+    // G3: the typed event validator (docs/typed-events.md).
+    if let Err(e) = event::parse_event(&line) {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    }
     if let Err(e) = LogLine::from_json(&line).commit(&log_path) {
         eprintln!("Error: cannot write to log: {e}");
         std::process::exit(1);

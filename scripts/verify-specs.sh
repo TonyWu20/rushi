@@ -31,6 +31,8 @@ IN_SCOPE=(
   "loop-lifecycle-hooks.md"
   "phase-2-plan.md"
   "skill-remapped-to-os-apps.md"
+  "subagent-design.md"
+  "typed-events.md"
 )
 
 check_doc() {

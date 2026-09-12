@@ -1,7 +1,7 @@
 #![deny(clippy::todo, clippy::unimplemented, clippy::unreachable)]
 
 use clap::Parser;
-use rushi_common::event_validation;
+use rushi_common::event;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
@@ -17,9 +17,6 @@ struct Args {
     #[arg(long)]
     session: String,
 
-    /// Path to schema directory
-    #[arg(long, default_value = "schemas/events/v1")]
-    schemas: String,
 }
 
 fn main() {
@@ -54,19 +51,11 @@ fn main() {
         }
     };
 
-    // The shared validator keeps the claim in step with the log
-    // vocabulary (docs/phase-2-plan.md section 6). When the schemas
-    // directory is absent (e.g. temp workdir in e2e tests), skip
-    // validation and rely on the structural state machine alone.
-    let schemas: Vec<(String, serde_json::Value)> = if std::path::Path::new(&args.schemas).is_dir() {
-        event_validation::load_schemas(&args.schemas)
-    } else {
-        eprintln!("claim: schemas dir not found at {}, skipping validation", args.schemas);
-        Vec::new()
-    };
-
+    // The typed event vocabulary is the validator
+    // (docs/typed-events.md). The claim derives the owed state from
+    // the structural state machine over the log lines.
     let (state, last_user_message_seq, pending_tool_calls, pending_follow_ups) =
-        derive_state(&lines, &schemas);
+        derive_state(&lines);
 
     let session_name = PathBuf::from(&args.session)
         .file_name()
@@ -125,7 +114,6 @@ fn main() {
 /// that case.
 fn derive_state(
     lines: &str,
-    schemas: &[(String, serde_json::Value)],
 ) -> (String, usize, Vec<serde_json::Value>, Vec<usize>) {
     let mut last_user_message_seq: usize = 0;
     let mut state = "idle".to_string();
@@ -153,9 +141,10 @@ fn derive_state(
             Ok(v) => v,
             Err(_) => continue,
         };
-        // The shared validator skips events outside the schema
-        // vocabulary (docs/phase-2-plan.md section 6).
-        if event_validation::validate_value(&event, schemas).is_err() {
+        // The typed event vocabulary is the validator
+        // (docs/typed-events.md): a line that does not parse into a
+        // known `Event` type owes no state.
+        if event::parse_event(line).is_err() {
             continue;
         }
 
@@ -351,18 +340,9 @@ mod tests {
         v.to_string()
     }
 
-    /// The shared schema set, loaded the same way the binary loads
-    /// it at runtime. The tests run from the crate dir; the schemas
-    /// live at the workspace root.
-    fn schemas() -> Vec<(String, serde_json::Value)> {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../schemas/events/v1");
-        event_validation::load_schemas(dir.to_str().expect("schema dir path"))
-    }
-
     #[test]
     fn empty_log_is_idle() {
-        let (state, seq, pending, follows) = derive_state("", &schemas());
+        let (state, seq, pending, follows) = derive_state("");
         assert_eq!(state, "idle");
         assert_eq!(seq, 0);
         assert!(pending.is_empty());
@@ -372,7 +352,7 @@ mod tests {
     #[test]
     fn user_message_awaits_model() {
         let log = line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"go"}));
-        let (state, seq, _, _) = derive_state(&log, &schemas());
+        let (state, seq, _, _) = derive_state(&log);
         assert_eq!(state, "awaiting_model");
         assert_eq!(seq, 1);
     }
@@ -386,7 +366,7 @@ mod tests {
                 &serde_json::json!({"v":1,"type":"context_exhausted","ts":"t","message":"m","new_session":"s1_h1","summary_request":{}})
             )
         );
-        let (state, _, pending, _) = derive_state(&log, &schemas());
+        let (state, _, pending, _) = derive_state(&log);
         assert_eq!(state, "exhausted");
         assert!(pending.is_empty());
     }
@@ -405,7 +385,7 @@ mod tests {
                 &serde_json::json!({"v":1,"type":"context_exhausted","ts":"t","message":"m","new_session":"s1_h2"})
             )
         );
-        let (state, seq, _, _) = derive_state(&log, &schemas());
+        let (state, seq, _, _) = derive_state(&log);
         assert_eq!(state, "exhausted");
         assert_eq!(seq, 2);
     }
@@ -426,7 +406,7 @@ mod tests {
                 line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"go"})),
                 m
             );
-            let (state, seq, pending, _) = derive_state(&log, &schemas());
+            let (state, seq, pending, _) = derive_state(&log);
             assert_eq!(state, "awaiting_model", "{m}");
             assert_eq!(seq, 1, "the marker adds no user message");
             assert!(pending.is_empty());
@@ -448,7 +428,7 @@ mod tests {
             r#"{"v":1,"type":"compaction_summary","ts":"t","summary":"s","first_kept_seq":2,"reason":"overflow","tokens_before":212000}"#,
         ] {
             let log = format!("{}\n{}", done, m);
-            let (state, _, pending, _) = derive_state(&log, &schemas());
+            let (state, _, pending, _) = derive_state(&log);
             assert_eq!(state, "idle", "{m}");
             assert!(pending.is_empty());
         }
@@ -467,7 +447,7 @@ mod tests {
                 &serde_json::json!({"v":1,"type":"context_exhausted","ts":"t","message":"m","new_session":""})
             )
         );
-        let (state, _, _, _) = derive_state(&log, &schemas());
+        let (state, _, _, _) = derive_state(&log);
         assert_eq!(state, "exhausted");
     }
 
@@ -479,7 +459,7 @@ mod tests {
     #[test]
     fn follow_message_keeps_idle_and_counts() {
         let log = line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"later","queue":"follow"}));
-        let (state, seq, pending, follows) = derive_state(&log, &schemas());
+        let (state, seq, pending, follows) = derive_state(&log);
         assert_eq!(state, "idle", "follow wakes no work");
         assert_eq!(seq, 1);
         assert!(pending.is_empty());
@@ -491,7 +471,7 @@ mod tests {
     #[test]
     fn steer_message_wakes_the_model() {
         let log = line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"now"}));
-        let (state, _, pending, follows) = derive_state(&log, &schemas());
+        let (state, _, pending, follows) = derive_state(&log);
         assert_eq!(state, "awaiting_model");
         assert!(pending.is_empty());
         assert!(follows.is_empty());
@@ -501,7 +481,7 @@ mod tests {
     #[test]
     fn explicit_steer_wakes_the_model() {
         let log = line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"now","queue":"steer"}));
-        let (state, _, _, follows) = derive_state(&log, &schemas());
+        let (state, _, _, follows) = derive_state(&log);
         assert_eq!(state, "awaiting_model");
         assert!(follows.is_empty());
     }
@@ -516,7 +496,7 @@ mod tests {
             line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"later","queue":"follow"})),
             line(&serde_json::json!({"v":1,"type":"assistant_message","ts":"t","content":"done","tool_calls":[],"stop_reason":"stop"}))
         );
-        let (state, _, _, follows) = derive_state(&log, &schemas());
+        let (state, _, _, follows) = derive_state(&log);
         assert_eq!(state, "idle");
         assert!(follows.is_empty(), "the boundary consumed the follow-up");
     }
@@ -530,7 +510,7 @@ mod tests {
             line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"later","queue":"follow"})),
             line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"now"}))
         );
-        let (state, _, _, follows) = derive_state(&log, &schemas());
+        let (state, _, _, follows) = derive_state(&log);
         assert_eq!(state, "awaiting_model");
         assert_eq!(follows, vec![1]);
     }
@@ -599,7 +579,7 @@ mod tests {
             tool_call(),
             approval_request("a1")
         );
-        let (state, seq, pending, _) = derive_state(&log, &schemas());
+        let (state, seq, pending, _) = derive_state(&log);
         assert_eq!(state, "awaiting_approval");
         assert_eq!(seq, 1);
         assert!(
@@ -620,7 +600,7 @@ mod tests {
             approval_request("a1"),
             approval("a1", "allow")
         );
-        let (state, _, _, _) = derive_state(&log, &schemas());
+        let (state, _, _, _) = derive_state(&log);
         assert_eq!(state, "awaiting_model");
     }
 
@@ -633,7 +613,7 @@ mod tests {
             approval_request("a1"),
             approval("a1", "deny")
         );
-        let (state, _, _, _) = derive_state(&log, &schemas());
+        let (state, _, _, _) = derive_state(&log);
         assert_eq!(state, "awaiting_model");
     }
 
@@ -646,7 +626,7 @@ mod tests {
             approval_request("a1"),
             approval("a2", "allow")
         );
-        let (state, _, _, _) = derive_state(&log, &schemas());
+        let (state, _, _, _) = derive_state(&log);
         assert_eq!(state, "awaiting_approval");
     }
 
@@ -661,7 +641,7 @@ mod tests {
             approval("a1", "allow"),
             approval_request("a2")
         );
-        let (state, _, _, _) = derive_state(&log, &schemas());
+        let (state, _, _, _) = derive_state(&log);
         assert_eq!(state, "awaiting_approval");
     }
 
@@ -674,7 +654,7 @@ mod tests {
             approval_request("a1"),
             error_event()
         );
-        let (state, _, _, _) = derive_state(&log, &schemas());
+        let (state, _, _, _) = derive_state(&log);
         assert_eq!(state, "idle");
     }
 
@@ -687,7 +667,7 @@ mod tests {
             approval_request("a1"),
             context_exhausted()
         );
-        let (state, _, _, _) = derive_state(&log, &schemas());
+        let (state, _, _, _) = derive_state(&log);
         assert_eq!(state, "exhausted");
     }
 
@@ -695,7 +675,7 @@ mod tests {
     #[test]
     fn request_after_terminal_event_awaits_approval() {
         let log = format!("{}\n{}", error_event(), approval_request("a1"));
-        let (state, _, _, _) = derive_state(&log, &schemas());
+        let (state, _, _, _) = derive_state(&log);
         assert_eq!(state, "awaiting_approval");
     }
 
@@ -710,7 +690,7 @@ mod tests {
             approval_request("a1"),
             tool_result()
         );
-        let (state, _, _, _) = derive_state(&log, &schemas());
+        let (state, _, _, _) = derive_state(&log);
         assert_eq!(state, "awaiting_approval");
     }
 
@@ -724,7 +704,7 @@ mod tests {
             r#"{"v":1,"type":"future_marker","ts":"t"}"#,
             approval_request("a1")
         );
-        let (state, seq, _, _) = derive_state(&log, &schemas());
+        let (state, seq, _, _) = derive_state(&log);
         assert_eq!(state, "awaiting_approval");
         assert_eq!(seq, 1, "the last user message still counts");
     }
@@ -749,7 +729,7 @@ mod tests {
             rewind(1, "before"),
         ]
         .join("\n");
-        let (state, seq, pending, follows) = derive_state(&log, &schemas());
+        let (state, seq, pending, follows) = derive_state(&log);
         assert_eq!(state, "idle");
         assert_eq!(seq, 1, "the last user message still counts");
         assert!(
@@ -771,7 +751,7 @@ mod tests {
             rewind(4, "on"),
         ]
         .join("\n");
-        let (state, _, pending, _) = derive_state(&log, &schemas());
+        let (state, _, pending, _) = derive_state(&log);
         assert_eq!(state, "awaiting_model", "the finished step owes its model call");
         assert!(pending.is_empty());
     }
@@ -790,7 +770,7 @@ mod tests {
             rewind(4, "before"),
         ]
         .join("\n");
-        let (state, _, pending, _) = derive_state(&log, &schemas());
+        let (state, _, pending, _) = derive_state(&log);
         assert_eq!(state, "idle");
         assert!(pending.is_empty());
     }
@@ -804,7 +784,7 @@ mod tests {
             &serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"later","queue":"follow"}),
         );
         let log = format!("{follow}\n{}", rewind(1, "before"));
-        let (state, _, _, follows) = derive_state(&log, &schemas());
+        let (state, _, _, follows) = derive_state(&log);
         assert_eq!(state, "idle");
         assert!(follows.is_empty(), "the masked follow-up is dropped");
     }
@@ -820,7 +800,7 @@ mod tests {
             rewind(1, "before"),
         ]
         .join("\n");
-        let (state, _, pending, _) = derive_state(&log, &schemas());
+        let (state, _, pending, _) = derive_state(&log);
         assert_eq!(state, "idle", "the masked wait owes nothing");
         assert!(pending.is_empty());
     }
@@ -837,7 +817,7 @@ mod tests {
             user_msg(),
         ]
         .join("\n");
-        let (state, seq, _, _) = derive_state(&log, &schemas());
+        let (state, seq, _, _) = derive_state(&log);
         assert_eq!(state, "awaiting_model");
         assert_eq!(seq, 5, "the new-branch message counts");
     }
@@ -863,7 +843,7 @@ mod tests {
             assistant_no_call(),             // seq 4: that call's turn boundary
         ]
         .join("\n");
-        let (state, _, pending, follows) = derive_state(&log, &schemas());
+        let (state, _, pending, follows) = derive_state(&log);
         assert_eq!(state, "awaiting_model", "undelivered steer stays owed");
         assert!(pending.is_empty());
         assert!(follows.is_empty());
@@ -879,7 +859,7 @@ mod tests {
             assistant_no_call(),
         ]
         .join("\n");
-        let (state, _, pending, _) = derive_state(&log, &schemas());
+        let (state, _, pending, _) = derive_state(&log);
         assert_eq!(state, "idle", "nothing owed after a fully delivered turn");
         assert!(pending.is_empty());
     }
@@ -894,7 +874,7 @@ mod tests {
             assistant_no_call(),
         ]
         .join("\n");
-        let (state, _, _, _) = derive_state(&log, &schemas());
+        let (state, _, _, _) = derive_state(&log);
         assert_eq!(state, "idle");
     }
 
@@ -911,7 +891,7 @@ mod tests {
             assistant_no_call(),
         ]
         .join("\n");
-        let (state, _, _, follows) = derive_state(&log, &schemas());
+        let (state, _, _, follows) = derive_state(&log);
         assert_eq!(state, "idle", "follow messages never force awaiting_model");
         assert!(follows.is_empty(), "the turn boundary consumed the follow");
     }
@@ -928,7 +908,7 @@ mod tests {
             assistant_no_call(),
         ]
         .join("\n");
-        let (state, _, _, _) = derive_state(&log, &schemas());
+        let (state, _, _, _) = derive_state(&log);
         assert_eq!(state, "idle", "masked steer owes nothing after the fork");
     }
 
@@ -946,7 +926,7 @@ mod tests {
             assistant_no_call(),
         ]
         .join("\n");
-        let (state, _, _, follows) = derive_state(&log, &schemas());
+        let (state, _, _, follows) = derive_state(&log);
         assert_eq!(state, "awaiting_model", "undelivered steer still owed");
         assert!(follows.is_empty(), "the turn boundary consumed the follow");
     }

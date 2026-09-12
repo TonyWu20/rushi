@@ -75,6 +75,8 @@ exts wiring.
 | `image-read-evaluation.md`                       | Review              | 2026-09-10   | Evaluation of `image-read-plan.md` against every `crates/rushi/` module and `bin/` kernel member: data flow, per-component changes, and gaps the plan does not cover |
 | `image-read-pi-study.md`                         | Investigation      | 2026-09-10   | How pi 0.85.1 addresses each gap found in `image-read-plan.md`: EXIF orientation, storage, token budget, and image delivery in the Responses vs Chat-Completions wire forms |
 | `image-read-kiss.md`                             | Implemented         | 2026-09-10   | KISS decision: image reading as a kernel + extension split. Kernel: accept image tool results, the per-model `vision` flag, the Responses `input_image` / Chat-Completions `image_url` wire forms, the flat per-image token estimate, the `tool.after` `transform` decision, and the `hook_io` payload-builder helper for extensions. Extension: image detection/compression/re-encode. e2e in `scripts/tool-after-transform-e2e.sh` |
+| `subagent-design.md`                              | Spec, not yet built | 2026-09-14   | Subagent mode: `spawn_agent` tool + `config_gen` generator + `tools_roots` list. Blocking v1, depth via tool availability, headless child. D9 typed event vocabulary. Properties P1-P8 |
+| `typed-events.md`                                   | Implemented       | 2026-09-14   | Typed event vocabulary in `rushi-common`: the `Event` enum and per-type structs replace runtime JSON-Schema validation with `serde` (de)serialization. `parse_event` is the single validation step. No `schemas_dir`. Properties P1-P6 |
 
 Status legend:
 

@@ -29,7 +29,6 @@ cd "$ROOT"
 LOG_BIN="$BIN_DIR/log"
 CLAIM_BIN="$BIN_DIR/claim"
 ASSEMBLE_BIN="$BIN_DIR/assemble"
-SCHEMAS="$ROOT/schemas/events/v1"
 CONFIG="$ROOT/config.toml"
 
 PASS=0
@@ -74,7 +73,7 @@ cat > "$WORK/inA.jsonl" <<'EOF'
 {"v":1,"type":"user_message","ts":"t","content":"task"}
 {"v":1,"type":"rewind","ts":"t","target_seq":1,"mode":"before","reason":"tui_pick"}
 EOF
-if "$LOG_BIN" --session "$WORK/sA" --schemas "$SCHEMAS" < "$WORK/inA.jsonl"; then
+if "$LOG_BIN" --session "$WORK/sA" < "$WORK/inA.jsonl"; then
   ok "A: log accepts the valid rewind marker"
 else
   ko "A: log rejected the valid rewind marker"
@@ -88,14 +87,14 @@ fi
 
 # The shape guards: a missing required `mode` is rejected.
 if printf '%s\n' '{"v":1,"type":"rewind","ts":"t","target_seq":1}' |
-  "$LOG_BIN" --session "$WORK/sA" --schemas "$SCHEMAS" 2>/dev/null; then
+  "$LOG_BIN" --session "$WORK/sA" 2>/dev/null; then
   ko "A: the mode-less marker must be rejected"
 else
   ok "A: the mode-less marker is rejected"
 fi
 # A non-integer target_seq is rejected.
 if printf '%s\n' '{"v":1,"type":"rewind","ts":"t","target_seq":"one","mode":"on"}' |
-  "$LOG_BIN" --session "$WORK/sA" --schemas "$SCHEMAS" 2>/dev/null; then
+  "$LOG_BIN" --session "$WORK/sA" 2>/dev/null; then
   ko "A: the string target_seq must be rejected"
 else
   ok "A: the string target_seq is rejected"
@@ -107,7 +106,7 @@ printf '%s\n' '{"v":1,"type":"user_message","ts":"t","content":"task"}' > "$WORK
 SIZE_BEFORE=$(wc -c < "$WORK/sP7/events.jsonl")
 HASH_BEFORE=$(sha256sum "$WORK/sP7/events.jsonl" | cut -d' ' -f1)
 printf '%s\n' '{"v":1,"type":"rewind","ts":"t","target_seq":1,"mode":"before"}' |
-  "$LOG_BIN" --session "$WORK/sP7" --schemas "$SCHEMAS" || ko "P7: the append failed"
+  "$LOG_BIN" --session "$WORK/sP7" || ko "P7: the append failed"
 HASH_PREFIX=$(head -c "$SIZE_BEFORE" "$WORK/sP7/events.jsonl" | sha256sum | cut -d' ' -f1)
 if [ "$HASH_PREFIX" = "$HASH_BEFORE" ]; then
   ok "P7: the prefix bytes are untouched by the append"
@@ -135,7 +134,7 @@ cat > "$WORK/sB/events.jsonl" <<'EOF'
 {"v":1,"type":"assistant_message","ts":"t","content":"","tool_calls":[{"id":"ca3","name":"bash","arguments":{"command":"a3"}}],"stop_reason":"tool_calls"}
 {"v":1,"type":"tool_result","ts":"t","id":"ca3","value":{"text":"A' done"},"is_error":false}
 EOF
-CLAIM_B=$("$CLAIM_BIN" --session "$WORK/sB" --schemas "$SCHEMAS")
+CLAIM_B=$("$CLAIM_BIN" --session "$WORK/sB")
 if grep -q '"state":"awaiting_model"' <<<"$CLAIM_B"; then
   ok "B: claim owes the model call on the finished A' step"
 else
@@ -159,7 +158,7 @@ fi
 cat >> "$WORK/sB/events.jsonl" <<'EOF'
 {"v":1,"type":"rewind","ts":"t","target_seq":6,"mode":"on"}
 EOF
-CLAIM_C=$("$CLAIM_BIN" --session "$WORK/sB" --schemas "$SCHEMAS")
+CLAIM_C=$("$CLAIM_BIN" --session "$WORK/sB")
 if grep -q '"state":"awaiting_model"' <<<"$CLAIM_C"; then
   ok "C: claim owes the model call on the finished B step"
 else
@@ -186,7 +185,7 @@ cat >> "$WORK/sB/events.jsonl" <<'EOF'
 {"v":1,"type":"rewind","ts":"t","target_seq":6,"mode":"on"}
 {"v":1,"type":"rewind","ts":"t","target_seq":12,"mode":"on"}
 EOF
-CLAIM_F=$("$CLAIM_BIN" --session "$WORK/sB" --schemas "$SCHEMAS")
+CLAIM_F=$("$CLAIM_BIN" --session "$WORK/sB")
 if grep -q '"state":"awaiting_model"' <<<"$CLAIM_F"; then
   ok "F: claim owes the model call on the finished A' step"
 else
@@ -251,7 +250,7 @@ cat > "$WORK/sE/events.jsonl" <<'EOF'
 {"v":1,"type":"tool_result","ts":"t","id":"c1","value":{"text":"R1 result"},"is_error":false}
 {"v":1,"type":"rewind","ts":"t","target_seq":3,"mode":"before"}
 EOF
-CLAIM_E=$("$CLAIM_BIN" --session "$WORK/sE" --schemas "$SCHEMAS")
+CLAIM_E=$("$CLAIM_BIN" --session "$WORK/sE")
 if grep -q '"state":"idle"' <<<"$CLAIM_E"; then
   ok "E: the before-mode rewind settles the session"
 else
