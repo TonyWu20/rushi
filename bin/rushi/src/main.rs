@@ -5,6 +5,7 @@
 //! - `rushi setup [--locked]` — initialize a project from `rushi.toml`
 //! - `rushi run SESSION` — the full turn loop (internal, TUI-supervised)
 //! - `rushi step SESSION` — one step (internal, TUI-supervised)
+//! - `rushi docs [SECTION]` — print the embedded harness reference
 //!
 //! The loop stages (`claim`, `assemble`, `model`, `parse`, `route`,
 //! `compact`) are spawned as separate binaries. The TUI is a separate
@@ -12,6 +13,7 @@
 
 mod classifier;
 mod config;
+mod docs;
 mod run_loop;
 mod signals;
 mod stage_runner;
@@ -59,6 +61,20 @@ enum Command {
     Step {
         /// Session name or directory
         session: String,
+    },
+    /// Print the embedded harness reference document.
+    ///
+    /// With no argument, prints the full document.
+    /// With a section number or title substring, prints only that
+    /// section. Run `rushi docs --list` to list all sections.
+    Docs {
+        /// Section number or title substring (case-insensitive).
+        /// Omit to print the full document.
+        section: Option<String>,
+
+        /// List all section headings without printing content.
+        #[arg(long)]
+        list: bool,
     },
 }
 
@@ -112,6 +128,14 @@ fn main() {
             let session_dir = cfg.resolve_session(&session);
             signals::install();
             step::do_step(&cfg, &session_dir, step::StepMode::Step);
+        }
+
+        Command::Docs { section, list } => {
+            if list {
+                docs::list_sections();
+            } else {
+                docs::print_docs(section.as_deref());
+            }
         }
     }
 }
