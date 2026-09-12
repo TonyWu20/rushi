@@ -56,6 +56,20 @@ struct Args {
     /// The path of the log binary (the sibling by default).
     #[arg(long)]
     log: Option<PathBuf>,
+    /// The 1-based log seq where the compact boundary lands: the
+    /// prefix up to that seq becomes the summary input. Absent: the
+    /// token-based keep-window walk (`find_cut`). Reuses the `assemble
+    /// --up-to` name (docs/tree-ui-design-from-human.md in the TUI
+    /// repo: the branch-summarize flow).
+    #[arg(long, value_name = "SEQ")]
+    up_to: Option<usize>,
+    /// The custom compaction instruction. It replaces the default
+    /// compact instruction wholesale (the six-section format is not
+    /// merged in; the user's text is the entire instruction). Forwarded
+    /// to `assemble --prompt`. Absent: the default first-time or
+    /// update instruction.
+    #[arg(long, value_name = "TEXT")]
+    prompt: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -297,6 +311,14 @@ fn append_event(
 
 fn main() {
     let args = Args::parse();
+    // `--up-to` is a 1-based log sequence (the same numbering `assemble
+    // --up-to`, `first_kept_seq`, and `last_user_seq` use). Reject 0 up
+    // front instead of writing a `compaction_failed` marker for a bad
+    // invocation.
+    if args.up_to == Some(0) {
+        eprintln!("Error: --up-to requires a 1-based log sequence");
+        std::process::exit(1);
+    }
     // The cooldown and the trigger need the log. The force and the
     // overflow skip the trigger test but still read the log for the
     // boundary and the cut.
@@ -404,6 +426,11 @@ fn main() {
         trigger_readings.push((last_seq.max(1), full_form));
     }
     let last_measurement = trigger_readings.last().map(|m| m.1).unwrap_or(0);
+    // An explicit `--up-to` compact is a user-initiated boundary compact
+    // (the TUI branch-summarize flow, docs/tree-ui-design-from-human.md):
+    // it fires unconditionally, even when the threshold trigger is cold
+    // and the feature is off. Reuse the force gate.
+    let forced = args.force || args.up_to.is_some();
     let decision = decide_trigger(&TriggerInput {
         trigger_level,
         trigger_readings: trigger_readings.clone(),
@@ -411,7 +438,7 @@ fn main() {
         failed_user_seq,
         cooldown: true,
         enabled,
-        force: args.force,
+        force: forced,
         overflow,
     });
 
@@ -441,6 +468,27 @@ fn main() {
                 .diverge_seq(diverge_seq)
                 .call();
         }
+    }
+}
+
+/// The compact cut index within the kept region. An explicit `--up-to`
+/// seq places the boundary at the picked event: the cut is the index
+/// of the first kept event whose seq exceeds it (mirroring assemble's
+/// own `--up-to` cut). When absent, the token-based keep-window walk
+/// (`find_cut`).
+fn cut_index(
+    kept_events: &[LogEvent],
+    up_to: Option<usize>,
+    projected: &[Ev],
+    keep_tokens: u64,
+    caps: &Caps,
+) -> usize {
+    match up_to {
+        Some(u) => kept_events
+            .iter()
+            .position(|e| e.seq > u)
+            .unwrap_or(kept_events.len()),
+        None => compact_math::find_cut(projected, keep_tokens, caps),
     }
 }
 
@@ -474,12 +522,20 @@ fn run_compaction(
         .collect();
 
     let est_caps: Caps = Caps { text: None, chars_per_token: cpts };
-    let cut = compact_math::find_cut(&projected, keep_tokens, &est_caps);
+    let cut = cut_index(kept_events, args.up_to, &projected, keep_tokens, &est_caps);
     if cut == 0 {
+        let detail = if args.up_to.is_some() {
+            format!(
+                "the old region is empty: no kept event at or before seq {}",
+                args.up_to.unwrap_or(0)
+            )
+        } else {
+            "the old region is empty: the keep window covers the log".to_string()
+        };
         let status = serde_json::json!({
             "status": "noop",
             "reason": args.reason.as_str(),
-            "detail": "the old region is empty: the keep window covers the log",
+            "detail": detail,
         });
         println!("{}", serde_json::to_string(&status).unwrap());
         std::process::exit(0);
@@ -488,7 +544,12 @@ fn run_compaction(
     // The old region: the projected events before the cut.
     let old = &projected[..cut];
     let old_events: Vec<LogEvent> = kept_events[..cut].to_vec();
-    let up_to = old_events.last().map(|e| e.seq).unwrap_or(0);
+    // With `--up-to` the boundary is the picked seq; without it the
+    // last old event's seq is the cut position (auto keep-window walk).
+    let up_to = match args.up_to {
+        Some(u) => u,
+        None => old_events.last().map(|e| e.seq).unwrap_or(0),
+    };
 
     // The strip-last-assistant retry: drop the last group of the
     // old region before the summary call.
@@ -531,6 +592,12 @@ fn run_compaction(
         .arg(&up_to_str);
     if args.strip_last_assistant {
         cmd.arg("--drop-last-assistant");
+    }
+    // Forward the custom compaction instruction to assemble: the
+    // user's text replaces the default six-section prompt wholesale
+    // (docs/tree-ui-design-from-human.md, the TUI branch-summarize).
+    if let Some(p) = &args.prompt {
+        cmd.arg("--prompt").arg(p);
     }
     let out = cmd.output().unwrap_or_else(|e| {
         fail_and_exit(args, overflow, last_user_seq, "the assemble call failed", &e.to_string());
@@ -668,8 +735,14 @@ fn run_compaction(
     };
 
     // The first kept sequence of the new boundary: the log
-    // sequence of the event at the cut.
-    let first_kept_seq = kept_events.get(cut).map(|e| e.seq).unwrap_or(1);
+    // sequence of the event at the cut. When the explicit `--up-to`
+    // boundary lands past the last kept event (the TUI branch tip:
+    // the picked event is the active tail), the boundary sits just
+    // past the picked seq rather than resetting to 1.
+    let first_kept_seq = match args.up_to {
+        Some(u) => kept_events.get(cut).map(|e| e.seq).unwrap_or(u + 1),
+        None => kept_events.get(cut).map(|e| e.seq).unwrap_or(1),
+    };
     if first_kept_seq < 1 {
         fail_and_exit(
             args,
@@ -951,5 +1024,49 @@ mod tests {
             compact_math::trigger_level_for(base, 16384),
             245760,
         );
+    }
+
+    // ── cut_index: the `--up-to` boundary vs the auto keep-window walk ──
+
+    fn log_events_up_to(n: usize) -> Vec<LogEvent> {
+        (1..=n)
+            .map(|s| LogEvent {
+                seq: s,
+                value: serde_json::json!({"v":1,"type":"user_message","content":"x"}),
+            })
+            .collect()
+    }
+
+    fn projected_from(kept: &[LogEvent]) -> Vec<Ev> {
+        kept.iter()
+            .map(|e| compact_math::project_event(&e.value))
+            .collect()
+    }
+
+    #[test]
+    fn cut_index_explicit_up_to_places_the_boundary() {
+        let kept = log_events_up_to(5); // seqs 1..=5
+        let projected = projected_from(&kept);
+        let caps = Caps { text: None, chars_per_token: 4 };
+
+        // up_to = 3: the first kept event past seq 3 is seq 4 (index 3).
+        assert_eq!(cut_index(&kept, Some(3), &projected, 100, &caps), 3);
+        // up_to = 1: first event past seq 1 is seq 2 (index 1).
+        assert_eq!(cut_index(&kept, Some(1), &projected, 100, &caps), 1);
+        // up_to = 5: no kept event past seq 5; the cut lands at the
+        // end: the whole kept region is old, nothing is kept.
+        assert_eq!(cut_index(&kept, Some(5), &projected, 100, &caps), 5);
+        // up_to far beyond the log: same as up_to = last seq.
+        assert_eq!(cut_index(&kept, Some(99), &projected, 100, &caps), 5);
+    }
+
+    #[test]
+    fn cut_index_without_up_to_delegates_to_find_cut() {
+        let kept = log_events_up_to(5);
+        let projected = projected_from(&kept);
+        let caps = Caps { text: None, chars_per_token: 4 };
+        // Five 1-char user events: 5 chars total, far below a large
+        // keep budget, so find_cut returns 0 (keep everything).
+        assert_eq!(cut_index(&kept, None, &projected, 100_000, &caps), 0);
     }
 }

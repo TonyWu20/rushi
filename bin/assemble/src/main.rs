@@ -61,6 +61,14 @@ struct Args {
     /// after the cwd line. Absent: no-op.
     #[arg(long)]
     fragments: Option<String>,
+
+    /// The custom compaction instruction for `--summary-input` mode.
+    /// It replaces the default compact instruction wholesale: the
+    /// user's text is the entire instruction; the six-section format
+    /// is not merged in (docs/tree-ui-design-from-human.md in the TUI
+    /// repo). Absent: the default first-time or update instruction.
+    #[arg(long, value_name = "TEXT")]
+    prompt: Option<String>,
 }
 
 /// One log event, projected to model input items.
@@ -1324,12 +1332,19 @@ fn main() {
             .input_budget(summary_input_target)
             .ptrs(&ptrs)
             .chars_per_token(chars_per_token);
-        // The optional request-level effort: the session effort stands
-        // when the config leaves it unset.
-        let request = if let Some(e) = compact_reasoning_effort.as_deref() {
-            builder.effort(e).call()
-        } else {
-            builder.call()
+        // The optional custom compaction instruction (docs/
+        // tree-ui-design-from-human.md in the TUI repo) replaces the
+        // default prompt wholesale; the optional request-level effort
+        // stands when the config leaves it unset. Both are optional
+        // builder fields, so the four combinations all end in `.call()`.
+        let request = match (
+            args.prompt.as_deref(),
+            compact_reasoning_effort.as_deref(),
+        ) {
+            (Some(p), Some(e)) => builder.custom_instructions(p).effort(e).call(),
+            (Some(p), None) => builder.custom_instructions(p).call(),
+            (None, Some(e)) => builder.effort(e).call(),
+            (None, None) => builder.call(),
         };
         println!("{}", request);
         return;
@@ -1459,6 +1474,7 @@ fn summary_input_request(
     input_budget: usize,
     ptrs: &LogPointers,
     chars_per_token: u64,
+    custom_instructions: Option<&str>,
 ) -> serde_json::Value {
     // The droppable step groups of the old region: the assistant
     // groups, in order. User groups never drop.
@@ -1472,9 +1488,17 @@ fn summary_input_request(
         Some(_) => COMPACT_ASK_UPDATE,
         None => COMPACT_ASK_FIRST,
     };
-    let instructions = match prev {
-        Some(b) => compact_update_instructions(b),
-        None => COMPACT_INSTRUCTIONS_FIRST.to_string(),
+    // The default instructions: first-time six-section prompt, or the
+    // update prompt carrying the previous summary and its file-op
+    // lists. A custom instruction (`--prompt`) replaces the default
+    // wholesale: the user's text is the entire instruction, the
+    // six-section format is not merged in.
+    let instructions = match custom_instructions {
+        Some(text) => text.to_string(),
+        None => match prev {
+            Some(b) => compact_update_instructions(b),
+            None => COMPACT_INSTRUCTIONS_FIRST.to_string(),
+        },
     };
     // The estimate of one candidate, in the calibrated
     // chars-per-token ratio (docs/auto-compact-plan.md 4.3). The
@@ -2198,6 +2222,95 @@ not json at all
         assert!(flat.contains("step one"), "the old region is projected");
         // No reasoning effort by default: the session effort stands.
         assert!(req.get("reasoning_effort").is_none());
+    }
+
+    /// A `--prompt` custom instruction replaces the default compact
+    /// instruction wholesale: the user's text is the entire
+    /// instruction; the six-section format is not merged in
+    /// (docs/tree-ui-design-from-human.md in the TUI repo).
+    #[test]
+    fn summary_input_custom_prompt_replaces_the_default() {
+        let events = [Ev::User {
+            text: "the task".to_string(),
+        }, ev_asst("step one"), ev_res("1", "ok")];
+        let refs: Vec<&Ev> = events.iter().collect();
+        let req: serde_json::Value = summary_input_request()
+            .old(&refs)
+            .prev(&None)
+            .model("m")
+            .max_out_cap(2048)
+            .caps(&Caps {
+                text: 100,
+            })
+            .input_budget(1_000_000)
+            .ptrs(&test_ptrs())
+            .chars_per_token(4)
+            .custom_instructions("Summarize only the security-relevant findings")
+            .call();
+        // The instructions field is the custom prompt, verbatim.
+        assert_eq!(
+            req["instructions"].as_str().unwrap(),
+            "Summarize only the security-relevant findings",
+            "the custom prompt replaces the default wholesale"
+        );
+        // The six-section format is not present.
+        assert!(
+            !req["instructions"].as_str().unwrap().contains("## Goal"),
+            "the six-section format is not merged in"
+        );
+        // The old region and the standard summary ask still ride the input.
+        let flat = req["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<String>();
+        assert!(flat.contains("the task"), "the task statement survives");
+        assert_eq!(
+            req["input"].as_array().unwrap().last().unwrap()["content"],
+            COMPACT_ASK_FIRST,
+        );
+    }
+
+    /// A custom prompt in update mode: the previous summary is not
+    /// merged into the user's text (the six-section format, and its
+    /// embedded summary, are not carried into a custom instruction).
+    #[test]
+    fn summary_input_custom_prompt_update_mode_no_merge() {
+        let events = [ev_asst("new step"), ev_res("2", "ok")];
+        let refs: Vec<&Ev> = events.iter().collect();
+        let boundary = Boundary {
+            seq: 9,
+            first_kept_seq: 5,
+            summary: "the previous summary".to_string(),
+            read_files: vec!["a.txt".to_string()],
+            modified_files: vec!["b.rs".to_string()],
+            version: 0,
+        };
+        let req: serde_json::Value = summary_input_request()
+            .old(&refs)
+            .prev(&Some(boundary))
+            .model("m")
+            .max_out_cap(2048)
+            .caps(&Caps {
+                text: 100,
+            })
+            .input_budget(1_000_000)
+            .ptrs(&test_ptrs())
+            .chars_per_token(4)
+            .custom_instructions("Write a narrative summary of the new work")
+            .call();
+        let inst = req["instructions"].as_str().unwrap();
+        assert_eq!(inst, "Write a narrative summary of the new work");
+        assert!(
+            !inst.contains("the previous summary"),
+            "the previous summary is not merged into the custom prompt"
+        );
+        // The update-mode ask item still rides the input.
+        assert_eq!(
+            req["input"].as_array().unwrap().last().unwrap()["content"],
+            COMPACT_ASK_UPDATE,
+        );
     }
 
     /// The update prompt carries the previous summary and its

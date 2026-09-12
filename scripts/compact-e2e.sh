@@ -909,6 +909,96 @@ run_scenario() {
   "$@"
 }
 
+# ── Scenario 13: the explicit up-to boundary + custom prompt ──────
+# The TUI branch-summary flow (docs/tree-ui-design-from-human.md in the
+# TUI repo): the user picks an event and the kernel compacts up to
+# that seq with a custom prompt. `--up-to` lands the boundary at the
+# picked seq (the prefix up to it is the summary input); `--prompt`
+# replaces the default six-section instruction wholesale.
+scenario_up_to_prompt() {
+  NEW_WORK up-to-prompt
+  COMPACT_ENABLED=true
+  work_config
+  seed_session 6000 6200 6500
+  make_stub
+
+  # Run the compact binary directly, the way the TUI spawns it:
+  # the boundary lands at seq 8 (the stop after step two), so the
+  # old region is events 1-8 and the kept region starts at seq 9.
+  # The custom prompt replaces the six-section default.
+  local reqlog="$WORK/reqlog"
+  rm -f "$reqlog"
+  local status
+  status=$(
+    cd "$WORK"
+    export MODEL_BIN="$WORK/stub-model" STUB_REQLOG="$reqlog"
+    "$BIN_DIR/compact" "$SESSIONS_DIR" --config "$WORK/config.toml" \
+      --up-to 8 --prompt "CUSTOM BRANCH SUMMARY PROMPT" 2>/dev/null
+  )
+  assert_contains "$status" '"compacted"' "the up-to compact succeeded"
+
+  # The marker: first_kept_seq is the event right after the picked
+  # seq 8, i.e. seq 9.
+  local fk
+  fk=$(jq -cs 'map(select(.type == "compaction_summary")) | last | .first_kept_seq' "$SLOG")
+  assert_eq "$fk" 9 "first_kept_seq lands on the event after the picked seq"
+
+  # The summary request carries the custom prompt in instructions and
+  # the six-section format is absent.
+  if [ -s "$reqlog" ]; then
+    local req
+    req=$(head -1 "$reqlog")
+    assert_contains "$req" "CUSTOM BRANCH SUMMARY PROMPT" "the custom prompt replaces the default instruction"
+    if echo "$req" | rg -q '## Goal'; then
+      ko "the six-section format leaked into the custom-prompt instructions"
+    else
+      ok "the six-section format is absent from the custom-prompt instructions"
+    fi
+    if echo "$req" | rg -q 'do the task'; then
+      ok "the old region carries the early content"
+    else
+      ko "the old region should carry 'do the task'"
+    fi
+    if echo "$req" | rg -q 'new task'; then
+      ko "the later 'new task' (seq 13) leaked into the summary input"
+    else
+      ok "the picked-seq boundary excluded the later events"
+    fi
+  else
+    ko "the reqlog is empty: the summary call was not exercised"
+  fi
+
+  assert_eq "$(count_events compaction_failed)" 0 "no compaction_failed"
+
+  # A second up-to compact in the same session, without --prompt: the
+  # default update instruction (carrying the previous summary) is used
+  # and the boundary advances to seq 13.
+  local status2
+  status2=$(
+    cd "$WORK"
+    export MODEL_BIN="$WORK/stub-model" STUB_REQLOG="$reqlog"
+    "$BIN_DIR/compact" "$SESSIONS_DIR" --config "$WORK/config.toml" \
+      --up-to 12 2>/dev/null
+  )
+  assert_contains "$status2" '"compacted"' "the second up-to compact succeeded"
+  local fk2
+  fk2=$(jq -cs 'map(select(.type == "compaction_summary")) | last | .first_kept_seq' "$SLOG")
+  assert_eq "$fk2" 13 "the second boundary lands at seq 13"
+  # The second request uses the default update instruction, not the
+  # custom one: the second reqlog line names the update form.
+  if [ -s "$reqlog" ]; then
+    local req2
+    req2=$(sed -n '2p' "$reqlog")
+    if echo "$req2" | rg -q 'Update the existing structured summary'; then
+      ok "the default update instruction is used without --prompt"
+    else
+      ko "the second request should carry the default update instruction"
+    fi
+  else
+    ko "the reqlog is missing the second summary request"
+  fi
+}
+
 # ── Run ──────────────────────────────────────────────────────────
 run_scenario threshold scenario_threshold
 run_scenario pi-parity scenario_pi_parity
@@ -928,6 +1018,7 @@ run_scenario no-detail scenario_no_detail
 run_scenario silent-failure-rescue scenario_silent_failure_rescue
 run_scenario fork-compact scenario_fork_compact
 run_scenario real-fixture-pressure scenario_real_fixture_pressure
+run_scenario up-to-prompt scenario_up_to_prompt
 
 echo
 echo "compact e2e: $PASS passed, $FAIL failed"
