@@ -174,8 +174,9 @@ fenix toolchain.
               '';
             };
         in
-        {
-          packages = rec {
+        # Per-system package attrset. The final `in` below exposes it
+        # under the flake's top-level `packages` key (standard shape).
+        rec {
             # ── Tools (wrap the cargo build into the tool contract) ──
             goal          = wrapAsTool { name = "goal";          toolToml = "${self}/goal-app/goal-tools/goal/tool.toml";         built = buildCrate { crateDir = "goal-app/goal-tools/goal";         crateName = "goal"; }; };
             goal-blocked  = wrapAsTool { name = "goal_blocked";  toolToml = "${self}/goal-app/goal-tools/goal_blocked/tool.toml";  built = buildCrate { crateDir = "goal-app/goal-tools/goal_blocked";  crateName = "goal_blocked"; }; };
@@ -193,10 +194,17 @@ fenix toolchain.
             goal-ext = wrapAsExt { extName = "goal"; extToml = "${self}/goal-app/goal-ext/ext.toml"; built = buildCrate { crateDir = "goal-app/goal-ext"; crateName = "goal-ext"; }; };
 
             default = goal;
-          };
         };
     in
-    pkgLib.genAttrs supportedSystems (system: buildFor system);
+    {
+      # Top-level `packages` (system as the inner key) is the standard
+      # flake shape: `nix build .` resolves packages.<host>.default,
+      # and the §5 consumer reads extFlake.packages.<system>.<name>.
+      # A system-key-on-top form (the genAttrs result as the whole
+      # outputs attrset) is legal Nix but breaks `nix build .` and
+      # every top-level attr access, so it is not prescribed here.
+      packages = pkgLib.genAttrs supportedSystems (system: buildFor system);
+    };
 }
 ```
 
