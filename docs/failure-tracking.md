@@ -290,6 +290,23 @@ request prime the next call. The harness controls the trigger
 through what it sends. Correction 60 drops every schema-error
 pair from the model request, keep window included.
 
+**Corrigendum (2026-09-12, correction 64):** The drop-all design
+above is reversed. In the `tool-display-external-extension`
+session the model re-sent an unknown-parameter `bash` call
+(`timeout` instead of `timeout_secs`) ~12 times in a row without
+ever reacting to the callout — because correction 60 dropped the
+callout pair from every request, the model never saw it. The
+"self-priming" premise (the model re-emits the failed call *after*
+seeing the failure) is self-contradictory when the failure is
+dropped from every request. The operator decided that no tool
+result, especially a failure, may be hidden from the model: the
+model adjusts its behaviour until the call succeeds. `assemble`
+no longer drops any pair; stale failures are managed by
+compaction summarizing the old region. The A/B trade-off noted in
+the correction-60 entry (failure history can prime the next call
+on this NVFP4 model) is accepted knowingly; re-run the A/B if the
+active model changes.
+
 ## FT-009 — Session dies and stays dead after a failed compact
 
 **Symptom:** `sessions/better-ui` logged three terminal errors

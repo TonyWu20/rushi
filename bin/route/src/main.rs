@@ -334,19 +334,34 @@ fn main() {
         };
 
         let schema = manifest.1.get("schema").unwrap();
-        if let Some(field) = validate_args(&tc_args, schema) {
+        if let Some(issue) = validate_args(&tc_args, schema) {
             // The first sentence is the stable prefix: the compact pass
             // in `assemble` keys the schema-error pairs off it.
-            // The suffix tells the model what to fix (correction 59).
-            let o = if field == "arguments" {
-                Outcome::not_run(
+            // The suffix tells the model what to fix (correction 59):
+            // unexpected usage is called out explicitly so the model
+            // adjusts the call and resends until it validates.
+            let o = match issue {
+                ArgsIssue::NotObject => Outcome::not_run(
                     "Tool arguments failed schema validation: arguments. The arguments value must be a JSON object. Resend the call with a JSON object."
                         .to_string(),
-                )
-            } else {
-                Outcome::not_run(format!(
-                    "Tool arguments failed schema validation: {field}. Required fields are missing from the call. Resend the call with all required fields filled in."
-                ))
+                ),
+                ArgsIssue::MissingRequired(fields) => {
+                    let names = fields.join(", ");
+                    Outcome::not_run(format!(
+                        "Tool arguments failed schema validation: {names}. Required fields are missing from the call. Resend the call with all required fields filled in."
+                    ))
+                }
+                ArgsIssue::Unknown(fields) => {
+                    let names = fields.join(", ");
+                    let valid = schema
+                        .get("properties")
+                        .and_then(serde_json::Value::as_object)
+                        .map(|p| p.keys().cloned().collect::<Vec<String>>().join(", "))
+                        .unwrap_or_else(|| "(none)".to_string());
+                    Outcome::not_run(format!(
+                        "Tool arguments failed schema validation: {names}. Parameter(s) {names} are not defined in the tool parameters for tool '{tc_name}'. The defined parameters are: {valid}. Resend the call using only the defined parameters."
+                    ))
+                }
             };
             println!("{}", emit_result(&o, &ts, tc_id, &args));
             continue;
@@ -476,21 +491,63 @@ fn process_stdout(stdout: &str, max_chars: usize) -> String {
     text
 }
 
-fn validate_args(args: &serde_json::Value, schema: &serde_json::Value) -> Option<String> {
-    if let Some(obj) = args.as_object() {
-        let mut missing: Vec<String> = Vec::new();
-        if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
-            for req in required {
-                if let Some(field) = req.as_str() {
-                    if !obj.contains_key(field) {
-                        missing.push(field.to_string());
-                    }
+/// The failure class of a tool call's argument schema validation.
+/// Every class is called out to the model explicitly (the tool is not
+/// run) so the model can fix the call and resend it. Unexpected usage
+/// — e.g. a parameter the schema does not define — is never tolerated
+/// silently: it is reported, and the model adjusts its call until it
+/// is valid.
+#[derive(Debug, PartialEq)]
+enum ArgsIssue {
+    /// The arguments value is not a JSON object.
+    NotObject,
+    /// Required fields missing from the call (names, in schema order).
+    MissingRequired(Vec<String>),
+    /// Keys present that the schema does not define (names, in the
+    /// JSON map's iteration order — sorted under the default serde_json
+    /// build).
+    Unknown(Vec<String>),
+}
+
+fn validate_args(
+    args: &serde_json::Value,
+    schema: &serde_json::Value,
+) -> Option<ArgsIssue> {
+    let obj = match args.as_object() {
+        Some(o) => o,
+        None => return Some(ArgsIssue::NotObject),
+    };
+    let mut missing: Vec<String> = Vec::new();
+    if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
+        for req in required {
+            if let Some(field) = req.as_str() {
+                if !obj.contains_key(field) {
+                    missing.push(field.to_string());
                 }
             }
         }
-        return (!missing.is_empty()).then(|| missing.join(", "));
     }
-    Some("arguments".to_string())
+    if !missing.is_empty() {
+        return Some(ArgsIssue::MissingRequired(missing));
+    }
+    // Unexpected usage: a key the schema does not define. Gated on the
+    // schema carrying a non-empty `properties` table (every tool in the
+    // registry does); without one the valid key set is unknown, so the
+    // check is skipped rather than rejecting every key.
+    let mut unknown: Vec<String> = Vec::new();
+    if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
+        if !props.is_empty() {
+            for key in obj.keys() {
+                if !props.contains_key(key) {
+                    unknown.push(key.clone());
+                }
+            }
+        }
+    }
+    if !unknown.is_empty() {
+        return Some(ArgsIssue::Unknown(unknown));
+    }
+    None
 }
 
 /// Scan one tools root for `tool.toml` manifests and register each
@@ -789,11 +846,14 @@ mod tests {
         let schema = serde_json::json!({"required": ["command", "timeout_secs"]});
         assert_eq!(
             validate_args(&serde_json::json!({}), &schema),
-            Some("command, timeout_secs".to_string())
+            Some(ArgsIssue::MissingRequired(vec![
+                "command".to_string(),
+                "timeout_secs".to_string()
+            ]))
         );
         assert_eq!(
             validate_args(&serde_json::json!({"command": "pwd"}), &schema),
-            Some("timeout_secs".to_string())
+            Some(ArgsIssue::MissingRequired(vec!["timeout_secs".to_string()]))
         );
         assert_eq!(
             validate_args(
@@ -809,7 +869,47 @@ mod tests {
         let schema = serde_json::json!({"required": ["command"]});
         assert_eq!(
             validate_args(&serde_json::json!(["cmd"]), &schema),
-            Some("arguments".to_string())
+            Some(ArgsIssue::NotObject)
+        );
+    }
+
+    #[test]
+    fn validate_args_flags_unknown_parameters() {
+        // The real-world case from the sglang stderr: the model sends
+        // `timeout`, which the `bash` schema does not define (the
+        // defined parameter is `timeout_secs`). That is unexpected
+        // usage: it must be called out, not silently tolerated.
+        let schema = serde_json::json!({
+            "required": ["command"],
+            "properties": {
+                "command": {"type": "string"},
+                "timeout_secs": {"type": "integer"}
+            }
+        });
+        assert_eq!(
+            validate_args(&serde_json::json!({"command": "pwd", "timeout": "300"}), &schema),
+            Some(ArgsIssue::Unknown(vec!["timeout".to_string()]))
+        );
+        // Multiple unknown keys are all reported (JSON map order:
+        // sorted under the default serde_json build).
+        assert_eq!(
+            validate_args(
+                &serde_json::json!({"command": "pwd", "timeout": 300, "cwd": "/tmp"}),
+                &schema
+            ),
+            Some(ArgsIssue::Unknown(vec!["cwd".to_string(), "timeout".to_string()]))
+        );
+        // Every key defined in the schema → valid, the call runs.
+        assert_eq!(
+            validate_args(&serde_json::json!({"command": "pwd", "timeout_secs": 300}), &schema),
+            None
+        );
+        // A schema without a `properties` table cannot define the valid
+        // key set, so no unknown-parameter rejection applies.
+        let bare = serde_json::json!({"required": ["command"]});
+        assert_eq!(
+            validate_args(&serde_json::json!({"command": "pwd", "extra": 1}), &bare),
+            None
         );
     }
 

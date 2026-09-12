@@ -432,43 +432,6 @@ fn record_text(rec: &serde_json::Value) -> Option<String> {
     }
 }
 
-/// The schema-validation error result of the empty-arguments class
-/// (FT-008). The result text starts with this prefix, intact: it is
-/// short, so it always survives the slim index preview.
-const SCHEMA_ERROR_PREFIX: &str = "Tool arguments failed schema validation";
-
-/// The truncation notice of the length-stop group (docs/
-/// auto-compact-plan.md section 4.4): parse fabricates one result
-/// per cut-off call, asking for a shorter call. The prefix is
-/// intact in the slim index preview.
-const TRUNCATION_NOTICE_PREFIX: &str = "Arguments may be truncated";
-
-/// A pair-droppable result text. Two prefixes (docs/
-/// auto-compact-plan.md section 4.3, correction 60 extended): the
-/// schema-validation failure and the truncation notice. Both pair
-/// shapes go out of every request form.
-fn is_droppable_pair_text(text: &str) -> bool {
-    text.starts_with(SCHEMA_ERROR_PREFIX) || text.starts_with(TRUNCATION_NOTICE_PREFIX)
-}
-
-/// The call ids of the droppable pairs before the split point:
-/// schema-validation failures and truncation notices. The failed
-/// pair (the call plus its error result) self-priming: the model
-/// re-emits its own failed call when it sees the failure in the
-/// input. The request drops the pair in every position, keep
-/// window included. The event log and the tool log keep it.
-fn drop_pair_ids(events: &[&Ev], split: usize) -> HashSet<String> {
-    let mut ids: HashSet<String> = HashSet::new();
-    for &ev in events.iter().take(split) {
-        if let Ev::ToolResult { id, text, .. } = ev {
-            if is_droppable_pair_text(text) {
-                ids.insert(id.clone());
-            }
-        }
-    }
-    ids
-}
-
 /// The pair-stranding invariant (docs/rewind-fork-design.md P4):
 /// every `function_call` in the context carries its `function_call_
 /// output`, and every `function_call_output` carries its call. Call
@@ -540,11 +503,7 @@ fn mask_active_path<'a>(
 }
 
 /// Model input items for one event, full form.
-fn full_items(
-    ev: &Ev,
-    drop_pairs: &HashSet<String>,
-    vision: bool,
-) -> Vec<serde_json::Value> {
+fn full_items(ev: &Ev, vision: bool) -> Vec<serde_json::Value> {
     match ev {
         Ev::User { text } => vec![serde_json::json!({
             "type": "message",
@@ -569,11 +528,6 @@ fn full_items(
                 "content": text
             }));
             for c in calls {
-                // A dropped old schema-error pair: the call goes out
-                // with its result (FT-008 self-priming).
-                if drop_pairs.contains(&c.id) {
-                    continue;
-                }
                 items.push(serde_json::json!({
                     "type": "function_call",
                     "call_id": c.id,
@@ -584,9 +538,6 @@ fn full_items(
             items
         }
         Ev::ToolResult { id, text, image, .. } => {
-            if drop_pairs.contains(id) {
-                return Vec::new();
-            }
             if let Some(img) = image {
                 let mime = img.get("mime_type").and_then(|m| m.as_str()).unwrap_or("image/png");
                 let data = img.get("data").and_then(|d| d.as_str()).unwrap_or("");
@@ -638,11 +589,10 @@ fn with_reasoning_type(item: serde_json::Value) -> serde_json::Value {
 fn compact_items(
     ev: &Ev,
     caps: &Caps,
-    drop_pairs: &HashSet<String>,
     ptrs: &LogPointers,
 ) -> Vec<serde_json::Value> {
     match ev {
-        Ev::User { .. } => full_items(ev, drop_pairs, false),
+        Ev::User { .. } => full_items(ev, false),
         Ev::Assistant { text, calls, .. } => {
             let mut items = vec![serde_json::json!({
                 "type": "message",
@@ -650,9 +600,6 @@ fn compact_items(
                 "content": trim_chars(text, caps.text, &ptrs.assistant_pointer())
             })];
             for c in calls {
-                if drop_pairs.contains(&c.id) {
-                    continue;
-                }
                 items.push(serde_json::json!({
                     "type": "function_call",
                     "call_id": c.id,
@@ -663,9 +610,6 @@ fn compact_items(
             items
         }
         Ev::ToolResult { id, text, .. } => {
-            if drop_pairs.contains(id) {
-                return Vec::new();
-            }
             vec![serde_json::json!({
                 "type": "function_call_output",
                 "call_id": id,
@@ -683,7 +627,6 @@ fn build_items_off(
     events: &[&Ev],
     keep: usize,
     caps: &Caps,
-    drop_pairs: &HashSet<String>,
     ptrs: &LogPointers,
     vision: bool,
 ) -> (Vec<serde_json::Value>, Vec<usize>) {
@@ -693,9 +636,9 @@ fn build_items_off(
     for (i, ev) in events.iter().enumerate() {
         offsets.push(items.len());
         let ev_items = if i < split {
-            compact_items(ev, caps, drop_pairs, ptrs)
+            compact_items(ev, caps, ptrs)
         } else {
-            full_items(ev, drop_pairs, vision)
+            full_items(ev, vision)
         };
         items.extend(ev_items);
     }
@@ -707,17 +650,15 @@ fn build_items_off(
 ///
 /// The last `keep` events stay full. Older events use the compact form.
 /// A `keep` at or above the event count keeps everything full.
-/// `drop_pairs` holds call ids of old schema-validation failures;
-/// their pairs go out of the request (FT-008 self-priming).
+/// Every event, failure results included, reaches the model (correction 64).
 fn build_items(
     events: &[&Ev],
     keep: usize,
     caps: &Caps,
-    drop_pairs: &HashSet<String>,
     ptrs: &LogPointers,
     vision: bool,
 ) -> Vec<serde_json::Value> {
-    build_items_off(events, keep, caps, drop_pairs, ptrs, vision).0
+    build_items_off(events, keep, caps, ptrs, vision).0
 }
 
 /// The delivery-queue gate of the user event (docs/tui-pending-user-
@@ -1266,6 +1207,13 @@ fn main() {
         ));
     }
 
+    // Harness self-docs pointer (byte-stable, no I/O).
+    system_prompt.push_str(
+        "\n\nHarness reference: run `rushi docs` for the full rushi reference\n\
+         (architecture, config, tool manifest, hook ABI, distribution).\n\
+         Read it when the user asks how rushi works, how to configure it, or how to extend it.",
+    );
+
     // Append prompt fragments (docs/system-prompt-generation.md D5).
     // The wire form is an ordered array of [id, text] pairs.
     // The kernel joins the text values in order and appends them
@@ -1457,12 +1405,10 @@ fn main() {
     let trim_target = trigger_level_for(budget_tokens as u64, compact_reserve);
     let est_before = estimate_request_tokens(&sel_events, &framing, chars_per_token);
     if est_before > trim_target && hard_trim_groups(&sel_events, &framing, trim_target, chars_per_token).is_none() {
-        let drop_pairs = drop_pair_ids(&kept_events, kept_events.len());
         let mut items = build_items(
             &sel_events,
             sel_events.len(),
             &Caps { text: 0 },
-            &drop_pairs,
             &ptrs,
             model_settings.vision,
         );
@@ -1481,12 +1427,10 @@ fn main() {
         return;
     }
 
-    let drop_pairs = drop_pair_ids(&kept_events, kept_events.len());
     let mut items = build_items(
         &sel_events,
         sel_events.len(),
         &Caps { text: 0 },
-        &drop_pairs,
         &ptrs,
         model_settings.vision,
     );
@@ -1548,15 +1492,13 @@ fn summary_input_request(
     for d in 0..=max_d {
         chosen = d;
         let sel = drop_oldest_groups(old, &droppable, d);
-        let drop_pairs = drop_pair_ids(&sel, sel.len());
-        let items = build_items(&sel, 0, caps, &drop_pairs, ptrs, false);
+        let items = build_items(&sel, 0, caps, ptrs, false);
         if estimate(&items) <= input_budget {
             break;
         }
     }
     let sel = drop_oldest_groups(old, &droppable, chosen);
-    let drop_pairs = drop_pair_ids(&sel, sel.len());
-    let items = build_items(&sel, 0, caps, &drop_pairs, ptrs, false);
+    let items = build_items(&sel, 0, caps, ptrs, false);
     let mut input = items.to_vec();
     input.push(serde_json::json!({
         "type": "message",
@@ -1836,25 +1778,12 @@ not json at all
         assert!(record_text(&serde_json::json!({})).is_none());
     }
 
-    /// The pair-drop text check is on the result text prefix. Two
-    /// prefixes (docs/auto-compact-plan.md section 4.3, correction
-    /// 60 extended): the schema-validation failure and the
-    /// truncation notice of the length-stop group.
+    /// No pair ever drops out of the model input (correction 64):
+    /// a failed call and its schema-error result both stay in the
+    /// items, full form. The event log was never the issue — the
+    /// request was.
     #[test]
-    fn droppable_pair_text_check() {
-        assert!(is_droppable_pair_text(
-            "Tool arguments failed schema validation: command."
-        ));
-        assert!(is_droppable_pair_text(
-            "Arguments may be truncated. Re-issue the call with shorter arguments."
-        ));
-        assert!(!is_droppable_pair_text("plain tool output"));
-    }
-
-    /// The full form drops a failed pair when its id is in the set.
-    /// The event log keeps the pair; only the request loses it.
-    #[test]
-    fn full_items_drop_a_schema_error_pair() {
+    fn full_items_keeps_a_schema_error_pair() {
         let calls = vec![
             Call {
                 id: "ok".to_string(),
@@ -1874,21 +1803,18 @@ not json at all
             usage_input: None,
             usage_output: None,
         };
-        let mut drop: HashSet<String> = HashSet::new();
-        drop.insert("bad".to_string());
-        let items = full_items(&ev, &drop, false);
-        // The dropped call is gone; its call id appears nowhere.
+        let items = full_items(&ev, false);
         let s = items.iter().map(|i| i.to_string()).collect::<String>();
-        assert!(!s.contains("\"bad\""), "the failed call must be out: {s}");
+        assert!(s.contains("\"bad\""), "the failed call stays in: {s}");
         assert!(s.contains("\"ok\""), "the clean call stays: {s}");
-        // Its result goes out too.
-        let res = full_items(&ev_schema_error("bad"), &drop, false);
-        assert!(res.is_empty(), "the failed result must be out");
+        // Its result stays too: the callout must reach the model.
+        let res = full_items(&ev_schema_error("bad"), false);
+        assert!(!res.is_empty(), "the failed result must be in");
+        assert!(res[0].to_string().contains("failed schema validation"));
     }
 
-    /// An empty drop set keeps the pair at the mechanism level.
-    /// The compact candidate supplies the full drop set (correction
-    /// 60), so the keep window's pairs go out too.
+    /// The compact form keeps pairs too (correction 64): nothing is
+    /// hidden from the model in either form.
     #[test]
     fn compact_items_keep_pairs_inside_the_keep_window() {
         let ev = Ev::Assistant {
@@ -1902,58 +1828,17 @@ not json at all
             usage_input: None,
             usage_output: None,
         };
-        // An empty drop set keeps the pair, even in the compact form.
-        let items = compact_items(
-            &ev,
-            &Caps {
-                text: 20,
-            },
-            &HashSet::new(),
-            &test_ptrs(),
-        );
+        let items = compact_items(&ev, &Caps { text: 20 }, &test_ptrs());
         let s = items.iter().map(|i| i.to_string()).collect::<String>();
-        assert!(
-            s.contains("\"bad\""),
-            "the pair stays in the keep window: {s}"
-        );
+        assert!(s.contains("\"bad\""), "the pair stays: {s}");
     }
 
-    /// The id set is the droppable-pair results before the split
-    /// point only: the two prefixes. Results at or after the split
-    /// are out of scope.
+    /// The full form keeps the model's own failures in the request
+    /// (correction 64). A fitting log is no reason to hide them:
+    /// the model adjusts the call until it succeeds. The task
+    /// statement survives, and so does the failed pair.
     #[test]
-    fn drop_pair_ids_cover_the_compacted_region() {
-        let evs: Vec<Ev> = vec![
-            ev_schema_error("r1"),
-            ev_res("r2", "fine"),
-            ev_schema_error("r3"),
-            ev_res("r4", "Arguments may be truncated. Re-issue the call with shorter arguments."),
-        ];
-        let refs: Vec<&Ev> = evs.iter().collect();
-        // Split after two events: r1 is old, r3 and r4 sit in the
-        // keep window.
-        let ids = drop_pair_ids(&refs, 2);
-        assert!(ids.contains("r1"), "the old failure is in the set");
-        assert!(
-            !ids.contains("r3"),
-            "the recent failure stays out of the set"
-        );
-        // The truncation-notice result joins the set at the split.
-        assert!(drop_pair_ids(&refs, 4).contains("r4"), "the two-prefix rule");
-        // A clean result is never in the set.
-        assert!(!ids.contains("r2"));
-        // No split: nothing is compacted, nothing drops.
-        assert!(drop_pair_ids(&refs, 0).is_empty());
-    }
-
-    /// The stage candidate drops every schema-error pair from the
-    /// request, keep window included (correction 60). The task
-    /// statement survives.
-    /// The full form drops the schema-error pairs even when the log
-    /// fits the budget (correction 60). A fitting log is no reason
-    /// to hand the model its own failures.
-    #[test]
-    fn full_form_drops_schema_error_pairs() {
+    fn full_form_keeps_schema_error_pairs() {
         let mut events: Vec<Ev> = vec![Ev::User {
             text: "the task".to_string(),
         }];
@@ -1973,23 +1858,15 @@ not json at all
             text: "continue".to_string(),
         });
         let refs: Vec<&Ev> = events.iter().collect();
-        // The full form of the whole log, every schema-error pair
-        // dropped.
-        let drops = drop_pair_ids(&refs, refs.len());
-        let out = build_items(
-            &refs,
-            refs.len(),
-            &Caps { text: 0 },
-            &drops,
-            &test_ptrs(),
-            false,
-        );
+        // The full form of the whole log: the failed pair stays in.
+        let out = build_items(&refs, refs.len(), &Caps { text: 0 }, &test_ptrs(), false);
         let s = serde_json::to_string(&out).unwrap();
         assert!(s.contains("the task"), "the task statement survives");
         assert!(
-            !s.contains("\"call_id\":\"f1\""),
-            "the failed pair must be out of the full form"
+            s.contains("\"call_id\":\"f1\""),
+            "the failed pair stays in the full form: the callout must reach the model"
         );
+        assert!(s.contains("failed schema validation"), "the callout text is delivered");
     }
 
     fn caps() -> Caps {
@@ -2020,7 +1897,7 @@ not json at all
     fn keep_all_when_window_covers_log() {
         let events = [ev_res("a", "one"), ev_res("b", "two")];
         let refs: Vec<&Ev> = events.iter().collect();
-        let items = build_items(&refs, 10, &caps(), &HashSet::new(), &test_ptrs(), false);
+        let items = build_items(&refs, 10, &caps(), &test_ptrs(), false);
         // No compact marker, no clip marker, plain outputs.
         assert!(!items.iter().any(|i| i.to_string().contains("compacted")));
         assert_eq!(items.len(), 2);
@@ -2041,7 +1918,6 @@ not json at all
             &Caps {
                 text: 20,
             },
-            &HashSet::new(),
             &test_ptrs(),
             false,
         );
@@ -2062,7 +1938,7 @@ not json at all
             ev_res("a", &"R".repeat(400)),
         ];
         let refs: Vec<&Ev> = events.iter().collect();
-        let items = build_items(&refs, 0, &caps(), &HashSet::new(), &test_ptrs(), false);
+        let items = build_items(&refs, 0, &caps(), &test_ptrs(), false);
         assert!(items[0].to_string().contains("do the task"));
         assert!(!items[1].to_string().contains("compacted"), "tool results are no longer compacted");
     }
@@ -2087,7 +1963,6 @@ not json at all
             &Caps {
                 text: 20,
             },
-            &HashSet::new(),
             &test_ptrs(),
         );
         let s = items.iter().map(|i| i.to_string()).collect::<String>();
@@ -2124,7 +1999,6 @@ not json at all
                 usage_input: None,
             usage_output: None,
             },
-            &HashSet::new(),
             false,
         );
         // Order: reasoning, assistant message, function_call.
@@ -2176,7 +2050,6 @@ not json at all
             &Caps {
                 text: 20,
             },
-            &HashSet::new(),
             &test_ptrs(),
         );
         assert_eq!(items.len(), 2, "compact form keeps message and call only");
@@ -2238,7 +2111,6 @@ not json at all
             &Caps {
                 text: 20,
             },
-            &HashSet::new(),
             &test_ptrs(),
             false,
         );
@@ -2461,11 +2333,12 @@ not json at all
     /// compaction re-engages fresh at the boundary index. The
     /// re-engage path is the `fresh_state` closure of main; the
     /// state loader exposes the boundary_seq field the check keys on.
-    /// The two-prefix drop rule: the truncated pair goes out of every
-    /// request form, like the schema-error pair (correction 60
-    /// extended, docs/auto-compact-plan.md section 4.4).
+    /// The truncation notice of the length-stop group reaches the
+    /// model like every other result (correction 64,
+    /// docs/auto-compact-plan.md section 4.4): the model re-issues
+    /// the call shorter, so the callout must be visible.
     #[test]
-    fn full_form_drops_the_truncation_notice_pair() {
+    fn full_form_keeps_the_truncation_notice_pair() {
         let mut events: Vec<Ev> = vec![Ev::User {
             text: "the task".to_string(),
         }];
@@ -2485,21 +2358,14 @@ not json at all
             "Arguments may be truncated. Re-issue the call with shorter arguments.",
         ));
         let refs: Vec<&Ev> = events.iter().collect();
-        let drops = drop_pair_ids(&refs, refs.len());
-        let out = build_items(
-            &refs,
-            refs.len(),
-            &Caps { text: 0 },
-            &drops,
-            &test_ptrs(),
-            false,
-        );
+        let out = build_items(&refs, refs.len(), &Caps { text: 0 }, &test_ptrs(), false);
         let s = serde_json::to_string(&out).unwrap();
         assert!(s.contains("the task"), "the task statement survives");
         assert!(
-            !s.contains("\"call_id\":\"t1\""),
-            "the truncated pair must be out of the full form"
+            s.contains("\"call_id\":\"t1\""),
+            "the truncated pair stays in the full form"
         );
+        assert!(s.contains("Arguments may be truncated"), "the notice is delivered");
     }
 
     /// `drop_last_assistant_group` excludes the last assistant group
@@ -2522,7 +2388,6 @@ not json at all
                 &out,
                 out.len(),
                 &Caps { text: 0 },
-                &HashSet::new(),
                 &test_ptrs(),
                 false,
             ),

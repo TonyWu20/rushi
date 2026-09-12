@@ -502,9 +502,11 @@ Length-stop log shape:
   retry request build from the log, and the truncated group is
   the last one.
 - Re-inclusion on a later request stays safe: correction 60's
-  drop rule matches two result prefixes, the schema-validation
-  prefix and the truncation-notice prefix. Both pair shapes go
-  out of every request form.
+  drop rule matched two result prefixes, the schema-validation
+  prefix and the truncation-notice prefix. Both pair shapes went
+  out of every request form. (Superseded by correction 64: the
+  drop rule no longer exists — every result, failure included,
+  reaches the model.)
 
 `turn.sh` is unchanged: it stops only on `idle` and `exhausted`.
 
@@ -634,9 +636,10 @@ Unit tests, per binary:
   schema keywords stay for documentation. They are not
   enforced by the validators.
 - `assemble` flag: `--drop-last-assistant` leaves no orphan
-  `function_call` in the request. Re-inclusion without the flag
-  drops the schema-error pairs and the truncation-notice pairs
-  (correction 60, two prefixes). The request stays valid.
+  `function_call` in the request. (Correction 64 removed the
+  schema-error / truncation-notice pair drop that correction 60
+  described here: no tool result is hidden from the model.) The
+  request stays valid.
 - `bin/log`: the three marker types validate through the
   hardcoded schema list. A missing list entry rejects the type
   as unknown.
@@ -813,10 +816,11 @@ sections 4-5. Section 8.1 records the external review.
    substitutes `{}` for cut-off arguments and emits the call.
    `route` records the schema-error result. The group carries
    both. Excluding the whole group stays safe: correction 60
-   drops the pairs from every request form. Now stated, with a
+   dropped the pairs from every request form. Now stated, with a
    test. The second audit (8.2, A2) corrects the log shape:
    `parse` fabricates the truncation-notice result. `route` does
-   not run. The drop rule matches two prefixes.
+   not run. (Correction 64 removed the drop rule entirely: the
+   group's results reach the model like every other result.)
 5. Summary-input overflow. The old region, the previous summary,
    and the prompt must fit the input budget. The first draft
    leaves that unstated. Now an invariant with a test: the drop

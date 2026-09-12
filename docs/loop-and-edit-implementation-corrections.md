@@ -885,3 +885,55 @@ request file. The model binary sent the envelope as the API body
 and the server rejected it (HTTP 400, `input` field missing).
 The step now unwraps the `.request` field on the failed
 last-resort path.
+
+### 64. Nothing is hidden from the model: the request keeps every tool result
+
+**Reference:** `bin/assemble` (drop mechanism removed), `bin/route`,
+`docs/auto-compact-plan.md`, `docs/handoff-compaction-request-format.md`,
+`docs/loop-and-edit-implementation.md`, FT-008
+
+**Problem:** In the `tool-display-external-extension` session the
+model re-sent a `bash` call with an unknown `timeout` parameter
+~12 times in a row; every `route` dispatch returned the
+unknown-parameter callout ("Parameter(s) timeout are not defined…
+Resend the call using only the defined parameters.") but the model
+never reacted to it. Its reasoning on each retry was its original
+intent ("let me rerun the build with a longer timeout"), not a
+response to the error. It only switched to `timeout_secs` after the
+user typed the correction out. Root cause: correction 60 made
+`assemble` drop *every* schema-error (and truncation-notice) pair
+from the model request, keep window included. The "self-priming"
+assumption behind the drop — the model re-emits its own failed call
+when it sees the failure — is self-contradictory: with the pair
+dropped from *every* request, the model never sees the failure, and
+its "re-emission" just re-runs the original wrong call. The token
+saving was purchased at the cost of the callout reaching the model
+at all.
+
+**Fix:** Removed the drop mechanism from `assemble`: `drop_pair_ids`,
+`is_droppable_pair_text`, the two result-text prefixes, and the
+`drop_pairs` argument through `build_items` / `full_items` /
+`compact_items` and the four call sites (full, compact,
+context-exhausted, summary-input). Every `tool_result` now projects
+to the model input, failure results included, in both the full and
+the compact form. The model adjusts its call until it succeeds; the
+event log and tool log were never the issue — the request was.
+Context size for stale failures is handled by in-session
+compaction (the old region is summarized), not by dropping pairs.
+
+**Deviation note:** This supersedes correction 60's drop-all design
+and its A/B deviation. Correction 60's own note conceded "a clean
+model should switch back to keep-newest." The operator decided that
+the model's failures must not be hidden from it — transparency over
+the glitch-avoidance optimization that drop-all bought on this
+NVFP4 deployment. Re-run that A/B if the active model changes.
+
+**Verification:** The `assemble` suite passes (40 tests), with the
+drop-pair tests repurposed to keep-tests
+(`full_items_keeps_a_schema_error_pair`,
+`full_form_keeps_schema_error_pairs`,
+`full_form_keeps_the_truncation_notice_pair`). Replaying
+`assemble` over the `tool-display-external-extension` session log
+delivers all 19 schema-error callouts, each paired with its
+`function_call`, into the model request — the callout the model
+never saw is now in its input.

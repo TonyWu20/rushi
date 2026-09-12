@@ -83,6 +83,10 @@ validates input against this schema before spawning the tool. An input
 missing the `command` field is rejected by route before the tool starts.
 The rejection produces a `tool_result` with `is_error: true` and text
 "Tool arguments failed schema validation: command. Required fields are missing from the call. Resend the call with all required fields filled in."
+An input carrying a parameter the schema does not define (e.g. `timeout`
+instead of the defined `timeout_secs`) is likewise rejected before spawn;
+the rejection names the defined parameters so the model can resend a valid
+call. Undefined usage is never tolerated silently.
 
 ## 4. Execution
 

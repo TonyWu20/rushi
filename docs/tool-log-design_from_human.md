@@ -81,11 +81,11 @@ trackable and replayable from the log.
   failures before a session stay on stderr.
 - The split interacts with the context budget through the slim index.
   The index carries `bytes`, the full body byte count. The compact
-  pass drops the old schema-error pairs (FT-008) out of the
-  compacted request. Correction 60 extends the drop to every pair,
-  keep window included: the failure history primes the next call
-  on the local NVFP4 model, so no pair survives in the model
-  request.
+  pass dropped the old schema-error pairs (FT-008) out of the
+  compacted request. Correction 60 extended the drop to every pair,
+  keep window included. (Correction 64 removed the drop entirely:
+  every tool result, failure included, reaches the model; stale
+  failures are managed by compaction summarizing the old region.)
 
 ## Related
 
