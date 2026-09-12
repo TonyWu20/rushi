@@ -74,7 +74,8 @@
           # left-to-right. Each module is:
           #   { config, lib, pkgs, ... } → { rushi = { ... }; }
           #
-          # See docs/nix-flake-module.md §3 for the full option schema.
+          # See docs/reference/nix/nix-flake-module.md §3 for the full
+          # option schema.
           #
           rushiConfigured = rushiFlake.lib.mkRushi {
             inherit pkgs;

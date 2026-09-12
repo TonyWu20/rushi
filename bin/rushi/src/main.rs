@@ -5,7 +5,9 @@
 //! - `rushi setup [--locked]` — initialize a project from `rushi.toml`
 //! - `rushi run SESSION` — the full turn loop (internal, TUI-supervised)
 //! - `rushi step SESSION` — one step (internal, TUI-supervised)
-//! - `rushi docs [SECTION]` — print the embedded harness reference
+//! - `rushi docs [SECTION|DOC]` — print the embedded harness reference;
+//!   a section of the default reference, or a bundled sub-document by
+//!   name (e.g. `rushi docs nix-flake-module`)
 //!
 //! The loop stages (`claim`, `assemble`, `model`, `parse`, `route`,
 //! `compact`) are spawned as separate binaries. The TUI is a separate
@@ -62,17 +64,20 @@ enum Command {
         /// Session name or directory
         session: String,
     },
-    /// Print the embedded harness reference document.
+    /// Print the embedded harness reference.
     ///
-    /// With no argument, prints the full document.
-    /// With a section number or title substring, prints only that
-    /// section. Run `rushi docs --list` to list all sections.
+    /// With no argument, prints the default reference. With a section
+    /// number or title substring, prints only that section. With a
+    /// bundled-document name (e.g. `nix-flake-module`), prints that
+    /// whole sub-document. Run `rushi docs --list` to list sections and
+    /// bundled docs.
     Docs {
-        /// Section number or title substring (case-insensitive).
-        /// Omit to print the full document.
+        /// Section number / title substring, or a bundled-document name
+        /// (case-insensitive). Omit to print the default reference.
         section: Option<String>,
 
-        /// List all section headings without printing content.
+        /// List all section headings and bundled docs without printing
+        /// content.
         #[arg(long)]
         list: bool,
     },
