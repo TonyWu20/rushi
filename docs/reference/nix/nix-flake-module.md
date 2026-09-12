@@ -426,7 +426,9 @@ The rushi `flake.nix` gains:
 3. **`lib.fetchExt` / `lib.fetchTool` / `lib.resolvePlatformHash`** —
    extension / tool source helpers (pi-flake `extNoDeps` /
    `extWithDeps` / `resolvePlatformHash` equivalents), so consumers
-   don't hand-roll `fetchFromGitHub` + `buildRustPackage`.
+   don't hand-roll `fetchFromGitHub` + `buildRustPackage`. (Producer
+   side — how an ext repo authors its own `flake.nix` against these
+   contracts: `docs/reference/nix/ext-flake-authoring.md`.)
 4. **`nixosModules.rushi`** and **`homeManagerConfig.rushi`** — the
    `programs.rushi` NixOS / home-manager module (adds the configured
    package to `environment.systemPackages` / `home.packages`).

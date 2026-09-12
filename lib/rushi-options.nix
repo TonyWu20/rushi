@@ -22,7 +22,8 @@
 #     Different modules can set different top-level keys under
 #     `rushi.config` — they recursive-merge in `evalModules`.
 #
-#   * See docs/nix-flake-module.md §3 for the full schema reference.
+#   * See docs/reference/nix/nix-flake-module.md §3 for the full schema
+#     reference.
 
 { lib, ... }:
 

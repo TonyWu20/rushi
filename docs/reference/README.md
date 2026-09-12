@@ -453,7 +453,10 @@ command = "my-guard-hook"
 - Every tool and hook binary supports `--help`.
 - This reference doc is embedded in the `rushi` binary via `include_str!`.
   Run `rushi docs` to print it, or `rushi docs <section>` to print one
-  section (matched by `## N. Title` heading).
+  section (matched by `## N. Title` heading). The `docs/reference/nix/`
+  sub-docs are bundled too: `rushi docs nix-flake-module` and
+  `rushi docs ext-flake-authoring` print each whole document; `rushi
+  docs --list` lists both the sections and the bundled docs.
 - The system prompt carries a one-line pointer:
   *"Harness reference: run `rushi docs` for the full rushi reference."*
 - The agent reads this doc on demand via the `bash` tool when the user

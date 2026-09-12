@@ -75,7 +75,8 @@
 #
 # Mirrors the pi-flake.lib.mkCodingAgent pattern: the kernel flake
 # provides the builder; the consumer flake provides configuration
-# modules. See docs/nix-flake-module.md for the full option schema.
+# modules. See docs/reference/nix/nix-flake-module.md for the full
+# option schema.
 
 { pkgs
 , modules ? [ ]

@@ -48,8 +48,8 @@
     #       }.package;
     #   };
     #
-    # See docs/nix-flake-module.md for the full option schema and the
-    # pi-flake → rushi capability mapping (§9).
+    # See docs/reference/nix/nix-flake-module.md for the full option
+    # schema and the pi-flake → rushi capability mapping (§9).
     lib = {
       # Build a fully configured rushi package from Nix modules.
       #
