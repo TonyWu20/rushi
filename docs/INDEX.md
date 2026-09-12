@@ -3,6 +3,13 @@
 Authoritative entry point for any agent starting a new session.
 Read this first. It tells you what exists, what works, and what is next.
 
+## Harness Reference
+
+The stable, user-facing reference for the rushi kernel (architecture,
+configuration, tool manifest, hook ABI, distribution) lives in
+[`reference/README.md`](reference/README.md). It is also embedded in
+the `rushi` binary — run `rushi docs` or `rushi docs <section>`.
+
 ## Repo state (2026-09-08)
 
 **Working.** The Phase 2 pipeline runs end to end:
