@@ -961,3 +961,49 @@ an SSE `response.failed` event whose `response.error` field was
 compacts successfully: `tokens_before = 261477`,
 `tokens_after = 22793`, `version = 5`.
 
+## FT-024 — The length-stop e2e assertion survived correction 64
+
+**Symptom:** The `length-stop` scenario in `scripts/compact-e2e.sh`
+expected the re-included request to drop the truncated pair. It
+kept the pair.
+
+**Root cause:** The assertion dates to correction 60, when
+`bin/assemble` dropped stale pairs. Correction 64 removed that
+drop. The truncation notice now reaches the model like any other
+result. The e2e line was never updated to match.
+
+**Fix:** Flipped the `length-stop` assertion. The request keeps the
+truncation notice, so the expected count is 1, not 0. The label
+now cites correction 64.
+
+**Verification:** `length-stop` passes 7 of 7. The full compact-e2e
+suite passes 96 of 96.
+
+## FT-025 — Noop silent-overflow compact escalated to last-resort
+
+**Symptom:** The `silent-failure-rescue` scenario failed after the
+proactive compact. Three empty-detail errors should have burned the
+retry budget and let the fourth call recover. Instead a terminal
+error fired on the second error. The counts wanted 0 errors and 4
+assistant messages, got 1 and 3.
+
+**Root cause:** The FT-023 early-detection block treats any
+non-`Compacted` compact as failed. It escalates to `last_resort`
+and runs a forced last-resort compact.
+
+Here the kept region already fits the keep budget, so the compact
+returns `Noop`. The escalated `last_resort` flag then stopped the
+loop one call early. The FT-022 retry-exhaustion rescue had the
+same Noop/Failed conflation.
+
+**Fix:** `step.rs` now branches on `CompactOutcome` in the
+early-detection and retry-exhaustion blocks. A `Noop` compact
+resets the retry counter and continues, leaving `last_resort`
+untouched. A genuine unresolvable overflow still stops when
+retries exhaust. Only a `Failed` summary call escalates to the
+forced last-resort compact.
+
+**Verification:** `silent-failure-rescue` passes 5 of 5. The full
+compact-e2e suite passes 96 of 96. `cargo test` and clippy are
+clean, and the other e2e suites pass.
+

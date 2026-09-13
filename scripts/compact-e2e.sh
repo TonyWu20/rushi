@@ -409,13 +409,16 @@ EOF
   n_err=$(jq -c 'select(.type == "error")' "$SLOG" | wc -l)
   assert_eq "$n_err" 0 "no terminal error event"
   assert_eq "$(claim_state)" "idle" "the loop runs to idle"
-  # The re-included request drops the truncated pair: the two-
-  # prefix rule.
+  # Correction 64: the truncation notice reaches the model like every
+  # other result (the correction-60 pair-drop is gone; stale failures
+  # are managed by compaction instead). So the re-included request
+  # KEEPS the truncation-notice pair so the model can re-issue the
+  # call with shorter args (docs/auto-compact-plan.md section 4.4).
   local req
   req=$(cd "$WORK" && "$BIN_DIR/assemble" --session sessions/session --config config.toml 2>/dev/null)
   local n_hit
   n_hit=$(rg -c 'Arguments may be truncated' <<<"$req" 2>/dev/null || true)
-  assert_eq "${n_hit:-0}" 0 "the re-included request drops the truncated pair"
+  assert_eq "${n_hit:-0}" 1 "the re-included request keeps the truncation notice"
 }
 
 # ── Scenario 5: the compact failure ──────────────────────────────

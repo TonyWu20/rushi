@@ -1014,18 +1014,47 @@ fn model_retry_loop(
                     let status = try_compact_with_hooks(
                         cfg, runner, session, CompactReason::Overflow, false, false,
                     );
-                    if status.outcome == CompactOutcome::Compacted {
-                        reassemble(cfg, runner, session, request, false);
-                        model_err_retries = 0;
-                        continue;
+                    match status.outcome {
+                        // The compact shrank the context: re-include the
+                        // smaller context and retry immediately.
+                        CompactOutcome::Compacted => {
+                            reassemble(cfg, runner, session, request, false);
+                            model_err_retries = 0;
+                            continue;
+                        }
+                        // Nothing left to compact: the kept region already
+                        // fits the keep budget, so the estimate still reads
+                        // above the trigger only because of its 25% safety
+                        // margin. Do NOT escalate to last_resort here: a
+                        // transient empty-detail model error should get the
+                        // ordinary retry budget, not an immediate terminal
+                        // stop. Reset the retry counter and fall back to
+                        // the transport path below; a genuine
+                        // unresolvable overflow still terminates once the
+                        // retries exhaust (the post-failure rescue at the
+                        // bottom is gated on !overflow_recovered, which is
+                        // now set, so it will not double-fire).
+                        CompactOutcome::Noop => {
+                            eprintln!(
+                                "rushi: silent-overflow compact was a noop; context already at its keep budget, retrying without escalating"
+                            );
+                            reassemble(cfg, runner, session, request, false);
+                            model_err_retries = 0;
+                            continue;
+                        }
+                        // The compact genuinely failed (summary call error,
+                        // empty summary, ...): escalate to the more
+                        // aggressive last-resort compact before giving up.
+                        CompactOutcome::Failed => {
+                            last_resort = true;
+                            let _ = try_compact_with_hooks(
+                                cfg, runner, session, CompactReason::LastResort, true, false,
+                            );
+                            reassemble(cfg, runner, session, request, false);
+                            model_err_retries = 0;
+                            continue;
+                        }
                     }
-                    last_resort = true;
-                    let _ = try_compact_with_hooks(
-                        cfg, runner, session, CompactReason::LastResort, true, false,
-                    );
-                    reassemble(cfg, runner, session, request, false);
-                    model_err_retries = 0;
-                    continue;
                 }
             }
             // Transport-level model failure.
@@ -1060,18 +1089,45 @@ fn model_retry_loop(
                     let status = try_compact_with_hooks(
                         cfg, runner, session, CompactReason::Overflow, false, false,
                     );
-                    if status.outcome == CompactOutcome::Compacted {
-                        reassemble(cfg, runner, session, request, false);
-                        model_err_retries = 0;
-                        continue;
+                    match status.outcome {
+                        // The compact shrank the context: re-include the
+                        // smaller context and retry immediately.
+                        CompactOutcome::Compacted => {
+                            reassemble(cfg, runner, session, request, false);
+                            model_err_retries = 0;
+                            continue;
+                        }
+                        // Nothing left to compact: the kept region already
+                        // fits the keep budget, so the estimate still reads
+                        // above the trigger only because of its 25% safety
+                        // margin. Do NOT escalate to last_resort here: a
+                        // transient model error should get another retry
+                        // budget, not an immediate terminal stop. Reset the
+                        // retry counter and keep retrying; a genuine
+                        // unresolvable overflow still stops once the next
+                        // retries exhaust (overflow_recovered is now set, so
+                        // this rescue will not double-fire).
+                        CompactOutcome::Noop => {
+                            eprintln!(
+                                "rushi: post-failure compact was a noop; context already at its keep budget, retrying without escalating"
+                            );
+                            reassemble(cfg, runner, session, request, false);
+                            model_err_retries = 0;
+                            continue;
+                        }
+                        // The compact genuinely failed (summary call error,
+                        // empty summary, ...): escalate to the more
+                        // aggressive last-resort compact before giving up.
+                        CompactOutcome::Failed => {
+                            last_resort = true;
+                            let _ = try_compact_with_hooks(
+                                cfg, runner, session, CompactReason::LastResort, true, false,
+                            );
+                            reassemble(cfg, runner, session, request, false);
+                            model_err_retries = 0;
+                            continue;
+                        }
                     }
-                    last_resort = true;
-                    let _ = try_compact_with_hooks(
-                        cfg, runner, session, CompactReason::LastResort, true, false,
-                    );
-                    reassemble(cfg, runner, session, request, false);
-                    model_err_retries = 0;
-                    continue;
                 }
             }
             append_terminal_error(
