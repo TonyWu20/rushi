@@ -20,14 +20,16 @@ pub struct HarnessConfig {
     pub config_dir: PathBuf,
     /// Root directory for session directories.
     pub sessions_root: PathBuf,
-    /// Root directory for tool manifests.
-    pub tools_root: PathBuf,
-    /// Extra roots for tool manifests (extension-provided tools, e.g.
-    /// the exts repo's `goal-tools/` group), if `[paths]
-    /// extra_tools_roots` is set. Scanned after `tools_root`; the
-    /// primary root wins a name collision. Relative entries resolve
-    /// against the stage CWD (the config dir).
-    pub extra_tools_roots: Vec<PathBuf>,
+    /// Native tool dirs (each a dir containing a `tool.toml` manifest),
+    /// from `[paths] native_tool_paths`. Relative entries resolve
+    /// against the config dir.
+    pub native_tool_paths: Vec<PathBuf>,
+    /// Extension tool dirs (each a dir containing a `tool.toml`
+    /// manifest, or a root dir holding several tool sub-dirs), from
+    /// `[paths] extension_tool_paths`. Scanned after the native paths;
+    /// the native path wins a name collision. Relative entries resolve
+    /// against the config dir.
+    pub extension_tool_paths: Vec<PathBuf>,
 
     // -- model resolution --
     /// The active model section name (e.g. "deepseek", "Qwen3.8-27B-...").
@@ -101,25 +103,47 @@ impl HarnessConfig {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("sessions"));
 
-        // Tools root
-        let tools_root = cfg
+        // Native tool paths (each entry is a tool dir containing a
+        // tool.toml, or a root dir holding tool sub-dirs). Relative
+        // entries resolve against the config dir so Nix-store installs
+        // work without full store paths.
+        let native_tool_paths = cfg
             .get("paths")
-            .and_then(|p| p.get("tools_root"))
-            .and_then(|s| s.as_str())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("tools"));
-
-        // Extra tools roots (extension-provided tool manifests, e.g.
-        // the exts repo's goal-tools/ group; docs/tui-ext-repo-split.md
-        // section 4, item 16).
-        let extra_tools_roots = cfg
-            .get("paths")
-            .and_then(|p| p.get("extra_tools_roots"))
+            .and_then(|p| p.get("native_tool_paths"))
             .and_then(|l| l.as_array())
             .map(|arr| {
                 arr.iter()
                     .filter_map(|v| v.as_str())
-                    .map(PathBuf::from)
+                    .map(|s| {
+                        let p = PathBuf::from(s);
+                        if p.is_relative() {
+                            config_dir.join(p)
+                        } else {
+                            p
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Extension tool paths (extension-provided tool manifests, e.g.
+        // the exts repo's goal-tools/ group; docs/tui-ext-repo-split.md
+        // section 4, item 16).
+        let extension_tool_paths = cfg
+            .get("paths")
+            .and_then(|p| p.get("extension_tool_paths"))
+            .and_then(|l| l.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| {
+                        let p = PathBuf::from(s);
+                        if p.is_relative() {
+                            config_dir.join(p)
+                        } else {
+                            p
+                        }
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -228,8 +252,8 @@ impl HarnessConfig {
             config_path: config_path.to_path_buf(),
             config_dir,
             sessions_root,
-            tools_root,
-            extra_tools_roots,
+            native_tool_paths,
+            extension_tool_paths,
             active_model,
             model_id,
             max_output_tokens,

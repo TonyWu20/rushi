@@ -86,7 +86,7 @@ model = "deepseek"
 
 [paths]
 sessions_root = "sessions"
-tools_root = "tools"
+native_tool_paths = ["tools/bash", "tools/read", "tools/write", "tools/edit"]
 
 [limits]
 compact_keep_events = 24

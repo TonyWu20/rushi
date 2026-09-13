@@ -8,9 +8,9 @@
 //!   stdin; the optional stream channel is docs/tui-streaming-response.md
 //!   section 4.1)
 //! - `parse --config <cfg>` (the model output JSON on stdin)
-//! - `route --tools <dir> [--cwd <dir>] [--tool-log <path>]
-//!   [--tool-result-max-chars N]` (tool_call events on stdin, one
-//!   JSON per line)
+//! - `route --native-tool-path <dir>... --extension-tool-path <dir>...
+//!   [--cwd <dir>] [--tool-log <path>] [--tool-result-max-chars N]`
+//!   (tool_call events on stdin, one JSON per line)
 //! - `compact <session> --config <cfg> --reason <r> [--force]
 //!   [--strip-last-assistant]`
 //!
@@ -292,9 +292,11 @@ impl StageRunner for SubprocessRunner {
             .join("\n");
 
         let mut cmd = Command::new(&self.route_bin);
-        cmd.arg("--tools").arg(&env.tools_root);
-        for extra in &env.extra_tools_roots {
-            cmd.arg("--extra-tools").arg(extra);
+        for p in &env.native_tool_paths {
+            cmd.arg("--native-tool-path").arg(p);
+        }
+        for p in &env.extension_tool_paths {
+            cmd.arg("--extension-tool-path").arg(p);
         }
         if let Some(cwd) = &env.cwd {
             cmd.arg("--cwd").arg(cwd);

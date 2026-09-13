@@ -18,6 +18,27 @@ struct Args {
     config: String,
 }
 
+/// Collect tool names from a tool path (tool dir or root dir).
+fn collect_tool_names(path: &PathBuf, names: &mut std::collections::HashSet<String>) {
+    let direct_toml = path.join("tool.toml");
+    if direct_toml.exists() {
+        if let Some(name) = path.file_name() {
+            names.insert(name.to_string_lossy().to_string());
+        }
+        return;
+    }
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let sub = entry.path();
+            if sub.is_dir() && sub.join("tool.toml").exists() {
+                if let Some(name) = sub.file_name() {
+                    names.insert(name.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -38,23 +59,54 @@ fn main() {
         }
     };
 
-    let tools_root = config
+    // Native tool paths (each entry is a tool dir containing a
+    // tool.toml, or a root dir holding tool sub-dirs). Relative
+    // entries resolve against the config dir.
+    let native_tool_paths: Vec<PathBuf> = config
         .get("paths")
-        .and_then(|p| p.get("tools_root"))
-        .and_then(|t| t.as_str())
-        .unwrap_or("tools");
-
-    // Extra tools roots (extension-provided tool manifests, e.g. the
-    // exts repo's goal-tools/ group; docs/tui-ext-repo-split.md
-    // section 4, item 16)
-    let extra_tools_roots = config
-        .get("paths")
-        .and_then(|p| p.get("extra_tools_roots"))
+        .and_then(|p| p.get("native_tool_paths"))
         .and_then(|l| l.as_array())
         .map(|arr| {
+            let config_dir = std::path::Path::new(config_path)
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_default();
             arr.iter()
                 .filter_map(|v| v.as_str())
-                .map(PathBuf::from)
+                .map(|s| {
+                    let p = PathBuf::from(s);
+                    if p.is_relative() {
+                        config_dir.join(p)
+                    } else {
+                        p
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    // Extension tool paths (extension-provided tool manifests, e.g.
+    // the exts repo's goal-tools/ group; docs/tui-ext-repo-split.md
+    // section 4, item 16).
+    let extension_tool_paths: Vec<PathBuf> = config
+        .get("paths")
+        .and_then(|p| p.get("extension_tool_paths"))
+        .and_then(|l| l.as_array())
+        .map(|arr| {
+            let config_dir = std::path::Path::new(config_path)
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_default();
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| {
+                    let p = PathBuf::from(s);
+                    if p.is_relative() {
+                        config_dir.join(p)
+                    } else {
+                        p
+                    }
+                })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -73,45 +125,12 @@ fn main() {
         }
     };
 
-    // Load valid tool names from tools/
-    let tools_root_path = PathBuf::from(&tools_root);
+    // Load valid tool names from native and extension tool paths.
+    // Each path is either a tool dir (contains tool.toml directly)
+    // or a root dir (sub-dirs contain tool.toml).
     let mut valid_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
-    if let Ok(entries) = fs::read_dir(&tools_root_path) {
-        for entry in entries.flatten() {
-            let tool_path = entry.path();
-            if tool_path.is_dir() {
-                let tool_toml = tool_path.join("tool.toml");
-                if tool_toml.exists() {
-                    if let Some(name) = tool_path.file_name() {
-                        valid_tools.insert(name.to_string_lossy().to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    // Extension-provided tool roots (config `[paths]
-    // extra_tools_roots` plus the RUSHI_EXTRA_TOOLS_ROOT env-var
-    // fallback — e.g. the exts repo's goal-tools/ group): additive
-    // discovery, same as route. Names only; dispatch is route's
-    // business.
-    let mut extra_roots: Vec<PathBuf> = extra_tools_roots.clone();
-    if let Ok(extra_root) = std::env::var("RUSHI_EXTRA_TOOLS_ROOT") {
-        if !extra_root.is_empty() {
-            extra_roots.push(PathBuf::from(extra_root));
-        }
-    }
-    for extra_root in &extra_roots {
-        if let Ok(entries) = fs::read_dir(extra_root) {
-            for entry in entries.flatten() {
-                let tool_path = entry.path();
-                if tool_path.is_dir() && tool_path.join("tool.toml").exists() {
-                    if let Some(name) = tool_path.file_name() {
-                        valid_tools.insert(name.to_string_lossy().to_string());
-                    }
-                }
-            }
-        }
+    for path in native_tool_paths.iter().chain(extension_tool_paths.iter()) {
+        collect_tool_names(path, &mut valid_tools);
     }
 
     let (code, lines) = process(&model_output, &valid_tools);

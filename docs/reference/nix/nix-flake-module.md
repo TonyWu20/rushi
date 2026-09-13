@@ -88,8 +88,8 @@ rushi = {
     # [paths]
     paths = {
       sessions_root = "sessions";
-      tools_root = "tools";
-      extra_tools_roots = [ ];   # list of paths (relative to CWD or abs)
+      native_tool_paths = [ "tools/bash" "tools/read" "tools/write" "tools/edit" ];
+      extension_tool_paths = [ ];  # list of tool dirs for extension tools
     };
 
     # [limits]
@@ -322,7 +322,7 @@ The mapping is direct:
 | `config.loop.command` | `[loop] command = "..."` |
 | `config.system_prompt.text` | `[system_prompt] text = "..."` |
 | `config.tui.tool_display.preset` | `[tui.tool_display] preset = "..."` |
-| `config.paths.extra_tools_roots` | `[paths] extra_tools_roots = [ ... ]` |
+| `config.paths.extension_tool_paths` | `[paths] extra_tools_roots = [ ... ]` |
 
 Empty strings / zero values / empty lists are **omitted** from the
 generated TOML (the kernel default stands). This keeps the config

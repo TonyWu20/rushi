@@ -33,8 +33,8 @@
     # [paths]
     paths = {
       sessions_root = "sessions";
-      tools_root = "tools";
-      extra_tools_roots = [ ];
+      native_tool_paths = [ "tools/bash" "tools/edit" "tools/read" "tools/write" ];
+      extension_tool_paths = [ ];
     };
 
     # [limits]

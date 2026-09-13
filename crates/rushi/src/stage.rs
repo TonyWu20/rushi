@@ -191,10 +191,14 @@ pub struct ToolCallEvent {
 /// The environment for the `route` stage.
 #[derive(Clone, Debug)]
 pub struct RouteEnv {
-    /// The tools root directory.
-    pub tools_root: PathBuf,
-    /// Extra roots for tool manifests (`[paths] extra_tools_roots`).
-    pub extra_tools_roots: Vec<PathBuf>,
+    /// Native tool dirs (each a dir containing a `tool.toml` manifest).
+    /// Scanned before extension tool paths; on a tool-name collision
+    /// the native entry wins.
+    pub native_tool_paths: Vec<PathBuf>,
+    /// Extension tool dirs (each a dir containing a `tool.toml`
+    /// manifest, or a root dir holding several tool sub-dirs).
+    /// Scanned after the native paths.
+    pub extension_tool_paths: Vec<PathBuf>,
     /// The working directory for tool subprocesses.
     pub cwd: Option<PathBuf>,
     /// The per-session tool log path.

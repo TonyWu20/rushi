@@ -876,23 +876,51 @@ fn main() {
     let compact_reasoning_effort: Option<String> =
         val_str(&limits, "compact_reasoning_effort");
 
-    let tools_root = config
-        .get("paths")
-        .and_then(|p| p.get("tools_root"))
-        .and_then(|t| t.as_str())
-        .unwrap_or("tools");
+    // Native tool paths (each entry is a tool dir containing a
+    // tool.toml, or a root dir holding tool sub-dirs). Relative
+    // entries resolve against the config dir.
+    let config_dir = PathBuf::from(&args.config)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
 
-    // Extra tools roots (extension-provided tool manifests, e.g. the
-    // exts repo's goal-tools/ group; docs/tui-ext-repo-split.md
-    // section 4, item 16)
-    let extra_tools_roots = config
+    let native_tool_paths: Vec<PathBuf> = config
         .get("paths")
-        .and_then(|p| p.get("extra_tools_roots"))
+        .and_then(|p| p.get("native_tool_paths"))
         .and_then(|l| l.as_array())
         .map(|arr| {
             arr.iter()
                 .filter_map(|v| v.as_str())
-                .map(PathBuf::from)
+                .map(|s| {
+                    let p = PathBuf::from(s);
+                    if p.is_relative() {
+                        config_dir.join(p)
+                    } else {
+                        p
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    // Extension tool paths (extension-provided tool manifests, e.g.
+    // the exts repo's goal-tools/ group; docs/tui-ext-repo-split.md
+    // section 4, item 16).
+    let extension_tool_paths: Vec<PathBuf> = config
+        .get("paths")
+        .and_then(|p| p.get("extension_tool_paths"))
+        .and_then(|l| l.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| {
+                    let p = PathBuf::from(s);
+                    if p.is_relative() {
+                        config_dir.join(p)
+                    } else {
+                        p
+                    }
+                })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -1094,24 +1122,25 @@ fn main() {
     let boundary = boundary.filter(|b| b.first_kept_seq <= seq.max(1));
 
     // Load tool schemas
-    let tools_root_path = PathBuf::from(&tools_root);
     let mut tool_schemas: Vec<serde_json::Value> = Vec::new();
 
-    // Tool dir names that carry a manifest under a tools root.
-    fn tool_names_in(root: &Path) -> Vec<String> {
-        let mut names: Vec<String> = Vec::new();
-        if let Ok(entries) = fs::read_dir(root) {
+    /// Collect tool dirs from a tool path (tool dir or root dir).
+    /// Returns the list of tool dir paths that carry a `tool.toml`.
+    fn tool_dirs_in(path: &Path) -> Vec<std::path::PathBuf> {
+        let direct_toml = path.join("tool.toml");
+        if direct_toml.exists() {
+            return vec![path.to_path_buf()];
+        }
+        let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+        if let Ok(entries) = fs::read_dir(path) {
             for entry in entries.flatten() {
-                let tool_path = entry.path();
-                if tool_path.is_dir() && tool_path.join("tool.toml").exists() {
-                    if let Some(name) = tool_path.file_name() {
-                        names.push(name.to_string_lossy().to_string());
-                    }
+                let sub = entry.path();
+                if sub.is_dir() && sub.join("tool.toml").exists() {
+                    dirs.push(sub);
                 }
             }
         }
-        names.sort();
-        names
+        dirs
     }
 
     // Build one model tool schema from a `tool.toml` manifest.
@@ -1145,50 +1174,32 @@ fn main() {
     // the base prompt and before the cwd line.
     let mut tool_list_entries: Vec<(String, String)> = Vec::new();
 
-    for name in tool_names_in(&tools_root_path) {
-        let tool_toml = tools_root_path.join(&name).join("tool.toml");
-        if let Some(schema) = load_tool_schema(&tool_toml, &name) {
-            tool_schemas.push(schema.clone());
-            let desc = schema
-                .get("description")
-                .and_then(|d| d.as_str())
-                .filter(|d| !d.is_empty())
-                .unwrap_or(name.as_str())
-                .to_string();
-            tool_list_entries.push((name, desc));
-        }
-    }
-
-    // Extension-provided tool roots (config `[paths]
-    // extra_tools_roots` plus the RUSHI_EXTRA_TOOLS_ROOT env-var
-    // fallback — the exts repo's goal-tools/ group): additive
-    // discovery, same as route. The primary root wins on a name
-    // collision.
-    let mut extra_roots: Vec<PathBuf> = extra_tools_roots;
-    if let Ok(extra_root_str) = std::env::var("RUSHI_EXTRA_TOOLS_ROOT") {
-        if !extra_root_str.is_empty() {
-            extra_roots.push(PathBuf::from(extra_root_str));
-        }
-    }
-    for extra_root in &extra_roots {
+    // Scan native tool paths first, then extension tool paths. A
+    // tool dir carries a `tool.toml` directly; a root dir holds
+    // several tool sub-dirs. The native path wins a name collision.
+    for path in native_tool_paths.iter().chain(extension_tool_paths.iter()) {
         let known: HashSet<String> = tool_schemas
             .iter()
             .filter_map(|s| s.get("name").and_then(|n| n.as_str()).map(str::to_string))
             .collect();
-        for name in tool_names_in(extra_root) {
-            if known.contains(name.as_str()) {
+        for tool_dir in tool_dirs_in(path) {
+            let name = tool_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            if name.is_empty() || known.contains(name) {
                 continue;
             }
-            let tool_toml = extra_root.join(&name).join("tool.toml");
-            if let Some(schema) = load_tool_schema(&tool_toml, &name) {
+            let tool_toml = tool_dir.join("tool.toml");
+            if let Some(schema) = load_tool_schema(&tool_toml, name) {
                 tool_schemas.push(schema.clone());
                 let desc = schema
                     .get("description")
                     .and_then(|d| d.as_str())
                     .filter(|d| !d.is_empty())
-                    .unwrap_or(name.as_str())
+                    .unwrap_or(name)
                     .to_string();
-                tool_list_entries.push((name, desc));
+                tool_list_entries.push((name.to_string(), desc));
             }
         }
     }

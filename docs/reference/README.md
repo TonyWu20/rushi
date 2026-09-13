@@ -152,8 +152,8 @@ The loop binary reads a TOML config. Resolution order for the config path:
 
 # --- [paths] ---
 # sessions_root = "sessions"
-# tools_root = "tools"
-# extra_tools_roots = []         # additional dirs for extension tool manifests
+# native_tool_paths = ["tools/bash", "tools/read", "tools/write", "tools/edit"]
+# extension_tool_paths = []       # additional tool dirs for extension tools
 
 # --- [limits] ---
 # read_limit = 2000
@@ -255,7 +255,7 @@ properties = {
    stdout.
 5. Add the tool name to `rushi.toml` → `[tools] enabled = [...]` and
    re-run `rushi setup` (or just have the directory present in
-   `tools_root`; discovery is by scan).
+   `native_tool_paths`; each entry names a tool dir or a root dir containing tool dirs).
 6. `assemble` picks up the manifest on the next build. The tool appears
    in the generated tool list in the system prompt and in the model's
    tool schemas.
@@ -362,7 +362,7 @@ cache once.
 
 ### Extension Model
 
-- **Tools:** add a directory to `tools/` or an `extra_tools_roots` path.
+- **Tools:** add a path to `native_tool_paths` or `extension_tool_paths`.
 - **Hooks:** register in `config.toml` or (future) `hooks/` directory.
 - **Prompt fragments:** an extension hook at `model.before` can insert or
   replace a fragment. The kernel only joins; it does not author content.

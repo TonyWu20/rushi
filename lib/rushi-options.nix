@@ -60,7 +60,7 @@ in
           [active]        active.model — name of the active model
           [model]         api, max_output_tokens, reasoning_effort,
                          plus per-model nested tables (e.g. model."deepseek")
-          [paths]         sessions_root, tools_root, extra_tools_roots
+          [paths]         sessions_root, native_tool_paths, extension_tool_paths
           [limits]        read/write/bash/compact limits
           [hooks]         timeout_ms, on = [ { window, command, args } ]
           [loop]          command, args, arg_style

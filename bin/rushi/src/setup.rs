@@ -218,8 +218,8 @@ pub fn render_config(manifest: &RushiManifest, version: &str, kernel_commit: &st
     #[derive(Serialize)]
     struct TPaths {
         sessions_root: String,
-        tools_root: String,
-        extra_tools_roots: Vec<String>,
+        native_tool_paths: Vec<String>,
+        extension_tool_paths: Vec<String>,
     }
     #[derive(Serialize)]
     struct TLimits {
@@ -278,8 +278,13 @@ pub fn render_config(manifest: &RushiManifest, version: &str, kernel_commit: &st
     };
     let paths = TPaths {
         sessions_root: "sessions".into(),
-        tools_root: "tools".into(),
-        extra_tools_roots: Vec::new(),
+        native_tool_paths: vec![
+            "tools/bash".into(),
+            "tools/edit".into(),
+            "tools/read".into(),
+            "tools/write".into(),
+        ],
+        extension_tool_paths: Vec::new(),
     };
     let hooks = THooks {
         timeout_ms: 30000,
@@ -796,7 +801,7 @@ mod tests {
         let text = render_config(&m, "0.1.0", "dev");
         assert!(text.contains("# compact_reserve_tokens = 16384"));
         assert!(text.contains("[paths]"));
-        assert!(text.contains("# extra_tools_roots = []"));
+        assert!(text.contains("# extension_tool_paths = []"));
         // Every section is present as a template.
         assert!(text.contains("[active]"));
         assert!(text.contains("[model]"));
