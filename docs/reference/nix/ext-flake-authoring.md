@@ -160,9 +160,8 @@ fenix toolchain.
           # because the TUI resolves `command` against the ext entry dir.
           # buildRustPackage is a release build, so the default is
           # "target/release". If an ext's ext.toml points at a different
-          # dir (e.g. goal-ext's "target/debug/goal-ext", a dev artifact),
-          # either align the ext.toml `command` to target/release/… or
-          # pass binDir = "target/debug".
+          # dir (e.g. a dev-build target/debug/), pass a matching
+          # binDir = "target/debug".
           wrapAsExt = { extName, extToml, built, binDir ? "target/release" }:
             pkgs.stdenv.mkDerivation {
               pname = "${extName}-ui-ext";
@@ -294,15 +293,15 @@ goal-app/goal-ext/
 `packages.goal-ext = wrapAsExt { extName = "goal"; extToml = "…/goal-ext/ext.toml"; built = buildCrate { … }; }`
 → `$out/goal/ext.toml` + `$out/goal/target/release/goal-ext`.
 The `extName` (`"goal"`) is the `ui_extensions/` entry name; it matches
-the `command`'s entry-dir. **Watch the `binDir` invariant**: `goal-ext`'s
-`ext.toml` currently reads `command = "target/debug/goal-ext"` (a dev
-artifact — `ext-env.sh` builds in debug). For the Nix package, align it
-to `target/release/goal-ext` (the `buildRustPackage` release layout) so
-the default `binDir = "target/release"` resolves; otherwise pass
-`binDir = "target/debug"`. (For `statusline-rs` the entry name and the
-binary name differ — `ext.toml` `command = "target/release/statusline-ext"`
-— and `cp -rL ${built}/bin/.` copies the binary under its *binary* name,
-so the relative `command` path still resolves.)
+the `command`'s entry-dir. **Watch the `binDir` invariant**:
+`goal-ext`'s `ext.toml` reads `command = "target/release/goal-ext"` (the
+`buildRustPackage` release layout), so the default `binDir =
+"target/release"` resolves. If an ext's `ext.toml` points at a
+different dir (e.g. a dev-build `target/debug/…`), pass a matching
+`binDir`. (For `statusline-rs` the entry name and the binary name
+differ — `ext.toml` `command = "target/release/statusline-ext"`
+— and `cp -rL ${built}/bin/.` copies the binary under its *binary*
+name, so the relative `command` path still resolves.)
 
 ---
 
