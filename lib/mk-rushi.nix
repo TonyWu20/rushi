@@ -83,6 +83,7 @@
 , src
 , rustToolchain ? null
 , extraSpecialArgs ? { }
+, cargoLockContents ? null
 , ...
 }:
 
@@ -149,9 +150,14 @@ let
   rushi = pkgs.rustPlatform.buildRustPackage rec {
     pname = "rushi";
     inherit version src;
-    cargoLock = {
-      lockFile = src/Cargo.lock;
-    };
+    # When cargoLockContents is supplied (the flake pre-reads ./Cargo.lock),
+    # feed the contents directly to importCargoLock. This avoids a Nix path
+    # reference to src/Cargo.lock, which mis-resolves when `src` is a flake
+    # path input.  Fall back to the path form for direct callers.
+    cargoLock = if cargoLockContents != null then
+      { lockFileContents = cargoLockContents; }
+    else
+      { lockFile = src/Cargo.lock; };
     nativeBuildInputs = [ toolchain ];
     # Build all workspace members (loop stages, tools, hooks).
     cargoBuildFlags = [ "--workspace" ];

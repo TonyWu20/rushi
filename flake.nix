@@ -73,6 +73,10 @@
         (import ./lib/mk-rushi.nix) {
           inherit pkgs modules rustToolchain extraSpecialArgs;
           src = self;
+          # Read the lock contents here, where ./Cargo.lock resolves to
+          # the flake root.  A Nix path reference (src/Cargo.lock)
+          # mis-resolves when the kernel is a flake path input.
+          cargoLockContents = builtins.readFile ./Cargo.lock;
         };
 
       # Kernel defaults (for inspection or custom overlay construction).
