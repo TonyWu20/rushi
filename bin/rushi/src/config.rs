@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 use toml::Value;
 
+use rushi_common::config_check;
 use rushi_common::hooks::HookRegistration;
 use rushi_common::model_settings;
 
@@ -76,6 +77,35 @@ pub struct HarnessConfig {
     pub log_bin: PathBuf,
 }
 
+/// Resolve a hook command against the package layout.
+///
+/// A bare name (no path separator) is tried against the sibling of
+/// the running binary first. Kernel-shipped hooks such as
+/// `harness-hook-compact` live there, in `bin/`. Then the name is
+/// tried against the package `hooks/` dir. `lib.mkRushi` bundles
+/// external hook binaries there.
+///
+/// This mirrors the stage-binary sibling resolution. A Nix-store
+/// package stays self-contained. The bare names in the generated
+/// `config.toml` resolve without relying on `PATH`. A name with a
+/// path separator is relative or absolute and is returned as-is.
+/// When neither sibling location holds the binary, the raw name is
+/// returned. `Command::new` then falls back to a `PATH` lookup
+/// (docs/reference/nix/nix-flake-module.md).
+fn resolve_hook_command(raw: &str, exe_dir: &Path) -> String {
+    if !raw.is_empty() && !raw.contains('/') {
+        let sibling = exe_dir.join(raw);
+        if sibling.is_file() {
+            return sibling.to_string_lossy().into_owned();
+        }
+        let in_hooks = exe_dir.join("../hooks").join(raw);
+        if in_hooks.is_file() {
+            return in_hooks.to_string_lossy().into_owned();
+        }
+    }
+    raw.to_string()
+}
+
 impl HarnessConfig {
     /// Load and resolve the config from a TOML file.
     pub fn load(config_path: &Path) -> Self {
@@ -88,6 +118,16 @@ impl HarnessConfig {
             eprintln!("Error: invalid config TOML: {e}");
             std::process::exit(1);
         });
+
+        // Hard-fail on legacy `[paths]` keys that the rename in
+        // 353424a made inert; they silently drop tool discovery.
+        let legacy = config_check::legacy_key_report(&cfg);
+        if !legacy.is_empty() {
+            for msg in &legacy {
+                eprintln!("Error: {msg}");
+            }
+            std::process::exit(1);
+        }
 
         let config_dir = config_path
             .canonicalize()
@@ -195,6 +235,21 @@ impl HarnessConfig {
             .and_then(|v| v.as_integer())
             .map(|v| v as u64);
 
+        // Binary paths: env overrides, then sibling of the running binary.
+        // Computed before the hook loop so bare hook commands can resolve
+        // against the sibling `bin/` dir and the package `hooks/` dir.
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        fn resolve_bin(env_var: &str, name: &str, exe_dir: &Path) -> PathBuf {
+            if let Ok(p) = std::env::var(env_var) {
+                return PathBuf::from(p);
+            }
+            exe_dir.join(name)
+        }
+
         // Hooks
         let hooks_timeout_ms = cfg
             .get("hooks")
@@ -210,7 +265,6 @@ impl HarnessConfig {
         {
             for entry in on_list {
                 let window_str = entry.get("window").and_then(|w| w.as_str()).unwrap_or("");
-                let command = entry.get("command").and_then(|c| c.as_str()).unwrap_or("").to_string();
                 let window = match rushi_common::hooks::Window::parse(window_str) {
                     Some(w) => w,
                     None => {
@@ -227,25 +281,18 @@ impl HarnessConfig {
                             .collect()
                     })
                     .unwrap_or_default();
+                let raw_command = entry
+                    .get("command")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let command = resolve_hook_command(&raw_command, &exe_dir);
                 hooks.push(HookRegistration {
                     window,
                     command,
                     args,
                 });
             }
-        }
-
-        // Binary paths: env overrides, then sibling of the running binary
-        let exe_dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-            .unwrap_or_else(|| PathBuf::from("."));
-
-        fn resolve_bin(env_var: &str, name: &str, exe_dir: &Path) -> PathBuf {
-            if let Ok(p) = std::env::var(env_var) {
-                return PathBuf::from(p);
-            }
-            exe_dir.join(name)
         }
 
         HarnessConfig {
@@ -351,5 +398,51 @@ compact_reserve_tokens = 16384
         // Trigger is always context_budget - reserve = 262144 - 16384.
         assert_eq!(cfg.trigger_level(), 245760);
         assert_eq!(cfg.compact_overflow_budget(), 262144);
+    }
+
+    // Build a fake Nix package layout under a tempdir and return the
+    // `bin/` dir (the exe_dir a `bin/rushi` would report).
+    fn fake_pkg_layout() -> (tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        let hooks = root.path().join("hooks");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&hooks).unwrap();
+        // Kernel-shipped hook binary sits in bin/ next to the kernel.
+        std::fs::write(bin.join("harness-hook-compact"), "").unwrap();
+        // External hook binary is bundled in hooks/ by lib.mkRushi.
+        std::fs::write(hooks.join("harness-hook-goal-idle"), "").unwrap();
+        (root, bin)
+    }
+
+    #[test]
+    fn bare_hook_resolves_to_sibling_bin() {
+        let (_root, bin) = fake_pkg_layout();
+        let got = resolve_hook_command("harness-hook-compact", &bin);
+        let want = bin.join("harness-hook-compact");
+        assert_eq!(got, want.to_string_lossy().to_string());
+    }
+
+    #[test]
+    fn bare_hook_resolves_to_package_hooks_dir() {
+        let (_root, bin) = fake_pkg_layout();
+        let got = resolve_hook_command("harness-hook-goal-idle", &bin);
+        let want = bin.join("../hooks/harness-hook-goal-idle");
+        assert_eq!(got, want.to_string_lossy().to_string());
+    }
+
+    #[test]
+    fn bare_hook_missing_everywhere_stays_bare() {
+        let (_root, bin) = fake_pkg_layout();
+        // No such binary in bin/ or hooks/ -> fall back to PATH.
+        assert_eq!(resolve_hook_command("no-such-hook", &bin), "no-such-hook");
+    }
+
+    #[test]
+    fn path_hook_command_is_used_verbatim() {
+        let (_root, bin) = fake_pkg_layout();
+        // A name with a path separator is relative or absolute; as-is.
+        assert_eq!(resolve_hook_command("./my/hook.sh", &bin), "./my/hook.sh");
+        assert_eq!(resolve_hook_command("/abs/hook.sh", &bin), "/abs/hook.sh");
     }
 }

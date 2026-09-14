@@ -288,6 +288,10 @@ command = "my-approval-hook"
 - The `on` list is ordered. Hooks run in order.
 - One hook binds to exactly one window.
 - No matcher DSL; filtering is the hook's own job from the JSON on stdin.
+- The `command` field resolves against the package layout: the sibling
+  `bin/` dir (kernel-shipped hooks), then the package `hooks/` dir
+  (external hooks bundled by `lib.mkRushi`), then `PATH`. A name with
+  a path separator is used as-is.
 - Growth path: `hooks/<window>/<name>/hook.toml` directory layout (not yet
   built; config registry is the current mechanism).
 

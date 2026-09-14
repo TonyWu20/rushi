@@ -177,6 +177,10 @@ rushi = {
 
   # External hook binaries: list of Nix derivations or paths.
   # Each must produce a single executable (or a bin/ dir).
+  # The binaries are bundled into the package hooks/ dir. At runtime
+  # the kernel resolves a bare hook command against the sibling bin/
+  # dir first, then the package hooks/ dir, so generated configs can
+  # use bare names without relying on PATH.
   external_hooks = [ ];
 
   # ── Environment variables ──

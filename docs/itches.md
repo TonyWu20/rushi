@@ -244,3 +244,76 @@ loop retries indefinitely.
    keeping local copies. Defaults are `max_output_tokens = 32768`
    and `context_tokens = 262144`, matching the `rushi setup`
    template. A default change is now a single edit in one file.
+
+## Nix-configured package: external hooks in `$out/hooks/` are unreachable (2026-09-15)
+
+**Observed.** The `rushi-config` flake builds a configured rushi
+package. Its generated `config.toml` names the external hooks by
+bare binary name. `lib.mkRushi` bundles those hook binaries into
+`$out/hooks/`. At runtime, every external hook firing fails to
+spawn.
+
+The session log records an error marker per hook:
+
+```
+{"id":"hook.run.idle.error","type":"ext_status",
+ "value":"spawn harness-hook-goal-idle: No such file or directory (os error 2)"}
+```
+
+The failure was reproduced against the store package. The PATH had
+only `$out/bin` plus the system dirs. Each external hook logged a
+`hook.<window>.error` marker. The window then fell back to its
+default decision.
+
+The kernel-bundled `harness-hook-compact` resolves fine. It ships
+in `$out/bin/`. Only the external hooks are unreachable.
+
+**Root cause.** The kernel fires hooks with `Command::new(command)`.
+That is a bare `PATH` lookup. No code searches the package
+`hooks/` directory.
+
+There is no resolver like the one tools have
+(`resolve_kernel_tools_dir`). Nor one like the stage-binary
+sibling resolution (`resolve_bin`). `lib.mkRushi` copies external
+hook binaries into `$out/hooks/`. That dir is not on `PATH`.
+
+Only `$out/bin/` is, via `mkShell` or `nix run`. The consumer
+flake's comment says the kernel resolves commands from there. The
+kernel never implemented that.
+
+**Behavioral impact.** In the Nix build the external hooks are
+dead. Goal continuation on `run.idle` dies. Goal compact on
+`compact.before` dies. The tool guards on `tool.before` die.
+
+Those guards are goal-tools, no-find-grep, and simple-english. The
+model transforms on `model.before` die. Those are goal-arm and
+simple-english. Every failed window applies its default decision.
+
+The compact hook still works. Its binary ships in `$out/bin/`.
+
+**Chosen fix: option 1, the kernel resolver.** The other two
+options stay open as alternatives but were not needed.
+
+**Resolution (2026-09-15).** Added `resolve_hook_command` in
+`bin/rushi/src/config.rs`. `HarnessConfig::load` now resolves a
+bare hook command against the sibling `bin/` dir first. Then it
+tries the package `hooks/` dir. Then it falls back to the raw
+name.
+
+The raw name keeps the old `PATH` behavior. A name with a path
+separator is used as-is, so dev configs are unchanged.
+
+The Nix packaging needed no change. `lib.mkRushi` already ships
+the external hooks in `hooks/` next to `bin/`. The generated
+config already uses bare names. The kernel now resolves them.
+
+Proof: unit tests in `config.rs` cover the sibling `bin/` hit, the
+`hooks/` hit, the missing-everywhere fallback, and the
+path-verbatim case. An end-to-end run of a fake Nix layout (PATH
+holding only `bin/`) shows the `hooks/` hooks get invoked. No
+`hook.<window>.error` markers appear.
+
+**Note.** The kernel change sits in this repo's git working tree.
+The `rushi-config` flake pulls the kernel by `git+file://`. So the
+fix reaches a Nix build only after the kernel change is committed
+and the flake lock is updated.

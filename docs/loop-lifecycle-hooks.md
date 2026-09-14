@@ -191,6 +191,11 @@ For each window, the harness spawns each registered hook:
   section 3, plus a `window` field and the `session` name).
 - `env` carries `SESSION`, `SESSIONS_ROOT`, `CONFIG`,
   `HARNESS_PHASE`, and the window name.
+- `command` is the program the harness spawns. A bare name resolves
+  against the package layout: the sibling `bin/` dir (kernel-shipped
+  hook binaries), then the package `hooks/` dir (external hooks
+  bundled by `lib.mkRushi`). A name with a path separator is used
+  as-is. Otherwise the name falls back to `PATH`.
 - One `write` of the JSON. Then the harness reads `stdout`.
 
 ### 4.3 The decision contract

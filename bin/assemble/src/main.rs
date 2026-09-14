@@ -2,6 +2,7 @@
 
 use clap::Parser;
 use bon::builder;
+use rushi_common::config_check;
 use rushi_common::compact_math::trigger_level_for;
 use rushi_common::model_settings::{ModelSettings, resolve_active_model, resolve_model_settings, val_int, val_str};
 use rushi_common::rewind;
@@ -846,6 +847,16 @@ fn main() {
             std::process::exit(1);
         }
     };
+
+    // Hard-fail on legacy `[paths]` keys that the rename in 353424a
+    // made inert; they silently drop tool discovery.
+    let legacy = config_check::legacy_key_report(&config);
+    if !legacy.is_empty() {
+        for msg in &legacy {
+            eprintln!("Error: {msg}");
+        }
+        std::process::exit(1);
+    }
 
     let base_prompt = config
         .get("system_prompt")
