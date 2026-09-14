@@ -59,6 +59,16 @@ fn main() {
         }
     };
 
+    // Hard-fail on legacy `[paths]` keys that the rename in 353424a
+    // made inert; they silently drop tool discovery.
+    let legacy = rushi_common::config_check::legacy_key_report(&config);
+    if !legacy.is_empty() {
+        for msg in &legacy {
+            eprintln!("Error: {msg}");
+        }
+        std::process::exit(1);
+    }
+
     // Native tool paths (each entry is a tool dir containing a
     // tool.toml, or a root dir holding tool sub-dirs). Relative
     // entries resolve against the config dir.
@@ -247,10 +257,19 @@ fn process(
             return (2, lines);
         }
 
-        // Check tool name matches manifest
+        // Check the tool name against the manifest.
+        //
+        // FT-026: an unknown or blank name no longer hard-fails the
+        // parse. Only the exit-2 consequence was dropped. The call is
+        // forwarded to `route` (below), which reports it as a
+        // recoverable not-run `tool_result`, so the model corrects the
+        // call on the next turn. The `valid_tools` set stays in parse
+        // (operator decision 2026-09-15): it is the parse-side
+        // guarantee that only the tools named in the config can be
+        // called. `route`'s manifest scan enforces the dispatch side.
         if !valid_tools.contains(tc_name) {
-            lines.push(error_event(&format!("Model called unknown tool {tc_name}.")));
-            return (2, lines);
+            // Forwarded: `emit_assistant_and_tool_calls` below emits the
+            // `tool_call`; `route` owns the not-run report.
         }
     }
 
@@ -874,6 +893,69 @@ mod tests {
             !joined.contains("unknown tool"),
             "a length stop must not fail on the tool manifest: {joined}"
         );
+    }
+
+    #[test]
+    fn unknown_tool_name_forwards_to_route() {
+        // FT-026: a non-length stop with a tool name that is not in the
+        // config's valid set no longer hard-fails. Parse forwards the
+        // call (exit 1, a `tool_call` event) and lets `route` report
+        // the not-run result. No `error` event, no "unknown tool" text.
+        let raw = r#"{
+            "text": "",
+            "tool_calls": [ { "id": "call_1", "name": "weird_tool", "arguments": {} } ],
+            "stop_reason": "tool_calls"
+        }"#;
+        let model_output: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let valid_tools: std::collections::HashSet<String> =
+            std::iter::once("bash".to_string()).collect();
+        let (code, lines) = process(&model_output, &valid_tools);
+        let joined = lines.join("\n");
+        assert_eq!(code, 1, "an unknown name on a non-length stop forwards to route");
+        assert!(
+            !joined.contains("\"type\":\"error\""),
+            "no terminal error event: {joined}"
+        );
+        assert!(
+            !joined.contains("unknown tool"),
+            "no 'unknown tool' text in the parse output: {joined}"
+        );
+        // The forwarded `tool_call` event carries the unknown name.
+        let tc = lines
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|v| v.get("type").and_then(|t| t.as_str()) == Some("tool_call"))
+            .expect("a tool_call event is emitted for the unknown call");
+        assert_eq!(tc["name"], "weird_tool");
+        assert_eq!(tc["id"], "call_1");
+    }
+
+    #[test]
+    fn blank_tool_name_forwards_with_empty_name() {
+        // FT-026: a blank (empty-string) tool name is forwarded too. The
+        // `tool_call` event carries the empty name and `route` reports
+        // it with the explicit empty-name message.
+        let raw = r#"{
+            "text": "",
+            "tool_calls": [ { "id": "call_1", "name": "", "arguments": {} } ],
+            "stop_reason": "tool_calls"
+        }"#;
+        let model_output: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let valid_tools: std::collections::HashSet<String> =
+            std::iter::once("bash".to_string()).collect();
+        let (code, lines) = process(&model_output, &valid_tools);
+        assert_eq!(code, 1, "a blank name on a non-length stop forwards to route");
+        let joined = lines.join("\n");
+        assert!(
+            !joined.contains("\"type\":\"error\""),
+            "no terminal error event: {joined}"
+        );
+        let tc = lines
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|v| v.get("type").and_then(|t| t.as_str()) == Some("tool_call"))
+            .expect("a tool_call event is emitted for the blank call");
+        assert_eq!(tc["name"], serde_json::Value::String(String::new()), "the blank name is forwarded verbatim");
     }
 
     // ── sanitize_text tests ────────────────────────────────────────

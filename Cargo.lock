@@ -1077,6 +1077,7 @@ dependencies = [
  "clap",
  "glob",
  "regex",
+ "rushi-common",
  "serde_json",
  "toml",
 ]

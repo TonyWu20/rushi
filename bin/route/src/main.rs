@@ -292,7 +292,7 @@ fn main() {
     for tc in &tool_calls {
         let tc_id = tc.get("id").and_then(|id| id.as_str()).unwrap_or("");
         let tc_name = tc.get("name").and_then(|n| n.as_str()).unwrap_or("");
-        // Arguments may be a JSON string or already a JSON object
+        // Arguments may be a JSON string, or already a JSON object.
         let tc_args: serde_json::Value = match tc.get("arguments") {
             Some(serde_json::Value::String(s)) => match serde_json::from_str(s) {
                 Ok(v) => v,
@@ -314,7 +314,12 @@ fn main() {
         let manifest = match tool_manifests.get(tc_name) {
             Some(m) => m,
             None => {
-                let o = Outcome::not_run(format!("Unknown tool {tc_name}."));
+                // FT-026: an unknown or blank tool name is a recoverable
+                // failure. It is reported as a not-run `tool_result`. The
+                // model corrects the call on the next turn.
+                let mut available: Vec<String> = tool_manifests.keys().cloned().collect();
+                available.sort();
+                let o = Outcome::not_run(unknown_tool_message(tc_name, &available));
                 println!("{}", emit_result(&o, &ts, tc_id, &args));
                 continue;
             }
@@ -476,6 +481,29 @@ fn process_stdout(stdout: &str, max_chars: usize) -> String {
         text = text.chars().take(max_chars).collect();
     }
     text
+}
+
+/// The not-run message for a tool whose manifest is not loaded (FT-026).
+/// It names the tool, says no tool ran, lists the available tool names,
+/// and tells the model to re-issue the call. The blank case is called out
+/// explicitly so the model knows the `name` field itself was empty.
+/// `available` is the set of loaded tool names (sorted for a stable,
+/// model-friendly listing).
+fn unknown_tool_message(tc_name: &str, available: &[String]) -> String {
+    let list = if available.is_empty() {
+        "(none)".to_string()
+    } else {
+        available.join(", ")
+    };
+    if tc_name.is_empty() {
+        format!(
+            "Unknown tool (empty name). No tool ran. The model emitted a tool call with an empty name. The available tools are: {list}. Re-issue the call using one of the available tool names."
+        )
+    } else {
+        format!(
+            "Unknown tool {tc_name}. No tool ran. The available tools are: {list}. Re-issue the call using one of the available tool names."
+        )
+    }
 }
 
 /// The failure class of a tool call's argument schema validation.
@@ -841,6 +869,37 @@ mod tests {
             o.display_text(usize::MAX),
             "Tool arguments failed schema validation: file_path."
         );
+    }
+
+    #[test]
+    fn unknown_tool_message_names_the_tool_and_lists_available() {
+        // FT-026: the not-run message is actionable. It keeps the stable
+        // "Unknown tool <name>." prefix, says no tool ran, lists the
+        // available tools, and teaches the resend.
+        let available = vec!["bash".to_string(), "edit".to_string()];
+        let msg = unknown_tool_message("nope", &available);
+        assert!(msg.starts_with("Unknown tool nope."), "stable prefix names the tool: {msg}");
+        assert!(msg.contains("No tool ran"), "states no tool ran: {msg}");
+        assert!(msg.contains("bash, edit"), "lists the available tools: {msg}");
+        assert!(msg.contains("Re-issue the call"), "teaches the resend: {msg}");
+    }
+
+    #[test]
+    fn unknown_tool_message_distinguishes_the_blank_case() {
+        // FT-026: a blank tool name is called out explicitly so the model
+        // knows the `name` field itself was empty.
+        let available = vec!["bash".to_string()];
+        let msg = unknown_tool_message("", &available);
+        assert!(msg.starts_with("Unknown tool (empty name)."), "the blank case keeps the prefix: {msg}");
+        assert!(msg.contains("The model emitted a tool call with an empty name"), "names the blank defect: {msg}");
+        assert!(msg.contains("No tool ran"), "states no tool ran: {msg}");
+    }
+
+    #[test]
+    fn unknown_tool_message_handles_an_empty_registry() {
+        let msg = unknown_tool_message("nope", &[]);
+        assert!(msg.contains("(none)"), "an empty registry lists nothing: {msg}");
+        assert!(msg.starts_with("Unknown tool nope."), "the prefix still names the tool: {msg}");
     }
 
     #[test]

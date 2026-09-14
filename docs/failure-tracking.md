@@ -1031,12 +1031,205 @@ call id (`fc_names` `or_insert`, `bin/model/src/main.rs`).
 A name missing at `output_item.added` stays blank. No session
 log from the failing run was found on this machine.
 
-**Status:** Open, deferred. The candidate fix: parse stops
-hard-failing on unknown names, emits the `tool_call` lines and
-exits 1, and `route` returns the `not_run` result so the model
-can correct itself. Add a clearer message for an empty name.
-Update the contract at
-`docs/loop-and-edit-implementation.md:248` and the parse
-tests.
+**Investigation verified against current code:**
 
-**Verification:** None yet. No repro on this machine.
+- `bin/parse/src/main.rs:250-254` — the unknown-name check
+  pushes the `error` event and returns exit 2. The
+  `assistant_message` and `tool_call` lines are never
+  emitted. The recorded symptom is the empty case.
+- The name is read with `.unwrap_or("unknown")`. A missing
+  key prints `unknown`. A present empty string prints
+  nothing.
+- `bin/model/src/main.rs:678-683, 757, 908` — a
+  `function_call` item event without `name` stores `""`.
+  `fc_names` inserts it via `or_insert`. Later reads fall
+  back to `unwrap_or_default()`. So the emitted `tool_call`
+  carries `name: ""`.
+- `bin/rushi/src/step.rs:369-400` — `route` runs only when
+  parse exits 1. On exit 2 the `error` event is appended and
+  routing is skipped.
+- `bin/claim/src/main.rs:228-235` — an `error` event
+  settles the session to `idle`. The `run` loop then exits
+  (`bin/rushi/src/run_loop.rs:80`). This is the "loop
+  ended" half of the symptom.
+- `bin/route/src/main.rs:314-321` — the recoverable path
+  already exists. An unknown name yields
+  `Outcome::not_run("Unknown tool {tc_name}.")`. It is
+  emitted as a `tool_result` with `is_error: true`.
+- A `tool_result` maps to `awaiting_model`
+  (`bin/claim/src/main.rs:171-172`). The pending call
+  resolves by id (`:305-321`). The next step re-invokes the
+  model with the failure in context. This is the
+  self-correction loop that correction 64 needs.
+
+**Proposed solution (implemented as correction 65):**
+
+Design: `route` is the single source of truth for tool-name
+validity. Parse stops hard-failing on unknown or blank
+names. It forwards the call instead. `route`'s existing
+`not_run` path reports the failure to the model. The model
+corrects the call on the next turn.
+
+1. `bin/parse/src/main.rs:250-254` — the
+   `if !valid_tools.contains(tc_name)` check and the set it
+   runs against stay (see the operator decision below). Only
+   the exit-2 hard-fail is dropped. For a non-`length`
+   stop, unknown or blank names reach
+   `emit_assistant_and_tool_calls`.
+2. One `assistant_message` is emitted. One `tool_call` is
+   emitted per call. The exit code is 1.
+3. The malformed-arguments hard-fail is unchanged
+   (`:233-248`, contract
+   `docs/loop-and-edit-implementation.md:247`). It is
+   tracked separately as FT-027.
+4. `bin/route/src/main.rs:314-321` — make the not-run
+   message actionable. Use the style of `ArgsIssue::Unknown`
+   (`:341-351`).
+5. Name the tool. State that no tool ran. List the available
+   tool names from the loaded manifests. Tell the model to
+   re-issue the call.
+6. Distinguish the blank case. Say "the model emitted a tool
+   call with an empty name".
+7. `docs/loop-and-edit-implementation.md:248` — update the
+   parse contract line. Unknown names are not a parse
+   failure.
+8. `route` rejects them with a recoverable `tool_result`
+   (`is_error: true`). Parse-level hard failures remain.
+   They are malformed JSON input, non-object arguments, and
+   `length`-stop truncation.
+9. Add a corrections entry 65 to
+   `docs/loop-and-edit-implementation-corrections.md` when
+   implemented. Mark the applied deviation from entry 35.
+   Flip this entry to Fixed with its verification.
+
+Tests to add:
+
+- parse: unknown name on a non-length stop exits 1. The
+  `tool_call` is emitted. No `error` event. No "unknown
+  tool" text.
+- A blank name emits the `tool_call` with `name: ""`. The
+  existing `length_stop_unknown_tool_is_not_validated` and
+  malformed-args tests still hold.
+- route: the unknown-tool `not_run` message names the tool.
+  It lists the available tools. The blank-name message is
+  explicit.
+- e2e: use the stub-model pattern from
+  `scripts/compact-e2e.sh`. The session log gains a
+  `tool_result` with `is_error`. The text says "Unknown
+  tool". No terminal `error` event appears.
+- `claim` returns `awaiting_model`. The loop continues to
+  the next model call. No script pins the old exit-2
+  behavior.
+
+Operator decisions (2026-09-15):
+
+- Keep `valid_tools`. The set guarantees that no tool other
+  than the ones named in the passed-in config can be called.
+  `route`'s manifest scan enforces the dispatch side. The
+  check and the set stay in parse. Only the exit-2
+  consequence is dropped.
+- Scope stays unknown names. The malformed-arguments
+  hard-fail is a separate structural hole. It is tracked as
+  FT-027 and stays out of this fix.
+- `bin/model` is unchanged. The blank-name pass-through
+  (`fc_names` `or_insert`) stays. The recovery mechanism is
+  `route`'s `not_run` message, not a model-stage guard.
+
+**Fix:** `parse` no longer hard-fails on an unknown or blank
+tool name. It forwards the call. One `assistant_message` and
+one `tool_call` are emitted, exit 1. The `valid_tools` set
+stays in `parse`. Only the exit-2 branch was dropped.
+
+`route` now owns the reject. Its not-run `tool_result` names
+the tool, says no tool ran, lists the available tool names,
+and tells the model to re-issue the call. The blank case is
+called out explicitly. The malformed-arguments hard-fail is
+unchanged (FT-027).
+
+**Status:** Fixed. Implemented as correction 65 on 2026-09-18.
+
+**Verification:** The `parse` test
+`unknown_tool_name_forwards_to_route` pins exit 1 with the
+`tool_call` emitted, no `error` event, and no unknown-tool
+text. `blank_tool_name_forwards_with_empty_name` pins the
+blank forward. The `route` tests pin the actionable not-run
+message.
+
+The compact e2e `unknown-tool` scenario drives a stub model
+that emits an unknown tool call. The log gains a not-run
+`tool_result` with `Unknown tool` text. No terminal `error`
+event appears. `claim` returns `awaiting_model`. The loop
+continues to the next model call. All workspace unit tests
+pass and the full compact-e2e suite passes.
+
+## FT-027 — The parse hard-fail on malformed arguments blocks
+route's recoverable hints
+
+**Symptom:** Not directly observed in a tracked session. This
+is a structural hole in the FT-008 / FT-026 family. A call
+whose `arguments` are not a JSON object kills the loop
+instead of giving the model a correction. Parse emits a
+terminal `error` event and exits 2. No `tool_result` is
+written. The loop ends before the model can see a resend
+hint.
+
+The one observed incident (a 4096-token output cap cut
+tool-call arguments mid-JSON, recorded in `docs/itches.md`
+under "Model-settings defaults drift") no longer reaches
+this gate. The model stage now marks truncated arguments as
+a `length` stop. Parse skips validation on `length` stops.
+The residual hole is a non-truncated, non-object
+`arguments` value. That is broken or missing JSON at a
+normal stop.
+
+**Root cause:** The parse stage hard-fails with exit 2 on a
+bad `arguments` value. The check sits in the `process`
+validation loop of `bin/parse/src/main.rs`. It fires when a
+non-`length` stop leaves the `arguments` key missing. It
+fires for an `arguments` string that does not parse as
+JSON. It fires for a value that is not a JSON object. The
+error message names the call id.
+
+`bin/rushi` (`bin/rushi/src/step.rs:369-400`) skips
+`route` when parse exits 2. `bin/claim` settles the
+session to `idle` on the `error` event. The `run` loop
+then exits. `route` already owns recoverable paths for
+every shape. The invalid-JSON branch
+(`bin/route/src/main.rs:296-306`) tells the model to resend
+with a JSON object. The `validate_args` block turns a
+non-object value into an `ArgsIssue` hint with the
+correction 59 resend hint.
+
+Missing `arguments` become an empty object. Tools that need
+fields then get a `MissingRequired` hint. The parse gate
+fires first, so none of these hints reach the model. The
+contract is `docs/loop-and-edit-implementation.md:247`.
+
+**Fix (proposed, not implemented):** Parse stops
+hard-failing on missing or non-object `arguments`. It
+forwards the call like any other. It emits one
+`assistant_message` and one `tool_call` per call. The exit
+code is 1. `route`'s existing `not_run` messages carry the
+recovery.
+
+Correction 64 keeps failure pairs in the model context.
+The model fixes the call on the next turn. The `length`-
+stop truncation path is unchanged. The `valid_tools` name
+machinery stays in parse per the FT-026 operator
+decision. `bin/model` is unchanged.
+
+**Status:** Open, deferred. Tracked from the 2026-09-15
+FT-026 scope decision. The malformed-arguments hard-fail
+stays out of the FT-026 fix and is tracked here.
+
+**Verification:** None yet. When implemented, pin:
+- a parse test: missing or non-object `arguments` on a
+  non-`length` stop exits 1. The `tool_call` is emitted
+  and no `error` event appears.
+- the existing `non_length_malformed_args_still_fail`
+  test is flipped. It pins exit 2 today.
+- a stub-model e2e on the `scripts/compact-e2e.sh`
+  pattern.
+- the session log holds an errored `tool_result` with the
+  resend text. `claim` reports `awaiting_model`. The loop
+  continues to the next model call.

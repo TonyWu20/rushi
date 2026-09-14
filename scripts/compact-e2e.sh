@@ -94,7 +94,7 @@ model = "stub"
 
 [paths]
 sessions_root = "sessions"
-tools_root = "$ROOT/tools"
+native_tool_paths = ["$ROOT/tools"]
 
 [limits]
 context_budget_tokens = 8000
@@ -1002,6 +1002,43 @@ scenario_up_to_prompt() {
   fi
 }
 
+# ── Scenario: unknown tool name is recoverable (FT-026) ──────────
+# The stub model emits a tool call whose name has no manifest.
+# `parse` forwards it (no terminal error). `route` reports it as a
+# not-run `tool_result` ("Unknown tool ..."). `claim` returns
+# `awaiting_model` and the loop continues to the next model call.
+# No terminal `error` event appears and no script pins the old
+# exit-2 behavior.
+scenario_unknown_tool() {
+  NEW_WORK unknown-tool
+  COMPACT_ENABLED=false
+  work_config
+  # Seed a session with a single user turn.
+  cat > "$SLOG" <<EOF
+{"v":1,"type":"user_message","ts":"t1","seq":1,"content":"do the task"}
+EOF
+  # Plan: first call is the unknown tool, second is the recovery stop.
+  cat >"$WORK/plan" <<'EOF'
+{"text":"","tool_calls":[{"id":"uc1","name":"no_such_tool","arguments":{}}],"reasoning":[],"stop_reason":"tool_calls","usage":{"input_tokens":50,"output_tokens":10}}
+{"text":"done","tool_calls":[],"reasoning":[],"stop_reason":"stop","usage":{"input_tokens":100,"output_tokens":10}}
+EOF
+  make_stub
+  run_step
+  # The unknown call was reported as a recoverable not-run tool_result.
+  local unknown_text
+  unknown_text=$(jq -r 'select(.type=="tool_result") | .value.text' "$SLOG" 2>/dev/null)
+  assert_contains "$unknown_text" "Unknown tool no_such_tool" "the unknown call is a recoverable tool_result"
+  assert_contains "$unknown_text" "Re-issue the call" "the not-run message teaches the resend"
+  # No terminal error event: parse forwarded, it did not hard-fail.
+  assert_eq "$(count_events error)" 0 "no terminal error event"
+  # After the not-run tool_result, claim owes a model call (FT-026).
+  assert_eq "$(claim_state)" "awaiting_model" "after the not-run result the loop owes a model call"
+  # The loop continues: the second model call recovers the turn.
+  run_step
+  assert_eq "$(count_events assistant_message)" 2 "the loop continued past the unknown call"
+  assert_eq "$(claim_state)" "idle" "the loop runs to idle"
+}
+
 # ── Run ──────────────────────────────────────────────────────────
 run_scenario threshold scenario_threshold
 run_scenario pi-parity scenario_pi_parity
@@ -1022,6 +1059,7 @@ run_scenario silent-failure-rescue scenario_silent_failure_rescue
 run_scenario fork-compact scenario_fork_compact
 run_scenario real-fixture-pressure scenario_real_fixture_pressure
 run_scenario up-to-prompt scenario_up_to_prompt
+run_scenario unknown-tool scenario_unknown_tool
 
 echo
 echo "compact e2e: $PASS passed, $FAIL failed"

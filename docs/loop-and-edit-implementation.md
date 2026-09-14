@@ -245,7 +245,7 @@ Validation rules:
 
 - Input must be one JSON object with `text`, `tool_calls`, and `stop_reason`. Reject malformed JSON with nonzero exit and a stderr diagnostic.
 - Each tool call's `arguments` must parse as a JSON object. If it does not, emit one `error` event with message "Model emitted malformed tool arguments for call <id>." Exit with code 2.
-- Each tool call's `name` must match a manifest in `tools/`. If it does not, emit one `error` event with message "Model called unknown tool <name>." Exit with code 2.
+- An unknown or blank `name` is not a parse failure (FT-026, correction 65). `parse` does not reject it. It emits the `tool_call` and exits 1 so `route` reports the not-run result. The `valid_tools` set stays in `parse`. It is the parse-side guarantee that only configured tools can be called. Only the exit-2 hard-fail was dropped.
 
 The model returns `arguments` as a JSON string. `parse` parses it into a JSON object before emission. All emitted events carry `arguments` as an object.
 
@@ -274,7 +274,7 @@ Dispatches each tool call to its subprocess.
 Algorithm:
 
 1. For each `tool_call` event:
-2. Load `tools/<name>/tool.toml`. If no manifest exists, emit `tool_result` with `is_error: true` and `value.text` equal to "Unknown tool <name>." Do not spawn a process.
+2. Load `tools/<name>/tool.toml`. If no manifest exists, emit `tool_result` with `is_error: true`. The `value.text` is actionable (correction 65): it keeps the stable "Unknown tool <name>." prefix, says no tool ran, lists the available tool names, and tells the model to re-issue the call. For a blank name the message says the model emitted a tool call with an empty name. Do not spawn a process.
 3. Validate `arguments` against the manifest's `[tool.schema]`. If validation fails, emit `tool_result` with `is_error: true` and `value.text` starting with "Tool arguments failed schema validation: <field>.". The suffix teaches the model the resend (correction 59): the missing-field case ends with "Required fields are missing from the call. Resend the call with all required fields filled in.", the non-object case with "The arguments value must be a JSON object. Resend the call with a JSON object.", the bad-JSON-string case with "The arguments string is not valid JSON. Resend the call with a JSON object.", and the unknown-parameter case (a key the schema's `properties` does not define) with "Parameter(s) <names> are not defined in the tool parameters for tool '<tool>'. The defined parameters are: <defined>. Resend the call using only the defined parameters." Unexpected usage is never tolerated silently: the tool is not run, and the model adjusts the call until it validates. Do not spawn a process.
 4. Spawn subprocess: `command args`. Write `arguments` JSON to stdin. Enforce the manifest's `timeout_ms` (default 30000). On timeout, kill the process and emit `tool_result` with `is_error: true` and `value.text` equal to "Tool timed out after <timeout_ms> ms."
 5. Read stdout. If stdout is a JSON object with a `text` field, use it as `value`. If stdout is non-JSON text, wrap it as `{"text": "<stdout>"}`. If stdout is JSON but not an object, wrap it as `{"text": "<compact JSON>"}`. If stdout is a JSON object without a `text` field, wrap it as `{"text": "<compact JSON>"}`.

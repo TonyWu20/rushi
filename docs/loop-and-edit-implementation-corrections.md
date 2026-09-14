@@ -937,3 +937,26 @@ drop-pair tests repurposed to keep-tests
 delivers all 19 schema-error callouts, each paired with its
 `function_call`, into the model request — the callout the model
 never saw is now in its input.
+
+### 65. Unknown tool names no longer abort the loop
+
+**Reference:** `bin/parse`, `bin/route`,
+`docs/loop-and-edit-implementation.md`, FT-026, FT-027
+
+**Problem:** `parse` hard-failed (exit 2) on any tool call whose `name` was not in the config's tool set. A local model that emitted a `function_call` with a blank `name` therefore killed the loop. The SGLang pass-through stores `""` when the name is missing in the `output_item` event. `parse` logged a terminal `error` event naming the blank tool. `claim` settled the session to `idle`. The recoverable `not_run` path in `route` never fired because `parse` blocked it first.
+
+**Fix:** `parse` stops hard-failing on an unknown or blank name. It forwards the call: one `assistant_message`, one `tool_call` per call, exit 1. `route`'s manifest scan is the single source of truth for name validity.
+
+Its not-run message is now actionable. It keeps the stable `Unknown tool` prefix. It says no tool ran. It lists the available tool names. It tells the model to re-issue the call. The blank case is called out explicitly.
+
+The `valid_tools` set stays in `parse`. Only the exit-2 consequence was dropped. The malformed-arguments hard-fail is unchanged. It stays tracked as FT-027.
+
+**Deviation note:** This narrows the hard-fail gate from entries 20 and 35. Entry 20 made unknown tool names an `error` event plus exit 2. Entry 35 made malformed arguments one. Correction 65 drops the name half of that gate.
+
+`parse` now hard-fails only on malformed JSON input and malformed arguments. Unknown or blank names are a recoverable `route` rejection. This matches the transparency decision of correction 64. Failures reach the model and the model corrects the call.
+
+**Verification:** The `parse` test `unknown_tool_name_forwards_to_route` pins exit 1 with the `tool_call` emitted. No `error` event and no "unknown tool" text appear. `blank_tool_name_forwards_with_empty_name` pins the blank forward.
+
+The three `route` message tests pin the not-run text. The compact e2e `unknown-tool` scenario drives a stub model that emits an unknown tool call. The log gains a not-run `tool_result` with `Unknown tool` text. No terminal `error` event appears. `claim` returns `awaiting_model`. The loop continues to the next model call.
+
+`length_stop_unknown_tool_is_not_validated` and `non_length_malformed_args_still_fail` still hold. The full compact-e2e suite passes 102 of 102. All workspace unit tests pass.

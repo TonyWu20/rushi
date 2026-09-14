@@ -21,3 +21,4 @@ pub mod hooks;
 pub mod hook_io;
 pub mod rewind;
 pub mod model_settings;
+pub mod config_check;
