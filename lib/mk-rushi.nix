@@ -84,6 +84,7 @@
 , rustToolchain ? null
 , extraSpecialArgs ? { }
 , cargoLockContents ? null
+, kernelCargoLock ? null
 , ...
 }:
 
@@ -150,11 +151,16 @@ let
   rushi = pkgs.rustPlatform.buildRustPackage rec {
     pname = "rushi";
     inherit version src;
-    # When cargoLockContents is supplied (the flake pre-reads ./Cargo.lock),
-    # feed the contents directly to importCargoLock. This avoids a Nix path
-    # reference to src/Cargo.lock, which mis-resolves when `src` is a flake
-    # path input.  Fall back to the path form for direct callers.
-    cargoLock = if cargoLockContents != null then
+    # The kernel's Cargo.lock, in order of preference:
+    #   1. kernelCargoLock — a Nix path reference to the kernel's
+    #      Cargo.lock, supplied by the flake wrapper where `./Cargo.lock`
+    #      resolves correctly (even when the kernel is a flake path input).
+    #   2. cargoLockContents — the lock text read by the flake, fed
+    #      directly to importCargoLock.
+    #   3. src/Cargo.lock — the path form for direct (non-flake) callers.
+    cargoLock = if kernelCargoLock != null then
+      kernelCargoLock
+    else if cargoLockContents != null then
       { lockFileContents = cargoLockContents; }
     else
       { lockFile = src/Cargo.lock; };

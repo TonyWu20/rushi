@@ -338,22 +338,29 @@ exposes one `wrapAsTool` package. The flake shape is identical; only the
 
 The TUI is a *fourth* output, not an `external_*`. It feeds `rushi.tui`
 and must expose the binary at `$out/bin/tui` (standard Nix package
-layout) so the kernel's side-by-side resolver (`<exe_dir>/tui`) finds it:
+layout) so the kernel's side-by-side resolver (`<exe_dir>/tui`) finds it.
+
+The TUI flake now ships a `packages` output (the `tui` binary, built via
+`buildRustPackage` from `src = self`). The consumer wires it with:
 
 ```nix
-# rushi-tui/flake.nix — add a packages output (it currently has devShells only)
-packages = {
-  default = tuiPkg;   # tuiPkg = buildRustPackage { … ; src = self; } → $out/bin/tui
-};
-# consumer: rushi.tui = rushiTuiFlake.packages.${system}.default;
+# consumer flake
+rushi.tui = rushiTuiFlake.packages.${system}.default;
 ```
 
-`rushi-tui` also path-deps on the kernel's `rushi-common` crate, so its
-flake takes a `rushi-kernel` flake input — see `rushi-tui/flake.nix`.
-Today that input is a bootstrap `git+file:` URL into the sibling kernel
-checkout; at hosting time it flips to a pinned `github:` ref (the same
-three-mode pinning as `nix-flake-module.md` §7). The ext repos do
-**not** depend on the kernel, so they need no such input.
+Because the TUI path-deps on the kernel's `rushi-common` crate, its
+flake takes two kernel inputs:
+
+- `rushi-kernel` — the kernel *flake* (for the dev shell's `rushi`
+  launcher binary, and for future `lib.mkRushi` reuse).
+- `rushi-kernel-src` — the kernel *source tree* (`flake = false`),
+  used by a `patchPhase` to rewrite the bootstrap `rushi-common`
+  sibling path into a Nix store path before `cargo build`.
+
+Both are bootstrap `git+file:` / `path:` URLs today. At hosting time
+both flip to pinned `github:` refs (the same three-mode pinning as
+`nix-flake-module.md` §7). The ext repos do **not** depend on the
+kernel, so they need no such input.
 
 ---
 
