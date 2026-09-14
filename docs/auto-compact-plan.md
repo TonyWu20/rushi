@@ -275,7 +275,9 @@ compact <session> --config <config>
   --up-to` name and forwards it. An explicit `--up-to` call starts
   the compact even when the threshold trigger is cold and the
   feature is off. It behaves like `--force`. `--up-to 0` is
-  rejected up front (a 1-based sequence).
+  rejected up front (a 1-based sequence). A target at or before the
+  current `first_kept_seq` degrades to the region head (rewind rule
+  I4 in docs/rewind-fork-design.md).
 - `--prompt <TEXT>`: the custom compaction instruction. It
   replaces the default compact instruction. The user's text is the
   entire instruction. The six-section format is not merged in. It
@@ -1351,7 +1353,7 @@ claim state `idle`.
 
 **Motivation.** The TUI picks a specific event as the compact boundary and edits the compaction prompt. The kernel needed two matching flags.
 
-**Decision 1: `--up-to <seq>`.** The cut lands on the picked event. The first kept event past `seq` is the boundary. Everything up to `seq` becomes the summary input. `first_kept_seq` is `seq + 1` when the picked event is the last kept one. An explicit `--up-to` fires even when the threshold trigger is cold.
+**Decision 1: `--up-to <seq>`.** The cut lands on the picked event. The first kept event past it is the boundary. Everything up to `seq` becomes the summary input. When the picked event is the last kept one, `first_kept_seq` is `seq + 1`. A target at or before `first_kept_seq` degrades to the region head (rewind rule I4).
 
 **Decision 2: `--prompt <text>`.** The user's text is the whole instruction. It replaces the default compaction instruction wholesale and is not merged with the six-section format. The flag forwards to `bin/assemble --summary-input`, which accepts the same flag.
 
@@ -1371,7 +1373,7 @@ P7. silent-overflow: given a successful call whose input usage meets the input b
 P8. overflow-retry: given a recoverable overflow or length stop, observe one `compact --reason overflow` then one model re-run. A second overflow runs the last-resort compact then a terminal `error`.
 P9. iterative-merge: given a prior `compaction_summary`, observe the next summary request carry the previous summary and its file-op lists.
 P13. post-failure-rescue: given a model API failure whose detail does not match `is_overflow`, observe the loop re-check `estimate_context` after retries and fire a compact when the estimate exceeds the trigger, instead of writing a terminal error.
-P14. up-to-boundary: given an explicit `--up-to <seq>` on `bin/compact`, observe the compact boundary land on that event. The prefix up to that seq becomes the summary input and `first_kept_seq` is the first kept event past it. When the picked event is the last kept one (the TUI branch tip), `first_kept_seq` is `seq + 1`. An explicit `--up-to` fires even when the threshold trigger is cold.
+P14. up-to-boundary: given an explicit `--up-to <seq>` on `bin/compact`, observe the compact boundary land on that event. The prefix up to that seq becomes the summary input and `first_kept_seq` is the first kept event past it. When the picked event is the last kept one (the TUI branch tip), `first_kept_seq` is `seq + 1`. An explicit `--up-to` fires even when the threshold trigger is cold. A target at or before `first_kept_seq` degrades to the region head.
 P15. custom-prompt: given `bin/compact --prompt <text>` (and `bin/assemble --summary-input --prompt <text>`), observe the request `instructions` field equal the user's text verbatim. The six-section default format is not merged in. The summary-ask user item still rides the input.
 
 ## Verification
@@ -1391,7 +1393,7 @@ P15. custom-prompt: given `bin/compact --prompt <text>` (and `bin/assemble --sum
 | P11 | hard-trim-fallback: given a framing alone that exceeds the target, observe the `context_exhausted` form fire the last-resort compaction | `hard_trim_fails_when_the_framing_alone_exceeds_the_target`, `scenario_context_exhausted` in `scripts/compact-e2e.sh` | proven |
 | P12 | length-stop-recovery: given a `length` stop that truncates a tool call, observe parse record the turn without a hard-fail and the loop re-issue via compact | the parse length-stop tests in `bin/parse/src/main.rs` | proven |
 | P13 | post-failure-rescue: after a non-overflow API failure exhausts retries, the loop re-checks `estimate_context` and fires compact when the estimate exceeds the trigger | `scenario_silent_failure_rescue` in `scripts/compact-e2e.sh` | proven |
-| P14 | up-to-boundary | `cut_index_explicit_up_to_places_the_boundary` + `scenario_up_to_prompt` | proven |
+| P14 | up-to-boundary | `cut_index_explicit_up_to_places_the_boundary` + `cut_index_up_to_degrades_to_the_region_head` + `scenario_up_to_prompt` | proven |
 | P15 | custom-prompt | `summary_input_custom_prompt_replaces_the_default` + `scenario_up_to_prompt` | proven |
 
 ## Gate

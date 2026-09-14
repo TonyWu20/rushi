@@ -472,10 +472,17 @@ fn main() {
 }
 
 /// The compact cut index within the kept region. An explicit `--up-to`
-/// seq places the boundary at the picked event: the cut is the index
-/// of the first kept event whose seq exceeds it (mirroring assemble's
-/// own `--up-to` cut). When absent, the token-based keep-window walk
-/// (`find_cut`).
+/// seq places the boundary at the picked event. The cut is the index
+/// of the first kept event whose seq exceeds it. This mirrors
+/// assemble's own `--up-to` cut. When absent, the token-based
+/// keep-window walk (`find_cut`) runs.
+///
+/// Rewind rule I4 (docs/rewind-fork-design.md): a target at or before
+/// the region head is out of the un-compact prefix. It degrades to the
+/// region head. The region head is the first kept event. Clamping the
+/// target to the head seq keeps the boundary on that event. Without
+/// the clamp it would collapse to an empty old region. That is the
+/// `cut == 0` noop path. In-range and beyond targets are untouched.
 fn cut_index(
     kept_events: &[LogEvent],
     up_to: Option<usize>,
@@ -484,10 +491,14 @@ fn cut_index(
     caps: &Caps,
 ) -> usize {
     match up_to {
-        Some(u) => kept_events
-            .iter()
-            .position(|e| e.seq > u)
-            .unwrap_or(kept_events.len()),
+        Some(u) => {
+            let head = kept_events.first().map(|e| e.seq).unwrap_or(0);
+            let u_eff = u.max(head);
+            kept_events
+                .iter()
+                .position(|e| e.seq > u_eff)
+                .unwrap_or(kept_events.len())
+        }
         None => compact_math::find_cut(projected, keep_tokens, caps),
     }
 }
@@ -1037,6 +1048,17 @@ mod tests {
             .collect()
     }
 
+    /// Kept region that does not start at seq 1. It stands in for a
+    /// post-boundary region whose head is at `start`.
+    fn log_events_range(start: usize, end: usize) -> Vec<LogEvent> {
+        (start..=end)
+            .map(|s| LogEvent {
+                seq: s,
+                value: serde_json::json!({"v":1,"type":"user_message","content":"x"}),
+            })
+            .collect()
+    }
+
     fn projected_from(kept: &[LogEvent]) -> Vec<Ev> {
         kept.iter()
             .map(|e| compact_math::project_event(&e.value))
@@ -1058,6 +1080,27 @@ mod tests {
         assert_eq!(cut_index(&kept, Some(5), &projected, 100, &caps), 5);
         // up_to far beyond the log: same as up_to = last seq.
         assert_eq!(cut_index(&kept, Some(99), &projected, 100, &caps), 5);
+    }
+
+    /// Rewind rule I4. A target at or before the region head degrades
+    /// to the region head. It does not collapse to the empty-region
+    /// noop. The region head is the first kept event.
+    #[test]
+    fn cut_index_up_to_degrades_to_the_region_head() {
+        // A post-boundary region: head at seq 9.
+        let kept = log_events_range(9, 13);
+        let projected = projected_from(&kept);
+        let caps = Caps { text: None, chars_per_token: 4 };
+
+        // Before the region head: degrades to the head. The cut lands
+        // on the event after the head (seq 10, index 1). The old
+        // region is the head event alone.
+        assert_eq!(cut_index(&kept, Some(5), &projected, 100, &caps), 1);
+        assert_eq!(cut_index(&kept, Some(1), &projected, 100, &caps), 1);
+        // At the region head: the same degrade.
+        assert_eq!(cut_index(&kept, Some(9), &projected, 100, &caps), 1);
+        // Inside the un-compact prefix: untouched.
+        assert_eq!(cut_index(&kept, Some(11), &projected, 100, &caps), 3);
     }
 
     #[test]
