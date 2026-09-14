@@ -308,6 +308,9 @@ let
   package = pkgs.stdenv.mkDerivation {
     pname = "rushi-configured";
     inherit version;
+    # No source unpacking: installPhase copies from pre-built packages
+    # (rushi, exts, TUI), not from $src.
+    dontUnpack = 1;
 
     # Kernel binary (provides all stage + tool binaries and tool manifests).
     buildInputs = [ rushi ];
