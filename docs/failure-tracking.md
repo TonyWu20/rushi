@@ -1007,3 +1007,36 @@ forced last-resort compact.
 compact-e2e suite passes 96 of 96. `cargo test` and clippy are
 clean, and the other e2e suites pass.
 
+
+## FT-026 — `Model called unknown tool .` aborts the loop
+
+**Symptom:** The loop stopped with the terminal error event
+`Model called unknown tool .` The tool name after "tool" is
+empty. `bin/parse` produced the event, and the loop never
+routed the call.
+
+**Investigation (2026-09-18):** `bin/parse` validates every
+tool call name against the native and extension tool
+manifests. An unknown or empty name emits the
+`Model called unknown tool {name}.` error event and exits 2.
+`bin/rushi` appends that event and skips `route`. The loop
+ends. `route` already has a recoverable `not_run` path for
+unknown tools (`bin/route/src/main.rs:317`). Parse blocks it
+first, so that path never fires for unknown names.
+
+The empty name likely comes from the local model emitting a
+`function_call` with a blank `name`. The responses-API
+conversion in `bin/model` keeps the first name it sees per
+call id (`fc_names` `or_insert`, `bin/model/src/main.rs`).
+A name missing at `output_item.added` stays blank. No session
+log from the failing run was found on this machine.
+
+**Status:** Open, deferred. The candidate fix: parse stops
+hard-failing on unknown names, emits the `tool_call` lines and
+exits 1, and `route` returns the `not_run` result so the model
+can correct itself. Add a clearer message for an empty name.
+Update the contract at
+`docs/loop-and-edit-implementation.md:248` and the parse
+tests.
+
+**Verification:** None yet. No repro on this machine.
