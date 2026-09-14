@@ -214,12 +214,14 @@ let
     map (s:
       let sp = toShellPath s; in ''
         # External hook source: ${sp}
-        if [ -x "${sp}" ]; then
-          cp "${sp}" "$out/hooks/"
-        elif [ -d "${sp}/bin" ]; then
+        # Order matters: a store-dir (buildRustPackage) is a directory
+        # that is -x but must be recursed into, not cp'd as a file.
+        if [ -d "${sp}/bin" ]; then
           cp -rL "${sp}/bin/." "$out/hooks/" 2>/dev/null || true
         elif [ -d "${sp}" ]; then
           cp -rL "${sp}/." "$out/hooks/" 2>/dev/null || true
+        elif [ -e "${sp}" ]; then
+          cp "${sp}" "$out/hooks/"
         fi
       ''
     ) extHooks
