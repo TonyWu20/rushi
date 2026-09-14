@@ -107,6 +107,11 @@
   # External UI extension sources.
   external_ui_extensions = [ ];
 
+  # Entry directory names of external UI extension packages
+  # (bundled via external_ui_extensions), recorded in
+  # tools.manifest alongside ui_extensions.
+  ui_extension_names = [ ];
+
   # External hook binaries.
   external_hooks = [ ];
 

@@ -138,6 +138,29 @@ in
       '';
     };
 
+    # Entry names of the external UI extension packages listed in
+    # `external_ui_extensions`. Each name is the top-level directory
+    # inside the package's `$out` (the directory that holds
+    # `ext.toml`); it is what the TUI extension discovery reports.
+    # The generated `tools.manifest` records `ui_extensions` and
+    # `ui_extension_names` in its `[ui_extensions] enabled` list, so
+    # that `rushi setup --locked` verifies a manifest that describes
+    # the package's actual contents. The build fails when a declared
+    # name is missing from the assembled `ui_extensions/` dir.
+    ui_extension_names = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      description = ''
+        Entry directory names of the external UI extension packages
+        bundled via `external_ui_extensions` (the top-level directory
+        in each package's `$out`, the one that holds `ext.toml`).
+        Recorded in the generated `tools.manifest` alongside
+        `ui_extensions`, so `rushi setup --locked` sees the full
+        set of shipped UI extensions.
+      '';
+      example = [ "statusline" "goal" "simple-english" ];
+    };
+
     external_hooks = lib.mkOption {
       type = rawList;
       default = [ ];

@@ -123,6 +123,7 @@ let
   uiExtensions = evaluated.config.rushi.ui_extensions;
   extTools     = evaluated.config.rushi.external_tools;
   extUiExts    = evaluated.config.rushi.external_ui_extensions;
+  extUiExtNames = evaluated.config.rushi.ui_extension_names;
   extHooks     = evaluated.config.rushi.external_hooks;
   tuiPkg       = evaluated.config.rushi.tui or null;
 
@@ -210,6 +211,18 @@ let
     ) extUiExts
   );
 
+  # Fail the build when a declared ui-extension name is not actually
+  # present in the assembled ui_extensions/ dir (drift guard between
+  # ui_extension_names and external_ui_extensions).
+  checkUiExtNamesScript = builtins.concatStringsSep "\n" (
+    map (n: ''
+      if [ ! -d "$out/ui_extensions/${n}" ]; then
+        echo "mkRushi: ui_extension_names '${n}' has no entry in $out/ui_extensions/" >&2
+        exit 1
+      fi
+    '' ) extUiExtNames
+  );
+
   extHookScript = builtins.concatStringsSep "\n" (
     map (s:
       let sp = toShellPath s; in ''
@@ -228,8 +241,13 @@ let
   );
 
   # tools.manifest: rushi.toml-equivalent for `rushi setup --locked`.
+  # [ui_extensions] lists kernel-bundled names (ui_extensions) plus the
+  # entry names of the external packages bundled via
+  # external_ui_extensions (ui_extension_names), so the manifest
+  # describes everything the package actually ships.
+  allUiExtNames = uiExtensions ++ extUiExtNames;
   toolListStr  = builtins.concatStringsSep ", " (map (t: "\"${t}\"") tools);
-  extListStr   = builtins.concatStringsSep ", " (map (t: "\"${t}\"") uiExtensions);
+  extListStr   = builtins.concatStringsSep ", " (map (t: "\"${t}\"") allUiExtNames);
   toolsManifestText = ''
     [rushi]
     version = "${version}"
@@ -354,6 +372,9 @@ let
 
       # ── External UI extension sources (add to ui_extensions/) ──
       ${extUiScript}
+
+      # ── Verify declared ui-extension names are present ──
+      ${checkUiExtNamesScript}
 
       # ── External hook binaries (add to hooks/) ──
       ${extHookScript}

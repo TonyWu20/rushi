@@ -168,6 +168,13 @@ rushi = {
   # External UI extension sources: same pattern as external_tools.
   external_ui_extensions = [ ];
 
+  # Entry directory names of the packages in external_ui_extensions
+  # (the top-level dir in each $out that holds ext.toml). Recorded in
+  # the generated tools.manifest [ui_extensions] enabled list so it
+  # describes every bundled UI extension. The build fails if a name
+  # is missing from the assembled ui_extensions/ dir.
+  ui_extension_names = [ ];
+
   # External hook binaries: list of Nix derivations or paths.
   # Each must produce a single executable (or a bin/ dir).
   external_hooks = [ ];
@@ -623,7 +630,7 @@ pi-flake does NOT ship extensions. The consumer flake provides helpers:
 | 5 | `skills` — skill directories | No analog yet | ⏳ future |
 | 6 | `models` — model catalog file | `rushi.config.model` (inline attrset, not separate file) | ✅ covered |
 | 7 | `environment` — env var overrides (tagged) | `rushi.environment` (value/file tagged, sops-nix support) | ✅ implemented |
-| 8 | `extensions` — extension list | `rushi.tools` + `rushi.external_tools` + `rushi.ui_extensions` + `rushi.external_ui_extensions` + `rushi.external_hooks` | ✅ covered |
+| 8 | `extensions` — extension list | `rushi.tools` + `rushi.external_tools` + `rushi.ui_extensions` + `rushi.external_ui_extensions` + `rushi.ui_extension_names` + `rushi.external_hooks` | ✅ covered |
 | 9 | `extNoDeps` — zero-dep GitHub fetch | `lib.fetchExt` (kernel flake helper) | ✅ implemented |
 | 10 | `extWithDeps` — npm-dep GitHub fetch | `lib.fetchTool` (kernel flake helper, cargo build) | ✅ implemented |
 | 11 | `resolvePlatformHash` — per-system hashes | `lib.resolvePlatformHash` (kernel flake helper) | ✅ implemented |
