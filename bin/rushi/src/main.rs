@@ -201,19 +201,26 @@ fn resolve_tui_binary(config_path: &str) -> String {
 }
 
 /// Read `[tui].binary` from the config file. The value is resolved
-/// relative to the config directory; `None` when the key is absent
-/// or the resolved path does not exist.
+/// relative to the config directory. Returns `None` when the key is
+/// absent, the value is empty, or the resolved path is not a file.
 fn config_tui_binary(config_path: &str) -> Option<String> {
     let raw = std::fs::read_to_string(config_path).ok()?;
     let cfg: toml::Value = raw.parse().ok()?;
     let rel = cfg.get("tui")?.get("binary")?.as_str()?;
+    // An empty value means no binary is configured. Return None. The
+    // side-by-side resolver in resolve_tui_binary then finds the TUI
+    // next to rushi (the Nix package keeps it in bin/).
+    if rel.trim().is_empty() {
+        return None;
+    }
     let config_dir = std::path::Path::new(config_path)
         .canonicalize()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     let p = config_dir.join(rel);
-    if p.exists() {
+    // A TUI binary is a file. Reject a directory or a missing path.
+    if p.is_file() {
         Some(p.to_string_lossy().into_owned())
     } else {
         None
