@@ -62,6 +62,15 @@ compact_reserve_tokens = 16384
 # arg_style = "append_session"
 #
 
+# [run]
+# `run.idle` silent-refire cap (issue #6): when a `run.idle` hook
+# returns `continue` with `"refire": true`, the loop runs a model
+# turn in place, without appending a `user_message` — the hook
+# delivers its pending feedback through `model.before` on that call.
+# Each refire is a full model call; `max_silent_refires` is the hard
+# per-run cap (default 2; 0 disables refires).
+# max_silent_refires = 2
+
 # [system_prompt]
 # text = "You are an expert coding assistant..."
 #
