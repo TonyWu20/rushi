@@ -26,27 +26,28 @@ keep it active. On a fresh clone, run the command once.
 
 ## 2026-09-15 history rewrite
 
-Three commits on main carried the anthropic trailers. A
-`git filter-branch --msg-filter` run on 2026-09-15 removed the
-trailer lines from the whole main history. The commit trees did
-not change. Only the three messages changed.
+Run 1 (trailers): three commits carried the anthropic trailers.
+A `git filter-branch --msg-filter` pass removed those lines from
+the whole main history. The commit trees did not change. Only the
+three messages changed.
 
-The backup branch `backup/pre-coauthor-cleanup` still points at
-the pre-rewrite state. Delete it once the force-push is
-confirmed.
+Run 2 (identity): one commit, the `flake/mkRushi`
+`cargoLockContents` fix, had its author and committer truncated to
+`t <t@local>`. A `git filter-branch --env-filter` pass restored
+`TonyWu20 <tony.w21@gmail.com>` on both fields. Trees, messages,
+and timestamps were preserved.
 
-Because the rewrite changed commit hashes, the remote main needs
-a force-push:
-
-```
-git push --force-with-lease origin main
-```
+After each rewrite, main was force-pushed with
+`git push --force-with-lease origin main`. Each backup branch was
+deleted after its push. Stale objects were pruned with
+`git reflog expire` plus `git gc --prune=now`.
 
 ## Notes
 
-- Two detached `/tmp` worktree commits (the Phase 2 harness and
-  the Phase 2 plan revision) still carry trailers. They are
-  scratch-only and on no branch.
+- Three detached `/tmp` worktrees (compact-path alignment,
+  token-estimate anchor, TUI head) carried the same trailers on
+  their scratch lineages. They were removed on 2026-09-15 with
+  the first force-push, and their objects were pruned.
 - The docs line in an older commit that cites `Agent Skills
   (Claude/Anthropic)` as an established practice is a genuine
   external reference. It is not a co-author trail and stays.
