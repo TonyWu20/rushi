@@ -44,7 +44,7 @@ model = "stub"
 
 [paths]
 sessions_root = "sessions"
-tools_root = "$ROOT/tools"
+native_tool_paths = ["$ROOT/tools"]
 
 [limits]
 context_budget_tokens = 8000
