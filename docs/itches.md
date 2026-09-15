@@ -338,3 +338,31 @@ a `tool_started` marker event plus a recovery rule for
 started-but-unresolved calls, or an explicit idempotent-tools-only
 scope. Per P0, build it only when a real episode of a
 non-idempotent tool losing work appears.
+
+## Core-crate extraction stays parked (2026-09-16)
+
+**Observed.** Question: any actual benefit to entering Phase 3
+and building `crates/core`?
+
+Reasons it is not worth it now:
+
+- No recorded episode demands a core crate (P0).
+- Utility-level duplication is already solved by `rushi-common`.
+- The concrete benefits map to parked triggers: G8 overhead
+  measurement is not built. No second concurrent session is in
+  use. No plugin requirement exists.
+- The typed vocabulary is one day old (2026-09-15), far short
+  of the 20-session stability bar.
+- The subagent kernel surface (`config_gen`, route env exports,
+  shared tools module) fits in `rushi-common`. Phase 3 is not
+  forced by it.
+
+**Decision.** Stay on the not-yet list (`refinement-policy` P8).
+Re-evaluate only when a trigger fires, as recorded in the
+`architecture.md` Phase 3 re-evaluation gate: G8 fork/exec over
+budget. Real multi-agent use. Replay/DRT as the main verification
+vehicle. Or the P3 gate formally opening.
+
+**Seed (do anyway).** The G1 double-step replay test (audit
+finding F7) is the missing replay half of the P3 gate. It pays
+off before Phase 3.
