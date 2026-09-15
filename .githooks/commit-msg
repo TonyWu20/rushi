@@ -1,0 +1,30 @@
+#!/bin/sh
+# commit-msg hook — strip AI co-author trailers (Claude / Anthropic).
+#
+# Policy (docs/commit-hygiene.md): this repo has never been developed with
+# Anthropic tooling. Co-author lines that leak in from AI editors are
+# removed here at commit time. Human co-author trailers are left alone.
+#
+# The hook rewrites the message file in place (removing the matching lines
+# plus any resulting trailing blank lines) and prints a notice when it acts.
+# Enabled via `git config core.hooksPath .githooks`.
+
+MSG="$1"
+[ -f "$MSG" ] || exit 0
+
+stripped=$(sed -E '/^[Cc]o-[Aa]uthored-[Bb]y:.*([Aa]nthropic|[Cc]laude)/d' "$MSG")
+
+# Trim trailing blank lines so the body ends cleanly.
+clean=$(printf '%s\n' "$stripped" | awk '{ if (NF) last = NR; buf[NR] = $0 } END { for (i = 1; i <= last; i++) print buf[i] }')
+
+if [ "$stripped" != "$(cat "$MSG")" ]; then
+  echo "commit-msg: removed AI co-author trailer(s) from the commit message" >&2
+fi
+
+if [ -z "$clean" ]; then
+  echo "commit-msg: message is empty after cleaning; refusing to commit" >&2
+  exit 1
+fi
+
+printf '%s\n' "$clean" > "$MSG"
+exit 0

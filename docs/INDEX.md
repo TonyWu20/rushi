@@ -77,6 +77,7 @@ exts wiring.
 | `image-read-kiss.md`                             | Implemented         | 2026-09-10   | KISS decision: image reading as a kernel + extension split. Kernel: accept image tool results, the per-model `vision` flag, the Responses `input_image` / Chat-Completions `image_url` wire forms, the flat per-image token estimate, the `tool.after` `transform` decision, and the `hook_io` payload-builder helper for extensions. Extension: image detection/compression/re-encode. e2e in `scripts/tool-after-transform-e2e.sh` |
 | `subagent-design.md`                              | Spec, not yet built | 2026-09-14   | Subagent mode: `spawn_agent` tool + `config_gen` generator + `tools_roots` list. Blocking v1, depth via tool availability, headless child. D9 typed event vocabulary. Properties P1-P8 |
 | `typed-events.md`                                   | Implemented       | 2026-09-15   | Typed event vocabulary in `rushi-common`: the `Event` enum and per-type structs replace runtime JSON-Schema validation with `serde` (de)serialization. `parse_event` is the single validation step. No `schemas_dir`. The `schemas/events/v1/` files were removed from the repo 2026-09-15. Properties P1-P6 |
+| `commit-hygiene.md`                                   | Active            | 2026-09-15   | Commit-message policy: AI co-author trailers are stripped at commit time by `.githooks/commit-msg` (enabled via `git config core.hooksPath .githooks`), and the 2026-09-15 filter-branch rewrite of main with the backup branch and force-push note |
 
 Status legend:
 
