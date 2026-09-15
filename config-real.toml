@@ -151,7 +151,7 @@ arg_style = "append_session"
 # ones by extension name; an empty/absent list falls back to
 # <config-dir>/ui_extensions (docs/ui-extension.md section 3).
 [tui]
-binary = "../rushi-tui-ratatui-widget-based/target/release/tui"
+binary = "../rushi-tui/target/release/tui"
 clipboard = "unnamed"
 ext_dirs = [
   "../rushi-exts/ext-rs/statusline-rs/",
