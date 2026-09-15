@@ -332,6 +332,12 @@ command = "my-approval-hook"
 | `tool.after` | per tool batch | *(observation only)* | — |
 | `run.idle` | on idle claim | `stop`, `continue` | `stop` |
 
+`run.idle` `continue` payload: `{"message": "..."}` appends a follow
+`user_message` before continuing. Adding `"log_message": false` keeps
+the loop alive but skips that `user_message` append — the hook routes
+its text to the model through its own `model.before` transform instead.
+The flag is optional and defaults to `true` (today's behavior).
+
 ### 6.5 Writing a Hook
 
 1. Write a binary/script that reads one JSON object from stdin.

@@ -101,15 +101,27 @@ pub fn run(cfg: &HarnessConfig, session_dir: &Path) {
                     .and_then(|m| m.as_str())
                     .unwrap_or("")
                     .to_string();
-                let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-                let event = serde_json::json!({
-                    "v": 1,
-                    "type": "user_message",
-                    "ts": ts,
-                    "content": message,
-                    "queue": "follow",
-                });
-                append_event(cfg, &session.path, &event);
+                // `log_message: false` (issue #4) keeps the loop alive
+                // without a visible `user_message`: the hook routes its
+                // text to the model through its own `model.before`
+                // transform. Absent or `true` (the default) preserves
+                // the historical byte-identical behavior.
+                let log_message = payload_val
+                    .get("log_message")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                if log_message {
+                    let ts =
+                        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                    let event = serde_json::json!({
+                        "v": 1,
+                        "type": "user_message",
+                        "ts": ts,
+                        "content": message,
+                        "queue": "follow",
+                    });
+                    append_event(cfg, &session.path, &event);
+                }
                 continue;
             }
             // Decision is `stop` (default) or absent: stop the loop.

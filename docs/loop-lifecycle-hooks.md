@@ -149,6 +149,12 @@ heart of this design.
     seam for goal-continuation hooks (the `pi-goal` pattern): a
     hook that knows the goal is not yet complete returns `continue`
     with a continuation prompt.
+  - `continue` with `"log_message": false` in the payload keeps the
+    loop alive without appending the visible `user_message` event.
+    The hook carries its text to the model through its own
+    `model.before` transform; the kernel only keeps the loop alive
+    (issue #4, the writing-rule reply-gate use case). Absent or
+    `true` preserves the historical behavior, byte-identical.
 
 ## 4. The hook ABI (the Unix contract)
 
@@ -517,5 +523,6 @@ cargo build
 cargo test
 scripts/compact-e2e.sh
 scripts/model-before-transform-e2e.sh
+scripts/run-idle-log-message-e2e.sh
 run-idle-continue-e2e.sh   # rushi-exts root (docs/tui-ext-repo-split.md section 4)
 ```
