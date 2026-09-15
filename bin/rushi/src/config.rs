@@ -67,6 +67,13 @@ pub struct HarnessConfig {
     pub hooks_timeout_ms: u64,
     pub hooks: Vec<HookRegistration>,
 
+    // -- run loop (issue #6) --
+    /// Hard per-run cap on silent refire model turns requested by a
+    /// `run.idle` `continue` with `"refire": true` (`[run]
+    /// max_silent_refires`, default 2). Each refire is a full model
+    /// call; the cap bounds the silent loop.
+    pub run_max_silent_refires: u64,
+
     // -- binary paths --
     pub model_bin: PathBuf,
     pub compact_bin: PathBuf,
@@ -295,6 +302,15 @@ impl HarnessConfig {
             }
         }
 
+        // Silent-refire cap (issue #6): `[run] max_silent_refires`.
+        // `0` disables refires; absent means the default of 2.
+        let run_max_silent_refires = cfg
+            .get("run")
+            .and_then(|r| r.get("max_silent_refires"))
+            .and_then(|v| v.as_integer())
+            .map(|v| (v.max(0)) as u64)
+            .unwrap_or(2);
+
         HarnessConfig {
             config_path: config_path.to_path_buf(),
             config_dir,
@@ -317,6 +333,7 @@ impl HarnessConfig {
             approval_timeout_s,
             hooks_timeout_ms,
             hooks,
+            run_max_silent_refires,
             model_bin: resolve_bin("MODEL_BIN", "model", &exe_dir),
             compact_bin: resolve_bin("COMPACT_BIN", "compact", &exe_dir),
             assemble_bin: resolve_bin("ASSEMBLE_BIN", "assemble", &exe_dir),

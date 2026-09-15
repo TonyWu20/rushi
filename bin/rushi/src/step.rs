@@ -32,14 +32,16 @@ use rushi_common::stage::{SessionDir, StageRunner};
 use crate::config::HarnessConfig;
 use crate::stage_runner::{new_subprocess_runner, SubprocessRunner};
 use crate::step::approval::run_awaiting_approval;
-use crate::step::hook::fire_step_start;
-use crate::step::model::{describe_model, publish_model_thinking, run_awaiting_model};
 use crate::step::tool::run_awaiting_tool_result;
 
 // Re-export the public surface so external consumers keep the same
 // paths (`crate::step::append_event`, `crate::step::hook_env`, …).
-pub use crate::step::hook::hook_env;
+// `pub use` also binds the names locally for this file.
+pub use crate::step::hook::{fire_step_start, hook_env};
 pub use crate::step::logio::append_event;
+pub use crate::step::model::{
+    describe_model, publish_model_thinking, run_awaiting_model,
+};
 
 /// Create a `SubprocessRunner` from the resolved config.
 pub fn make_runner(cfg: &HarnessConfig) -> SubprocessRunner {

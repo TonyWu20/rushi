@@ -18,7 +18,10 @@ use rushi_common::stage::{Claim, SessionDir, StageRunner};
 
 use crate::config::HarnessConfig;
 use crate::signals;
-use crate::step::{append_event, hook_env, make_runner, StepMode};
+use crate::step::{
+    append_event, describe_model, fire_step_start, hook_env, make_runner,
+    publish_model_thinking, run_awaiting_model, StepMode,
+};
 
 /// The `rushi run` entry point.
 pub fn run(cfg: &HarnessConfig, session_dir: &Path) {
@@ -51,6 +54,10 @@ pub fn run(cfg: &HarnessConfig, session_dir: &Path) {
         "window": "session.start",
         "session": session.path.to_string_lossy(),
     }));
+
+    // Silent-refire counter (issue #6): bounds how many `run.idle`
+    // refire model turns one run may execute.
+    let mut silent_refires: u64 = 0;
 
     // The turn loop.
     loop {
@@ -96,6 +103,60 @@ pub fn run(cfg: &HarnessConfig, session_dir: &Path) {
 
             let (decision, payload_val) = first_decision(&results);
             if decision == Some("continue") {
+                // `refire: true` (issue #6): run a model turn in place,
+                // without appending a `user_message`. The hook delivers
+                // its pending feedback through `model.before` on that
+                // refired call, so the model revises the gated reply in
+                // the same run. The refired request grows only by the
+                // `model.before` fragment, so the prompt-cache prefix is
+                // untouched. A hard per-run cap (`[run]
+                // max_silent_refires`, default 2) bounds the silent
+                // loop: each refire is a full model call.
+                let refire = payload_val
+                    .get("refire")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if refire {
+                    if silent_refires >= cfg.run_max_silent_refires {
+                        // Cap reached: stop the run instead of
+                        // re-firing `run.idle` forever.
+                        let ts =
+                            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                        let event = serde_json::json!({
+                            "v": 1,
+                            "type": "ext_status",
+                            "ts": ts,
+                            "id": "run.refire_cap",
+                            "value": {
+                                "refires": silent_refires,
+                                "cap": cfg.run_max_silent_refires,
+                            },
+                        });
+                        append_event(cfg, &session.path, &event);
+                        fire_session_end(cfg, &session, "idle");
+                        break;
+                    }
+                    silent_refires += 1;
+                    let ts =
+                        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                    let event = serde_json::json!({
+                        "v": 1,
+                        "type": "ext_status",
+                        "ts": ts,
+                        "id": "run.refire",
+                        "value": { "n": silent_refires },
+                    });
+                    append_event(cfg, &session.path, &event);
+                    // Run the model turn in place, mirroring the step
+                    // entry: no `user_message` is appended, and with no
+                    // pending follow-ups the request carries nothing
+                    // new beyond the `model.before` fragment.
+                    let describe = describe_model(cfg);
+                    publish_model_thinking(cfg, session_dir, &describe);
+                    fire_step_start(cfg, &session, &claim);
+                    run_awaiting_model(cfg, &runner, &session, &claim, false, &describe, StepMode::Run);
+                    continue;
+                }
                 let message = payload_val
                     .get("message")
                     .and_then(|m| m.as_str())
