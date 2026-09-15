@@ -18,7 +18,7 @@ vision = true
 model = "Qwen3.8-27B-NVFP4-RTX5090-DFlash2"
 
 [paths]
-sessions_root = "sessions"
+sessions_root = "/home/tony/programming/rust-unix-harness/sessions"
 native_tool_paths = ["tools/bash", "tools/edit", "tools/read", "tools/write"]
 # Extension-provided tool manifests. In a kernel-only checkout the
 # list is empty. When running alongside the rushi-exts sibling repo,
