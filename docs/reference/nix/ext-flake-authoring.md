@@ -62,7 +62,7 @@ Concrete groundings:
   package's `$out` must be `<tool>/tool.toml` + `<tool>/bin/<binary>`.
 - **UI extension** — `ext.toml` `command` "resolves against the entry
   directory" when it is a relative path
-  (`../rushi-tui/docs/ui-extension.md` §6). The entry dir *is*
+  (`github.com/TonyWu20/rushi-tui/docs/ui-extension.md` §6). The entry dir *is*
   `ui_extensions/<ext>/`. So the ext package's `$out` must be
   `<ext>/ext.toml` + `<ext>/target/release/<binary>`, where
   `ext.toml` `command = "target/release/<binary>"` is relative to

@@ -14,7 +14,7 @@ the same one the human operator uses (blocking `rushi run` with a
 generated config and a nested session dir.
 
 The TUI and extension UIs are separate repos
-(`../rushi-tui`, `rushi-exts`). The kernel does not depend on them at
+(`github.com/TonyWu20/rushi-tui`, `rushi-exts`). The kernel does not depend on them at
 build time. This doc is the kernel's contract for what a subagent must be
 able to do and what it must not be able to do.
 

@@ -20,9 +20,9 @@ written to `docs/itches.md`, not built.
 
 ### P1a. Add a new event type only when ALL of these are true
 
-1. **Two or more consumers need the distinction** (loop, reducer, TUI, policy, tool).
+1. **Two or more consumers need the distinction** (loop, claim, TUI, hook, tool).
 2. **The fact must survive replay/restart** — if it is transient UI state or an in-memory hint, it is not an event.
-3. **It changes a state transition in the reducer or a decision in the loop** — if it only affects how the TUI renders, add a rendering rule instead.
+3. **It changes a state transition in `claim` or a loop decision** — a TUI-only effect gets a rendering rule instead.
 4. **It cannot be carried by an existing type's optional fields** (`meta`, `data`, `details`).
 
 If any condition fails, do not add the type. The TUI renders unknown types via
@@ -62,9 +62,15 @@ failure domain**.
 
 ## P3. Internal type / core promotion policy
 
-Phase 1 has no shared Rust crate. The shared types are JSON Schema files.
+Shared types live in the `rushi-common` crate (`crates/rushi/`): the
+typed `Event` vocabulary, `LogLine`, stage payloads, hook-ABI helpers,
+rewind active-path math, and model-section resolution.
+The old JSON-Schema event files were retired 2026-09-15 (`docs/typed-events.md`).
+The typed `Event` enum is the contract. `parse_event` is the single
+validation step. The TUI repo (`github.com/TonyWu20/rushi-tui`)
+imports the same crate by path.
 
-Promote into a shared Rust type only when:
+Promote a new structure into the shared crate only when:
 
 - the same structure appears in **three or more binaries** with identical
   fields and non-trivial validation, or
@@ -75,13 +81,13 @@ Promote a function into a shared library when:
 - it has been copied three times, or
 - a bug was fixed in one copy and not another.
 
-Create the `core` crate only after:
+Create a `core` crate for the loop state machine only after:
 
-- the JSON event/tool schemas have been stable through **20 real sessions** (default), and
-- the reducer/loop state machine has replay tests over those sessions.
+- the typed `Event` vocabulary has been stable through **20 real sessions** (default), and
+- the loop state machine (`claim`'s owed-state derivation) has replay tests over those sessions.
 
-Before that, duplicate deliberately. The JSON contract is the spec; duplication
-is cheaper than a premature shared crate.
+Before that, duplicate deliberately. The typed-enum contract is the spec.
+Duplication is cheaper than a premature shared crate.
 
 ## P4. Necessary-change checklist
 
@@ -108,7 +114,7 @@ Each goal has acceptance criteria so an agent can self-evaluate.
 > If the same step is run twice on the same log, no event is duplicated and no
 > tool side effect happens twice.
 
-- Acceptance: run `step.sh <session>` twice; second run emits no new
+- Acceptance: run `rushi step <session>` twice. The second run emits no new
   `tool_call` events and appends no duplicate `assistant_message`.
 - Forces: a correct reducer in `claim`; "what is owed" derived only from the log.
 
@@ -128,8 +134,9 @@ Each goal has acceptance criteria so an agent can self-evaluate.
 > Producers serialize it and readers parse it with `parse_event` (serde).
 
 - Acceptance: `crates/rushi/src/event.rs` covers all current event types with
-  a round-trip test. `log` rejects invalid events with a nonzero exit. `tui`
-  reads a deliberately malformed line and shows a fallback, not a crash.
+  a round-trip test. `log` rejects invalid events with a nonzero exit. The
+  `tui` binary now lives in `github.com/TonyWu20/rushi-tui`. It reads a
+  deliberately malformed line and shows a fallback, not a crash.
 - Forces: the versioned envelope (`v`, `type`, `ts`) and the typed
   validation step.
 
@@ -138,10 +145,12 @@ Each goal has acceptance criteria so an agent can self-evaluate.
 > A script/program in any language is a valid tool if and only if it passes the
 > conformance harness.
 
-- Acceptance: `tool-conformance <manifest>` runs the tool with sample inputs and
-  checks: stdout is one JSON object, stderr is ignored, exit 0 = success,
-  nonzero = failure; a Python tool and a Bash tool both pass without any
-  language-specific handling.
+- Acceptance: `scripts/tool-conformance.sh` runs the tools with sample inputs.
+  It checks: stdout is one JSON object, empty stderr on success, exit 0 =
+  success, nonzero = failure. The runner is language-neutral: it drives the
+  tool through stdin, stdout, and the exit code. A Python tool and a Bash
+  tool pass the same way. Today it hard-codes the four native tools, with
+  no manifest argument.
 - Forces: the stdin/stdout/stderr/exit-code contract as a test, not a comment.
 
 ### G5 — TUI resilience
@@ -152,7 +161,9 @@ Each goal has acceptance criteria so an agent can self-evaluate.
 - Acceptance: feed the TUI (a) unknown event type, (b) `v: 99`, (c) malformed
   JSON line, (d) missing fields in a known type; TUI stays responsive and shows
   a fallback/hint in each case.
-- Forces: `render_event` fallback rules and `SessionPort` validation.
+- Forces: the fallback rules and `SessionPort` in the TUI repo
+  (`github.com/TonyWu20/rushi-tui`: `bin/tui/src/event.rs`
+  `UnknownType` / `UnsupportedVersion` / `BadLine`, `bin/tui/src/port.rs`).
 
 ### G6 — Approval recovery
 
@@ -163,15 +174,21 @@ Each goal has acceptance criteria so an agent can self-evaluate.
   resumes without timeout and without re-running the tool call.
 - Forces: approval as events, pending state derived from the log, idempotent resume.
 
-### G7 — Stage contract conformance
+### G7 — Producer-side event validation
 
-> Every pipeline binary validates its input and output against its schema and
-> exits nonzero on mismatch.
+> Every event line is validated against the typed `Event` vocabulary at the
+> producer, before append. Readers never fail on a well-formed line.
 
-- Acceptance: `echo '{}' | claim` exits nonzero with a schema error on stderr;
-  `claim --help` prints its input/output schemas.
-- Forces: each binary owns its contract; pipelines fail loudly instead of
-  passing garbage downstream.
+- Acceptance: `echo '{}' | log --session <s>` exits nonzero with a validation
+  error on stderr. The `rushi` loop append paths, `user`, and `log` all
+  reject lines that do not parse into a known `Event`. Reader-side
+  consumers (`claim`, TUI) skip or fall back on malformed lines instead
+  of failing.
+- Forces: the typed `Event` enum (`rushi-common::event::parse_event`) is
+  the single validation step (`docs/typed-events.md`). Garbage is loud at
+  the producer and silent-safe at the reader.
+- Known gap: the TUI's own producer paths (`user_message`, `cancel`,
+  `approval`) append straight through `LogLine` without the typed check.
 
 ### G8 — Overhead budget
 
@@ -208,22 +225,25 @@ If any section is missing, the proposal is incomplete.
 | New binary | Two unrelated failure modes, or independent standalone use |
 | New endpoint/flag | Third real caller (rule of three) |
 | Shared Rust type | 3+ duplicated copies, or a divergence bug |
-| `core` crate | Schemas stable 20 sessions + replay-tested reducer |
-| Retry/timeout on a stage | A real transient failure observed (e.g., model API 5xx) |
+| `core` crate | Typed event vocabulary stable 20 sessions + replay-tested loop state machine |
+| Retry/timeout on a stage | A real transient failure observed (e.g., model API 5xx) | **Done** for the model call: `step.rs` model retry loop (2 × 3 s) plus the `model_timeout_s` config knob |
 | Daemon + attachable TUI | TUI restart killing the loop becomes unacceptable | **Done** (loop.pid reattach) |
-| In-process compiled tool | A specific tool's process overhead measured and exceeds G8 budget |
+| In-process tool execution (remove the per-call fork/exec) | A tool's per-call process overhead is measured and exceeds the G8 budget (measurement not yet built. All base tools are already compiled Rust binaries, so the remaining cost is fork/exec plus shell spawn for `bash`) |
 | NDJSON streaming tools | A tool must emit progress that changes control flow |
 | Plugin/dynamic-loading system | Hot reload beyond editing scripts is a real requirement |
 
 ## P8. Not-yet list (do not build until triggered)
 
-- Shared Rust `core` crate (see P3)
+- Shared Rust `core` crate for the loop state machine (see P3). The shared
+  *utility* crate (`rushi-common`) already exists and is imported by every
+  kernel stage and by the TUI. Only the state-machine core crate is not-yet.
 - Compiled-in tools (see P7)
 - ~~Daemon/TUI split~~ — **done**: `rushi run` runs the loop as a standalone process; the TUI binary attaches via `loop.pid` and can reattach after restart to send SIGINT/SIGTERM
 - HTTP/WebSocket API (until a non-terminal/remote client is a current requirement)
 - Plugin system / dynamic loading (until script editing is insufficient)
 - NDJSON streaming for tools (until progress affects control flow)
-- Multi-agent scheduling (until a second concurrent session is actually in use)
+- Multi-agent scheduling (until a second concurrent session is actually in
+  use). The `docs/subagent-design.md` spec is approved but not built.
 - Approval policy engine beyond allow/deny/edit (until a real policy need appears)
 
 ## P9. Itches (parking lot)

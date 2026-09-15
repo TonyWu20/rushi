@@ -20,7 +20,7 @@ uses append-only JSONL with JSON Schema validation. The model adapter
 speaks the DeepSeek Responses API with a Chat Completions fallback.
 
 **Post-split.** At the 2026-09-08 split this repo is the kernel
-(loop, base tools, extension host, hook ABI, distribution). The TUI and UI-extension layers moved to `../rushi-tui`; goal tools, goal
+(loop, base tools, extension host, hook ABI, distribution). The TUI and UI-extension layers moved to `github.com/TonyWu20/rushi-tui`. Goal tools, goal
 hooks, and `lean-verify` moved to `../rushi-exts`. Their docs live in those repos. The kernel ships a default config with no sibling
 dependency; `config-exts.example.toml` shows how to re-enable the
 exts wiring.
@@ -98,7 +98,7 @@ Status legend:
 
 ## Sibling repos
 
-The TUI and UI-extension layers live in `../rushi-tui`. Goal tools,
+The TUI and UI-extension layers live in `github.com/TonyWu20/rushi-tui`. Goal tools,
 goal hooks, and `lean-verify` live in `../rushi-exts`. Their docs
 (`tui.md`, `ui-extension.md`, `goal-ux.md`, etc.) live in those repos.
 The kernel does not depend on them at build time. `config-exts.example.toml`
@@ -106,9 +106,9 @@ shows how to wire the kernel to the exts tree for development.
 
 Moved docs (not in this repo anymore):
 
-- `../rushi-tui/docs/user-message-editing.md` — queue recall, `:edit-queue` palette.
-- `../rushi-tui/docs/vim-editor-design.md` — TUI vim modal input.
-- `../rushi-tui/docs/goal-ui_feedback_from_human.md` — goal UX feedback.
+- `github.com/TonyWu20/rushi-tui/docs/user-message-editing.md` — queue recall, `:edit-queue` palette.
+- `github.com/TonyWu20/rushi-tui/docs/vim-editor-design.md` — TUI vim modal input.
+- `github.com/TonyWu20/rushi-tui/docs/goal-ui_feedback_from_human.md` — goal UX feedback.
 - `../rushi-exts/docs/aeneas-rust-to-lean.md` — Aeneas toolchain notes.
 - `../rushi-exts/docs/goal-rule-reinject.md` — goal prompt injection (superseded).
 - `../rushi-exts/docs/pi-extension-port-investigation.md` — pi extension porting.
