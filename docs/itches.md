@@ -317,3 +317,24 @@ holding only `bin/`) shows the `hooks/` hooks get invoked. No
 The `rushi-config` flake pulls the kernel by `git+file://`. So the
 fix reaches a Nix build only after the kernel change is committed
 and the flake lock is updated.
+
+## G2b: tool side effects repeat after a mid-tool crash (2026-09-15)
+
+**Observed.** The loop writes the `tool_call` event, then `route`
+spawns the tool and writes the `tool_result` only after it finishes.
+A kill -9 between those two writes leaves a `tool_call` with no
+result. On restart, `claim` owes the result and the loop re-runs
+the tool. Any side effect of the first run happens twice.
+
+**Reproduce.** `scripts/crash-e2e.sh` test B: start `route` with a
+slow bash call, kill -9 it while the tool runs, then run the
+recovery. The log stays consistent (one `tool_result` per call),
+but the tool's side effects ran twice.
+
+**Status: parked (G2b of docs/refinement-policy.md).** The
+log-completeness and no-dangling-state halves (G2a) are proven by
+`scripts/crash-e2e.sh`. Closing this itch needs a design decision:
+a `tool_started` marker event plus a recovery rule for
+started-but-unresolved calls, or an explicit idempotent-tools-only
+scope. Per P0, build it only when a real episode of a
+non-idempotent tool losing work appears.

@@ -35,6 +35,10 @@ fallback; unknown fields are ignored by consumers.
 - Additive changes (new event type, new optional field) do **not** bump `v`.
 - Consumers must tolerate unknown `type` values; unsupported `v` values render
   raw with a hint (never crash).
+- Producers may extend the vocabulary per repo: the TUI adds the event
+  types it needs for rendering (for example, `cancel`). The kernel only
+  cares about events relevant to the loop with the model, and it skips
+  unknown types per the rules above.
 
 ### P1c. Definition of done for an event type
 
@@ -123,10 +127,22 @@ Each goal has acceptance criteria so an agent can self-evaluate.
 > Kill -9 any stage at any point; the log is either complete or absent for that
 > event, and the next start recovers without double execution or dangling state.
 
-- Acceptance: crash-injection script kills each stage at 3 points; after
-  restart, every `tool_call` has exactly one `tool_result` or a terminal
-  `error`, and rerunning a crashed tool call does not repeat side effects.
-- Forces: O_APPEND atomic appends, sequence numbers, and a recovery rule.
+- **G2a — log completeness and no dangling state: Done.**
+  `scripts/crash-e2e.sh` kills `log` mid-append, `route` mid-tool,
+  and `claim` in flight, then restarts. Every committed line is a
+  whole event, and a truncated tail from a mid-write kill is the one
+  tolerated worst case. After the restart, each unresolved `tool_call`
+  still owes exactly one `tool_result` or a terminal `error`. The
+  atomic half is FT-005 `LogLine` (exclusive `flock` plus one
+  `write(2)`). The owed-state half is `claim`'s log-only derivation.
+
+- **G2b — no repeated tool side effects: Parked** (docs/itches.md).
+  A `tool_call` is logged before the tool runs. A kill mid-tool means
+  the recovery re-runs the tool, so a non-idempotent tool repeats
+  its side effect. Closing G2b needs a `tool_started` marker event
+  plus a recovery rule, or a documented idempotent-tools-only scope.
+- Forces: one locked `write(2)` per event line (FT-005), and owed
+  state derived only from the log.
 
 ### G3 — Event vocabulary
 
