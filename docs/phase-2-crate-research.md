@@ -1,6 +1,6 @@
 # Phase 2 Crate Research
 
-Status: Research (2026-09-07).
+Status: Research (2026-09-07). Decisions recorded 2026-09-15, see the Decisions section.
 
 This document maps shell and bash-tool work in the Phase 2 core to Rust
 crates. It targets two goals:
@@ -11,6 +11,19 @@ crates. It targets two goals:
 It feeds `docs/phase-2-plan.md`. It adds no new event type and no new config
 key. It only changes the implementation underneath. It follows the YAGNI guard
 in the plan section 9.
+
+## Decisions (2026-09-15)
+
+**Tool-layer rows retired.** No native `tools/json` (on `jaq-core`,
+`jaq-stdlib`, `jaq-json`), no `tools/grep` (on `grep`, `grep-searcher`,
+`ignore`), no `similar`, `sha2`, `base64`, or `hex` tool. The four native
+tools cover the work. The `jq` process stays in e2e test scripts only.
+
+**`jsonschema` retired** (the JSON-Schema validation row, reversed the same day). The typed `Event` enum in `crates/rushi/src/event.rs` is the single validation step. serde deserialization is the check. No JSON-Schema file is imported or compiled. The typed vocabulary already replaced the hand-rolled validator copies (docs/typed-events.md).
+
+**`schemas/events/v1/` removed** (2026-09-15). No consumer remains in the
+kernel or the active TUI fork. The typed `Event` vocabulary is the only
+event contract.
 
 ## 1. Scope
 

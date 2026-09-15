@@ -70,8 +70,9 @@ hand-building the JSON string.
 | `--schemas` CLI args | `user`, `claim`, `log` binaries | Removed |
 | `event_validation` module | JSON Schema validator | Retired |
 
-The `schemas/events/v1/` files stay in the repo for the TUI and
-external consumers. The kernel no longer reads them at runtime.
+The `schemas/events/v1/` files were removed from the repo on
+2026-09-15. The active TUI fork carries its own typed event
+vocabulary. The kernel no longer reads schema files at runtime.
 
 ## 3. Status
 
@@ -101,7 +102,8 @@ P3 — **Missing field rejected.** A `user_message` line missing
 `content` fails with an error naming `content`.
 
 P4 — **Type-tag inventory.** `EVENT_TYPES` has exactly 14 entries.
-They are the same set as the 14 filenames in `schemas/events/v1/`.
+It is the same set as the 14 canonical event type names,
+hardcoded in the `event.rs` test (the former `schemas/events/v1/` filenames).
 
 P5 — **Wire format unchanged.** No existing JSONL line that is valid
 per the JSON schemas will fail `parse_event`. The set of valid lines

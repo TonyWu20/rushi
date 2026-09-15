@@ -38,7 +38,8 @@ fallback; unknown fields are ignored by consumers.
 
 ### P1c. Definition of done for an event type
 
-- JSON Schema exists under `schemas/events/v1/`.
+- The typed `Event` variant exists in `crates/rushi/src/event.rs`,
+  with a round-trip test in `event.rs` covering it.
 - One producer test appends it.
 - One consumer test reads it.
 - One replay test proves an old session containing it still renders/reduces.
@@ -121,15 +122,16 @@ Each goal has acceptance criteria so an agent can self-evaluate.
   `error`, and rerunning a crashed tool call does not repeat side effects.
 - Forces: O_APPEND atomic appends, sequence numbers, and a recovery rule.
 
-### G3 — Event schemas
+### G3 — Event vocabulary
 
-> Every event type has a JSON Schema; producers validate before append; readers
-> validate on read.
+> Every event type is a typed `Event` variant in `rushi-common`.
+> Producers serialize it and readers parse it with `parse_event` (serde).
 
-- Acceptance: `schemas/events/v1/*.json` exist for all current event types;
-  `log` rejects invalid events with nonzero exit; `tui` reads a deliberately
-  malformed line and shows a fallback, not a crash.
-- Forces: the versioned envelope (`v`, `type`, `ts`) and validation tooling.
+- Acceptance: `crates/rushi/src/event.rs` covers all current event types with
+  a round-trip test. `log` rejects invalid events with a nonzero exit. `tui`
+  reads a deliberately malformed line and shows a fallback, not a crash.
+- Forces: the versioned envelope (`v`, `type`, `ts`) and the typed
+  validation step.
 
 ### G4 — Tool conformance test
 

@@ -74,7 +74,8 @@ cancellation signals, and manages the session lock (`loop.pid`).
 ## 3. Session Log (Event Schema)
 
 The session log is `sessions/<name>/events.jsonl`, append-only JSONL.
-Each line is one event object. Schema: `schemas/events/v1/*.json`.
+Each line is one event object. Validation: the typed `Event` enum in
+`rushi-common` (`docs/typed-events.md`).
 
 ### Event types
 

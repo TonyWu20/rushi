@@ -14,7 +14,6 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN_DIR="$(cd "$SCRIPT_DIR/../target/debug" && pwd)"
 TOOL_DIR="$(cd "$SCRIPT_DIR/../tools" && pwd)"
-SCHEMA_DIR="$(cd "$SCRIPT_DIR/../schemas/events/v1" && pwd)"
 CONFIG="$SCRIPT_DIR/../config.toml"
 export CONFIG
 

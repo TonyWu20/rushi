@@ -40,7 +40,6 @@ charm of our Unix-style architecture.
 - `lean/` — Lean 4 backstop specs: `RushiSpec` (the `setup` tool-set
   resolver), `RewindSpec` (the fork active-path recursion), and the
   `RewindDrt` differential-random-test model executable.
-- `schemas/events/v1/` — the JSON Schema vocabulary for the session log.
 - `docs/` — specs, reviews, and the doc index (`docs/INDEX.md`).
 - `config.toml` / `config-low.toml` — kernel-only default configs.
   `config-exts.example.toml` shows the sibling `rushi-exts` wiring.
