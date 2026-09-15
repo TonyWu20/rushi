@@ -26,12 +26,13 @@ A subagent is:
   (`sessions/<n>/sub-<uuid8>`), with its own `events.jsonl`,
   `tools.jsonl`, `meta.json`, and `.loop.lock`.
 - a **restricted agent** at **depth 1**: the main agent calls the
-  subagent, and that is the whole chain. The parent's `spawn_agent`
-  tool projects the parent config into a child config that keeps only
-  the tool paths the parent chose for this child. The child cannot call
-  `spawn_agent` again because `spawn_agent` is an extension tool (P1)
-  and the child's tool paths omit it. Depth is 1 by construction, not
-  by a counter (D6).
+  subagent, and that is the whole chain. The `spawn_agent` tool
+  projects the parent config into a child config that keeps only
+  the tool paths the parent chose for this child. The tool lives
+  in the exts repo (decision 2026-09-16). The child cannot call
+  `spawn_agent` again because it is an extension tool (P1) and
+  the child's tool paths omit it. Depth is 1 by construction,
+  not by a counter (D6).
 - a **blocking call in v1**: the parent step does not advance until the
   child loop exits. No parallel fan-out. No shared memory. The only
   channel is the child's terminal `ext_status` value, read from the child
@@ -564,7 +565,13 @@ properties = {
 }
 ```
 
-The tool binary (`bin/spawn_agent/`, a new workspace member) does:
+Decision 2026-09-16 (human): the tool is an application, not a
+kernel citizen. It is not a kernel workspace member. The tool dir
+and binary live in the exts repo, registered via
+`extension_tool_paths`. The kernel ships only `config_gen` and the
+`rushi config-gen` subcommand.
+
+The exts tool binary does:
 
 1. Read `$HARNESS_SESSION_DIR`, `$CONFIG`, and `$HARNESS_BIN` (all set
    by `route`).
@@ -591,6 +598,15 @@ parent agent sees in its next step.
 
 - New module `config_gen` (D5). It has a `project()` function and a
   `rushi config-gen` subcommand that writes a child config. P3.
+  The `bin/spawn_agent` kernel workspace member named in section 4
+  is superseded. The tool is exts-owned (decision 2026-09-16).
+
+- Route tool-env exports: `HARNESS_BIN` and `CONFIG` join
+  `HARNESS_SESSION_DIR` in the tool subprocess env. The exts
+  `spawn_agent` tool execs the child run through them. The spec's
+  section 4 claim that route already sets all three is not true
+  today. Verified 2026-09-16: route sets only `HARNESS_SESSION_DIR`
+  (`bin/route/src/main.rs:376`).
 
 - New module `event.rs` with the `Event` enum and per-type structs
   (D8). It is the live validator in the loop and in every stage
@@ -632,9 +648,10 @@ parent agent sees in its next step.
 
 ## Properties
 
-P1 — **Extension isolation.** `cargo build` of the kernel workspace
-succeeds with `tools/spawn_agent/` removed from the workspace
-members list. No kernel crate references `spawn_agent` by name.
+P1 — **Extension isolation.** The `spawn_agent` tool never enters
+the kernel tree (decision 2026-09-16: exts-owned application). No
+kernel crate or binary references `spawn_agent` by name. The
+kernel workspace builds without the exts tool present.
 
 P2 — **Nesting and cleanup.** The child session dir is
 `sessions/<parent>/sub-<uuid8>`. `rm -rf sessions/<parent>/`
@@ -681,7 +698,7 @@ deserialization with a `serde_json::Error` naming the field. The
 
 | # | Property | Method | Status |
 |---|----------|--------|--------|
-| P1 | Extension isolation | `cargo build` with the tool crate removed. `rg spawn_agent crates/ bin/rushi/ bin/route/ bin/assemble/` is empty. | open |
+| P1 | Extension isolation | The tool lives in the exts repo. `rg spawn_agent` over the kernel tree is empty. The kernel never references it (decision 2026-09-16). | open |
 | P2 | Nesting and cleanup | unit test in `config_gen`: `project` sets `sessions_root` to `<parent>/sub-<uuid8>`. e2e: `rm -rf` of the parent dir removes child state. | open |
 | P3 | Deterministic child config | unit test: two `project` calls, same input, diff the output bytes (session uuid masked). | open |
 | P4 | Headless child | e2e: `rg '\[tui\]'` the generated config finds nothing. run the child, assert no `$HARNESS_WS` in its env. | open |
@@ -692,9 +709,10 @@ deserialization with a `serde_json::Error` naming the field. The
 
 ## Gate
 
-**Blocked.** `tools/spawn_agent/`, `config_gen`, the
-`native_tool_paths` change, and the `scripts/subagent-e2e.sh`
-script are not implemented. P1-P7 are open. P8 (typed events) is
-done: `event.rs` is wired into the loop and all stage binaries.
+**Blocked.** D6 (tool-path lists) and D8 (typed events) are built.
+Not yet implemented: `config_gen`, the `rushi config-gen`
+subcommand, the route tool-env exports, and the exts-owned
+`spawn_agent` tool. P1-P7 are open. P8 (typed events) is done:
+`event.rs` is wired into the loop and all stage binaries.
 `event_validation` is retired, and the loop no longer reads
 `schemas/events/v1/` at runtime.

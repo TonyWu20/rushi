@@ -289,6 +289,29 @@ Rules:
 - The types and state transitions repeated across binaries become `crates/core` with ports/traits.
 - The binaries remain as adapters (subprocess) or become in-process trait impls.
 
+Re-evaluation gate (decision 2026-09-16). Entering Phase 3 was
+judged not worth it now. No recorded episode demands a core crate.
+The typed vocabulary dates from 2026-09-15, far short of the
+20-session stability bar. The loop replay-test suite does not
+exist yet. Re-open only when a trigger below fires.
+
+1. G8 measurement shows per-call fork/exec overhead exceeding
+   budget. The in-process `ToolExecutor` adapter earns its place.
+
+2. A real second concurrent session or scheduler appears. The
+   shared state machine becomes load-bearing.
+
+3. Replay/DRT testing becomes the main verification vehicle. A
+   pure reducer in `crates/core` pays off immediately.
+
+4. The P3 gate formally opens: 20 stable sessions plus replay
+   tests over them.
+
+Seed work, do regardless of Phase 3: the G1 double-step replay
+test (audit finding F7 in `docs/kernel-complexity-audit.md`). It
+is the missing replay half of the gate. Parked details:
+`docs/itches.md` (2026-09-16 entry).
+
 ### Phase 4 — Compile in what is stable
 - Hot/stable stages become in-process trait impls.
 - Isolation-sensitive stages stay subprocesses.
