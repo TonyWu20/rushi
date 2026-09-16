@@ -97,6 +97,22 @@ let
   # ── Kernel defaults ──
   defaults = import ./rushi-defaults.nix;
 
+  # ── 0. Kernel tool names (eval-time, from the kernel's own tools/) ──
+  #
+  # Derived from src/tools/*/tool.toml. Two consumers:
+  #   * `rushi.tools` option default (full kernel tool set, so the
+  #     consumer can omit it entirely)
+  #   * build-time ext-tool discovery filter (subdirs of $out/tools
+  #     that are NOT in this set are extension tool dirs)
+  nativeToolNames =
+    let
+      toolsDir = src + "/tools";
+      dirNames = builtins.attrNames (builtins.readDir toolsDir);
+    in
+    builtins.filter (n:
+      builtins.pathExists (toolsDir + "/${n}/tool.toml")
+    ) dirNames;
+
   # ── 1. Evaluate the NixOS module system ──
   #
   # optionsModule declares the rushi.* schema with lib.mkOption types,
@@ -104,10 +120,13 @@ let
   # `modules` parameter) set values.  evalModules type-checks all
   # option values and exposes the option schema for docs generation.
   #
-  # extraSpecialArgs (like pi-flake) lets the caller inject additional
+  # nativeToolNames is threaded in as `kernelTools` so the `tools`
+  # option default is the kernel's real tool set, not a hand-maintained
+  # list. extraSpecialArgs (like pi-flake) lets the caller pass more
   # special args into every module's scope (e.g. sops-nix secrets,
   # environment-specific overrides).
-  optionsModule = import ./rushi-options.nix { inherit lib; };
+  optionsModule =
+    import ./rushi-options.nix { kernelTools = nativeToolNames; inherit lib; };
 
   evaluated = lib.evalModules {
     specialArgs = {
@@ -126,6 +145,19 @@ let
   extUiExtNames = evaluated.config.rushi.ui_extension_names;
   extHooks     = evaluated.config.rushi.external_hooks;
   tuiPkg       = evaluated.config.rushi.tui or null;
+
+  # Inputs for build-time discovery and drift guards, interpolated into
+  # installPhase as shell variables.
+  discoveryInputs =
+    let
+      userExtToolPaths = mergedConfig.paths.extension_tool_paths or [ ];
+      bareHookCommands =
+        builtins.filter (c: c != "" && builtins.match "^[^/]+$" c != null)
+          (builtins.map (e:
+             if builtins.isAttrs e then e.command or "" else ""
+           ) (mergedConfig.hooks.on or [ ]));
+    in
+    { inherit userExtToolPaths bareHookCommands; };
 
   # ── 2. Deep-merge rushi.config ──
   #
@@ -189,38 +221,57 @@ let
   # Nix derivations expand to their store path; string paths pass through.
   toShellPath = v: if builtins.isString v then v else toString v;
 
+  # External tool sources. Each is copied into $out/tools/ and must
+  # ship at least one tool manifest (a tool.toml at the source top
+  # level or in a sub-dir). A source with none is a broken ext and
+  # fails the build with a clear error. This is the declare-once
+  # guarantee: the source is the single declaration of this ext tool.
   extToolScript = builtins.concatStringsSep "\n" (
     map (s:
       let sp = toShellPath s; in ''
         # External tool source: ${sp}
-        if [ -d "${sp}" ]; then
-          cp -rL "${sp}/." "$out/tools/" 2>/dev/null || true
+        if [ ! -d "${sp}" ]; then
+          echo "mkRushi: external tool source ${sp} is missing or not a directory" >&2
+          exit 1
         fi
+        ext_toml=""
+        for t in "${sp}"/tool.toml "${sp}"/*/tool.toml; do
+          if [ -f "$t" ]; then ext_toml="$t"; break; fi
+        done
+        if [ -z "$ext_toml" ]; then
+          echo "mkRushi: external tool source ${sp} ships no tool.toml (broken ext)" >&2
+          exit 1
+        fi
+        cp -rL "${sp}/." "$out/tools/"
       ''
     ) extTools
   );
 
+  # External UI extension sources. Each is copied into
+  # $out/ui_extensions/. Each source must ship at least one entry dir
+  # with an ext.toml. A source with none is a broken ext and fails
+  # the build with a clear error. Entry dir names are auto-discovered
+  # at build time (see installPhase) unless ui_extension_names
+  # overrides them.
   extUiScript = builtins.concatStringsSep "\n" (
     map (s:
       let sp = toShellPath s; in ''
         # External UI extension source: ${sp}
-        if [ -d "${sp}" ]; then
-          cp -rL "${sp}/." "$out/ui_extensions/" 2>/dev/null || true
+        if [ ! -d "${sp}" ]; then
+          echo "mkRushi: external UI ext source ${sp} is missing or not a directory" >&2
+          exit 1
         fi
+        ext_toml=""
+        for t in "${sp}"/ext.toml "${sp}"/*/ext.toml; do
+          if [ -f "$t" ]; then ext_toml="$t"; break; fi
+        done
+        if [ -z "$ext_toml" ]; then
+          echo "mkRushi: external UI ext source ${sp} ships no ext.toml (broken ext)" >&2
+          exit 1
+        fi
+        cp -rL "${sp}/." "$out/ui_extensions/"
       ''
     ) extUiExts
-  );
-
-  # Fail the build when a declared ui-extension name is not actually
-  # present in the assembled ui_extensions/ dir (drift guard between
-  # ui_extension_names and external_ui_extensions).
-  checkUiExtNamesScript = builtins.concatStringsSep "\n" (
-    map (n: ''
-      if [ ! -d "$out/ui_extensions/${n}" ]; then
-        echo "mkRushi: ui_extension_names '${n}' has no entry in $out/ui_extensions/" >&2
-        exit 1
-      fi
-    '' ) extUiExtNames
   );
 
   extHookScript = builtins.concatStringsSep "\n" (
@@ -240,24 +291,11 @@ let
     ) extHooks
   );
 
-  # tools.manifest: rushi.toml-equivalent for `rushi setup --locked`.
-  # [ui_extensions] lists kernel-bundled names (ui_extensions) plus the
-  # entry names of the external packages bundled via
-  # external_ui_extensions (ui_extension_names), so the manifest
-  # describes everything the package actually ships.
-  allUiExtNames = uiExtensions ++ extUiExtNames;
-  toolListStr  = builtins.concatStringsSep ", " (map (t: "\"${t}\"") tools);
-  extListStr   = builtins.concatStringsSep ", " (map (t: "\"${t}\"") allUiExtNames);
-  toolsManifestText = ''
-    [rushi]
-    version = "${version}"
-
-    [tools]
-    enabled = [ ${toolListStr} ]
-
-    [ui_extensions]
-    enabled = [ ${extListStr} ]
-  '';
+  # tools.manifest is generated at build time in installPhase so the
+  # [ui_extensions] enabled list can include ext entry names
+  # auto-discovered from the bundled UI ext packages. The [tools]
+  # enabled list and [rushi] version are static, interpolated from
+  # Nix into the shell at build time.
 
   # ── 6. Environment variables (rushi.environment) ──
   #
@@ -294,8 +332,10 @@ let
   ) envFileDeps;
 
   # Embed generated files as Nix text files (referenced via passAsFile).
+  # (tools.manifest is generated at build time in installPhase, not
+  # embedded, because its [ui_extensions] list depends on build-time
+  # discovery of the bundled ext entry dirs.)
   configTomlFile  = pkgs.writeText "rushi-config.toml" configTomlText;
-  manifestFile    = pkgs.writeText "rushi-tools-manifest" toolsManifestText;
 
   # Only Nix values (derivations, paths) need to be build inputs;
   # plain string paths are used directly in the shell.
@@ -340,9 +380,23 @@ let
 
     # Pass generated text files via file descriptors (avoids long
     # Nix store paths in the shell command).
-    passAsFile = [ configTomlFile manifestFile envFile ];
+    passAsFile = [ configTomlFile envFile ];
 
     installPhase = ''
+      # ── Build-time discovery inputs (Nix-interpolated) ──
+      # NATIVE_TOOLS: kernel tool dir names (excluded from ext discovery).
+      # USER_EXT_TOOL_PATHS: user-set [paths] extension_tool_paths entries.
+      # USER_UI_EXT_NAMES: ui_extension_names override (drift-guarded).
+      # UI_EXT_BASE_NAMES: kernel-bundled ui extension names.
+      # BARE_HOOK_COMMANDS: bare config.hooks.on commands to verify.
+      # TOOLS_RAW: the [tools] enabled list (rushi.tools option value).
+      NATIVE_TOOLS="${builtins.concatStringsSep " " nativeToolNames}"
+      USER_EXT_TOOL_PATHS="${builtins.concatStringsSep " " discoveryInputs.userExtToolPaths}"
+      USER_UI_EXT_NAMES="${builtins.concatStringsSep " " extUiExtNames}"
+      UI_EXT_BASE_NAMES="${builtins.concatStringsSep " " uiExtensions}"
+      BARE_HOOK_COMMANDS="${builtins.concatStringsSep " " discoveryInputs.bareHookCommands}"
+      TOOLS_RAW="${builtins.concatStringsSep " " tools}"
+
       # ── Directory layout ──
       mkdir -p $out/bin $out/tools $out/ui_extensions $out/hooks
 
@@ -373,20 +427,125 @@ let
       # ── External UI extension sources (add to ui_extensions/) ──
       ${extUiScript}
 
-      # ── Verify declared ui-extension names are present ──
-      ${checkUiExtNamesScript}
-
       # ── External hook binaries (add to hooks/) ──
       ${extHookScript}
 
       # ── TUI binary (rushi.tui) ──
       ${tuiInstallScript}
 
-      # ── Generated config.toml ──
-      cp "${configTomlFile}" $out/config.toml
+      # ── Auto-derive [paths] extension_tool_paths ──
+      # Discover ext tool dirs: subdirs of $out/tools/ that hold a
+      # tool.toml and are not native kernel tools. Merge with the
+      # user-set entries (deduped) and rewrite the line in the
+      # generated config.toml below.
+      ext_tool_paths=""
+      for d in "$out"/tools/*/tool.toml; do
+        if [ -f "$d" ]; then
+          name=$(basename "$(dirname "$d")")
+          is_native=0
+          for nt in $NATIVE_TOOLS; do
+            if [ "$name" = "$nt" ]; then is_native=1; break; fi
+          done
+          if [ "$is_native" -eq 0 ]; then
+            ext_tool_paths="$ext_tool_paths tools/$name"
+          fi
+        fi
+      done
+      all_ext_paths="$USER_EXT_TOOL_PATHS $ext_tool_paths"
+      final_ext_paths=""
+      for p in $all_ext_paths; do
+        case " $final_ext_paths " in *" $p "*) continue ;; esac
+        final_ext_paths="$final_ext_paths $p"
+      done
+      ext_paths_toml=""
+      for p in $final_ext_paths; do
+        if [ -z "$ext_paths_toml" ]; then
+          ext_paths_toml=$(printf '"%s"' "$p")
+        else
+          ext_paths_toml="$ext_paths_toml, $(printf '"%s"' "$p")"
+        fi
+      done
 
-      # ── tools.manifest (rushi.toml equivalent) ──
-      cp "${manifestFile}" $out/tools.manifest
+      # ── Auto-discover [ui_extensions] entry names ──
+      # Each entry dir in $out/ui_extensions/ holds an ext.toml. When
+      # ui_extension_names is set it overrides discovery and is
+      # drift-guarded (every name must have a dir). When empty, the
+      # discovered names are used. Kernel-bundled names (ui_extensions)
+      # are always listed first.
+      discovered_ui=""
+      for d in "$out"/ui_extensions/*/ext.toml; do
+        if [ -f "$d" ]; then
+          discovered_ui="$discovered_ui $(basename "$(dirname "$d")")"
+        fi
+      done
+      if [ -n "$USER_UI_EXT_NAMES" ]; then
+        for n in $USER_UI_EXT_NAMES; do
+          if [ ! -d "$out/ui_extensions/$n" ]; then
+            echo "mkRushi: ui_extension_names '$n' has no entry in $out/ui_extensions/ (drift)" >&2
+            exit 1
+          fi
+        done
+        ext_ui_names="$USER_UI_EXT_NAMES"
+      else
+        ext_ui_names="$discovered_ui"
+      fi
+      all_ui_names="$UI_EXT_BASE_NAMES $ext_ui_names"
+      final_ui_names=""
+      for n in $all_ui_names; do
+        case " $final_ui_names " in *" $n "*) continue ;; esac
+        final_ui_names="$final_ui_names $n"
+      done
+      ui_ext_toml=""
+      for n in $final_ui_names; do
+        if [ -z "$ui_ext_toml" ]; then
+          ui_ext_toml=$(printf '"%s"' "$n")
+        else
+          ui_ext_toml="$ui_ext_toml, $(printf '"%s"' "$n")"
+        fi
+      done
+
+      # ── Hook command drift guard ──
+      # Every bare command in config.hooks.on must resolve to a file
+      # in $out/bin/ or $out/hooks/ (the kernel's runtime resolution
+      # for bare names, per resolve_hook_command). A typo or an
+      # unbundled hook fails the build with a clear message.
+      missing_hooks=""
+      for cmd in $BARE_HOOK_COMMANDS; do
+        if [ ! -f "$out/bin/$cmd" ] && [ ! -f "$out/hooks/$cmd" ]; then
+          missing_hooks="$missing_hooks $cmd"
+        fi
+      done
+      if [ -n "$missing_hooks" ]; then
+        echo "mkRushi: hook command(s) not found in $out/bin/ or $out/hooks/:$missing_hooks" >&2
+        echo "  Bundle them via rushi.external_hooks, or set a full path in config.hooks.on[].command." >&2
+        exit 1
+      fi
+
+      # ── Manifest [tools] enabled list (rushi.tools value) ──
+      tools_toml=""
+      for t in $TOOLS_RAW; do
+        if [ -z "$tools_toml" ]; then
+          tools_toml=$(printf '"%s"' "$t")
+        else
+          tools_toml="$tools_toml, $(printf '"%s"' "$t")"
+        fi
+      done
+
+      # ── Generated config.toml (extension_tool_paths filled in) ──
+      cp "${configTomlFile}" $out/config.toml
+      sed -i "s|^extension_tool_paths = .*|extension_tool_paths = [ $ext_paths_toml ]|" $out/config.toml
+
+      # ── tools.manifest (rushi.toml equivalent, built at build time) ──
+      {
+        printf '[rushi]\n'
+        printf 'version = "%s"\n' "$version"
+        printf '\n'
+        printf '[tools]\n'
+        printf 'enabled = [ %s ]\n' "$tools_toml"
+        printf '\n'
+        printf '[ui_extensions]\n'
+        printf 'enabled = [ %s ]\n' "$ui_ext_toml"
+      } > $out/tools.manifest
 
       # ── Environment variables (rushi.environment) ──
       # If env vars were declared, wrap bin/rushi so they are

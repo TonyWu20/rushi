@@ -151,7 +151,10 @@ rushi = {
   # ── Tools ──
   # Kernel tool names to enable. Each must exist in the kernel's
   # tools/ dir. The final package ships tool.toml + binary for each.
-  tools = [ "read" "write" "edit" "bash" ];
+  # Default: the kernel's full tool set, derived at eval time from
+  # the kernel's own tools/*/tool.toml — omit this line to get all
+  # kernel tools. Set a subset to restrict the bundle.
+  # tools = [ "read" "write" "edit" "bash" ];
 
   # ── Extensions ──
   # UI extension names (resolved from the exts dir bundled with the
@@ -160,19 +163,28 @@ rushi = {
 
   # External tool sources: Nix derivations (fetchFromGitHub, built
   # cargo packages, paths, etc.). Each derivation's output must
-  # contain a <name>/tool.toml + binary layout.
-  # The last path component of the derivation's out is used as the
-  # tool name unless overridden.
+  # contain a <name>/tool.toml + binary layout; a source with no
+  # tool.toml fails the build with a clear error.
+  # Declare each ext source once here: at build time the tool dirs
+  # are discovered from the copied sources and written into the
+  # generated config.toml [paths] extension_tool_paths automatically.
+  # If you also set rushi.config.paths.extension_tool_paths, the two
+  # lists are merged (deduped) — that escape hatch covers the
+  # no-flake case where a tool lives outside the Nix bundle.
   external_tools = [ ];
 
   # External UI extension sources: same pattern as external_tools.
+  # Each source must ship an ext.toml; the entry dir names are
+  # auto-discovered at build time and written into the generated
+  # tools.manifest [ui_extensions] enabled list.
   external_ui_extensions = [ ];
 
-  # Entry directory names of the packages in external_ui_extensions
-  # (the top-level dir in each $out that holds ext.toml). Recorded in
-  # the generated tools.manifest [ui_extensions] enabled list so it
-  # describes every bundled UI extension. The build fails if a name
-  # is missing from the assembled ui_extensions/ dir.
+  # Optional override / drift-guard for the UI extension entry names
+  # (the top-level dir in each external_ui_extensions $out that holds
+  # ext.toml). When empty (default), names are auto-discovered from
+  # the bundled sources. When set, these names are used verbatim in
+  # the generated tools.manifest, and the build fails if a name has
+  # no matching dir in the assembled ui_extensions/ dir.
   ui_extension_names = [ ];
 
   # External hook binaries: list of Nix derivations or paths.
@@ -181,6 +193,11 @@ rushi = {
   # the kernel resolves a bare hook command against the sibling bin/
   # dir first, then the package hooks/ dir, so generated configs can
   # use bare names without relying on PATH.
+  # Build-time drift guard: every bare command in
+  # rushi.config.hooks.on[].command is verified to resolve to a file
+  # in $out/bin/ or $out/hooks/; a typo or an unbundled hook fails
+  # the build with the missing binary named. Explicit-path commands
+  # are not guarded (resolved verbatim at runtime).
   external_hooks = [ ];
 
   # ── Environment variables ──
@@ -216,7 +233,14 @@ rushi = {
   the package. Unset fields fall through to the kernel default.
 - **Tools are a whitelist.** Only tools listed in `rushi.tools`
   (kernel) + `rushi.external_tools` (external) appear in the final
-  package. This is the same as `rushi.toml [tools] enabled`.
+  package. `rushi.tools` defaults to the full kernel tool set,
+  derived at eval time from the kernel's `tools/*/tool.toml` list.
+  Set a subset to restrict the bundle.
+- **Declare-once auto-derivation.** A consumer lists each ext source
+  once in `external_tools`, `external_ui_extensions`, or
+  `external_hooks`. `mkRushi` then derives the `config.toml`
+  `extension_tool_paths`, the manifest `ui_extensions` list, and the
+  hook drift guard at build time.
 - **Extensions are fetched, not embedded in the kernel.** The kernel
   flake does NOT ship extensions. The consumer flake fetches them
   (exactly like pi-config fetches `pi-automode`, `pi-lynx`, etc.)
@@ -393,7 +417,12 @@ rushiConfigured = rushiFlake.lib.mkRushi {
 
     # Module 2: tools + extensions
     ({ config, lib, pkgs, ... }: {
-      rushi.tools = [ "read" "write" "edit" "bash" ];
+      # `rushi.tools` defaults to the full kernel tool set, so this
+      # line is redundant. Set it only to restrict the bundle:
+      # rushi.tools = [ "read" "write" "edit" "bash" ];
+      #
+      # Kernel-bundled UI exts. `ui_extension_names` is only needed
+      # to drift-guard names auto-discovered from ext sources.
       rushi.ui_extensions = [ "statusline-rs" "mermaid" ];
       # rushi.external_tools = [
       #   rushiFlake.lib.fetchTool {
