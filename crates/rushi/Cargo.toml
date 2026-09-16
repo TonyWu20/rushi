@@ -2,6 +2,10 @@
 name = "rushi-common"
 version = "0.1.0"
 edition = "2021"
+description = "Shared types and math for the rushi agent harness (event log, hook ABI, compact math, stage types, rewind/fork active-path math)"
+license = "MIT"
+repository = "https://github.com/TonyWu20/rushi"
+homepage = "https://github.com/TonyWu20/rushi"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
