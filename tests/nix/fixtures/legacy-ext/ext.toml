@@ -1,0 +1,3 @@
+[ext]
+description = "Legacy ext (no meta.rushi)"
+command = "target/release/legacy-ext"

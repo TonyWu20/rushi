@@ -1,0 +1,5 @@
+[tool]
+description = "Legacy tool (no meta.rushi)"
+command = "legacy-tool"
+args = []
+timeout_ms = 5000

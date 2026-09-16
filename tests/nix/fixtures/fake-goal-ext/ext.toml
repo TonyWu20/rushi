@@ -1,0 +1,3 @@
+[ext]
+description = "Goal UI ext (test fixture)"
+command = "target/release/fake-goal-ext"

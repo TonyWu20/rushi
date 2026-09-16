@@ -46,10 +46,15 @@
       #   rustToolchain     — optional pre-resolved toolchain (auto-resolved if null)
       #   extraSpecialArgs  — extra args injected into every module's scope
       #
-      # Returns: { package, config, version, options, configAttrs }
+      # Returns: { package, config, version, options, configAttrs,
+      #   extensionToolPaths, uiExtensionNames }
       #   config      = generated config.toml text
       #   options     = full lib.mkOption schema (for nixosOptionsDoc)
       #   configAttrs = deep-merged Nix attrset (pre-TOML)
+      #   extensionToolPaths = final [paths] extension_tool_paths list
+      #   uiExtensionNames   = final [ui_extensions] enabled list
+      #   (the two lists are filled from meta.rushi at eval time when
+      #   the consumer leaves them unset; issue #13)
       mkRushi =
         { pkgs
         , modules ? [ ]
