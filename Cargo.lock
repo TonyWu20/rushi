@@ -1315,13 +1315,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rewind-drt"
-version = "0.1.0"
-dependencies = [
- "rushi-common",
-]
-
-[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
