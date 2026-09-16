@@ -25,12 +25,24 @@
 #   * See docs/reference/nix/nix-flake-module.md §3 for the full schema
 #     reference.
 
-{ lib, ... }:
+{ lib, kernelTools ? null, ... }:
 
 let
   # Convenience: "free-form" list type for external sources
   # (derivations, store paths, or plain strings).
   rawList = lib.types.listOf lib.types.raw;
+
+  # Kernel tool names for the `tools` default. When the caller passes
+  # a precomputed `kernelTools` list (derived at eval time from the
+  # kernel's own `tools/*/tool.toml`, via `builtins.readDir` +
+  # `pathExists` in mk-rushi.nix), use it so the consumer can omit
+  # `rushi.tools` and get the full kernel tool set. When null (e.g.
+  # the docs-generation import from flake.nix, which does not have the
+  # kernel path), fall back to the known set so the option still
+  # evaluates.
+  kernelToolNames =
+    if kernelTools != null then kernelTools
+    else [ "read" "write" "edit" "bash" ];
 in
 {
   # ── Option declarations ──
@@ -89,14 +101,18 @@ in
 
     tools = lib.mkOption {
       type = lib.types.listOf lib.types.str;
-      default = [ "read" "write" "edit" "bash" ];
+      default = kernelToolNames;
       description = ''
         Kernel tool names to ship in the package's `tools/` directory.
         Each name must correspond to a tool in the kernel's `tools/`
         dir (has a `tool.toml`). The generated `tools.manifest`
         records this list for `rushi setup --locked`.
 
-        Kernel tools: `read`, `write`, `edit`, `bash`.
+        Defaults to the full kernel tool set, derived at eval time
+        from the kernel's own `tools/*/tool.toml` (via
+        `builtins.readDir` + `pathExists`). Override with a subset
+        to restrict which kernel tools are bundled.
+
         The bash tool's binary is `harness-bash` (not `bash`), so
         it does not shadow the system shell.
       '';
@@ -122,10 +138,17 @@ in
         External tool sources. Each entry is a Nix derivation (e.g.
         `pkgs.fetchFromGitHub { … }`, a cargo-built tool) or a path
         string. The derivation's `$out` must contain a
-        `<tool-name>/tool.toml` + binary layout.
+        `<tool-name>/tool.toml` + binary layout (a source with no
+        `tool.toml` fails the build with a clear error).
 
         At build time the entries are copied into the package's
-        `tools/` directory (additive to the kernel tools).
+        `tools/` directory (additive to the kernel tools), and the
+        discovered tool dirs are written into the generated
+        `config.toml` `[paths] extension_tool_paths` automatically —
+        the consumer declares each ext source once here. If the user
+        also sets `rushi.config.paths.extension_tool_paths`, the two
+        lists are merged (deduped); that escape hatch covers the
+        no-flake case where a tool lives outside the Nix bundle.
       '';
     };
 
@@ -134,29 +157,43 @@ in
       default = [ ];
       description = ''
         External UI extension sources (Nix derivations or path
-        strings). Copied into the package's `ui_extensions/` dir.
+        strings). Each source's `$out` must contain one or more
+        entry dirs, each holding an `ext.toml` (a source with no
+        `ext.toml` fails the build with a clear error). Copied into
+        the package's `ui_extensions/` dir, and the entry dir names
+        are auto-discovered into the generated `tools.manifest`
+        `[ui_extensions] enabled` list — the consumer declares each
+        ext source once here. Use `ui_extension_names` only to
+        override / drift-guard the discovered names.
       '';
     };
 
-    # Entry names of the external UI extension packages listed in
-    # `external_ui_extensions`. Each name is the top-level directory
-    # inside the package's `$out` (the directory that holds
-    # `ext.toml`); it is what the TUI extension discovery reports.
-    # The generated `tools.manifest` records `ui_extensions` and
-    # `ui_extension_names` in its `[ui_extensions] enabled` list, so
-    # that `rushi setup --locked` verifies a manifest that describes
-    # the package's actual contents. The build fails when a declared
-    # name is missing from the assembled `ui_extensions/` dir.
+    # Optional override / drift-guard for the external UI extension
+    # entry names. When empty (the default), the entry directories are
+    # auto-discovered at build time from the packages in
+    # `external_ui_extensions` (each entry dir holds an `ext.toml`),
+    # so the consumer declares each ext source once. When non-empty,
+    # the listed names are used as-is in the generated
+    # `tools.manifest` and the build verifies each name has a matching
+    # directory in the assembled `ui_extensions/` dir (drift guard).
     ui_extension_names = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
       description = ''
-        Entry directory names of the external UI extension packages
-        bundled via `external_ui_extensions` (the top-level directory
-        in each package's `$out`, the one that holds `ext.toml`).
-        Recorded in the generated `tools.manifest` alongside
-        `ui_extensions`, so `rushi setup --locked` sees the full
-        set of shipped UI extensions.
+        Optional override / drift-guard for the external UI extension
+        entry names (the top-level directory in each
+        `external_ui_extensions` package's `$out` that holds
+        `ext.toml`).
+
+        When empty (default): the names are auto-discovered at build
+        time from the bundled UI extension packages and recorded in
+        the generated `tools.manifest` — declare each ext source once
+        in `external_ui_extensions` and this fills in automatically.
+
+        When set: these names are used in the generated
+        `tools.manifest`'s `[ui_extensions] enabled` list, and the
+        build fails if any name has no matching entry directory in
+        the assembled `ui_extensions/` dir (drift guard).
       '';
       example = [ "statusline" "goal" "simple-english" ];
     };
@@ -169,8 +206,15 @@ in
         strings). Each source must produce an executable or a `bin/`
         directory. Copied into the package's `hooks/` dir.
 
-        Hook binaries are referenced by name in
-        `config.hooks.on[].command`.
+        Hook binaries are referenced by bare name in
+        `config.hooks.on[].command`. At build time, each bare command
+        is verified to resolve to a file in `$out/bin/` or
+        `$out/hooks/` (mirroring the kernel's `resolve_hook_command`),
+        so a typo in the `command` string or a hook binary that
+        external_hooks failed to bundle is caught at build time with a
+        clear error listing the missing binary. Commands written as
+        explicit paths are not guarded (they are resolved verbatim at
+        runtime).
       '';
     };
 

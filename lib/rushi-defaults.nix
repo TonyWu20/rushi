@@ -96,6 +96,9 @@
   };
 
   # Kernel tool names to include in the package.
+  # Note: the authoritative default is the eval-time derivation in
+  # mk-rushi.nix (nativeToolNames, from the kernel's tools/*/tool.toml).
+  # This entry mirrors that set for `lib.defaults` inspection only.
   tools = [ "read" "write" "edit" "bash" ];
 
   # UI extension names to include.
