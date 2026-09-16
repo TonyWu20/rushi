@@ -1,17 +1,20 @@
-# House gate on push/PR: build + test + doc gate + e2e suites.
+# House gate on push/PR: hermetic flake build + test + doc gate + e2e.
 #
-# Platform notes:
-# - One job per flake supported system: x86_64-linux, aarch64-linux,
-#   aarch64-darwin (Macs are a first-class dev platform).
-# - Nix is installed via nix-installer-action on every platform.
-# - The gate runs inside the flake devShell so the toolchain matches
-#   the flake pin. All e2e scripts are hermetic (stub models, temp
-#   dirs, no external service or key).
+# One job per flake supported system (x86_64-linux, aarch64-linux,
+# aarch64-darwin). Each runner builds natively, so `nix build .#rushi`
+# proves the flake packages for that platform (the aarch64-darwin job is
+# the "rushi works on Mac" gate).
 #
-# Known scope notes:
-# - scripts/cache-e2e.sh needs a machine-local config.toml and a live
-#   DEEPSEEK_API_KEY, so it is not run here.
-# - run-idle-continue-e2e.sh is owned by rushi-exts.
+# Test/e2e steps do NOT run inside the Nix devShell: Nix on the
+# runners predates `nix develop . -- cmd` / `nix print-dev-shell`, so
+# the toolchain comes from rustup (matches the flake's fenix stable
+# pin) and the gate is still the same: build, test, doc gate, e2e.
+#
+# Tooling notes:
+# - jq and python3 ship on the runners; ripgrep is installed.
+# - `scripts/cache-e2e.sh` needs a machine-local config.toml plus a live
+#   DEEPSEEK_API_KEY, so it stays a local key-gated test.
+# - `run-idle-continue-e2e.sh` is owned by rushi-exts.
 
 name: ci
 
@@ -26,8 +29,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # One entry per flake supported system. Nix builds for the
-        # native arch on each runner.
+        # One entry per flake supported system.
         include:
           - runner: ubuntu-latest
             system: x86_64-linux
@@ -46,21 +48,53 @@ jobs:
           extra_nix_config: |
             experimental-features = "nix-command flakes"
 
-      - name: Build the flake package
+      - name: Build the flake package (hermetic, native arch)
         run: nix build .#rushi --print-out-paths
 
-      - name: Run tests and e2e suites in the flake devShell
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install ripgrep + jq
+        if: runner.os == 'Linux'
         run: |
-          set -e
-          source <(nix print-dev-shell .)
+          sudo apt-get update -y
+          sudo apt-get install -y ripgrep jq
+
+      - name: Install ripgrep + jq
+        if: runner.os == 'macOS'
+        run: brew install ripgrep jq
+
+      - name: cargo build + test
+        run: |
+          cargo build --workspace
           cargo test --workspace
-          bash scripts/verify-specs.sh
-          bash scripts/crash-e2e.sh
-          bash scripts/compact-e2e.sh
-          bash scripts/e2e-rewind.sh
-          bash scripts/tool-conformance.sh
-          bash scripts/model-before-transform-e2e.sh
-          bash scripts/run-idle-log-message-e2e.sh
-          bash scripts/run-idle-refire-e2e.sh
-          bash scripts/steer-inflight-e2e.sh
-          bash scripts/tool-after-transform-e2e.sh
+
+      - name: Doc gate
+        run: bash scripts/verify-specs.sh
+
+      - name: e2e: crash consistency
+        run: bash scripts/crash-e2e.sh
+
+      - name: e2e: compact
+        run: bash scripts/compact-e2e.sh
+
+      - name: e2e: rewind
+        run: bash scripts/e2e-rewind.sh
+
+      - name: e2e: tool conformance
+        run: bash scripts/tool-conformance.sh
+
+      - name: e2e: model-before transform
+        run: bash scripts/model-before-transform-e2e.sh
+
+      - name: e2e: run-idle log-message
+        run: bash scripts/run-idle-log-message-e2e.sh
+
+      - name: e2e: run-idle refire
+        run: bash scripts/run-idle-refire-e2e.sh
+
+      - name: e2e: steer-inflight
+        run: bash scripts/steer-inflight-e2e.sh
+
+      - name: e2e: tool-after transform
+        run: bash scripts/tool-after-transform-e2e.sh
