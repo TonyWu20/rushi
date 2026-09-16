@@ -142,13 +142,19 @@ in
         `tool.toml` fails the build with a clear error).
 
         At build time the entries are copied into the package's
-        `tools/` directory (additive to the kernel tools), and the
-        discovered tool dirs are written into the generated
-        `config.toml` `[paths] extension_tool_paths` automatically —
-        the consumer declares each ext source once here. If the user
-        also sets `rushi.config.paths.extension_tool_paths`, the two
-        lists are merged (deduped); that escape hatch covers the
-        no-flake case where a tool lives outside the Nix bundle.
+        `tools/` directory (additive to the kernel tools). When the
+        source declares `meta.rushi = { entry = "…" }` (a producer
+        flake attribute, issue #13), the path `tools/<entry>` is
+        filled at eval time into the generated `config.toml` `[paths]
+        extension_tool_paths`. The consumer declares each ext source
+        once here, and the name rides on the producer's `meta`
+        instead of a second hand-typed copy in the consumer config.
+        Sources without `meta.rushi.entry` (including plain path
+        strings, which cannot carry meta) fall back to build-time
+        discovery with an eval-time warning. A consumer-set
+        `rushi.config.paths.extension_tool_paths` (including an
+        explicitly empty list) is authoritative and wins over the
+        derived list.
       '';
     };
 
@@ -160,22 +166,27 @@ in
         strings). Each source's `$out` must contain one or more
         entry dirs, each holding an `ext.toml` (a source with no
         `ext.toml` fails the build with a clear error). Copied into
-        the package's `ui_extensions/` dir, and the entry dir names
-        are auto-discovered into the generated `tools.manifest`
-        `[ui_extensions] enabled` list — the consumer declares each
-        ext source once here. Use `ui_extension_names` only to
-        override / drift-guard the discovered names.
+        the package's `ui_extensions/` dir.
+
+        When the source declares `meta.rushi = { ext = "…" }`
+        (issue #13), the entry name is filled at eval time into the
+        generated `tools.manifest` `[ui_extensions] enabled` list —
+        the consumer declares each ext source once here. Sources
+        without `meta.rushi.ext` fall back to build-time discovery
+        with an eval-time warning. `ui_extension_names` overrides
+        the derived list and drift-guards it.
       '';
     };
 
     # Optional override / drift-guard for the external UI extension
-    # entry names. When empty (the default), the entry directories are
-    # auto-discovered at build time from the packages in
-    # `external_ui_extensions` (each entry dir holds an `ext.toml`),
-    # so the consumer declares each ext source once. When non-empty,
-    # the listed names are used as-is in the generated
-    # `tools.manifest` and the build verifies each name has a matching
-    # directory in the assembled `ui_extensions/` dir (drift guard).
+    # entry names. When empty (the default), the names come from the
+    # producers' `meta.rushi.ext` declarations at eval time (issue
+    # #13), and only sources lacking `meta.rushi.ext` fall back to
+    # build-time discovery with an eval-time warning, so the consumer
+    # declares each ext source once. When non-empty, the listed names
+    # are used as-is in the generated `tools.manifest` and the build
+    # verifies each name has a matching directory in the assembled
+    # `ui_extensions/` dir (drift guard).
     ui_extension_names = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
@@ -185,10 +196,10 @@ in
         `external_ui_extensions` package's `$out` that holds
         `ext.toml`).
 
-        When empty (default): the names are auto-discovered at build
-        time from the bundled UI extension packages and recorded in
-        the generated `tools.manifest` — declare each ext source once
-        in `external_ui_extensions` and this fills in automatically.
+        When empty (default): names come from the producers'
+        `meta.rushi.ext` declarations at eval time (issue #13), and
+        only sources lacking meta.rushi.ext fall back to build-time
+        discovery with a warning.
 
         When set: these names are used in the generated
         `tools.manifest`'s `[ui_extensions] enabled` list, and the
@@ -207,14 +218,14 @@ in
         directory. Copied into the package's `hooks/` dir.
 
         Hook binaries are referenced by bare name in
-        `config.hooks.on[].command`. At build time, each bare command
-        is verified to resolve to a file in `$out/bin/` or
-        `$out/hooks/` (mirroring the kernel's `resolve_hook_command`),
-        so a typo in the `command` string or a hook binary that
-        external_hooks failed to bundle is caught at build time with a
-        clear error listing the missing binary. Commands written as
-        explicit paths are not guarded (they are resolved verbatim at
-        runtime).
+        `config.hooks.on[].command`. A source declaring
+        `meta.rushi = { bin = "…" }` (issue #13) is checked at eval
+        time: bare commands matching a declared bin are trusted, and
+        the build verifies the binary actually landed in `hooks/`.
+        Bare commands not covered by any `meta.rushi.bin` are still
+        verified at build time against `$out/bin/` and `$out/hooks/`.
+        Commands written as explicit paths are not guarded (they are
+        resolved verbatim at runtime).
       '';
     };
 

@@ -146,23 +146,80 @@ let
   extHooks     = evaluated.config.rushi.external_hooks;
   tuiPkg       = evaluated.config.rushi.tui or null;
 
-  # Inputs for build-time discovery and drift guards, interpolated into
-  # installPhase as shell variables.
-  discoveryInputs =
-    let
-      userExtToolPaths = mergedConfig.paths.extension_tool_paths or [ ];
-      bareHookCommands =
-        builtins.filter (c: c != "" && builtins.match "^[^/]+$" c != null)
-          (builtins.map (e:
-             if builtins.isAttrs e then e.command or "" else ""
-           ) (mergedConfig.hooks.on or [ ]));
-    in
-    { inherit userExtToolPaths bareHookCommands; };
+  # ── 1.5. Producer-declared names: `meta.rushi` (issue #13) ──
+  #
+  # Each external package may carry the standard `meta` attribute
+  # declaring what it provides, like `meta.mainProgram` does. A
+  # package sets exactly one field of `meta.rushi`:
+  #
+  #   entry  tool package: the entry dir copied into <pkg>/tools/
+  #   ext    UI-ext package: the entry dir copied into <pkg>/ui_extensions/
+  #   bin    hook package: the binary name copied into <pkg>/hooks/
+  #
+  # mkRushi reads these at eval time and fills
+  # config.paths.extension_tool_paths plus the manifest [ui_extensions]
+  # enabled list when the consumer has not set them. A non-empty
+  # consumer value stays authoritative. Sources without a usable
+  # meta.rushi field (plain paths cannot carry meta) keep the #10
+  # build-time discovery as a fallback, with an eval-time warning.
+
+  # `meta.rushi` for a source. `{ }` when absent, which is the case
+  # for plain path strings. A present-but-malformed `meta.rushi` is an
+  # error, not a silent no-op.
+  rushiMeta = s:
+    if builtins.isAttrs s && s ? meta && s.meta ? rushi then
+      let m = s.meta.rushi; in
+      if builtins.isAttrs m then m
+      else
+        throw "rushi.mkRushi: meta.rushi on ${toString s} must be an attrset with one of entry / ext / bin, got ${builtins.typeOf m}"
+    else { };
+
+  # `meta.rushi.entry` per external_tools source: the tool entry dir
+  # name that the source ships under its $out (it is copied into the
+  # configured package at <pkg>/tools/<entry>). Sources without the
+  # field fall back to build-time discovery. The warning fires at eval
+  # time when this value is forced, i.e. when the fallback kicks in.
+  metaToolEntries =
+    lib.foldl
+      (acc: s:
+        let m = rushiMeta s; in
+        if m ? entry then
+          acc ++ [ m.entry ]
+        else
+          lib.warn "rushi.mkRushi: external_tools source ${toString s} has no meta.rushi.entry — falling back to build-time discovery. Declare meta.rushi.entry in the producer flake (issue #13)" acc)
+      [ ]
+      extTools;
+
+  # `meta.rushi.ext` per external_ui_extensions source: the UI-ext
+  # entry dir that the source ships under $out.
+  metaExtUiNames =
+    lib.foldl
+      (acc: s:
+        let m = rushiMeta s; in
+        if m ? ext then
+          acc ++ [ m.ext ]
+        else
+          lib.warn "rushi.mkRushi: external_ui_extensions source ${toString s} has no meta.rushi.ext — falling back to build-time discovery. Declare meta.rushi.ext in the producer flake (issue #13)" acc)
+      [ ]
+      extUiExts;
+
+  # `meta.rushi.bin` per external_hooks source: the hook binary name
+  # shipped under $out/hooks/. A bare hook command matching one of
+  # these is statically known-bundled, so the build-time guard only
+  # covers the rest (plain-path sources, kernel bins, typos).
+  metaHookBins =
+    lib.map (s: (rushiMeta s).bin) (lib.filter (s: rushiMeta s ? bin) extHooks);
+
+  # The sources that keep the #10 build-time discovery fallback.
+  toolFallbackSources =
+    lib.filter (s: !(rushiMeta s ? entry)) extTools;
+  uiFallbackSources =
+    lib.filter (s: !(rushiMeta s ? ext)) extUiExts;
 
   # ── 2. Deep-merge rushi.config ──
   #
   # NixOS recursively merges `rushi.config` values across modules
-  # (different top-level keys merge; same keys, later module wins).
+  # (different top-level keys merge. Same key: later module wins).
   # The option's `default` ({}) is NOT deep-merged with module values,
   # so we manually overlay the kernel defaults underneath:
   #
@@ -170,7 +227,87 @@ let
   #
   # This is the overlay semantics a user expects from a config system.
   userConfig   = evaluated.config.rushi.config or { };
-  mergedConfig = lib.recursiveUpdate defaults.config userConfig;
+  baseConfig =
+    lib.recursiveUpdate defaults.config userConfig;
+
+  # ── 2.5. Eval-time fill from `meta.rushi` (issue #13) ──
+  #
+  # A consumer-set value is authoritative as-is: it is used verbatim
+  # (no merge, no discovery, no dedup). Only when the consumer left
+  # extension_tool_paths / ui_extension_names unset does mkRushi fill
+  # them from the producers' meta.rushi declarations. An explicit
+  # `= [ ]` counts as set: the empty list stays empty, and no
+  # fallback discovery runs. Filled values land in the returned
+  # `config` text and `configAttrs`, and the shipped config.toml is
+  # written once from them, byte-identical to the returned config,
+  # unless the build-time fallback below appends names.
+  userExtToolPathsSet =
+    (userConfig ? paths) && (userConfig.paths ? extension_tool_paths);
+  userExtToolPaths =
+    if userExtToolPathsSet then
+      userConfig.paths.extension_tool_paths
+    else
+      [ ];
+
+  # Config paths carry the "tools/" prefix (the ext copy target), so
+  # entry dir names are expanded here. This matches the shape of the
+  # #10 build-time discovery output.
+  finalExtToolPaths =
+    if userExtToolPathsSet
+    then userExtToolPaths
+    else
+      lib.unique (lib.map (e: "tools/${e}") metaToolEntries);
+
+  finalExtUiNames =
+    if extUiExtNames != [ ]
+    then extUiExtNames
+    else
+      lib.unique metaExtUiNames;
+
+  # The manifest [ui_extensions] enabled list: kernel-bundled names
+  # (the `rushi.ui_extensions` option) first, then the ext names.
+  finalUiNames =
+    lib.unique (uiExtensions ++ finalExtUiNames);
+
+  extPathsOverride =
+    lib.listToAttrs [
+      (lib.nameValuePair "extension_tool_paths" finalExtToolPaths)
+    ];
+  filledPaths =
+    baseConfig.paths // extPathsOverride;
+  filledConfig =
+    lib.recursiveUpdate baseConfig (lib.listToAttrs [
+      (lib.nameValuePair "paths" filledPaths)
+    ]);
+  mergedConfig =
+    if userExtToolPathsSet then
+      baseConfig
+    else
+      filledConfig;
+
+  # Build-time discovery runs only when a source lacks a meta.rushi
+  # field AND the consumer did not set the value themselves.
+  needToolDiscovery =
+    !userExtToolPathsSet
+    && toolFallbackSources != [ ];
+  needUiDiscovery =
+    extUiExtNames == [ ]
+    && uiFallbackSources != [ ];
+
+  # Bare hook commands the build-time guard still checks: every bare
+  # `config.hooks.on[].command` that is not statically known from a
+  # bundled hook package's `meta.rushi.bin` (issue #13).
+  hooksOn =
+    mergedConfig.hooks.on;
+  hookCommands =
+    builtins.map (e: if builtins.isAttrs e then e.command or "" else "")
+      hooksOn;
+  bareHookCommands =
+    builtins.filter (c: c != "" && builtins.match "^[^/]+$" c != null)
+      hookCommands;
+  guardedHookCommands =
+    builtins.filter (c: !(builtins.elem c metaHookBins))
+      bareHookCommands;
 
   # ── 3. Build the rushi kernel binary ──
   fenixInput = pkgs.fenix or null;
@@ -383,18 +520,27 @@ let
     passAsFile = [ configTomlFile envFile ];
 
     installPhase = ''
-      # ── Build-time discovery inputs (Nix-interpolated) ──
-      # NATIVE_TOOLS: kernel tool dir names (excluded from ext discovery).
-      # USER_EXT_TOOL_PATHS: user-set [paths] extension_tool_paths entries.
-      # USER_UI_EXT_NAMES: ui_extension_names override (drift-guarded).
-      # UI_EXT_BASE_NAMES: kernel-bundled ui extension names.
-      # BARE_HOOK_COMMANDS: bare config.hooks.on commands to verify.
-      # TOOLS_RAW: the [tools] enabled list (rushi.tools option value).
+      # ── Eval-time + build-time inputs (Nix-interpolated) ──
+      # NEED_*: 1 only when a source lacks a meta.rushi field and the
+      # consumer did not set the value themselves (issue #13).
+      # EVAL_*: the eval-time derived lists. The shipped config.toml is
+      # written once from these, and discovery only appends names for
+      # sources without meta.
+      # META_*: producer-declared dirs/bins to verify after the copy.
+      # GUARDED_HOOK_COMMANDS: bare commands the build-time hook drift
+      # guard still checks. meta.rushi.bin-covered ones are exempt
+      # (issue #13).
+      NEED_TOOL_DISCOVERY="${if needToolDiscovery then "1" else "0"}"
+      NEED_UI_DISCOVERY="${if needUiDiscovery then "1" else "0"}"
       NATIVE_TOOLS="${builtins.concatStringsSep " " nativeToolNames}"
-      USER_EXT_TOOL_PATHS="${builtins.concatStringsSep " " discoveryInputs.userExtToolPaths}"
+      EVAL_EXT_TOOL_PATHS="${builtins.concatStringsSep " " finalExtToolPaths}"
+      EVAL_EXT_UI_NAMES="${builtins.concatStringsSep " " finalExtUiNames}"
+      META_TOOL_DIRS="${builtins.concatStringsSep " " metaToolEntries}"
+      META_EXT_DIRS="${builtins.concatStringsSep " " metaExtUiNames}"
+      META_HOOK_BINS="${builtins.concatStringsSep " " metaHookBins}"
       USER_UI_EXT_NAMES="${builtins.concatStringsSep " " extUiExtNames}"
       UI_EXT_BASE_NAMES="${builtins.concatStringsSep " " uiExtensions}"
-      BARE_HOOK_COMMANDS="${builtins.concatStringsSep " " discoveryInputs.bareHookCommands}"
+      GUARDED_HOOK_COMMANDS="${builtins.concatStringsSep " " guardedHookCommands}"
       TOOLS_RAW="${builtins.concatStringsSep " " tools}"
 
       # ── Directory layout ──
@@ -433,51 +579,84 @@ let
       # ── TUI binary (rushi.tui) ──
       ${tuiInstallScript}
 
-      # ── Auto-derive [paths] extension_tool_paths ──
-      # Discover ext tool dirs: subdirs of $out/tools/ that hold a
-      # tool.toml and are not native kernel tools. Merge with the
-      # user-set entries (deduped) and rewrite the line in the
-      # generated config.toml below.
-      ext_tool_paths=""
-      for d in "$out"/tools/*/tool.toml; do
-        if [ -f "$d" ]; then
-          name=$(basename "$(dirname "$d")")
-          is_native=0
-          for nt in $NATIVE_TOOLS; do
-            if [ "$name" = "$nt" ]; then is_native=1; break; fi
-          done
-          if [ "$is_native" -eq 0 ]; then
-            ext_tool_paths="$ext_tool_paths tools/$name"
-          fi
+      # ── meta.rushi declaration check (issue #13) ──
+      # What a producer declared must exist in the assembled package;
+      # a lying producer fails the build here instead of breaking at
+      # runtime.
+      for d in $META_TOOL_DIRS; do
+        if [ ! -f "$out/tools/$d/tool.toml" ]; then
+          echo "mkRushi: meta.rushi.entry '$d' declared but $out/tools/$d/tool.toml is missing (broken ext)" >&2
+          exit 1
         fi
       done
-      all_ext_paths="$USER_EXT_TOOL_PATHS $ext_tool_paths"
-      final_ext_paths=""
-      for p in $all_ext_paths; do
-        case " $final_ext_paths " in *" $p "*) continue ;; esac
-        final_ext_paths="$final_ext_paths $p"
+      for d in $META_EXT_DIRS; do
+        if [ ! -f "$out/ui_extensions/$d/ext.toml" ]; then
+          echo "mkRushi: meta.rushi.ext '$d' declared but $out/ui_extensions/$d/ext.toml is missing (broken ext)" >&2
+          exit 1
+        fi
       done
-      ext_paths_toml=""
-      for p in $final_ext_paths; do
-        if [ -z "$ext_paths_toml" ]; then
-          ext_paths_toml=$(printf '"%s"' "$p")
-        else
-          ext_paths_toml="$ext_paths_toml, $(printf '"%s"' "$p")"
+      for b in $META_HOOK_BINS; do
+        if [ ! -f "$out/hooks/$b" ] && [ ! -f "$out/bin/$b" ]; then
+          echo "mkRushi: meta.rushi.bin '$b' declared but $b is missing from $out/hooks/ and $out/bin/ (broken ext)" >&2
+          exit 1
         fi
       done
 
-      # ── Auto-discover [ui_extensions] entry names ──
-      # Each entry dir in $out/ui_extensions/ holds an ext.toml. When
-      # ui_extension_names is set it overrides discovery and is
-      # drift-guarded (every name must have a dir). When empty, the
-      # discovered names are used. Kernel-bundled names (ui_extensions)
-      # are always listed first.
-      discovered_ui=""
-      for d in "$out"/ui_extensions/*/ext.toml; do
-        if [ -f "$d" ]; then
-          discovered_ui="$discovered_ui $(basename "$(dirname "$d")")"
-        fi
-      done
+      # ── Generated config.toml: written once, from the eval-time
+      # value (issue #13). The returned `config` and this file are
+      # byte-identical unless the fallback below appends. ──
+      cp "${configTomlFile}" $out/config.toml
+
+      # ── Build-time discovery fallback for [paths] (issue #13) ──
+      # Runs only when a tool source lacks meta.rushi.entry AND the
+      # consumer did not set extension_tool_paths. Discover ext tool
+      # dirs (subdirs of $out/tools/ holding a tool.toml, not native
+      # kernel tools) and append them to the shipped config line.
+      # Meta-covered dirs are already in the eval-time list; dedup.
+      if [ "$NEED_TOOL_DISCOVERY" = "1" ]; then
+        ext_tool_paths=""
+        for d in "$out"/tools/*/tool.toml; do
+          if [ -f "$d" ]; then
+            name=$(basename "$(dirname "$d")")
+            is_native=0
+            for nt in $NATIVE_TOOLS; do
+              if [ "$name" = "$nt" ]; then is_native=1; break; fi
+            done
+            if [ "$is_native" -eq 0 ]; then
+              ext_tool_paths="$ext_tool_paths tools/$name"
+            fi
+          fi
+        done
+        all_ext_paths="$EVAL_EXT_TOOL_PATHS$ext_tool_paths"
+        final_ext_paths=""
+        for p in $all_ext_paths; do
+          case " $final_ext_paths " in *" $p "*) continue ;; esac
+          final_ext_paths="$final_ext_paths $p"
+        done
+        ext_paths_toml=""
+        for p in $final_ext_paths; do
+          if [ -z "$ext_paths_toml" ]; then
+            ext_paths_toml=$(printf '"%s"' "$p")
+          else
+            ext_paths_toml="$ext_paths_toml, $(printf '"%s"' "$p")"
+          fi
+        done
+        sed -i "s|^extension_tool_paths = .*|extension_tool_paths = [ $ext_paths_toml ]|" $out/config.toml
+      fi
+
+      # ── [ui_extensions] enabled list for the manifest (issue #13) ──
+      # Kernel-bundled names first, then the ext names: the consumer's
+      # override (USER_UI_EXT_NAMES, drift-guarded) or the
+      # meta.rushi.ext declarations (EVAL_EXT_UI_NAMES), plus
+      # build-time discovery when a source lacks meta.
+      ext_ui_names="$EVAL_EXT_UI_NAMES"
+      if [ "$NEED_UI_DISCOVERY" = "1" ]; then
+        for d in "$out"/ui_extensions/*/ext.toml; do
+          if [ -f "$d" ]; then
+            ext_ui_names="$ext_ui_names $(basename "$(dirname "$d")")"
+          fi
+        done
+      fi
       if [ -n "$USER_UI_EXT_NAMES" ]; then
         for n in $USER_UI_EXT_NAMES; do
           if [ ! -d "$out/ui_extensions/$n" ]; then
@@ -485,9 +664,6 @@ let
             exit 1
           fi
         done
-        ext_ui_names="$USER_UI_EXT_NAMES"
-      else
-        ext_ui_names="$discovered_ui"
       fi
       all_ui_names="$UI_EXT_BASE_NAMES $ext_ui_names"
       final_ui_names=""
@@ -504,20 +680,21 @@ let
         fi
       done
 
-      # ── Hook command drift guard ──
-      # Every bare command in config.hooks.on must resolve to a file
-      # in $out/bin/ or $out/hooks/ (the kernel's runtime resolution
-      # for bare names, per resolve_hook_command). A typo or an
-      # unbundled hook fails the build with a clear message.
+      # ── Hook command drift guard (issue #13) ──
+      # Every bare command NOT statically known from a bundled hook
+      # package's meta.rushi.bin must resolve to a file in $out/bin/
+      # or $out/hooks/ (the kernel's runtime resolution for bare
+      # names, per resolve_hook_command). Meta-covered commands were
+      # already verified by the meta-declaration check above.
       missing_hooks=""
-      for cmd in $BARE_HOOK_COMMANDS; do
+      for cmd in $GUARDED_HOOK_COMMANDS; do
         if [ ! -f "$out/bin/$cmd" ] && [ ! -f "$out/hooks/$cmd" ]; then
           missing_hooks="$missing_hooks $cmd"
         fi
       done
       if [ -n "$missing_hooks" ]; then
         echo "mkRushi: hook command(s) not found in $out/bin/ or $out/hooks/:$missing_hooks" >&2
-        echo "  Bundle them via rushi.external_hooks, or set a full path in config.hooks.on[].command." >&2
+        echo "  Bundle them via rushi.external_hooks (meta.rushi.bin recommended), or set a full path in config.hooks.on[].command." >&2
         exit 1
       fi
 
@@ -530,10 +707,6 @@ let
           tools_toml="$tools_toml, $(printf '"%s"' "$t")"
         fi
       done
-
-      # ── Generated config.toml (extension_tool_paths filled in) ──
-      cp "${configTomlFile}" $out/config.toml
-      sed -i "s|^extension_tool_paths = .*|extension_tool_paths = [ $ext_paths_toml ]|" $out/config.toml
 
       # ── tools.manifest (rushi.toml equivalent, built at build time) ──
       {
@@ -585,6 +758,13 @@ in
   # (analogous to pi-flake's `options` output, usable with nixosOptionsDoc).
   inherit (evaluated) options;
   # Expose the raw evaluated config (pre-TOML) for programmatic access.
-  # This is the deep-merged Nix attrset (defaults + user overlays).
+  # This is the deep-merged Nix attrset (defaults + user overlays +
+  # meta.rushi fill), identical to what ships in config.toml when no
+  # build-time fallback is in play.
   configAttrs = mergedConfig;
+  # issue #13: final eval-time values exposed for `nix eval`.
+  extensionToolPaths =
+    finalExtToolPaths;
+  uiExtensionNames =
+    finalUiNames;
 }

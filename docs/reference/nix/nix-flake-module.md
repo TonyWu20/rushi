@@ -179,12 +179,13 @@ rushi = {
   # tools.manifest [ui_extensions] enabled list.
   external_ui_extensions = [ ];
 
-  # Optional override / drift-guard for the UI extension entry names
-  # (the top-level dir in each external_ui_extensions $out that holds
-  # ext.toml). When empty (default), names are auto-discovered from
-  # the bundled sources. When set, these names are used verbatim in
-  # the generated tools.manifest, and the build fails if a name has
-  # no matching dir in the assembled ui_extensions/ dir.
+  # Optional override / drift-guard for the UI extension entry names.
+  # When empty (default), names come from the producers'
+  # meta.rushi.ext declarations at eval time (issue #13), and only
+  # sources lacking meta.rushi.ext fall back to build-time discovery
+  # with a warning. When set, the listed names are used as-is in the
+  # generated tools.manifest, and the build fails if a name has no
+  # matching dir in the assembled ui_extensions/ dir.
   ui_extension_names = [ ];
 
   # External hook binaries: list of Nix derivations or paths.
@@ -194,10 +195,12 @@ rushi = {
   # dir first, then the package hooks/ dir, so generated configs can
   # use bare names without relying on PATH.
   # Build-time drift guard: every bare command in
-  # rushi.config.hooks.on[].command is verified to resolve to a file
-  # in $out/bin/ or $out/hooks/; a typo or an unbundled hook fails
-  # the build with the missing binary named. Explicit-path commands
-  # are not guarded (resolved verbatim at runtime).
+  # rushi.config.hooks.on[].command that is not covered by a
+  # meta.rushi.bin declaration is verified to resolve to a file in
+  # $out/bin/ or $out/hooks/; a typo or an unbundled hook fails the
+  # build with the missing binary named. Commands covered by
+  # meta.rushi.bin are exempt (they are statically known to be
+  # bundled). Explicit-path commands are not guarded.
   external_hooks = [ ];
 
   # ── Environment variables ──
@@ -236,11 +239,16 @@ rushi = {
   package. `rushi.tools` defaults to the full kernel tool set,
   derived at eval time from the kernel's `tools/*/tool.toml` list.
   Set a subset to restrict the bundle.
-- **Declare-once auto-derivation.** A consumer lists each ext source
-  once in `external_tools`, `external_ui_extensions`, or
-  `external_hooks`. `mkRushi` then derives the `config.toml`
-  `extension_tool_paths`, the manifest `ui_extensions` list, and the
-  hook drift guard at build time.
+- **Declare-once auto-derivation (issue #13).** A consumer lists each
+  ext source once in `external_tools`, `external_ui_extensions`, or
+  `external_hooks`. If a source carries `meta.rushi` (entry/ext/bin),
+  `mkRushi` reads it at eval time and fills `extension_tool_paths`
+  and the manifest `ui_extensions` list before the build. The
+  shipped `config.toml` is written once and is byte-identical to the
+  returned `config` string. Sources without `meta.rushi` fall back to
+  build-time discovery with an eval-time warning. A consumer-set
+  value is authoritative and suppresses the derived list. The hook
+  drift guard is reduced to commands not covered by `meta.rushi.bin`.
 - **Extensions are fetched, not embedded in the kernel.** The kernel
   flake does NOT ship extensions. The consumer flake fetches them
   (exactly like pi-config fetches `pi-automode`, `pi-lynx`, etc.)
@@ -269,6 +277,8 @@ lib.mkRushi {
   version,            # the resolved kernel version string
   options,            # full lib.mkOption schema (for nixosOptionsDoc / docs generation)
   configAttrs,        # deep-merged Nix attrset (pre-TOML), for programmatic access
+  extensionToolPaths, # final [paths] extension_tool_paths list (eval-time, issue #13)
+  uiExtensionNames,   # final [ui_extensions] enabled list (eval-time, issue #13)
 }
 ```
 
@@ -421,8 +431,9 @@ rushiConfigured = rushiFlake.lib.mkRushi {
       # line is redundant. Set it only to restrict the bundle:
       # rushi.tools = [ "read" "write" "edit" "bash" ];
       #
-      # Kernel-bundled UI exts. `ui_extension_names` is only needed
-      # to drift-guard names auto-discovered from ext sources.
+      # Kernel-bundled UI exts. `ui_extension_names` is an override /
+      # drift-guard. When empty (default), names come from producer
+      # meta.rushi.ext declarations at eval time (issue #13).
       rushi.ui_extensions = [ "statusline-rs" "mermaid" ];
       # rushi.external_tools = [
       #   rushiFlake.lib.fetchTool {

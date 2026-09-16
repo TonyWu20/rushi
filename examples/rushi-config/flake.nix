@@ -126,9 +126,12 @@
               #
               # External tools / UI extensions / hooks: Nix derivations
               # (fetchFromGitHub, cargo packages, local paths, …).
-              # Each source is declared once; lib.mkRushi derives
-              # extension_tool_paths, ui_extension_names, and the
-              # manifest entries from it.
+              # Each source is declared once; lib.mkRushi reads each
+              # producer's meta.rushi (entry / ext / bin) at eval time
+              # and derives extension_tool_paths, ui_extension_names,
+              # and the manifest entries from it (issue #13). Sources
+              # without meta.rushi (incl. plain paths) fall back to
+              # build-time discovery with an eval-time warning.
               # ══════════════════════════════════════════════
               ({ config, lib, pkgs, ... }:
               {
@@ -142,7 +145,9 @@
 
                 # External tool sources (Nix derivations). Each derivation's
                 # output must contain <tool-name>/tool.toml + binary.
-                # extension_tool_paths is derived automatically.
+                # extension_tool_paths is derived automatically from each
+                # source's meta.rushi.entry (issue #13); a source without
+                # meta falls back to build-time discovery (with a warning).
                 # rushi.external_tools = [
                 #   (pkgs.fetchFromGitHub {
                 #     owner = "tony";
@@ -152,9 +157,10 @@
                 #   })
                 # ];
 
-                # External UI extension sources. Entry names are
-                # auto-discovered from ext.toml; ui_extension_names
-                # is only a drift-guard override when set.
+                # External UI extension sources. Entry names come from
+                # each source's meta.rushi.ext at eval time (issue #13);
+                # legacy sources without meta fall back to build-time
+                # discovery. ui_extension_names overrides both when set.
                 # rushi.external_ui_extensions = [
                 #   (pkgs.fetchFromGitHub {
                 #     owner = "tony";
@@ -165,8 +171,10 @@
                 # ];
 
                 # Hook binaries (goal-continuation, lean-verify, …).
-                # Each bare command in config.hooks.on is verified
-                # against the bundled bin/ + hooks/ at build time.
+                # Each bare command in config.hooks.on is verified at
+                # build time against the bundled bin/ + hooks/. Commands
+                # covered by a producer's meta.rushi.bin are exempt from
+                # the build-time guard (issue #13).
                 # rushi.external_hooks = [
                 #   (pkgs.fetchFromGitHub {
                 #     owner = "tony";

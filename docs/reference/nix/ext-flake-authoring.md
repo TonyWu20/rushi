@@ -92,6 +92,12 @@ Because the copy is `cp -rL "<src>/. "`, the ext package's `$out` must
 difference between the tool/ext wrappers (which wrap in a named dir) and
 the hook (which ships a bare `bin/`).
 
+Since issue #13 the entry names also ride on the package itself, in
+standard Nix `meta`: `meta.rushi.entry` (tool), `meta.rushi.ext` (UI ext),
+`meta.rushi.bin` (hook). `lib.mkRushi` reads them at eval time and fills
+the consumer's `extension_tool_paths` / `[ui_extensions] enabled` list
+without a second hand-typed copy. See §4.5 for the full contract.
+
 ---
 
 ## 3. The ext flake skeleton
@@ -138,17 +144,25 @@ fenix toolchain.
           # lockfile hook at the per-crate Cargo.lock. The output binary
           # name comes from the crate's [[bin]] name in Cargo.toml, not
           # from crateName.
-          buildCrate = { crateDir, crateName }:
-            pkgs.rustPlatform.buildRustPackage {
-              pname = crateName;
-              version = "0.1.0";
-              src = "${self}";
-              buildAndTestSubdir = crateDir;
-              cargoRoot = crateDir;
-              nativeBuildInputs = [ rustToolchain ];
-              cargoLock = { lockFile = "${self}/${crateDir}/Cargo.lock"; };
-              doCheck = false;
-            };
+          buildCrate = { crateDir, crateName, bin ? null }:
+            let
+              built = pkgs.rustPlatform.buildRustPackage {
+                pname = crateName;
+                version = "0.1.0";
+                src = "${self}";
+                buildAndTestSubdir = crateDir;
+                cargoRoot = crateDir;
+                nativeBuildInputs = [ rustToolchain ];
+                cargoLock = { lockFile = "${self}/${crateDir}/Cargo.lock"; };
+                doCheck = false;
+              };
+            in
+            # Issue #13: when `bin` is passed (hook crates), declare
+            # meta.rushi.bin so lib.mkRushi can exempt the bare hook
+            # command from the build-time drift guard.
+            if bin != null
+            then built // { meta = ((built.meta or {}) // { rushi = { bin = bin; } }); }
+            else built;
 
           # ── Tool wrapper: $out/<name>/tool.toml + <name>/bin/<binary> ──
           # Two gotchas on current nixpkgs:
@@ -174,6 +188,14 @@ fenix toolchain.
                 cp -rL ${built}/bin/. $out/${name}/bin/
                 cp ${toolToml} $out/${name}/tool.toml
               '';
+              # Issue #13: declare the tool entry dir in meta. lib.mkRushi
+              # reads meta.rushi.entry at eval time and fills the
+              # consumer's [paths] extension_tool_paths with "tools/<name>"
+              # (the meta value is the dir name, not the config path).
+              meta = {
+                description = "${name} tool for rushi";
+                rushi = { entry = name; };
+              };
             };
 
           # ── UI-ext wrapper: $out/<ext>/ext.toml + <ext>/<binDir>/<bin> ──
@@ -199,6 +221,13 @@ fenix toolchain.
                 cp ${extToml} $out/${extName}/ext.toml
                 cp -rL ${built}/bin/. $out/${extName}/${binDir}/
               '';
+              # Issue #13: declare the UI-ext entry dir. lib.mkRushi fills
+              # the consumer's [ui_extensions] enabled list from
+              # meta.rushi.ext at eval time.
+              meta = {
+                description = "${extName} UI extension for rushi";
+                rushi = { ext = extName; };
+              };
             };
         in
         # Per-system package attrset. The final `in` below exposes it
@@ -212,10 +241,10 @@ fenix toolchain.
             # ── Hooks (a bare buildRustPackage result IS the hook source) ──
             # Binary names (harness-hook-*) come from each Cargo.toml's
             # [[bin]] name; they must match the `command` in the hook config.
-            hook-goal-idle     = buildCrate { crateDir = "goal-app/goal-hooks/hook-goal-idle";     crateName = "hook-goal-idle"; };
-            hook-goal-compact  = buildCrate { crateDir = "goal-app/goal-hooks/hook-goal-compact";  crateName = "hook-goal-compact"; };
-            hook-goal-tools    = buildCrate { crateDir = "goal-app/goal-hooks/hook-goal-tools";    crateName = "hook-goal-tools"; };
-            hook-goal-arm      = buildCrate { crateDir = "goal-app/goal-hooks/hook-goal-arm";      crateName = "hook-goal-arm"; };
+            hook-goal-idle     = buildCrate { crateDir = "goal-app/goal-hooks/hook-goal-idle";     crateName = "hook-goal-idle";     bin = "harness-hook-goal-idle"; };
+            hook-goal-compact  = buildCrate { crateDir = "goal-app/goal-hooks/hook-goal-compact";  crateName = "hook-goal-compact";  bin = "harness-hook-goal-compact"; };
+            hook-goal-tools    = buildCrate { crateDir = "goal-app/goal-hooks/hook-goal-tools";    crateName = "hook-goal-tools";    bin = "harness-hook-goal-tools"; };
+            hook-goal-arm      = buildCrate { crateDir = "goal-app/goal-hooks/hook-goal-arm";      crateName = "hook-goal-arm";      bin = "harness-hook-goal-arm"; };
 
             # ── UI extension (wrap into the ext contract) ──
             goal-ext = wrapAsExt { extName = "goal"; extToml = "${self}/goal-app/goal-ext/ext.toml"; built = buildCrate { crateDir = "goal-app/goal-ext"; crateName = "goal-ext"; }; };
@@ -244,7 +273,10 @@ Notes on the skeleton:
   `external_hooks` source. The binary name is whatever `[[bin]] name`
   is in that crate's `Cargo.toml` (e.g. `harness-hook-goal-idle`, not
   the crate name `hook-goal-idle`); it must match the `command` field
-  in `config.toml`'s `[[hooks.on]]`.
+  in `config.toml`'s `[[hooks.on]]`. Pass the same name to the `bin`
+  parameter of `buildCrate` so the package declares `meta.rushi.bin`
+  and the consumer's bare hook command is exempt from the build-time
+  drift guard (issue #13).
 - **`goal-state`** (the shared path-dep crate) is *not* a `packages.`
   entry. It is built transitively by `buildCrate`'s path-dep
   resolution. Expose it only if a consumer wants to build/link it
@@ -411,6 +443,61 @@ working flake that bundles obscura next to `web_fetch` and
 
 ---
 
+## 4.5 Declaring `meta.rushi` (issue #13)
+
+Since issue #13, `lib.mkRushi` reads producer-declared names at **eval
+time** instead of relying solely on build-time shell globbing. Every
+package a producer exposes for `rushi.external_*` should carry
+`meta.rushi` with exactly **one** of the three fields:
+
+| Package type | `meta.rushi` field | Value |
+|---|---|---|
+| Tool (`wrapAsTool`) | `entry` | the tool entry dir name (e.g. `"goal"`) |
+| UI ext (`wrapAsExt`) | `ext` | the ext entry dir name (e.g. `"goal"`) |
+| Hook (`buildCrate`) | `bin` | the bare hook binary name (e.g. `"harness-hook-goal-idle"`) |
+
+**What `mkRushi` does with `meta.rushi`**
+
+- **`entry` / `ext`** — at eval time, `mkRushi` collects
+  `meta.rushi.entry` values from every `rushi.external_tools` source
+  (and `meta.rushi.ext` from `rushi.external_ui_extensions`). The
+  collected names are written into the consumer's
+  `config.paths.extension_tool_paths` (tools) and the
+  `tools.manifest` `[ui_extensions] enabled` list (ext) **before** the
+  build. The resulting `config.toml` is written once and is
+  byte-identical to the `config` string returned by `mkRushi`.
+- **`bin`** — at eval time, `mkRushi` collects `meta.rushi.bin` values
+  and **exempts** matching bare hook commands from the build-time
+  drift guard. Uncovered bare commands are still guarded.
+
+**Fallback (pre-#13 producers and plain-path sources)**
+
+Sources that lack a `meta.rushi` field (including plain Nix path
+strings, which cannot carry `meta`) fall back to the #10 build-time
+discovery. An eval-time warning names the source that still needs
+migration. The consumer's own values (if explicitly set) are
+authoritative: no merge, no dedup.
+
+**Build-time check**
+
+After the package is assembled, `mkRushi` verifies that each
+`meta.rushi.entry` dir actually contains a `tool.toml` and each
+`meta.rushi.ext` dir contains an `ext.toml` (or the declared
+`meta.rushi.bin` binary exists under `hooks/` or `bin/`). A mismatch
+fails the build with a clear error.
+
+**Migration status**
+
+| Producer | Status |
+|---|---|
+| `rushi-web-access` | ✅ `meta.rushi.entry` set |
+| `rushi-simple-english` | ✅ `meta.rushi.ext` / `meta.rushi.bin` set |
+| `rushi-exts` (goal-app) | ⏳ pending (no `packages` output yet) |
+| `no-find-grep-rushi` | ⏳ pending (not checked out here) |
+| `rushi-statusline` | ⏳ pending (not checked out here) |
+
+---
+
 ## 5. Combinations: any subset of {tool, hook, ext} in one flake
 
 There is no rule that a repo does exactly one category. `goal-app` does
@@ -515,6 +602,14 @@ intra-repo `goal-state` path dep needs the whole tree as one source.
 - **P4. no-workspace.** A multi-crate repo with no root `Cargo.toml`
   builds correctly under Mode B (one `buildCrate` per crate), where
   `lib.fetchTool`'s `--workspace` assumption would fail.
+- **P5. meta-declaration.** Each producer package declares exactly one
+  `meta.rushi` field (`entry`, `ext`, or `bin`) that matches its
+  actual `$out` layout. When consumed by `lib.mkRushi`, the eval-time
+  `extensionToolPaths` / `uiExtensionNames` equal what the #10
+  build-time discovery would have produced, and the shipped
+  `config.toml` is byte-identical to the returned `config` string.
+  A producer that declares `meta.rushi` but does not ship the
+  referenced dir/bin fails the consumer's build.
 
 **Verification**
 
@@ -526,6 +621,11 @@ intra-repo `goal-state` path dep needs the whole tree as one source.
   `ls -R <rushi-pkg>/{tools,ui_extensions,hooks,bin}`.
 - `rushi setup --locked` against the generated `tools.manifest`
   materializes the external tools/hooks; `rushi docs` still renders.
+- P5: In the kernel repo, `bash tests/nix/run.sh` asserts the
+  eval-time values, byte-identity, fallback warning, meta-check
+  failure, and reduced hook guard. In a consumer flake,
+  `nix eval .#<case>.extensionToolPaths` returns the meta-derived
+  list without building the package.
 
 **Gate**
 

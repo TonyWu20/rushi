@@ -1,0 +1,5 @@
+[tool]
+description = "Plain-path tool (no meta)"
+command = "plain-tool"
+args = []
+timeout_ms = 5000
