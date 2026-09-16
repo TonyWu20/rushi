@@ -72,29 +72,29 @@ jobs:
       - name: Doc gate
         run: bash scripts/verify-specs.sh
 
-      - name: e2e: crash consistency
+      - name: "e2e: crash consistency"
         run: bash scripts/crash-e2e.sh
 
-      - name: e2e: compact
+      - name: "e2e: compact"
         run: bash scripts/compact-e2e.sh
 
-      - name: e2e: rewind
+      - name: "e2e: rewind"
         run: bash scripts/e2e-rewind.sh
 
-      - name: e2e: tool conformance
+      - name: "e2e: tool conformance"
         run: bash scripts/tool-conformance.sh
 
-      - name: e2e: model-before transform
+      - name: "e2e: model-before transform"
         run: bash scripts/model-before-transform-e2e.sh
 
-      - name: e2e: run-idle log-message
+      - name: "e2e: run-idle log-message"
         run: bash scripts/run-idle-log-message-e2e.sh
 
-      - name: e2e: run-idle refire
+      - name: "e2e: run-idle refire"
         run: bash scripts/run-idle-refire-e2e.sh
 
-      - name: e2e: steer-inflight
+      - name: "e2e: steer-inflight"
         run: bash scripts/steer-inflight-e2e.sh
 
-      - name: e2e: tool-after transform
+      - name: "e2e: tool-after transform"
         run: bash scripts/tool-after-transform-e2e.sh
