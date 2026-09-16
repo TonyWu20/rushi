@@ -29,6 +29,7 @@ IN_SCOPE=(
   "loop-and-edit-implementation.md"
   "loop-and-edit-tool.md"
   "loop-lifecycle-hooks.md"
+  "meta-rushi.md"
   "phase-2-plan.md"
   "skill-remapped-to-os-apps.md"
   "subagent-design.md"
