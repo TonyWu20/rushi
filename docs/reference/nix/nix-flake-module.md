@@ -417,7 +417,12 @@ rushiConfigured = rushiFlake.lib.mkRushi {
 
     # Module 2: tools + extensions
     ({ config, lib, pkgs, ... }: {
-      rushi.tools = [ "read" "write" "edit" "bash" ];
+      # `rushi.tools` defaults to the full kernel tool set, so this
+      # line is redundant. Set it only to restrict the bundle:
+      # rushi.tools = [ "read" "write" "edit" "bash" ];
+      #
+      # Kernel-bundled UI exts. `ui_extension_names` is only needed
+      # to drift-guard names auto-discovered from ext sources.
       rushi.ui_extensions = [ "statusline-rs" "mermaid" ];
       # rushi.external_tools = [
       #   rushiFlake.lib.fetchTool {
