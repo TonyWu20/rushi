@@ -53,7 +53,7 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v1
         with:
-          extra_nix_config: |
+          extra-conf: |
             experimental-features = "nix-command flakes"
 
       - name: Build the flake package (hermetic, native arch)
