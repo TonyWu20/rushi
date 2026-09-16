@@ -366,3 +366,81 @@ vehicle. Or the P3 gate formally opening.
 **Seed (do anyway).** The G1 double-step replay test (audit
 finding F7) is the missing replay half of the P3 gate. It pays
 off before Phase 3.
+
+## Lean backstop fully retired (2026-09-17, user decision)
+
+**Observed.** `lean-verify op=drt n=100000` waited 3 h with no
+stdout (2026-09-12, the `lean-verify` drt episode above). The Lean
+backstop was already optional ("the house gate remains the
+conformance and e2e scripts", `docs/INDEX.md`). Actual use showed
+the method was overkill for what it bought.
+
+**Decision (2026-09-17, user).** Full retirement. Removed:
+`lean/` (specs, lakefile, toolchain pin), `verification/rewind-drt/`
+(+ its cargo workspace member), `scripts/lean-gate.sh`,
+`scripts/lean-verify-e2e.sh`, `scripts/lean-verify-drt-e2e.sh`,
+`scripts/rewind-drt-e2e.sh`, `scripts/rewind-drt-inputs.sh`, the
+flake `aeneas` input, `devShells.lean`, `devShells.aeneas`, and the
+Lean toolchain entries in `devShells.default`. The invariants keep
+their Rust proofs (`rewind_*` tests, `scripts/e2e-rewind.sh`). The
+exts-owned `lean-verify` tool is unaffected in this repo but no
+longer gets a toolchain from the kernel devShell. See
+`docs/lean-driven-development.md` §8.
+
+## aarch64-darwin first-class + CI added (2026-09-17, user decision)
+
+**Observed.** `docs/harness-distribution.md` (P5) already named
+aarch64-darwin as a flake-managed author platform, but the flake's
+`supportedSystems` listed only `[x86_64-linux aarch64-linux]`
+(nixpkgs 26.11 dropped x86_64-darwin, so the darwin attrset was
+skipped). The repo had no CI despite ~10 commits/day velocity and a
+fully scripted house gate.
+
+**Decision (2026-09-17, user).**
+- `aarch64-darwin` added to `supportedSystems`: Macs build and
+  develop rushi natively through the flake.
+- GitHub Actions CI added (`.github/workflows/ci.yml`) at push/PR.
+  The Lean gate is out of CI (retired above). Scope note: the e2e
+  bash suites are Linux-only and run on the two Linux systems. The
+  `aarch64-darwin` job carries the hermetic flake build, `cargo
+  test`, and the doc gate. See the scoping entry below.
+- `scripts/cache-e2e.sh` stays a local key-gated test: it needs a
+  machine-local `config.toml` plus a live `DEEPSEEK_API_KEY`.
+- `run-idle-continue-e2e.sh` remains a rushi-exts gate, not part of
+  this repo's CI.
+
+## e2e suites scoped to Linux runners (2026-09-17, user decision)
+
+**Observed.** CI run 35145471528 ran the full gate on all three
+flake systems. The two Linux jobs passed. The `aarch64-darwin`
+job failed at `e2e: compact` (46 of 98) after its `nix build`,
+`cargo test`, and doc gate all passed. Every macOS failure was a
+GNU-vs-BSD userland mismatch, not a rushi defect:
+
+- `wc -l` pads the count on macOS, breaking the suites'
+  `[ "$n" -eq 1 ]` numeric comparisons.
+- `sed -i 's/…/' file` uses GNU in-place syntax. BSD `sed`
+  rejects it ("sed: -I or -i may not be used with stdin").
+
+The e2e bash suites target the GNU/Linux dev platform. Porting the
+affected suites to BSD userland (wc padding, `sed -i`, `timeout`,
+`xxd`, `sha256sum`) is a large slow-feedback effort, separate from
+the CI-landing work.
+
+**Decision (2026-09-17, user).** Scope the e2e suites to the two
+Linux runners. Keep the hermetic build, `cargo test`, and doc gate
+on all three.
+
+- `.github/workflows/ci.yml` gains a matrix `e2e` flag: `true` on
+  `x86_64-linux` and `aarch64-linux`, `false` on
+  `aarch64-darwin`. The nine e2e steps are guarded by
+  `if: matrix.e2e`.
+- The macOS job still proves aarch64-darwin: `nix build .#rushi`
+  packages darwin-arm64, and the full Rust test suite runs
+  natively on the Mac runner.
+- Follow-up, not in this PR: port the e2e bash suites to BSD
+  userland so they run on macOS too. That is a separate effort,
+  if macOS e2e coverage is wanted.
+
+Corrects the `aarch64-darwin first-class + CI added` entry above:
+the e2e suites do not run on `aarch64-darwin`.

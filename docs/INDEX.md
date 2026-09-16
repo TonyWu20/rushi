@@ -10,7 +10,7 @@ configuration, tool manifest, hook ABI, distribution) lives in
 [`reference/README.md`](reference/README.md). It is also embedded in
 the `rushi` binary — run `rushi docs` or `rushi docs <section>`.
 
-## Repo state (2026-09-08)
+## Repo state (2026-09-17)
 
 **Working.** The Phase 2 pipeline runs end to end:
 `rushi` (loop) → `claim` → `assemble` → `model` →
@@ -25,14 +25,30 @@ hooks, and `lean-verify` moved to `../rushi-exts`. Their docs live in those repo
 dependency; `config-exts.example.toml` shows how to re-enable the
 exts wiring.
 
-**Not yet done.** No CI. No shared `core` crate (by design, per Phase 3. Re-evaluation triggers recorded 2026-09-16). The `LogLine` and validator itches are closed: both live once in `crates/rushi/` (`docs/itches.md`).
+**Platform + CI (2026-09-17).** CI runs the house gate on push/PR
+(`.github/workflows/ci.yml`): `cargo build`, `cargo test`,
+`scripts/verify-specs.sh`, and the e2e suites. It covers
+`x86_64-linux`, `aarch64-linux`, and `aarch64-darwin`. The flake's
+`supportedSystems` now includes `aarch64-darwin`, so Macs build and
+develop rushi natively through the flake (decision 2026-09-17,
+`docs/itches.md`).
+
+The Lean backstop is fully retired as of the same decision.
+`lean/`, the DRT pair, the gate scripts, and the flake's Lean
+toolchain are gone. The gate is now the conformance and e2e
+scripts alone.
+
+**Not yet done.** No shared `core` crate (by design, per Phase 3.
+Re-evaluation triggers recorded 2026-09-16). The `LogLine` and
+validator itches are closed: both live once in `crates/rushi/`
+(`docs/itches.md`).
 
 ## Doc inventory
 
 | Doc                                           | Status              | Last updated | Purpose                                                                                                                                                    |
 | --------------------------------------------- | ------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `architecture.md`                             | Active              | 2026-09-16   | Hexagonal architecture, phase roadmap, tool contract, guardrails. Lean sections: Properties P1-P8, Verification, Gate. Phase 3 carries a re-evaluation gate (decision 2026-09-16) |
-| `lean-driven-development.md`                  | Active              | 2026-09-07   | Lean-driven development workflow adapted to this repo: the Properties / Verification / Gate contract for spec docs, the no-unproven-claim rule, the build gate as acceptance authority, and the `scripts/verify-specs.sh` doc gate |
+| `lean-driven-development.md`                  | Active              | 2026-09-17   | Lean-driven development workflow adapted to this repo: the Properties / Verification / Gate contract for spec docs, the no-unproven-claim rule, the build gate as acceptance authority, and the `scripts/verify-specs.sh` doc gate. The Lean toolchain backstop was retired 2026-09-17 (§8) |
 | `auto-compact-plan.md`                        | Implemented       | 2026-09-08   | In-session auto-compaction: the `bin/compact` binary, the threshold trigger, the overflow and length-stop recovery in `step.sh`, the `context_exhausted` last-resort. Ported from the pi 0.84.2 compaction source. Reviewed, audited in three passes, and shipped: e2e scenarios in `scripts/compact-e2e.sh`. The trigger always uses the `context_budget` base (pi parity); the `compact_trigger_base` knob was removed; the stale post-compact reading guard (sections 9, 9.5) keeps the last-resort path recoverable; the wire budget unclamps to the model window (section 9.6); reserve size controls next-response headroom and `model_timeout_s` bounds a stalled model call (section 9.7); the hard-trim backstop is disabled (section 9.8); the parse length-stop gate lets truncated tool calls recover instead of hard-failing (section 9.9); the post-failure estimate rescue re-checks the context after a non-overflow API failure and fires compact instead of dying (section 9.11) |
 | `auto-compact-plan-review.md`                 | Review              | 2026-09-02   | Design review of `auto-compact-plan.md`: every claim verified against the repo code, config, and the pi source                                              |
 | `auto-compact-plan-audit.md`                  | Review              | 2026-09-02   | Second audit: re-derives each accepted cut and safety argument from the code, not the plan wording                                                        |
@@ -58,7 +74,7 @@ exts wiring.
 | `empty-turn-root-cause.md`                    | Implemented         | 2026-08-27   | Root cause and fix for `model returned an empty turn after retries`: 30 s reqwest cap on streaming SSE, silent error swallow, loop-guard misclassification |
 | `tool-interface-registry-idea_from_human.md`  | Draft v2            | 2026-08-26   | User idea: clap-based tool registration and auto-discovery via the daemon                                                                                  |
 | `ft-005-logline.md`                           | Implemented         | 2026-09-05   | Record for FT-005: motivation from the ruxe type-level-disjointness post, two-writer interleave analysis, LogLine capability design and tests             |
-| `rewind-fork-design.md`                        | Implemented       | 2026-09-07   | Session rewind and fork (pi `/tree` style): the `rewind` event on the append-only log, the active-path mask in `bin/assemble` (the recursive computation that masks abandoned branches at every nesting depth), the rewind-aware `bin/claim` state, and the review of the proposed checkpoint+mask design (I1-I12). Lean backstop: `lean/RewindSpec.lean` + DRT gate in `scripts/rewind-drt-e2e.sh`. The TUI picker stage lives in `rushi-tui` |
+| `rewind-fork-design.md`                        | Implemented       | 2026-09-17   | Session rewind and fork (pi `/tree` style): the `rewind` event on the append-only log, the active-path mask in `bin/assemble` (the recursive computation that masks abandoned branches at every nesting depth), the rewind-aware `bin/claim` state, and the review of the proposed checkpoint+mask design (I1-I12). Invariants proven in Rust: the `rewind_*` unit tests plus `scripts/e2e-rewind.sh` (the Lean backstop and DRT gate were retired 2026-09-17). The TUI picker stage lives in `rushi-tui` |
 | `skill-remapped-to-os-apps.md`                  | Proposal            | 2026-09-08   | Feature request: the OS + Applications split. Base distribution (kernel: loop core + base tools + growth machinery; default-swappable `tui` front-end, the WM tier). A tool registers by being on the agent-visible PATH and self-documents via `--help` (no `SKILL.md`; a procedure is a script). The tool list is prompt-resident, generated by `assemble`. `tools --list` remains for TUI/human use. First application is `tui-capture` |
 | `system-prompt-generation.md`                    | Implemented       | 2026-09-08   | How the system prompt is built: the kernel starts from the user config `[system_prompt]` field, adds a generated tool list and cwd line, then extension hooks add or remove named fragments (e.g. goal block). The kernel joins all parts into `request.instructions`. Supersedes the mechanism in `../rushi-exts/docs/goal-rule-reinject.md` (keeps D1-D3 and cache analysis). |
 | `deepseek-harness-compaction-research.md`       | Investigation       | 2026-09-04   | Cross-codebase research: how the dsh compaction system keeps the session log append-only while replacing surface ranges with summary checkpoints, and how the stable request prefix and prefix-aligned summarization call maximize KV cache prefix hits |
@@ -129,7 +145,7 @@ Moved docs (not in this repo anymore):
 7. `spec-review-criteria.md` — check your spec against these before implementing.
 8. `SPEC_CONTRACT_TESTS.md` — how to split the implementer and tester roles.
 
-## The Lean gate
+## The gate
 
 The acceptance gate for a spec is the `## Gate` section at the end of
 the spec doc. The doc gate is `scripts/verify-specs.sh` (structure and
@@ -137,20 +153,17 @@ cross-reference checks on the docs). The code gate is the command list
 in each Gate section: `cargo build`, `cargo test`, and the named e2e
 scripts. A clean gate with zero open properties is the guarantee.
 
-Lean backstops live in `lean/`: `RushiSpec.lean` mirrors the `rushi setup`
-resolver; `RewindSpec.lean` mirrors the fork-recursion active-path
-computation; `RewindDrt.lean` is the DRT model executable.
-`scripts/lean-gate.sh` runs `lake build` over all three and enforces
-zero `sorry`. The Lean backstop is optional; the house gate remains
-the conformance and e2e scripts. See `docs/lean-driven-development.md` §8.
+CI (`.github/workflows/ci.yml`) runs that gate on push/PR across
+`x86_64-linux`, `aarch64-linux`, and `aarch64-darwin`.
+
+The Lean backstop was fully retired 2026-09-17 (decision recorded in
+`docs/itches.md`). Retired: the `lean/` specs, `lake build` via
+`scripts/lean-gate.sh`, the `rewind-drt` DRT pair, and the flake's
+Lean toolchain. The invariants keep their Rust proofs. See
+`docs/lean-driven-development.md` §8.
 
 - `scripts/verify-specs.sh` — run before pushing doc changes. Exit 0
   is clean; exit 1 names the failing doc and section.
-- `scripts/rewind-drt-e2e.sh` — differential-random-test gate comparing
-  the Lean `RewindDrt` model against `verification/rewind-drt` on
-  generated
-  inputs. Run after any change to `crates/rushi/src/rewind.rs` or
-  `lean/RewindSpec.lean`.
 
 ## Maintenance rules
 

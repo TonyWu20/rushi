@@ -505,7 +505,7 @@ else
 
   # P1 route discovery: route resolves the lean-verify manifest from
   # the exts extra tools root (--extra-tools, the config's [paths]
-  # extra_tools_roots) to the binary (on PATH) and surfaces the
+  # extension_tool_paths) to the binary (on PATH) and surfaces the
   # tool-level diagnostic.
   ROUTE_BIN="$(cd "$SCRIPT_DIR/../target/debug" 2>/dev/null && pwd)/route"
   if [ -x "$ROUTE_BIN" ] && [ -n "$EXTS_ROOT" ] && [ -d "$EXTS_ROOT/goal-tools" ]; then

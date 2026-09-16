@@ -188,75 +188,37 @@ at the end: `No behavioral properties; design discussion only.`
   builder rule and the type-system guarantees are part of the "kernel"
   that re-checks every proof step.
 
-## 8. Real Lean backstop
+## 8. The Lean toolchain backstop — retired (2026-09-17)
 
-This repo has a real Lean 4 kernel check, not just the adapted
-workflow above. The Lean kernel re-checks the invariants of every
-formal spec under `lean/`.
+This repo used to carry a real Lean 4 kernel check under `lean/`:
+`RushiSpec` (mirroring the `bin/rushi/src/setup.rs` resolver),
+`RewindSpec` (the fork active-path recursion), and the `RewindDrt`
+DRT model executable paired with `verification/rewind-drt`. The TUI
+specs (`TuiStreamSpec`, `TuiViewportSpec`) moved to the `rushi-tui`
+repo at the 2026-09-08 split. The toolchain came from the flake
+(`aeneas` input, `devShells.lean`, `devShells.aeneas`) and the gates
+were `scripts/lean-gate.sh` plus `scripts/rewind-drt-e2e.sh`.
 
-- **The Lean specs.**
-  - `lean/RushiSpec.lean` mirrors the resolver in
-    `bin/rushi/src/setup.rs` (`classify`, `step`, `resolve`) and
-    states invariants as theorems.
-  - `lean/TuiStreamSpec.lean` is a forward spec for the TUI feature
-    request "Stream rendering of the model response"
-    (`docs/tui_feature_requests_from_human.md`). It models the
-    streaming renderer state machine and proves its invariants.
-  - `lean/TuiViewportSpec.lean` specifies the viewport-based
-    scrollback invariants: no-flush while pinned, tail-following,
-    eviction safety, chunked reachability, and bounded window size.
-  All use core Lean only (no Mathlib), so the build is hermetic
-  and needs no network.
-- **The devShell.** `flake.nix` defines `devShells.lean`
-  (Lean 4.30.0 + Z3). Enter it with
-  `nix develop .#lean` from the repo root.
-- **The Rust->Lean toolchain.** `flake.nix` also defines
-  `devShells.aeneas` (charon + aeneas, from the hermetic
-  AeneasVerif/aeneas flake input). The `lean-verify` tool's
-  `translate` op runs the charon -> aeneas pipeline (Rust MIR ->
-  LLBC -> pure Lean) and reports the generated model. The
-  translation is the model half of the workflow only — the `build`
-  kernel gate and the `drt` regression gate remain the guarantees
-  (../rushi-exts/docs/aeneas-rust-to-lean.md).
-- **The gate.** `scripts/lean-gate.sh` runs the Lean compiler over
-  every spec in `lean/`. Exit 0 = every proof re-checked by the
-  kernel. It is an optional backstop, not part of the main gate
-  (`scripts/verify-specs.sh`), matching the stance in
-  `docs/harness-distribution.md`.
-- **The DRT regression gate.** `lean/TuiStreamDrt.lean` is a pure
-  CLI executable over the frozen `TuiStreamSpec` reference renderer
-  (`View`, `step`, `runResponse`, `runResponses`). The production
-  mirror is `bin/tui-stream-drt` (pure-Rust, std-only). Both share a
-  one-line scenario protocol and are differential-random-tested via
-  `lean-verify` `op=drt` with a deterministic input generator
-  (`scripts/tui-stream-drt-inputs.sh`, fixed-seed LCG, alphabet
-  a-j 0-9). The `lean_exe «TuiStreamDrt»` target in `lakefile.lean`
-  puts the executable inside the zero-sorry build gate, so the DRT
-  model is kernel-checked alongside the theorems.
-- **The DRT preflight and long-run ergonomics.** After a generator or
-  protocol change, `lean-verify` `op=check-inputs` (default n=2000,
-  ~10 s) verifies that the generator's lines are well-formed for the
-  one-line scenario protocol: each line is fed to the model
-  executable (and the production executable when given), and a line
-  either side rejects (non-zero exit or timeout; accepted inputs
-  exit 0) is reported with its line number instead of waiting for a
-  full drt to surface it. Long drt runs write a heartbeat/checkpoint
-  to `<dir>/.drt-progress.json` every ~10 s or 100 inputs (poll it
-  to confirm a run is alive; a clean run deletes it); `"smoke":true`
-  is the quick tier (n=2000, the one-liner quick check), and
-  `"resume":true` continues a stopped run from its first failed
-  index after the fix.
-- **Pinned toolchain.** `lean/lean-toolchain` pins
-  `leanprover/lean4:v4.30.0`, matching the flake's `pkgs.lean4`.
-  The Lean project uses core Lean only (no Mathlib), so the build
-  is hermetic and needs no network.
+**Fully retired 2026-09-17 (user decision).** The method proved
+overkill in actual use. The recorded episode: a
+`lean-verify op=drt n=100000` run that waited 3 h with no stdout
+(2026-09-12, `docs/itches.md`).
 
-Running the backstop:
+Removed:
 
-```bash
-scripts/lean-gate.sh
-# or, step by step:
-nix develop .#lean
-cd lean && lean RushiSpec.lean TuiStreamSpec.lean TuiViewportSpec.lean
-```
+- `lean/` (specs, lakefile, toolchain pin)
+- `verification/rewind-drt/` (+ its cargo workspace member)
+- `scripts/lean-gate.sh`, `scripts/lean-verify-e2e.sh`,
+  `scripts/lean-verify-drt-e2e.sh`, `scripts/rewind-drt-e2e.sh`,
+  `scripts/rewind-drt-inputs.sh`
+- the flake `aeneas` input, `devShells.lean`, `devShells.aeneas`,
+  and the Lean toolchain entries in `devShells.default`
 
+What remains is the **methodology** (sections 1-7): named
+invariants with one proof each, the Gate as acceptance authority,
+zero open properties as the guarantee. The invariants keep their
+Rust proofs (unit tests, `scripts/e2e-rewind.sh`,
+`scripts/verify-specs.sh`). The house gate is now the conformance
+and e2e scripts alone — no Lean step. The exts-owned `lean-verify`
+tool is a separate repo's concern. It no longer gets a toolchain
+from this flake's devShell.

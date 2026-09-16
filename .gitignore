@@ -1,8 +1,5 @@
 .pi/
 
-## Lean build output
-lean/.lake/
-
 ## Rust build output
 **/target/
 target

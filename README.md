@@ -99,15 +99,14 @@ The house gate, run from the repo root:
     cargo build
     cargo test
     bash scripts/verify-specs.sh
-    bash scripts/lean-gate.sh
     bash scripts/e2e-rewind.sh
     bash scripts/compact-e2e.sh
     bash scripts/tool-conformance.sh
 
-`scripts/lean-gate.sh` runs `lake build` over the Lean specs and
-fails on any `sorry`. `scripts/rewind-drt-e2e.sh` differentially
-random-tests the fork active-path math between the Lean model
-executable and `verification/rewind-drt`.
+CI (`.github/workflows/ci.yml`) runs this gate on push/PR across
+`x86_64-linux`, `aarch64-linux`, and `aarch64-darwin`. The Lean
+toolchain backstop was retired 2026-09-17. The gate is now the
+conformance and e2e scripts alone.
 
 `scripts/cache-e2e.sh` requires a live model API key
 (`DEEPSEEK_API_KEY`) and skips when it is absent.
