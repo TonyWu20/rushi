@@ -120,20 +120,29 @@
               # ══════════════════════════════════════════════
               # Module 2: tools + extensions
               #
-              # Kernel tools: whitelist from the kernel's bundled set.
+              # Kernel tools: default is the kernel's full tool set
+              # (auto-derived from src/tools/*/tool.toml). Override
+              # with a subset only if you need to drop tools.
+              #
               # External tools / UI extensions / hooks: Nix derivations
               # (fetchFromGitHub, cargo packages, local paths, …).
+              # Each source is declared once; lib.mkRushi derives
+              # extension_tool_paths, ui_extension_names, and the
+              # manifest entries from it.
               # ══════════════════════════════════════════════
               ({ config, lib, pkgs, ... }:
               {
-                # Kernel tools to ship (must exist in the kernel's tools/).
-                rushi.tools = [ "read" "write" "edit" "bash" ];
+                # Kernel tools. Default is the full kernel tool set, so
+                # this line is redundant and can be dropped. Kept only
+                # as an example of a subset override.
+                # rushi.tools = [ "read" "write" "edit" "bash" ];
 
                 # UI extensions to enable (names in the ext dir).
                 rushi.ui_extensions = [ "statusline-rs" "mermaid" ];
 
                 # External tool sources (Nix derivations). Each derivation's
                 # output must contain <tool-name>/tool.toml + binary.
+                # extension_tool_paths is derived automatically.
                 # rushi.external_tools = [
                 #   (pkgs.fetchFromGitHub {
                 #     owner = "tony";
@@ -143,7 +152,9 @@
                 #   })
                 # ];
 
-                # External UI extension sources.
+                # External UI extension sources. Entry names are
+                # auto-discovered from ext.toml; ui_extension_names
+                # is only a drift-guard override when set.
                 # rushi.external_ui_extensions = [
                 #   (pkgs.fetchFromGitHub {
                 #     owner = "tony";
@@ -154,6 +165,8 @@
                 # ];
 
                 # Hook binaries (goal-continuation, lean-verify, …).
+                # Each bare command in config.hooks.on is verified
+                # against the bundled bin/ + hooks/ at build time.
                 # rushi.external_hooks = [
                 #   (pkgs.fetchFromGitHub {
                 #     owner = "tony";

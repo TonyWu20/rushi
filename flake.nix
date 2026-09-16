@@ -39,13 +39,14 @@
     #   };
     #   outputs = { self, nixpkgs, rushi-flake, ... }: {
     #     packages.x86_64-linux.default =
-    #       rushi-flake.lib.mkRushi {
+    #       (rushi-flake.lib.mkRushi {
     #         pkgs = import nixpkgs { system = "x86_64-linux"; overlays = [ fenix.overlays.default ]; };
     #         modules = [ { config, lib, pkgs, ... }: {
     #           rushi.config.model = { api = "responses"; max_output_tokens = 32768; };
-    #           rushi.tools = [ "read" "write" "edit" "bash" ];
+    #           rushi.external_tools = [ ... ];
+    #           # extension_tool_paths + ui_extension_names are auto-derived
     #         } ];
-    #       }.package;
+    #       }).package;
     #   };
     #
     # See docs/reference/nix/nix-flake-module.md for the full option
