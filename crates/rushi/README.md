@@ -116,7 +116,6 @@ It does not hold **how** any stage runs.
 | `serde` (derive) | Serialize and Deserialize the `Event` enum and payload types. |
 | `serde_json` | Parse JSON lines and build hook payload JSON. |
 | `toml` | Read the model section from `config.toml`. |
-| `glob` | Declared dependency (path-glob helpers). |
 | `libc` | `flock` in `LogLine::commit` for cross-process atomicity. |
 
 ---

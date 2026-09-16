@@ -1362,7 +1362,6 @@ dependencies = [
 name = "rushi-common"
 version = "0.1.1"
 dependencies = [
- "glob",
  "libc",
  "serde",
  "serde_json",
