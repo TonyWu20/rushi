@@ -51,3 +51,16 @@ deleted after its push. Stale objects were pruned with
 - The docs line in an older commit that cites `Agent Skills
   (Claude/Anthropic)` as an established practice is a genuine
   external reference. It is not a co-author trail and stays.
+
+## 2026-09-16 history rewrite
+
+Run 3 (agent mis-signed commits): two commits on the PR #11
+(`issue/10`) lineage had author and committer signed as
+`Tony Wu <tony@users.noreply.github.com>`. They were the `mkRushi`
+auto-derive commit and the auto-derivation docs commit. A `git
+filter-branch --env-filter` pass restored `TonyWu20 <tony.w21@gmail.com>`
+on both fields. Only the two commits and the merge that references
+them changed SHA. Trees, messages, and timestamps were preserved.
+
+Same follow-up as Run 1/2: force-push main, delete the backup
+branch, `git reflog expire` plus `git gc --prune=now`.
