@@ -1,19 +1,18 @@
 # House gate on push/PR: build + test + doc gate + e2e suites.
 #
 # Platform notes:
-# - Linux jobs build the flake natively (x86_64-linux / aarch64-linux).
-# - The macOS arm64 runner (macos-14) covers aarch64-darwin. Nix on that
-#   runner builds aarch64-darwin natively, so no cross toolchain is needed.
-# - The gate is the same on all platforms: `cargo build --workspace`,
-#   `cargo test --workspace`, `scripts/verify-specs.sh`, and the e2e
-#   suites under scripts/. All of these are hermetic: they use stub
-#   models and machine-local temp dirs, no external service or key.
-# - `scripts/cache-e2e.sh` needs a live DEEPSEEK_API_KEY plus a local
-#   config.toml, so it stays a manual / nightly job (opt-in here).
+# - One job per flake supported system: x86_64-linux, aarch64-linux,
+#   aarch64-darwin (Macs are a first-class dev platform).
+# - Nix is installed via nix-installer-action on every platform.
+# - The gate runs inside the flake devShell so the toolchain matches
+#   the flake pin. All e2e scripts are hermetic (stub models, temp
+#   dirs, no external service or key).
 #
-# Known gap: scripts/run-idle-continue-e2e.sh is owned by the
-# rushi-exts repo (docs/tui-ext-repo-split.md section 4) and does not
-# run here.
+# Known scope notes:
+# - scripts/cache-e2e.sh needs a machine-local config.toml and a live
+#   DEEPSEEK_API_KEY, so it is not run here.
+# - run-idle-continue-e2e.sh is owned by rushi-exts.
+
 name: ci
 
 on:
@@ -37,46 +36,31 @@ jobs:
           - runner: macos-14
             system: aarch64-darwin
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Nix (Linux)
-        if: runner.os == 'Linux'
+      - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v1
         with:
           extra_nix_config: |
             experimental-features = "nix-command flakes"
-          # Cache the store across runs so warm caches keep builds fast.
-          extra_nix_config_env: |
-            NIX_CONF_DIR = "${{ runner.temp }}/nix-conf"
-
-      - name: Install Nix (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          curl -fsSL https://determinate.systems/nix/latest/install.sh | bash
-          echo "$HOME/.nix-profile/bin" >> "$GITHUB_PATH"
 
       - name: Build the flake package
         run: nix build .#rushi --print-out-paths
 
-      - name: cargo test
+      - name: Run tests and e2e suites in the flake devShell
         run: |
-          # The devShell's rust is the flake-pinned toolchain; running
-          # through `nix develop` matches local dev exactly.
-          nix develop . -- cargo test --workspace
-
-      - name: Doc gate
-        run: nix develop . -- bash scripts/verify-specs.sh
-
-      - name: e2e suites
-        run: |
-          nix develop . -- bash scripts/crash-e2e.sh
-          nix develop . -- bash scripts/compact-e2e.sh
-          nix develop . -- bash scripts/e2e-rewind.sh
-          nix develop . -- bash scripts/tool-conformance.sh
-          nix develop . -- bash scripts/model-before-transform-e2e.sh
-          nix develop . -- bash scripts/run-idle-log-message-e2e.sh
-          nix develop . -- bash scripts/run-idle-refire-e2e.sh
-          nix develop . -- bash scripts/steer-inflight-e2e.sh
-          nix develop . -- bash scripts/tool-after-transform-e2e.sh
+          set -e
+          source <(nix print-dev-shell .)
+          cargo test --workspace
+          bash scripts/verify-specs.sh
+          bash scripts/crash-e2e.sh
+          bash scripts/compact-e2e.sh
+          bash scripts/e2e-rewind.sh
+          bash scripts/tool-conformance.sh
+          bash scripts/model-before-transform-e2e.sh
+          bash scripts/run-idle-log-message-e2e.sh
+          bash scripts/run-idle-refire-e2e.sh
+          bash scripts/steer-inflight-e2e.sh
+          bash scripts/tool-after-transform-e2e.sh
