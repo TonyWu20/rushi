@@ -115,8 +115,10 @@ assigned by the log stage and is ignored by the typed enum.
 
 A `rewind` event records a branch point. The active-path computation
 (`crates/rushi/src/rewind.rs`) masks events from abandoned branches.
-The Lean backstop (`lean/RewindSpec.lean`) and DRT
-(`verification/rewind-drt/`) verify the active-path recursion.
+The active-path recursion is proven in Rust: the `rewind_*` unit
+tests in `crates/rushi/src/rewind.rs`, the `bin/assemble` mask
+tests, gated by `scripts/e2e-rewind.sh`. The Lean backstop and DRT
+pair were retired 2026-09-17 (`docs/lean-driven-development.md` §8).
 
 ---
 
