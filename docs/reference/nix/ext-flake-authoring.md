@@ -130,23 +130,44 @@ fenix toolchain.
           ];
 
           # Build one standalone cargo crate from a subpath of this flake's
-          # source tree. Intra-repo path deps (goal-state) resolve because
-          # `src` keeps the repo layout intact. The output binary name comes
-          # from the crate's [[bin]] name in Cargo.toml, not from crateName.
+          # source tree. `src` is the *whole repo* — not the crate dir —
+          # so intra-repo path deps (goal-state, web-common) resolve in
+          # the sandbox; a crate-dir `src` breaks them ("No such file or
+          # directory" during the cargo phase). `buildAndTestSubdir` cd's
+          # into the crate before cargo runs, and `cargoRoot` points the
+          # lockfile hook at the per-crate Cargo.lock. The output binary
+          # name comes from the crate's [[bin]] name in Cargo.toml, not
+          # from crateName.
           buildCrate = { crateDir, crateName }:
             pkgs.rustPlatform.buildRustPackage {
               pname = crateName;
               version = "0.1.0";
-              src = "${self}/${crateDir}";
+              src = "${self}";
+              buildAndTestSubdir = crateDir;
+              cargoRoot = crateDir;
               nativeBuildInputs = [ rustToolchain ];
               cargoLock = { lockFile = "${self}/${crateDir}/Cargo.lock"; };
               doCheck = false;
             };
 
           # ── Tool wrapper: $out/<name>/tool.toml + <name>/bin/<binary> ──
+          # Two gotchas on current nixpkgs:
+          #  * `version` must accompany `pname` — with only `pname`,
+          #    stdenv does not synthesize `name` and derivationStrict
+          #    dies with "attribute 'name' missing".
+          #  * a bare-copy derivation still needs a `src` for unpackPhase
+          #    ("variable $src or $srcs should point to the source");
+          #    use a placeholder via writeTextFile. `destination` must
+          #    start with `/` (it is interpreted relative to $out).
           wrapAsTool = { name, toolToml, built }:
             pkgs.stdenv.mkDerivation {
               pname = "${name}-tool";
+              version = "0.1.0";
+              src = pkgs.writeTextFile {
+                name = "${name}-tool-src";
+                destination = "/placeholder";
+                text = "";
+              };
               nativeBuildInputs = [ built ];
               installPhase = ''
                 mkdir -p $out/${name}/bin
@@ -162,9 +183,16 @@ fenix toolchain.
           # "target/release". If an ext's ext.toml points at a different
           # dir (e.g. a dev-build target/debug/), pass a matching
           # binDir = "target/debug".
+          # Same `version` + placeholder-`src` requirement as wrapAsTool.
           wrapAsExt = { extName, extToml, built, binDir ? "target/release" }:
             pkgs.stdenv.mkDerivation {
               pname = "${extName}-ui-ext";
+              version = "0.1.0";
+              src = pkgs.writeTextFile {
+                name = "${extName}-ext-src";
+                destination = "/placeholder";
+                text = "";
+              };
               nativeBuildInputs = [ built ];
               installPhase = ''
                 mkdir -p $out/${extName}/${binDir}
@@ -226,6 +254,16 @@ Notes on the skeleton:
   package; the consumer decides which go to which `rushi.external_*`
   option. A tool-only repo exposes only tools; a hook-only repo only
   hooks; `goal-app` exposes all three.
+- **`buildCrate` uses the whole repo as `src`** (issue #8). A
+  crate-dir `src` breaks intra-repo path deps inside the sandbox.
+  `buildAndTestSubdir` cd's into the crate. `cargoRoot` points the
+  lockfile hook at the per-crate `Cargo.lock`.
+- **`wrapAsTool` / `wrapAsExt` need `version` + a placeholder `src`**
+  (issue #8). `stdenv` synthesizes `name` only when `pname` *and*
+  `version` are both present. A bare-copy derivation still unpacks
+  `$src`, so it gets an empty `writeTextFile` placeholder.
+- **structuredAttrs packages never go in input lists** (issue #8).
+  Bundle their binaries with a plain `mkDerivation` wrapper, §4.4.
 
 ---
 
@@ -302,6 +340,74 @@ different dir (e.g. a dev-build `target/debug/…`), pass a matching
 differ — `ext.toml` `command = "target/release/statusline-ext"`
 — and `cp -rL ${built}/bin/.` copies the binary under its *binary*
 name, so the relative `command` path still resolves.)
+
+### 4.4 Bundling a structuredAttrs package (e.g. obscura)
+
+Some nixpkgs packages are *structuredAttrs* (`__structuredAttrs = true`),
+for example `pkgs.obscura`. Listing such a package in another
+derivation's input lists fails the whole build. The error comes from
+`derivationStrict`, not from the package itself:
+
+- `nativeBuildInputs = [ pkgs.obscura ]` → `error: attribute 'name' missing`
+- `pkgs.buildEnv { paths = [ pkgs.obscura ]; }` → same failure.
+
+The package evaluates fine on its own. `pkgs.obscura.name` returns
+`obscura-0.2.0` without error. Plain `buildRustPackage` outputs list
+into `nativeBuildInputs` without issue. Only structuredAttrs packages
+break when consumed by another derivation.
+
+**Fix: re-wrap into a plain bundle derivation.** A small
+`stdenv.mkDerivation` copies the prebuilt binary out of the
+structuredAttrs package into its own `$out/bin/`. The tool wrapper
+then depends on that plain bundle, not on the structuredAttrs
+package. It copies the bundle's `bin/` next to its own binary:
+
+```nix
+obscuraBundle = pkgs.stdenv.mkDerivation {
+  pname = "obscura-bundle";
+  version = "0";
+  # placeholder src so unpackPhase is satisfied (same rule as the
+  # tool/ ext wrappers above)
+  src = pkgs.writeTextFile {
+    name = "obscura-bundle-src";
+    destination = "/placeholder";
+    text = "";
+  };
+  # copy the binary out of the structuredAttrs package by path,
+  # not by listing the package in nativeBuildInputs
+  installPhase = ''
+    mkdir -p $out/bin
+    cp ${pkgs.obscura}/bin/obscura $out/bin/obscura
+  '';
+};
+
+# tool wrapper with the bundle baked into the install phase
+# (same shape as the §3 skeleton's wrapAsTool, plus the copy)
+webFetchTool = pkgs.stdenv.mkDerivation {
+  pname = "web_fetch-tool";
+  version = "0.1.0";
+  src = pkgs.writeTextFile {
+    name = "web_fetch-tool-src";
+    destination = "/placeholder";
+    text = "";
+  };
+  nativeBuildInputs = [ webFetchBuilt obscuraBundle ];
+  installPhase = ''
+    mkdir -p $out/web_fetch/bin
+    cp -rL ${webFetchBuilt}/bin/. $out/web_fetch/bin/
+    cp -rL ${obscuraBundle}/bin/. $out/web_fetch/bin/
+    cp ${toolToml} $out/web_fetch/tool.toml
+  '';
+};
+```
+
+The kernel's tool route resolves a binary from the tool's own
+`bin/` dir. The tool looks for `obscura` next to itself first,
+before falling back to `PATH`. The Nix-built package is
+self-contained. It has no `PATH` dependency on a separately
+installed obscura. See `TonyWu20/rushi-obscura-web-access` for a
+working flake that bundles obscura next to `web_fetch` and
+`web_search`.
 
 ---
 
