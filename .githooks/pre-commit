@@ -1,0 +1,48 @@
+#!/bin/sh
+# pre-commit hook — verify commit identity.
+#
+# Policy (docs/commit-hygiene.md): every commit must carry the local
+# user's identity. This hook blocks commits whose author or committer
+# deviates from git config user.name / user.email, which is what
+# catches agent sessions that set GIT_AUTHOR_* / GIT_COMMITTER_* env
+# vars or run under a different HOME.
+#
+# Bypass (intentional, e.g. filter-branch): use `git commit --no-verify`.
+# Enabled via `git config core.hooksPath .githooks`.
+
+expected_name=$(git config user.name 2>/dev/null)
+expected_email=$(git config user.email 2>/dev/null)
+
+if [ -z "$expected_name" ] || [ -z "$expected_email" ]
+then
+    echo "pre-commit: user.name / user.email not set. Refusing to commit." >&2
+    exit 1
+fi
+
+# Effective identity. Env vars override config (GIT_AUTHOR_NAME beats
+# user.name, etc.), mirroring what git will actually stamp on the commit.
+author_name="${GIT_AUTHOR_NAME:-$expected_name}"
+author_email="${GIT_AUTHOR_EMAIL:-$expected_email}"
+committer_name="${GIT_COMMITTER_NAME:-$expected_name}"
+committer_email="${GIT_COMMITTER_EMAIL:-$expected_email}"
+
+fail=0
+if [ "$author_name" != "$expected_name" ] || [ "$author_email" != "$expected_email" ]
+then
+    echo "pre-commit: author is '$author_name <$author_email>'" >&2
+    echo "pre-commit: expected '$expected_name <$expected_email>'" >&2
+    fail=1
+fi
+if [ "$committer_name" != "$expected_name" ] || [ "$committer_email" != "$expected_email" ]
+then
+    echo "pre-commit: committer is '$committer_name <$committer_email>'" >&2
+    echo "pre-commit: expected '$expected_name <$expected_email>'" >&2
+    fail=1
+fi
+
+if [ "$fail" -eq 1 ]
+then
+    echo "pre-commit: refusing commit under a foreign identity." >&2
+    exit 1
+fi
+exit 0

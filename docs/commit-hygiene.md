@@ -15,6 +15,18 @@ Claude or Anthropic. It also trims the trailing blank lines that
 result. If the message ends up empty, the hook refuses the commit.
 It prints a notice on stderr whenever it removes anything.
 
+## The pre-commit hook
+
+`.githooks/pre-commit` verifies that the commit's author and committer
+match `git config user.name` / `user.email`. It reads the effective
+identity, which is the env-var override if set, otherwise the git
+config value. If either field deviates, the hook refuses the commit.
+
+This catches agent sessions that override the identity via environment
+variables. Run 3 in the log below was exactly this. It also catches
+misconfigured environments with a foreign HOME. It does not catch
+`git -c` overrides. Those are rare and intentional.
+
 ## Enabling
 
 ```
