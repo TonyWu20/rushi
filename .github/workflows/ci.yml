@@ -8,7 +8,9 @@
 # Test/e2e steps do NOT run inside the Nix devShell: Nix on the
 # runners predates `nix develop . -- cmd` / `nix print-dev-shell`, so
 # the toolchain comes from rustup (matches the flake's fenix stable
-# pin) and the gate is still the same: build, test, doc gate, e2e.
+# pin). The gate is the same: build, test, doc gate, e2e. The e2e
+# bash suites are GNU/Linux userland only and run on the two Linux
+# jobs; macOS keeps the hermetic build + test + doc gate.
 #
 # Tooling notes:
 # - jq and python3 ship on the runners; ripgrep is installed.
@@ -30,13 +32,19 @@ jobs:
       fail-fast: false
       matrix:
         # One entry per flake supported system.
+        # The e2e bash suites use GNU userland (wc, sed -i, timeout,
+        # xxd, sha256sum) and are Linux-only. macOS still gets the
+        # hermetic flake build + cargo test + doc gate.
         include:
           - runner: ubuntu-latest
             system: x86_64-linux
+            e2e: true
           - runner: ubuntu-24.04-arm
             system: aarch64-linux
+            e2e: true
           - runner: macos-14
             system: aarch64-darwin
+            e2e: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
@@ -73,28 +81,37 @@ jobs:
         run: bash scripts/verify-specs.sh
 
       - name: "e2e: crash consistency"
+        if: matrix.e2e
         run: bash scripts/crash-e2e.sh
 
       - name: "e2e: compact"
+        if: matrix.e2e
         run: bash scripts/compact-e2e.sh
 
       - name: "e2e: rewind"
+        if: matrix.e2e
         run: bash scripts/e2e-rewind.sh
 
       - name: "e2e: tool conformance"
+        if: matrix.e2e
         run: bash scripts/tool-conformance.sh
 
       - name: "e2e: model-before transform"
+        if: matrix.e2e
         run: bash scripts/model-before-transform-e2e.sh
 
       - name: "e2e: run-idle log-message"
+        if: matrix.e2e
         run: bash scripts/run-idle-log-message-e2e.sh
 
       - name: "e2e: run-idle refire"
+        if: matrix.e2e
         run: bash scripts/run-idle-refire-e2e.sh
 
       - name: "e2e: steer-inflight"
+        if: matrix.e2e
         run: bash scripts/steer-inflight-e2e.sh
 
       - name: "e2e: tool-after transform"
+        if: matrix.e2e
         run: bash scripts/tool-after-transform-e2e.sh
