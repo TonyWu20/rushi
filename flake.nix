@@ -93,7 +93,7 @@
     nixosModules = {
       rushi = import ./lib/nixos-module.nix;
     };
-    homeManagerConfig = {
+    homeManagerModules = {
       rushi = import ./lib/home-manager-module.nix;
     };
 

@@ -258,7 +258,7 @@ rushi = {
   generates a `rushi.env` file and a wrapper script. The `file` form
   keeps secrets out of the Nix store (sops-nix integration point).
 - **NixOS / home-manager integration.** The kernel flake exposes
-  `nixosModules.rushi` and `homeManagerConfig.rushi` (option path
+  `nixosModules.rushi` and `homeManagerModules.rushi` (option path
   `programs.rushi`). Set `programs.rushi.enable = true` and
   `programs.rushi.package = rushiConfigured.package` to add the
   configured rushi to `environment.systemPackages` / `home.packages`.
@@ -480,7 +480,7 @@ The rushi `flake.nix` gains:
    don't hand-roll `fetchFromGitHub` + `buildRustPackage`. (Producer
    side — how an ext repo authors its own `flake.nix` against these
    contracts: `docs/reference/nix/ext-flake-authoring.md`.)
-4. **`nixosModules.rushi`** and **`homeManagerConfig.rushi`** — the
+4. **`nixosModules.rushi`** and **`homeManagerModules.rushi`** — the
    `programs.rushi` NixOS / home-manager module (adds the configured
    package to `environment.systemPackages` / `home.packages`).
 5. **`packages.docs-md` / `packages.docs-html`** — auto-generated
@@ -682,7 +682,7 @@ pi-flake does NOT ship extensions. The consumer flake provides helpers:
 | 13 | `jail` — bubblewrap sandbox | Intentionally omitted (rushi uses hooks for restriction) | ❌ by design |
 | 14 | `extraArgs` — raw CLI args | `rushi.config.loop.args` (loop engine args) | ✅ covered |
 | 15 | `promptTemplates` — template files | No analog yet | ⏳ future |
-| 16 | NixOS/home-manager modules | `nixosModules.rushi` + `homeManagerConfig.rushi` (`programs.rushi`) | ✅ implemented |
+| 16 | NixOS/home-manager modules | `nixosModules.rushi` + `homeManagerModules.rushi` (`programs.rushi`) | ✅ implemented |
 | 17 | `devShells` | Kernel flake has `devShells.{default,lean,aeneas}` | ✅ covered |
 | 18 | `overlays` — expose as nixpkgs packages | Not needed (consumer imports kernel flake directly) | ⏳ optional |
 | 19 | `docs-md` / `docs-html` — auto option docs | `packages.docs-md` / `packages.docs-html` via `nixosOptionsDoc` | ✅ implemented |

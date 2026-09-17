@@ -15,7 +15,7 @@
 #     };
 #   }
 #
-# Exposed via the kernel flake's `homeManagerConfig.rushi` output.
+# Exposed via the kernel flake's `homeManagerModules.rushi` output.
 
 { config, lib, ... }:
 
