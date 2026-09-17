@@ -212,6 +212,9 @@ For each window, the harness spawns each registered hook:
   section 3, plus a `window` field and the `session` name).
 - `env` carries `SESSION`, `SESSIONS_ROOT`, `CONFIG`,
   `HARNESS_PHASE`, and the window name.
+- `SESSION` and `SESSIONS_ROOT` are **absolute** paths, resolved against
+  the process working directory at config-load time (issue #16).
+  Consumers must not re-anchor them on the config file's directory.
 - `command` is the program the harness spawns. A bare name resolves
   against the package layout: the sibling `bin/` dir (kernel-shipped
   hook binaries), then the package `hooks/` dir (external hooks

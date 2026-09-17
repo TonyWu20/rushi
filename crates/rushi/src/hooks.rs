@@ -161,6 +161,10 @@ pub fn decision_produced(results: &[HookResult]) -> bool {
 
 /// Build the env pairs passed to hooks: `SESSION`, `SESSIONS_ROOT`,
 /// `CONFIG`, `HARNESS_PHASE`, `HARNESS_WINDOW`.
+///
+/// `SESSION` and `SESSIONS_ROOT` are absolute paths resolved at
+/// config-load time (issue #16). Consumers must not re-anchor them
+/// on the config file's directory.
 pub fn hook_env(
     session: &str,
     sessions_root: &str,

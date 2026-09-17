@@ -142,13 +142,25 @@ impl HarnessConfig {
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
             .unwrap_or_else(|| PathBuf::from("."));
 
-        // Sessions root
-        let sessions_root = cfg
-            .get("paths")
-            .and_then(|p| p.get("sessions_root"))
-            .and_then(|s| s.as_str())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("sessions"));
+        // Sessions root (issue #16: resolve to an absolute path so the
+        // hook env vars SESSION / SESSIONS_ROOT are unambiguous
+        // regardless of where the kernel process is launched from).
+        let sessions_root = {
+            let raw = cfg
+                .get("paths")
+                .and_then(|p| p.get("sessions_root"))
+                .and_then(|s| s.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("sessions"));
+            if raw.is_relative() {
+                match std::env::current_dir() {
+                    Ok(cwd) => cwd.join(raw),
+                    Err(_) => raw,
+                }
+            } else {
+                raw
+            }
+        };
 
         // Native tool paths (each entry is a tool dir containing a
         // tool.toml, or a root dir holding tool sub-dirs). Relative
