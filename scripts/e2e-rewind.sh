@@ -29,8 +29,6 @@ cd "$ROOT"
 LOG_BIN="$BIN_DIR/log"
 CLAIM_BIN="$BIN_DIR/claim"
 ASSEMBLE_BIN="$BIN_DIR/assemble"
-CONFIG="$ROOT/config.toml"
-
 PASS=0
 FAIL=0
 ok() { PASS=$((PASS + 1)); }
@@ -41,6 +39,37 @@ ko() {
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+
+# Self-contained config so the suite is hermetic and does not depend
+# on a repo-root config.toml (which is gitignored for local use).
+CONFIG="$WORK/config.toml"
+cat > "$CONFIG" <<EOF
+[model]
+api = "responses"
+max_output_tokens = 4096
+
+[model.stub]
+model_id = "stub-model"
+base_url = "http://127.0.0.1:1"
+api_key_env = "DUMMY"
+context_tokens = 8000
+
+[active]
+model = "stub"
+
+[paths]
+sessions_root = "sessions"
+native_tool_paths = [
+  "$ROOT/tools/bash",
+  "$ROOT/tools/read",
+  "$ROOT/tools/write",
+  "$ROOT/tools/edit",
+]
+
+[limits]
+context_budget_tokens = 8000
+compact_reserve_tokens = 500
+EOF
 
 # The model input of one assemble run, as flat text the assertions
 # grep. Tag names the $WORK/$tag.out / $tag.err files. A
