@@ -131,6 +131,21 @@ The loop binary reads a TOML config. Resolution order for the config path:
 3. `<exe_dir>/../config.toml` (Nix side-by-side layout)
 4. `./config.toml` in CWD (dev checkout)
 
+### Dumping the active config
+
+`rushi config` prints the active config file to stdout. It resolves the
+config using the same order as the loop subcommands. This gives a quick
+way to dump the config to disk, tweak a key, and reuse it:
+
+```bash
+rushi config > my-config.toml   # e.g. tweak [paths] sessions_root
+rushi --config my-config.toml run my-session
+```
+
+stdout holds only the config text. This keeps pipes clean. Errors such
+as a missing file go to stderr with exit code 1. The dump adds a
+trailing newline if the source file lacks one.
+
 ### Keys
 
 ```toml

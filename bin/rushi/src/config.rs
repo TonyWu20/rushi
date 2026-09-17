@@ -384,6 +384,21 @@ impl HarnessConfig {
     }
 }
 
+/// Read the raw text of a config file, guaranteeing a trailing newline.
+///
+/// Backs the `rushi config` subcommand: it prints this to stdout so a
+/// redirect (`rushi config > config.toml`) ends in a complete line that
+/// is safe to edit and re-save. The content is the file verbatim; no
+/// key is added, removed, or reordered.
+pub fn config_dump(config_path: &str) -> Result<String, std::io::Error> {
+    let contents = std::fs::read_to_string(config_path)?;
+    if contents.ends_with('\n') {
+        Ok(contents)
+    } else {
+        Ok(format!("{contents}\n"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,5 +488,30 @@ compact_reserve_tokens = 16384
         // A name with a path separator is relative or absolute; as-is.
         assert_eq!(resolve_hook_command("./my/hook.sh", &bin), "./my/hook.sh");
         assert_eq!(resolve_hook_command("/abs/hook.sh", &bin), "/abs/hook.sh");
+    }
+
+    #[test]
+    fn config_dump_reads_file_and_guarantees_trailing_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let with_nl = dir.path().join("with-nl.toml");
+        std::fs::write(&with_nl, "[paths]\nsessions_root = \"sessions\"\n").unwrap();
+        assert_eq!(
+            config_dump(&with_nl.to_string_lossy()).unwrap(),
+            "[paths]\nsessions_root = \"sessions\"\n"
+        );
+
+        let no_nl = dir.path().join("no-nl.toml");
+        std::fs::write(&no_nl, "[paths]\nsessions_root = \"sessions\"").unwrap();
+        assert_eq!(
+            config_dump(&no_nl.to_string_lossy()).unwrap(),
+            "[paths]\nsessions_root = \"sessions\"\n"
+        );
+    }
+
+    #[test]
+    fn config_dump_missing_file_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.toml");
+        assert!(config_dump(&missing.to_string_lossy()).is_err());
     }
 }

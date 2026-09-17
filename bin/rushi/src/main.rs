@@ -8,6 +8,8 @@
 //! - `rushi docs [SECTION|DOC]` — print the embedded harness reference;
 //!   a section of the default reference, or a bundled sub-document by
 //!   name (e.g. `rushi docs nix-flake-module`)
+//! - `rushi config` — print the resolved config file to stdout, so it
+//!   can be dumped to disk for tweaking (e.g. `sessions_root`)
 //!
 //! The loop stages (`claim`, `assemble`, `model`, `parse`, `route`,
 //! `compact`) are spawned as separate binaries. The TUI is a separate
@@ -29,7 +31,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "rushi", about = "The rushi distribution: TUI entry point and project setup")]
 struct Args {
-    /// Path to config file (for loop subcommands).
+    /// Path to config file (for the loop and `config` subcommands).
     /// When omitted, falls back to the Nix side-by-side config or CWD.
     #[arg(long, global = true)]
     config: Option<PathBuf>,
@@ -81,6 +83,13 @@ enum Command {
         #[arg(long)]
         list: bool,
     },
+    /// Print the config file that would be used to stdout.
+    ///
+    /// Resolves the config like the loop subcommands (`$CONFIG`, then
+    /// `--config`, then the Nix side-by-side layout, then CWD) and
+    /// prints its raw contents. Useful for dumping the active config to
+    /// disk for tweaking, e.g. `rushi config > my-config.toml`.
+    Config,
 }
 
 fn main() {
@@ -140,6 +149,17 @@ fn main() {
                 docs::list_sections();
             } else {
                 docs::print_docs(section.as_deref());
+            }
+        }
+
+        Command::Config => {
+            match config::config_dump(&config_path) {
+                Ok(text) => print!("{text}"),
+                Err(e) => {
+                    eprintln!("rushi config: cannot read config {config_path:?}: {e}");
+                    eprintln!("hint: pass an explicit path with --config <file> or set CONFIG=<file>");
+                    std::process::exit(1);
+                }
             }
         }
     }
