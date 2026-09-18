@@ -274,6 +274,20 @@ visible. The log holds one marker per hook that returned
 command of that hook. The prompt prefix stays byte-stable for every
 other window.
 
+#### Fragment placement
+
+The kernel joins fragment text onto the tail of
+`instructions`, the head of the prompt. Under strict
+prefix-cache semantics a changed tail breaks the cache for
+everything after the injection point. Stable content such as a
+rule summary or goal objectives may ride a fragment.
+
+Dynamic content such as violation flags or pending feedback must
+not ride a fragment. The hook appends it as a user item at the
+tail of `request.input` instead. That keeps the cached prefix up
+to the last logged message intact. The item carries the hook's
+own origin marker. The model reads hook feedback, not user input.
+
 ## 5. The overflow strategy as a plug-in
 
 The loop ships one overflow strategy: in-session shadow compact.

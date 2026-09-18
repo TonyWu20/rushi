@@ -348,7 +348,14 @@ churn.
   payload (`request.prompt_fragments`). The kernel joins them
   generically after the hook chain. Extensions own their keys.
   The kernel never inspects the fragment content. Add or remove
-  is one step per extension.
+  is one step per extension. Fragment text must stay byte-stable.
+  The fragment rides the head of the prompt, so a change breaks
+  the cached prefix for everything after it. Stable content such
+  as a rule summary or goal objectives may ride a fragment.
+  Dynamic content such as violation flags or pending feedback
+  must not ride one. The hook appends it as a user item at the
+  tail of `request.input` instead. See the fragment placement
+  rule in `docs/loop-lifecycle-hooks.md` section 4.5.
 - **D6** (new): only `goal_complete` clears the goal fragment.
   `goal_blocked` keeps it, since the goal is still open. A manual
   `goal clear` (TUI palette) also clears it, since it marks the
