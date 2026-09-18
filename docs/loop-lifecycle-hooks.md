@@ -268,9 +268,10 @@ section 4.
 
 A hook that mutates prompt content runs at `model.before`. The
 harness records a `hook_applied` marker so the cache-break is
-visible. The marker is an `ext_status` event with `id =
-"hook_applied"` and the value is the command of the hook that
-applied the transform. The prompt prefix stays byte-stable for every
+visible. The log holds one marker per hook that returned
+`transform`, in registration order (issue #19). Each marker is an
+`ext_status` event with `id = "hook_applied"`. Its value is the
+command of that hook. The prompt prefix stays byte-stable for every
 other window.
 
 ## 5. The overflow strategy as a plug-in

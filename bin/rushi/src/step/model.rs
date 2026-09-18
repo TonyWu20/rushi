@@ -328,11 +328,11 @@ fn fire_and_handle_exhausted(
 ///
 /// A valid transform replaces the request JSON with the hook's
 /// `request` object. The harness logs the `hook.model.before`
-/// decision marker and a `hook_applied` marker so the cache-break
-/// is visible (docs/loop-lifecycle-hooks.md 4.5). A transform
-/// without an object `request` field is a non-blocking failure:
-/// the log carries `hook.model.before.error` and the original
-/// request proceeds.
+/// decision marker and one `hook_applied` marker per hook that
+/// returned `transform`, in registration order (docs/loop-lifecycle-hooks.md
+/// 4.5, issue #19). A transform without an object `request` field is
+/// a non-blocking failure: the log carries `hook.model.before.error`
+/// and the original request proceeds.
 ///
 /// Fragment join (docs/system-prompt-generation.md D5): when the
 /// transformed request carries `prompt_fragments` (an ordered array
@@ -418,20 +418,21 @@ fn apply_model_before_transform(
                 }
             }
             log_hook_window(cfg, session, "model.before", "transform", results);
-            let applied_by = results
-                .iter()
-                .find(|r| r.decision.as_deref() == Some("transform"))
-                .map(|r| r.command.clone())
-                .unwrap_or_default();
-            let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-            let marker = serde_json::json!({
-                "v": 1,
-                "type": "ext_status",
-                "ts": ts,
-                "id": "hook_applied",
-                "value": applied_by,
-            });
-            append_event(cfg, &session.path, &marker);
+            // One `hook_applied` marker per hook that returned
+            // `transform`, in registration order (issue #19). The
+            // old `.find()` recorded only the first, silently
+            // hiding every later transforming hook from the log.
+            for r in results.iter().filter(|r| r.decision.as_deref() == Some("transform")) {
+                let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                let marker = serde_json::json!({
+                    "v": 1,
+                    "type": "ext_status",
+                    "ts": ts,
+                    "id": "hook_applied",
+                    "value": r.command.clone(),
+                });
+                append_event(cfg, &session.path, &marker);
+            }
         }
         None => {
             let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -929,5 +930,149 @@ fn log_truncated_group(cfg: &HarnessConfig, session: &SessionDir, output: &Value
             "is_error": true,
         });
         append_event(cfg, &session.path, &result);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rushi_common::hooks::HookResult;
+
+    /// Minimal `HarnessConfig` for marker tests: `append_event`
+    /// ignores the cfg, so every field just needs to exist.
+    fn stub_cfg(root: &std::path::Path) -> HarnessConfig {
+        let bin = root.join("bin");
+        HarnessConfig {
+            config_path: root.join("config.toml"),
+            config_dir: root.to_path_buf(),
+            sessions_root: root.to_path_buf(),
+            native_tool_paths: vec![],
+            extension_tool_paths: vec![],
+            active_model: "stub".to_string(),
+            model_id: "stub".to_string(),
+            max_output_tokens: 32768,
+            context_tokens: 131072,
+            input_budget: 98304,
+            context_budget: 98304,
+            last_measured_input: 0,
+            compact_enabled: false,
+            compact_strategy: "compact".to_string(),
+            compact_reserve_tokens: 16384,
+            compact_keep_tokens: 16384,
+            compact_text_chars: 5000,
+            estimate_chars_per_token: 4,
+            approval_timeout_s: None,
+            hooks_timeout_ms: 10000,
+            hooks: vec![],
+            run_max_silent_refires: 2,
+            model_bin: bin.join("model"),
+            compact_bin: bin.join("compact"),
+            assemble_bin: bin.join("assemble"),
+            route_bin: bin.join("route"),
+            claim_bin: bin.join("claim"),
+            parse_bin: bin.join("parse"),
+            log_bin: bin.join("log"),
+        }
+    }
+
+    fn transform_result(command: &str) -> HookResult {
+        HookResult {
+            decision: Some("transform".to_string()),
+            payload: Value::Null,
+            blocking_default: false,
+            failed: false,
+            failure_detail: String::new(),
+            command: command.to_string(),
+        }
+    }
+
+    /// Read back the values of all `hook_applied` markers, in log order.
+    fn hook_applied_values(session_dir: &Path) -> Vec<Value> {
+        let data = std::fs::read_to_string(session_dir.join("events.jsonl")).unwrap();
+        data.lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|v| {
+                v.get("type").and_then(|t| t.as_str()) == Some("ext_status")
+                    && v.get("id").and_then(|i| i.as_str()) == Some("hook_applied")
+            })
+            .map(|v| v.get("value").cloned().unwrap_or(Value::Null))
+            .collect()
+    }
+
+    /// issue #19: two hooks both returning `transform` must produce
+    /// two `hook_applied` markers, in registration order.
+    #[test]
+    fn two_transform_hooks_emit_two_markers() {
+        let root = tempfile::tempdir().unwrap();
+        let session_dir = root.path().join("sessions").join("test");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let cfg = stub_cfg(root.path());
+        let session = SessionDir {
+            path: session_dir.clone(),
+        };
+
+        let payload = serde_json::json!({
+            "request": { "model": "m2", "instructions": "base instructions" }
+        });
+        let results = vec![
+            transform_result("harness-hook-goal-arm"),
+            transform_result("harness-simple-english"),
+        ];
+
+        let mut request = RequestFile {
+            json: serde_json::json!({ "model": "m1", "instructions": "base" }),
+        };
+        apply_model_before_transform(&cfg, &session, &payload, &results, &mut request);
+
+        let values = hook_applied_values(&session_dir);
+        assert_eq!(values.len(), 2, "expected two hook_applied markers");
+        assert_eq!(
+            values,
+            vec![
+                Value::String("harness-hook-goal-arm".to_string()),
+                Value::String("harness-simple-english".to_string()),
+            ],
+            "markers must be in registration order"
+        );
+        // The transform itself must have landed.
+        assert_eq!(request.json.get("model").and_then(|m| m.as_str()), Some("m2"));
+    }
+
+    /// A mixed chain (proceed, transform, transform) still emits one
+    /// marker per transforming hook, in order.
+    #[test]
+    fn mixed_decisions_emit_one_marker_per_transform() {
+        let root = tempfile::tempdir().unwrap();
+        let session_dir = root.path().join("sessions").join("test");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let cfg = stub_cfg(root.path());
+        let session = SessionDir {
+            path: session_dir.clone(),
+        };
+
+        let payload = serde_json::json!({
+            "request": { "model": "m3", "instructions": "x" }
+        });
+        let mut passthrough = transform_result("harness-hook-passthrough");
+        passthrough.decision = Some("proceed".to_string());
+        let results = vec![
+            passthrough,
+            transform_result("harness-hook-a"),
+            transform_result("harness-hook-b"),
+        ];
+
+        let mut request = RequestFile {
+            json: serde_json::json!({ "model": "m1" }),
+        };
+        apply_model_before_transform(&cfg, &session, &payload, &results, &mut request);
+
+        let values = hook_applied_values(&session_dir);
+        assert_eq!(
+            values,
+            vec![
+                Value::String("harness-hook-a".to_string()),
+                Value::String("harness-hook-b".to_string()),
+            ]
+        );
     }
 }
