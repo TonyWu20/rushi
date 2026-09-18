@@ -451,3 +451,43 @@ on all three.
 
 Corrects the `aarch64-darwin first-class + CI added` entry above:
 the e2e suites do not run on `aarch64-darwin`.
+
+## Flake packages gain standard `meta`; `maintainers`/`teams` left unset (2026-09-18, user decision)
+
+**Observed.** `flake.nix`'s `packages.<system>` derivations
+(`rushi`/`default`, `docs-md`, `docs-html`) carried no
+nixpkgs-standard `meta`. `buildRustPackage` auto-fills some fields,
+but `description`, `homepage`, `license`, and `mainProgram` were
+absent.
+
+**Decision (2026-09-18, user).**
+- Add a nixpkgs-standard `meta` to every package in the flake's
+  `packages` output:
+  - `rushi` / `default` — `description` ("rushi — Unix-philosophy
+    agent harness (kernel + distribution)"), `homepage`
+    (`https://github.com/TonyWu20/rushi`, matches the Cargo
+    manifests), `license = licenses.mit` (matches `LICENSE`),
+    `mainProgram = "rushi"`.
+  - `docs-md` / `docs-html` — `description`, `homepage`,
+    `license = licenses.mit`. `docs-md` is a `nixosOptionsDoc`
+    result, so `meta` is merged via `// { meta = …; }`.
+- `meta.maintainers` / `meta.teams` stay **unset** (user picked
+  option 1). Verified: `tonywu20` / `TonyWu20` is not a registered
+  nixpkgs maintainer in the pinned rev (`lib.maintainers`,
+  5211 entries, rev `801bef6a`). The "maintainerless" entry in
+  nixpkgs' meta lint is informational only — no effect on build or
+  distribution. Revisit only if rushi ever lands in nixpkgs proper
+  (which would need a nixpkgs `maintainers/maintainer.json` PR
+  first).
+- No `teams` entry: no nixpkgs team owns rushi; claiming one
+  (e.g. `teams.rust`) would misattribute maintenance.
+
+**Follow-ups.**
+- License mismatch, resolved 2026-09-18 (user decision: single MIT).
+  `lib/mk-rushi.nix` now declares `meta.license = licenses.mit`,
+  matching the repo `LICENSE`. Verified via
+  `nix eval './tests/nix#packages.x86_64-linux.case-meta.meta.license.shortName'`
+  → `"mit"`.
+- `devShells`' `rushi` derivation carries no `meta`. User decided
+  2026-09-18 this is fine: dev shells are not distribution
+  packages. Closed, no follow-up.

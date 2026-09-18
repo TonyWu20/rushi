@@ -743,7 +743,9 @@ let
 
     meta = with lib; {
       description = "Configured rushi agent harness (v${version})";
-      license = licenses.asl20;
+      # Single MIT license, matching the repo's LICENSE file
+      # (decision 2026-09-18, docs/itches.md).
+      license = licenses.mit;
       # Keep in sync with the flake's supportedSystems: aarch64-darwin
       # is a first-class rushi platform (decision 2026-09-17, see
       # docs/itches.md and flake.nix). Nixpkgs 26.11 dropped

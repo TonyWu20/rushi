@@ -3,14 +3,13 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
     fenix = {
       url = "github:nix-community/fenix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, fenix, ... }: rec {
+  outputs = { self, nixpkgs, fenix, ... }: rec {
 
     # ── Shared library (system-independent) ──
     #
@@ -149,6 +148,12 @@
             mkdir -p $out/tools
             cp -r $src/tools/. $out/tools/
           '';
+          meta = with pkgLib; {
+            description = "rushi — Unix-philosophy agent harness (kernel + distribution)";
+            homepage = "https://github.com/TonyWu20/rushi";
+            license = licenses.mit;
+            mainProgram = "rushi";
+          };
         };
 
         # Auto-generated option documentation (pi-flake docs-md / docs-html
@@ -172,7 +177,13 @@
         # Use lib.mkRushi for a fully configured package.
         rushi = rushi;
         # Markdown option docs (auto-generated from the option schema).
-        docs-md = optionsDoc.optionsCommonMark;
+        docs-md = optionsDoc.optionsCommonMark // {
+          meta = with pkgLib; {
+            description = "rushi option reference (Markdown, auto-generated from the option schema)";
+            homepage = "https://github.com/TonyWu20/rushi";
+            license = licenses.mit;
+          };
+        };
         # HTML option docs (pandoc).
         docs-html = pkgs.stdenv.mkDerivation {
           name = "rushi-options-docs-html";
@@ -185,6 +196,11 @@
               --metadata title="rushi flake module — option reference" \
               -o $out/index.html
           '';
+          meta = with pkgLib; {
+            description = "rushi option reference (HTML, auto-generated from the option schema)";
+            homepage = "https://github.com/TonyWu20/rushi";
+            license = licenses.mit;
+          };
         };
       }
     );
