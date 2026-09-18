@@ -120,10 +120,14 @@ projects a subset of the **parent** `HarnessConfig` into a child
 
 The generated file is written to
 `<parent_session_dir>/sub-<uuid8>/config.toml`. The tool then invokes
-`$HARNESS_BIN run --session-dir <child_dir> --config <child_config>
-<task prompt>` and blocks. The parent controls the child's behavior
-explicitly; no config is hand-written, and the tool's `inputSchema`
-makes every choice the parent can make visible in one place.
+`$HARNESS_BIN run <child_dir> <task prompt>` and blocks. Config comes
+from the `$CONFIG` env var that `route` exports, or from an explicit
+`--config <child_config>`. `rushi run` logs the task as the child's
+initial `user_message` (steer queue) before the loop starts. The child
+process therefore needs no `user` binary. A plain `install.sh` install
+ships only `rushi`. The parent controls the child's behavior
+explicitly. No config is hand-written. The tool's `inputSchema` makes
+every choice the parent can make visible in one place.
 
 ### D4. The child is headless
 
@@ -578,8 +582,8 @@ The exts tool binary does:
 2. Build the child config via `config_gen::project(parent_cfg, args)`
    (D3, D5, D6). Write it to
    `<parent_session_dir>/sub-<uuid8>/config.toml`.
-3. `exec` `$HARNESS_BIN run --session-dir <child_dir> --config
-   <child_config> <task>` and wait for exit.
+3. `exec` `$HARNESS_BIN run <child_dir> <task>` and wait for exit
+   (`$CONFIG` points at the child config, exported by `route`).
 4. On exit, read the child's `events.jsonl`, find the last
    `ext_status` event, and emit a tool result:
    `{"status": "<terminal>", "summary": "<last assistant text or the error message>", "session": "<child_dir>"}`.
@@ -600,6 +604,14 @@ parent agent sees in its next step.
   `rushi config-gen` subcommand that writes a child config. P3.
   The `bin/spawn_agent` kernel workspace member named in section 4
   is superseded. The tool is exts-owned (decision 2026-09-16).
+
+- `rushi run` accepts an optional initial task (implemented
+  2026-09-18): `rushi run <session> [task] [--no-run]`. When a task
+  is given, `run_loop` logs it as a steer `user_message` before the
+  first step and records the session `cwd` file. `claim` then reports
+  `awaiting_model` and the first step runs the model turn on it.
+  This is the seed path for subagents and replaces the `user` binary
+  in distributed installs, which ship only `rushi`.
 
 - Route tool-env exports: `HARNESS_BIN` and `CONFIG` join
   `HARNESS_SESSION_DIR` in the tool subprocess env. The exts
@@ -709,10 +721,10 @@ deserialization with a `serde_json::Error` naming the field. The
 
 ## Gate
 
-**Blocked.** D6 (tool-path lists) and D8 (typed events) are built.
-Not yet implemented: `config_gen`, the `rushi config-gen`
-subcommand, the route tool-env exports, and the exts-owned
-`spawn_agent` tool. P1-P7 are open. P8 (typed events) is done:
-`event.rs` is wired into the loop and all stage binaries.
-`event_validation` is retired, and the loop no longer reads
-`schemas/events/v1/` at runtime.
+**Blocked.** D6 (tool-path lists), D8 (typed events), and the
+`rushi run <session> [task]` seed contract are built. Not yet
+implemented: `config_gen`, the `rushi config-gen` subcommand, the route
+tool-env exports, and the exts-owned `spawn_agent` tool. P1-P7 are open.
+P8 (typed events) is done: `event.rs` is wired into the loop and all
+stage binaries. `event_validation` is retired, and the loop no longer
+reads `schemas/events/v1/` at runtime.

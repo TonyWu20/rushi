@@ -13,18 +13,26 @@
 
 use std::path::Path;
 
+use rushi_common::event::{Event, UserMessage};
 use rushi_common::hooks::{self, Window};
 use rushi_common::stage::{Claim, SessionDir, StageRunner};
 
 use crate::config::HarnessConfig;
 use crate::signals;
 use crate::step::{
-    append_event, describe_model, fire_step_start, hook_env, make_runner,
-    publish_model_thinking, run_awaiting_model, StepMode,
+    append_event, append_line, describe_model, fire_step_start, hook_env,
+    make_runner, publish_model_thinking, run_awaiting_model, StepMode,
 };
 
 /// The `rushi run` entry point.
-pub fn run(cfg: &HarnessConfig, session_dir: &Path) {
+///
+/// `task`: optional initial prompt (`rushi run SESSION [TASK]`). When
+/// present it is logged as a steer `user_message` before the loop
+/// starts, so `claim` reports `awaiting_model` and the first step runs
+/// a model turn on it — the subagent spawn contract
+/// (docs/subagent-design.md section 4). `no_run`: log the task and
+/// exit without running the loop.
+pub fn run(cfg: &HarnessConfig, session_dir: &Path, task: Option<&str>, no_run: bool) {
     // The session dir must exist (create it).
     if let Err(e) = std::fs::create_dir_all(session_dir) {
         eprintln!("rushi: cannot create session dir: {e}");
@@ -43,6 +51,21 @@ pub fn run(cfg: &HarnessConfig, session_dir: &Path) {
 
     // Install signal handlers (SIGTERM → 143, SIGINT → 130).
     signals::install();
+
+    // Seed the initial user message before the first step. A steer
+    // message leaves the claim in `awaiting_model`, so the loop runs
+    // the prompt instead of idling out.
+    if let Some(task) = task {
+        if task.trim().is_empty() {
+            eprintln!("rushi: task must not be empty");
+            std::process::exit(1);
+        }
+        let line = seed_initial_message(cfg, session_dir, task);
+        if no_run {
+            println!("{line}");
+            std::process::exit(0);
+        }
+    }
 
     let runner = make_runner(cfg);
     let session = SessionDir {
@@ -244,6 +267,47 @@ fn acquire_lock(session_dir: &Path) {
     std::mem::forget(lock_file);
 }
 
+/// Log the initial `user_message` into a fresh (or resumed) session and
+/// return the committed JSON line.
+///
+/// Mirrors what `bin/user` does for the interactive flow, in-process —
+/// this is what keeps `rushi` self-contained for seeding a session when
+/// the `user` binary is not shipped (plain `install.sh` ships only the
+/// `rushi` binary; docs/subagent-design.md section 4).
+///
+/// - The message is a steer `user_message` (no `queue` field), so
+///   `claim` reports `awaiting_model` and the loop's first step runs a
+///   model turn on it.
+/// - The entry point owns the `cwd` decision: the working directory is
+///   recorded in `sessions/<n>/cwd` only when the file does not yet
+///   exist (same rule as `bin/user`; `assemble`/`route` only read it).
+fn seed_initial_message(cfg: &HarnessConfig, session_dir: &Path, task: &str) -> String {
+    let cwd_path = session_dir.join("cwd");
+    if !cwd_path.exists() {
+        if let Ok(cwd) = std::env::current_dir() {
+            if let Err(e) = std::fs::write(&cwd_path, cwd.to_string_lossy().as_bytes()) {
+                eprintln!("rushi: warning: cannot write cwd file: {e}");
+            }
+        }
+    }
+
+    let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let event = Event::UserMessage(UserMessage {
+        v: 1,
+        ts,
+        content: task.to_string(),
+        queue: None,
+        id: None,
+    });
+    let line = serde_json::to_string(&event)
+        .unwrap_or_else(|e| {
+            eprintln!("rushi: cannot serialize user_message: {e}");
+            std::process::exit(1);
+        });
+    append_line(cfg, session_dir, &line);
+    line
+}
+
 /// Fire a fire-and-forget observation window and log its failures.
 fn fire_observation(
     cfg: &HarnessConfig,
@@ -330,5 +394,89 @@ fn log_hook_results(
             });
             append_event(cfg, &session.path, &event);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// A minimal in-memory config for seeding tests: no model calls,
+    /// no hooks, no tool paths.
+    fn test_cfg(root: &Path) -> HarnessConfig {
+        HarnessConfig {
+            config_path: root.join("config.toml"),
+            config_dir: root.to_path_buf(),
+            sessions_root: root.join("sessions"),
+            native_tool_paths: Vec::new(),
+            extension_tool_paths: Vec::new(),
+            active_model: "stub".into(),
+            model_id: "stub".into(),
+            max_output_tokens: 32768,
+            context_tokens: 8192,
+            input_budget: 1000,
+            context_budget: 1000,
+            last_measured_input: 0,
+            compact_enabled: false,
+            compact_strategy: "compact".into(),
+            compact_reserve_tokens: 16384,
+            compact_keep_tokens: 20000,
+            compact_text_chars: 200,
+            estimate_chars_per_token: 4,
+            approval_timeout_s: None,
+            hooks_timeout_ms: 30000,
+            hooks: Vec::new(),
+            run_max_silent_refires: 2,
+            model_bin: PathBuf::from("model"),
+            compact_bin: PathBuf::from("compact"),
+            assemble_bin: PathBuf::from("assemble"),
+            route_bin: PathBuf::from("route"),
+            claim_bin: PathBuf::from("claim"),
+            parse_bin: PathBuf::from("parse"),
+            log_bin: PathBuf::from("log"),
+        }
+    }
+
+    #[test]
+    fn seed_initial_message_appends_steer_user_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_cfg(dir.path());
+        let sess = dir.path().join("sess");
+        std::fs::create_dir_all(&sess).unwrap();
+
+        let line = seed_initial_message(&cfg, &sess, "do the thing");
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["type"], "user_message");
+        assert_eq!(v["content"], "do the thing");
+        assert_eq!(v["v"], 1);
+        assert!(v.get("queue").is_none(), "steer queue leaves the field absent");
+        // The typed validator (P8) accepts the seeded line.
+        assert!(rushi_common::event::parse_event(&line).is_ok());
+        // The event was committed to the session log.
+        let log = std::fs::read_to_string(sess.join("events.jsonl")).unwrap();
+        assert!(log.lines().any(|l| l == line));
+    }
+
+    #[test]
+    fn seed_initial_message_records_cwd_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_cfg(dir.path());
+        let sess = dir.path().join("sess");
+        std::fs::create_dir_all(&sess).unwrap();
+        // Pre-existing cwd file (an earlier entry point owned it): kept.
+        std::fs::write(sess.join("cwd"), "/pre-existing\n").unwrap();
+        seed_initial_message(&cfg, &sess, "task");
+        assert_eq!(
+            std::fs::read_to_string(sess.join("cwd")).unwrap(),
+            "/pre-existing\n"
+        );
+
+        // Fresh session: the entry point records the CWD.
+        let sess2 = dir.path().join("sess2");
+        std::fs::create_dir_all(&sess2).unwrap();
+        seed_initial_message(&cfg, &sess2, "task");
+        let cwd = std::fs::read_to_string(sess2.join("cwd")).unwrap();
+        assert_eq!(cwd, std::env::current_dir().unwrap().to_string_lossy());
     }
 }

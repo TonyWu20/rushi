@@ -8,6 +8,11 @@ use std::io::{self, Read};
 use std::path::PathBuf;
 
 /// Append a user_message event to a session log and run the agent loop
+///
+/// In distributed installs where only the `rushi` binary is shipped
+/// (plain `install.sh`), prefer `rushi run <session> <task>`. It logs
+/// the same seed `user_message` (steer queue) and then runs the loop
+/// in-process (docs/subagent-design.md section 4).
 #[derive(Parser)]
 #[command(name = "user", about = "Append a user message and run the agent loop")]
 struct Args {

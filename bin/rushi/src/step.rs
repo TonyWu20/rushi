@@ -38,7 +38,7 @@ use crate::step::tool::run_awaiting_tool_result;
 // paths (`crate::step::append_event`, `crate::step::hook_env`, …).
 // `pub use` also binds the names locally for this file.
 pub use crate::step::hook::{fire_step_start, hook_env};
-pub use crate::step::logio::append_event;
+pub use crate::step::logio::{append_event, append_line};
 pub use crate::step::model::{
     describe_model, publish_model_thinking, run_awaiting_model,
 };

@@ -37,7 +37,7 @@ stdin/stdout); the harness never imports tool or hook code.
 One turn of the agent loop:
 
 ```
-rushi run <session>
+rushi run <session> [task]
   ┌─────────────────────────────────────────────────────────┐
   │  claim → assemble → model → parse → route → log        │
   └─────────────────────────────────────────────────────────┘
@@ -56,6 +56,13 @@ rushi run <session>
 
 The loop binary (`bin/rushi`) orchestrates these stages in sequence, handles
 cancellation signals, and manages the session lock (`loop.pid`).
+
+The loop binary can also seed a session: `rushi run <session> <task>`
+logs `<task>` as the session's initial `user_message` (steer queue)
+before the loop starts. `--no-run` logs the message without running the
+loop. This keeps `rushi` self-contained for starting a session without
+the separate `user` binary, which plain installs do not ship
+(`docs/subagent-design.md`, the subagent spawn contract).
 
 ### Loop lifecycle
 

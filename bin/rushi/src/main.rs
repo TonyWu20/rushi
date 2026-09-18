@@ -3,7 +3,11 @@
 //! Subcommands:
 //! - `rushi` (default) or `rushi tui [SESSION]` — open the TUI
 //! - `rushi setup [--locked]` — initialize a project from `rushi.toml`
-//! - `rushi run SESSION` — the full turn loop (internal, TUI-supervised)
+//! - `rushi run SESSION [TASK]` — the full turn loop. With `TASK`, it
+//!   is first logged as the session's initial `user_message` (steer
+//!   queue) so the loop starts by running a model turn on it — the
+//!   subagent spawn contract (docs/subagent-design.md section 4).
+//!   `--no-run` logs the task without running the loop.
 //! - `rushi step SESSION` — one step (internal, TUI-supervised)
 //! - `rushi docs [SECTION|DOC]` — print the embedded harness reference;
 //!   a section of the default reference, or a bundled sub-document by
@@ -56,10 +60,27 @@ enum Command {
         #[arg(long)]
         locked: bool,
     },
-    /// Run the full turn loop (replaces `turn.sh`)
+    /// Run the full turn loop (replaces `turn.sh`).
+    ///
+    /// With an optional `TASK`, the prompt is logged as the session's
+    /// initial `user_message` (steer queue) before the loop starts, so
+    /// the loop's first step runs a model turn on it. This makes `rushi`
+    /// self-contained for seeding a session (the subagent spawn
+    /// contract, docs/subagent-design.md section 4) without the
+    /// separate `user` binary, which plain installs do not ship.
     Run {
         /// Session name or directory
         session: String,
+
+        /// Initial prompt, logged as a `user_message` before the loop
+        /// starts. Omit to continue from the log's current state.
+        task: Option<String>,
+
+        /// Log the task without running the loop (append-only mode,
+        /// mirrors `user --no-run`). The event line is printed to
+        /// stdout.
+        #[arg(long)]
+        no_run: bool,
     },
     /// Run a single step (replaces `step.sh`)
     Step {
@@ -130,11 +151,11 @@ fn main() {
             }
         }
 
-        Command::Run { session } => {
+        Command::Run { session, task, no_run } => {
             let cfg = config::HarnessConfig::load(&PathBuf::from(config_path));
             let session_dir = cfg.resolve_session(&session);
             signals::install();
-            run_loop::run(&cfg, &session_dir);
+            run_loop::run(&cfg, &session_dir, task.as_deref(), no_run);
         }
 
         Command::Step { session } => {
