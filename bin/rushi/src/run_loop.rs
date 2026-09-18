@@ -107,9 +107,14 @@ pub fn run(cfg: &HarnessConfig, session_dir: &Path) {
                 // without appending a `user_message`. The hook delivers
                 // its pending feedback through `model.before` on that
                 // refired call, so the model revises the gated reply in
-                // the same run. The refired request grows only by the
-                // `model.before` fragment, so the prompt-cache prefix is
-                // untouched. A hard per-run cap (`[run]
+                // the same run. The fragment is joined onto the tail of
+                // `instructions` (tail-injection placement rule,
+                // docs/loop-lifecycle-hooks.md 4.5), so under strict
+                // prefix-cache semantics it invalidates the cache for
+                // everything after the injection point. Hooks therefore
+                // must keep fragments byte-stable; dynamic content
+                // belongs as a user item at the input tail instead.
+                // A hard per-run cap (`[run]
                 // max_silent_refires`, default 2) bounds the silent
                 // loop: each refire is a full model call.
                 let refire = payload_val
