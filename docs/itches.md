@@ -409,6 +409,13 @@ fully scripted house gate.
 - `run-idle-continue-e2e.sh` remains a rushi-exts gate, not part of
   this repo's CI.
 
+**Follow-up (consistency).** `lib/mk-rushi.nix` still declared the
+configured package's `meta.platforms = platforms.linux` (nixpkgs' full
+Linux arch list, no darwin), contradicting the flake's
+`supportedSystems`. Aligned `lib/mk-rushi.nix` to declare exactly the
+flake's three systems (`x86_64-linux aarch64-linux aarch64-darwin`),
+with a comment pointing back to this decision.
+
 ## e2e suites scoped to Linux runners (2026-09-17, user decision)
 
 **Observed.** CI run 35145471528 ran the full gate on all three
