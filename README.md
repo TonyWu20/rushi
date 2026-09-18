@@ -222,7 +222,6 @@ bash scripts/tool-conformance.sh
 More e2e suites: `crash-e2e.sh`, `install-e2e.sh`,
 `model-before-transform-e2e.sh`,
 `run-idle-log-message-e2e.sh`,
-`run-idle-refire-e2e.sh`,
 `steer-inflight-e2e.sh`,
 `tool-after-transform-e2e.sh`.
 

@@ -964,7 +964,6 @@ mod tests {
             approval_timeout_s: None,
             hooks_timeout_ms: 10000,
             hooks: vec![],
-            run_max_silent_refires: 2,
             model_bin: bin.join("model"),
             compact_bin: bin.join("compact"),
             assemble_bin: bin.join("assemble"),

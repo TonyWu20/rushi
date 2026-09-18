@@ -153,23 +153,14 @@ heart of this design.
     loop alive without appending the visible `user_message` event.
     The hook carries its text to the model through its own
     `model.before` transform; the kernel only keeps the loop alive
-    (issue #4, the writing-rule reply-gate use case). Absent or
+    (issue #4). Absent or
     `true` preserves the historical behavior, byte-identical.
-  - `continue` with `"refire": true` in the payload makes the loop
-    run a model turn immediately, without appending any
-    `user_message` (issue #6). The hook delivers its pending
-    feedback through its `model.before` transform on that refired
-    call, so the model revises the gated reply in place, in the
-    same run (the TUI shows no correction prompt). The refired
-    request grows only by the `model.before` fragment, so the
-    prompt-cache prefix is untouched. Each refire is a full model
-    call, so the kernel enforces a hard per-run cap (`[run]
-    max_silent_refires`, default 2; 0 disables refires): when the
-    cap is reached the kernel logs a `run.refire_cap` marker and
-    stops the run instead of re-firing `run.idle` forever. Each
-    refired turn logs a `run.refire` marker (`{"n": <ordinal>}`);
-    neither marker enters the assembled request prefix. Absent or
-    `false` preserves the current behavior, byte-identical.
+  - The in-place silent `refire` turn (issue #6) is retired. A hook
+    that wants the model to act on its own feedback returns
+    `continue` with a `message`, so the loop logs a follow
+    `user_message` and drains it as a new turn. The transcript
+    keeps a normal user/assistant alternation: the model sees a
+    genuine user turn, not a re-presented reply.
 
 ## 4. The hook ABI (the Unix contract)
 

@@ -104,10 +104,6 @@ jobs:
         if: matrix.e2e
         run: bash scripts/run-idle-log-message-e2e.sh
 
-      - name: "e2e: run-idle refire"
-        if: matrix.e2e
-        run: bash scripts/run-idle-refire-e2e.sh
-
       - name: "e2e: steer-inflight"
         if: matrix.e2e
         run: bash scripts/steer-inflight-e2e.sh
