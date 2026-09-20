@@ -220,6 +220,16 @@ trailing newline if the source file lacks one.
 # [tui.tool_display]
 # preset = "opencode"
 # preview_lines = 8
+
+# --- [web] ---
+# WebUI front-end (Tier 2, replaceable, like the TUI).
+# `rushi serve` resolves the web binary in the same order as the TUI:
+# `[web].binary` (relative to the config dir), side-by-side next to the
+# `rushi` executable, then `PATH`. It forwards `--sessions-root` from
+# `[paths].sessions_root` and an opaque loop command.
+# binary = "rushi-web"
+# host = "127.0.0.1"    # forwarded to rushi-web --host
+# port = 8480           # forwarded to rushi-web --port
 ```
 
 ---

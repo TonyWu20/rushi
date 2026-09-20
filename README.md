@@ -66,6 +66,7 @@ Subcommands:
 | Command                                      | Purpose                                |
 | -------------------------------------------- | -------------------------------------- |
 | `rushi` _(default)_ or `rushi tui [SESSION]` | Launch the TUI                         |
+| `rushi serve`                                | Launch the WebUI front-end (`rushi-web`), if one is installed |
 | `rushi setup [--locked]`                     | Initialize a project from `rushi.toml` |
 | `rushi run SESSION`                          | Run the full turn loop                 |
 | `rushi step SESSION`                         | Run a single step                      |
