@@ -491,3 +491,66 @@ absent.
 - `devShells`' `rushi` derivation carries no `meta`. User decided
   2026-09-18 this is fine: dev shells are not distribution
   packages. Closed, no follow-up.
+
+## No front-end launcher subcommands in the kernel, and `rushi tui` to be retired (2026-09-20, user decision)
+
+**Observed.** PR #23 (`rushi serve`, opened 2026-09-20) adds a
+second front-end launcher subcommand to `bin/rushi`.
+It resolves a `rushi-web` binary (`[web].binary`, then side-by-side,
+then PATH), forwards `--sessions-root`, `[web].host`, `[web].port`,
+and `--loop-cmd "<exe> run"`, and exits with the child's code.
+It mirrors the existing `rushi tui` arm.
+The webui repo carried a private kernel patch so it could pin the
+kernel commit that ships the launcher.
+
+**Decision (2026-09-20, user).** PR #23 is not supported.
+The kernel does not host per-front-end launcher subcommands.
+
+- `serve` is a thin wrapper. `rushi-web` can do its whole job
+  itself. It reads the config TOML and spawns `rushi run` on PATH.
+  This passes the P4 pre-test (config or script, no protocol change).
+- P2 rule of three. `rushi tui` was the first need, inlined as early
+  coupling of the then-sole UI into the kernel CLI. `serve` would be
+  the second, and the pattern grows one subcommand per front-end.
+  The kernel stays front-end-agnostic per
+  `docs/skill-remapped-to-os-apps.md` §2. Tier 2 is swappable.
+  The base includes a default front-end but does not mandate one.
+- `rushi tui` is superseded by invoking the front-end binary
+  directly from the rushi-tui repo, a `rushi-tui` command.
+  Removal is a separate, user-visible change tracked here.
+  It is not part of PR #23.
+- P3 note (2026-09-20): promoting the config resolver into
+  `rushi-common` waives P3's "three copies or diverged bug"
+  trigger on purpose.
+  The recorded self-wiring decision creates the second and third
+  consumers (rushi-tui, rushi-web) before any copies exist.
+  Sharing now is the cheaper path.
+
+**Follow-ups (open, P0-gated. Build only on a recorded episode):**
+- [ ] Remove `Command::Tui`, `resolve_tui_binary`, and
+      `config_tui_binary` from `bin/rushi/src/main.rs`.
+      Decide the bare-`rushi` default.
+      Today `rushi` with no args launches the TUI (main.rs:123).
+- [ ] Update the README subcommand table and the `[tui]` section of
+      `docs/reference/README.md`.
+      Also update the `flake.nix` devShell comment (lines 247-250)
+      that documents the `tui`-on-PATH lookup.
+- [x] Config-path discovery for self-wired front-ends.
+      Done 2026-09-20.
+      The 4-step resolver ($CONFIG > CLI > Nix side-by-side > CWD)
+      and `resolved_exe()` (issue #25 symlink recovery) now live in
+      `rushi-common` (`crates/rushi/src/paths.rs`).
+      `bin/rushi` calls the shared function.
+      Front-ends get identical resolution by linking the crate they
+      already path-depend on.
+      No kernel endpoint is needed, so the
+      `rushi config --print-path` idea is retired.
+- [ ] rushi-tui repo: ship the entry point as one `rushi-tui`
+      command. It resolves its own config (`$CONFIG`, `--config`,
+      or CWD) and owns session/loop wiring.
+- [ ] rushi-web repo: self-wire. Read the config TOML and spawn
+      `rushi run`. Drop the private kernel patch. Pin only the
+      Tier-1 CLI contract, not a launcher commit.
+
+**Remote record:** PR #23 review comment at
+`github.com/TonyWu20/rushi/pull/23#issuecomment-5759736599`.
