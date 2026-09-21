@@ -117,7 +117,7 @@ fn main() {
     let args = Args::parse();
 
     // The CONFIG env var sets the config path, as the old scripts did.
-    let config_path = resolve_config_path(&args);
+    let config_path = rushi_common::paths::resolve_config_path(args.config.as_deref());
 
     // Default to TUI when no subcommand is given.
     let cmd = args.command.unwrap_or(Command::Tui { session: None });
@@ -184,43 +184,6 @@ fn main() {
             }
         }
     }
-}
-
-/// Resolve the config path.
-///
-/// Priority (highest to lowest):
-/// 1. `$CONFIG` env var — explicit user/system override
-/// 2. `--config` CLI flag — user-specified path
-/// 3. Side-by-side `<exe_dir>/../config.toml` — Nix package layout
-///    (`$out/bin/rushi` finds `$out/config.toml`)
-/// 4. `config.toml` in CWD — dev checkout fallback
-fn resolve_config_path(args: &Args) -> String {
-    // 1. $CONFIG env var (set by `user` binary, or by the user)
-    if let Ok(p) = std::env::var("CONFIG") {
-        return p;
-    }
-
-    // 2. Explicit --config flag
-    if let Some(ref p) = args.config {
-        return p.to_string_lossy().into_owned();
-    }
-
-    // 3. Side-by-side: <exe_dir>/../config.toml (Nix: $out/config.toml)
-    // Use the canonicalized exe (issue #25): on macOS current_exe() is
-    // the launch path, so a profile symlink chain would miss the
-    // store package's sibling config.toml.
-    if let Some(exe) = config::resolved_exe() {
-        if let Some(bin_dir) = exe.parent() {
-            if let Some(candidate) = bin_dir.parent().map(|p| p.join("config.toml")) {
-                if candidate.exists() {
-                    return candidate.to_string_lossy().into_owned();
-                }
-            }
-        }
-    }
-
-    // 4. CWD fallback (dev checkout)
-    "config.toml".into()
 }
 
 /// Find the `tui` binary. Resolution order:

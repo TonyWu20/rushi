@@ -108,20 +108,13 @@ fn resolve_hook_command(raw: &str, exe_dir: &Path) -> String {
 
 /// The running executable's path, symlinks resolved.
 ///
-/// `std::env::current_exe()` on macOS reports the launch path with no
-/// symlink resolution (unlike Linux's `/proc/self/exe`). Under a
-/// per-user profile symlink chain (nix-darwin:
-/// `/etc/profiles/<user>/bin/rushi` -> home-manager path -> store)
-/// every sibling resolution against the raw path misses, because the
-/// package layout (`config.toml`, `hooks/`, `tools/`) lives at the
-/// store package root, two links down (issue #25). Canonicalize once
-/// and reuse the result wherever sibling resolution happens. When
-/// canonicalization fails (e.g. the binary was deleted after launch)
-/// fall back to the raw reported path.
-pub fn resolved_exe() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    Some(std::fs::canonicalize(&exe).unwrap_or(exe))
-}
+/// Lives in the shared crate so front-end binaries (rushi-tui,
+/// rushi-web) resolve the Nix side-by-side layout the same way the
+/// kernel does (docs/itches.md, 2026-09-20: front-ends self-wire).
+/// The issue-#25 background (macOS launch path, profile symlink
+/// chain, store package root two links down) is documented at the
+/// definition: `crates/rushi/src/paths.rs`.
+pub use rushi_common::paths::resolved_exe;
 
 impl HarnessConfig {
     /// Load and resolve the config from a TOML file.
@@ -516,16 +509,6 @@ compact_reserve_tokens = 16384
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("missing.toml");
         assert!(config_dump(&missing.to_string_lossy()).is_err());
-    }
-
-    #[test]
-    fn resolved_exe_is_canonicalized() {
-        // resolved_exe() should return the same path that
-        // fs::canonicalize produces for the real executable.
-        let raw = std::env::current_exe().unwrap();
-        let want = std::fs::canonicalize(&raw).unwrap();
-        let got = resolved_exe().unwrap();
-        assert_eq!(got, want);
     }
 
     #[cfg(unix)]
