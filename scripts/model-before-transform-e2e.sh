@@ -128,6 +128,24 @@ EOF
   chmod +x "$WORK/hook-model-before"
 }
 
+# The no-op transform hook (issue #24): a transform decision whose
+# `request` object is the received request echoed back unchanged.
+# The applied request is semantically identical to the original, so
+# no `hook_applied` marker may be written.
+make_hook_noop() {
+  cat > "$WORK/hook-model-before" <<'EOF'
+#!/usr/bin/env bash
+set -u
+payload=$(cat)
+req=$(jq -c '.request // {}' <<<"$payload")
+jq -cn --argjson req "$req" '{
+  decision: "transform",
+  payload: { request: $req }
+}'
+EOF
+  chmod +x "$WORK/hook-model-before"
+}
+
 run_step() {
   (
     cd "$WORK"
@@ -236,9 +254,33 @@ scenario_malformed() {
   assert_eq "$(count_markers "hook_applied")" 0 "no cache-break marker"
 }
 
+# ── Scenario 4: no-op transform (issue #24) ───────────────────────
+# The hook returns a transform whose `request` is the received
+# request echoed back unchanged.  The applied request is semantically
+# identical to the original, so no `hook_applied` marker is written.
+# The `hook.model.before` decision marker is still logged.
+scenario_noop() {
+  NEW_WORK noop
+  work_config 1
+  seed_session
+  make_stub
+  make_hook_noop
+  run_step
+  assert_eq "$(claim_state)" "idle" "the step runs to idle"
+  local req
+  req="$(last_req)"
+  assert_eq "$(jq -r '.input[0].content' <<<"$req")" "do the task" \
+    "the model receives the unmodified request"
+  assert_eq "$(count_markers "hook.model.before")" 1 \
+    "one decision marker (transform decision is logged)"
+  assert_eq "$(count_markers "hook_applied")" 0 \
+    "no cache-break marker on a no-op transform"
+}
+
 scenario_transform
 scenario_default
 scenario_malformed
+scenario_noop
 
 echo
 echo "model-before-transform-e2e: $PASS passed, $FAIL failed"
