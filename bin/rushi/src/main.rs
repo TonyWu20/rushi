@@ -206,7 +206,10 @@ fn resolve_config_path(args: &Args) -> String {
     }
 
     // 3. Side-by-side: <exe_dir>/../config.toml (Nix: $out/config.toml)
-    if let Ok(exe) = std::env::current_exe() {
+    // Use the canonicalized exe (issue #25): on macOS current_exe() is
+    // the launch path, so a profile symlink chain would miss the
+    // store package's sibling config.toml.
+    if let Some(exe) = config::resolved_exe() {
         if let Some(bin_dir) = exe.parent() {
             if let Some(candidate) = bin_dir.parent().map(|p| p.join("config.toml")) {
                 if candidate.exists() {
@@ -230,7 +233,7 @@ fn resolve_tui_binary(config_path: &str) -> String {
     if let Some(p) = config_tui_binary(config_path) {
         return p;
     }
-    if let Ok(exe) = std::env::current_exe() {
+    if let Some(exe) = config::resolved_exe() {
         if let Some(dir) = exe.parent() {
             let candidate = dir.join("tui");
             if candidate.exists() {

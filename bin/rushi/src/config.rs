@@ -106,6 +106,23 @@ fn resolve_hook_command(raw: &str, exe_dir: &Path) -> String {
     raw.to_string()
 }
 
+/// The running executable's path, symlinks resolved.
+///
+/// `std::env::current_exe()` on macOS reports the launch path with no
+/// symlink resolution (unlike Linux's `/proc/self/exe`). Under a
+/// per-user profile symlink chain (nix-darwin:
+/// `/etc/profiles/<user>/bin/rushi` -> home-manager path -> store)
+/// every sibling resolution against the raw path misses, because the
+/// package layout (`config.toml`, `hooks/`, `tools/`) lives at the
+/// store package root, two links down (issue #25). Canonicalize once
+/// and reuse the result wherever sibling resolution happens. When
+/// canonicalization fails (e.g. the binary was deleted after launch)
+/// fall back to the raw reported path.
+pub fn resolved_exe() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    Some(std::fs::canonicalize(&exe).unwrap_or(exe))
+}
+
 impl HarnessConfig {
     /// Load and resolve the config from a TOML file.
     pub fn load(config_path: &Path) -> Self {
@@ -250,8 +267,11 @@ impl HarnessConfig {
         // Binary paths: env overrides, then sibling of the running binary.
         // Computed before the hook loop so bare hook commands can resolve
         // against the sibling `bin/` dir and the package `hooks/` dir.
-        let exe_dir = std::env::current_exe()
-            .ok()
+        // The exe path is canonicalized (issue #25): on macOS
+        // `current_exe()` reports the launch path without resolving
+        // symlinks, so a profile symlink chain would otherwise miss the
+        // store package's sibling `bin/` and `hooks/` dirs.
+        let exe_dir = resolved_exe()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
             .unwrap_or_else(|| PathBuf::from("."));
 
@@ -496,5 +516,55 @@ compact_reserve_tokens = 16384
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("missing.toml");
         assert!(config_dump(&missing.to_string_lossy()).is_err());
+    }
+
+    #[test]
+    fn resolved_exe_is_canonicalized() {
+        // resolved_exe() should return the same path that
+        // fs::canonicalize produces for the real executable.
+        let raw = std::env::current_exe().unwrap();
+        let want = std::fs::canonicalize(&raw).unwrap();
+        let got = resolved_exe().unwrap();
+        assert_eq!(got, want);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_exe_recovers_store_layout() {
+        // Regression for issue #25: a two-level symlink chain
+        // (profile -> hm path -> store) must resolve to the store
+        // package root so sibling dirs are found.
+        let (_root, bin) = fake_pkg_layout();
+        // Create the "rushi" binary placeholder inside the fake pkg.
+        std::fs::write(bin.join("rushi"), "").unwrap();
+
+        // Build a two-level symlink chain:
+        //   outer/bin/rushi -> mid/bin/rushi -> <root>/bin/rushi
+        let outer = tempfile::tempdir().unwrap();
+        let mid = tempfile::tempdir().unwrap();
+        let outer_bin = outer.path().join("bin");
+        let mid_bin = mid.path().join("bin");
+        std::fs::create_dir_all(&outer_bin).unwrap();
+        std::fs::create_dir_all(&mid_bin).unwrap();
+
+        let mid_link = mid_bin.join("rushi");
+        std::os::unix::fs::symlink(bin.join("rushi"), &mid_link).unwrap();
+        let outer_link = outer_bin.join("rushi");
+        std::os::unix::fs::symlink(&mid_link, &outer_link).unwrap();
+
+        // The raw launch path's parent has no sibling hooks/ dir.
+        let raw_dir = outer_link.parent().unwrap().to_path_buf();
+        assert!(
+            !raw_dir.join("../hooks/harness-hook-goal-idle").is_file(),
+            "raw launch dir should NOT have the hooks sibling (bug repro)"
+        );
+
+        // canonicalize the outer symlink -> resolves through both links
+        // to the real <root>/bin/rushi, whose parent is <root>/bin.
+        let canon = std::fs::canonicalize(&outer_link).unwrap();
+        let canon_dir = canon.parent().unwrap().to_path_buf();
+        let got = resolve_hook_command("harness-hook-goal-idle", &canon_dir);
+        let want = bin.join("../hooks/harness-hook-goal-idle");
+        assert_eq!(got, want.to_string_lossy().to_string());
     }
 }
