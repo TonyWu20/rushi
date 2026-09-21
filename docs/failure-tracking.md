@@ -1233,3 +1233,32 @@ stays out of the FT-026 fix and is tracked here.
 - the session log holds an errored `tool_result` with the
   resend text. `claim` reports `awaiting_model`. The loop
   continues to the next model call.
+
+## FT-028 — The PR #26 regression test fails on the macOS CI
+
+**Symptom:** PR #26 (issue #25) merged with green Linux jobs. The
+macOS gate failed exactly on
+`symlinked_exe_recovers_store_layout`. Both Linux jobs passed.
+
+**Root cause:** The regression test compared two path strings.
+The resolved side passed through `fs::canonicalize`. The
+expected side was built from the raw `tempfile::tempdir()`
+base. On macOS the temp dir lives under `/var`, which links
+to `/private/var`. So the two prefixes differed and the
+string comparison failed. On Linux `/tmp` is a real
+directory. Both sides matched, so the test passed. The
+production `resolved_exe` fix from PR #26 was correct. Only
+the test expectation was platform-dependent.
+
+**Fix:** PR #28 canonicalizes the fake package `bin/` base
+up front. Both sides of the comparison now share one
+canonical form. The regression semantics are unchanged. The
+two-level symlink chain must still resolve to the package
+root for sibling hook discovery.
+
+**Verification:**
+- Reproduced on Linux by pointing `TMPDIR` at a symlinked
+  path. The test failed before the fix and passed after it.
+- `cargo test --workspace` is green on the new base.
+- All three CI jobs passed on PR #28, including
+  `macos-14`. The PR merged as `f901b8d`.
