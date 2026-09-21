@@ -355,6 +355,9 @@ fn apply_model_before_transform(
     };
     match new_request {
         Some(r) => {
+            // issue #24: capture the original so we can detect a no-op
+            // transform and skip the `hook_applied` markers.
+            let original_request = request.json.clone();
             request.json = r;
             // Join the hook-supplied `prompt_fragments` into
             // `instructions`, then strip the field so the model call
@@ -418,20 +421,27 @@ fn apply_model_before_transform(
                 }
             }
             log_hook_window(cfg, session, "model.before", "transform", results);
-            // One `hook_applied` marker per hook that returned
-            // `transform`, in registration order (issue #19). The
-            // old `.find()` recorded only the first, silently
-            // hiding every later transforming hook from the log.
-            for r in results.iter().filter(|r| r.decision.as_deref() == Some("transform")) {
-                let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-                let marker = serde_json::json!({
-                    "v": 1,
-                    "type": "ext_status",
-                    "ts": ts,
-                    "id": "hook_applied",
-                    "value": r.command.clone(),
-                });
-                append_event(cfg, &session.path, &marker);
+            // issue #24: only write `hook_applied` markers when the
+            // transform actually changed the request.  If the folded
+            // payload is semantically identical to the original
+            // (key-order-insensitive `serde_json::Value` equality,
+            // which matches the key-sorted wire form because Map is
+            // a BTreeMap without `preserve_order`), no cache-break
+            // occurred and the markers would be misleading.
+            if request.json != original_request {
+                // One `hook_applied` marker per hook that returned
+                // `transform`, in registration order (issue #19).
+                for r in results.iter().filter(|r| r.decision.as_deref() == Some("transform")) {
+                    let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                    let marker = serde_json::json!({
+                        "v": 1,
+                        "type": "ext_status",
+                        "ts": ts,
+                        "id": "hook_applied",
+                        "value": r.command.clone(),
+                    });
+                    append_event(cfg, &session.path, &marker);
+                }
             }
         }
         None => {
@@ -1072,6 +1082,139 @@ mod tests {
                 Value::String("harness-hook-a".to_string()),
                 Value::String("harness-hook-b".to_string()),
             ]
+        );
+    }
+
+    /// issue #24: a hook that re-emits the request unchanged (the
+    /// byte-stable steady state of the goal-arm and simple-english
+    /// transforms) must produce no `hook_applied` marker. The
+    /// `hook.model.before` decision marker is still logged: the
+    /// decision factually happened, only the cache-break marker is
+    /// suppressed.
+    #[test]
+    fn noop_transform_writes_no_applied_marker() {
+        let root = tempfile::tempdir().unwrap();
+        let session_dir = root.path().join("sessions").join("test");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let cfg = stub_cfg(root.path());
+        let session = SessionDir {
+            path: session_dir.clone(),
+        };
+
+        // The folded transform is byte-identical to the original
+        // request (steady state).
+        let original = serde_json::json!({
+            "model": "m1",
+            "instructions": "base\n\ngoal-fragment",
+            "input": []
+        });
+        let payload = serde_json::json!({
+            "request": {
+                "model": "m1",
+                "instructions": "base",
+                "input": [],
+                "prompt_fragments": [["goal", "goal-fragment"]]
+            }
+        });
+        let results = vec![
+            transform_result("harness-hook-goal-arm"),
+            transform_result("harness-simple-english"),
+        ];
+
+        let mut request = RequestFile {
+            json: original.clone(),
+        };
+        apply_model_before_transform(&cfg, &session, &payload, &results, &mut request);
+
+        let values = hook_applied_values(&session_dir);
+        assert!(
+            values.is_empty(),
+            "no-op transform must not write hook_applied markers, got {values:?}"
+        );
+        // The applied request is back to the original.
+        assert_eq!(request.json, original);
+        // The `hook.model.before` decision marker is still logged.
+        let data = std::fs::read_to_string(session_dir.join("events.jsonl")).unwrap();
+        let decisions = data
+            .lines()
+            .filter(|l| l.contains("\"id\":\"hook.model.before\""))
+            .count();
+        assert_eq!(
+            decisions, 1,
+            "the decision marker stays logged on a no-op transform"
+        );
+    }
+
+    /// issue #24: key order is irrelevant to the no-op check. A
+    /// transform whose payload is semantically identical to the
+    /// original but lists the keys in another order still compares
+    /// equal (the `Map` is a `BTreeMap`, matching the key-sorted
+    /// wire form) and writes no marker.
+    #[test]
+    fn reordered_keys_compare_equal_and_write_no_marker() {
+        let root = tempfile::tempdir().unwrap();
+        let session_dir = root.path().join("sessions").join("test");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let cfg = stub_cfg(root.path());
+        let session = SessionDir {
+            path: session_dir.clone(),
+        };
+
+        let original = serde_json::json!({ "model": "m1", "instructions": "base" });
+        // Same content, keys in another order.
+        let payload = serde_json::json!({
+            "request": { "instructions": "base", "model": "m1" }
+        });
+        let results = vec![transform_result("harness-hook-goal-arm")];
+
+        let mut request = RequestFile {
+            json: original.clone(),
+        };
+        apply_model_before_transform(&cfg, &session, &payload, &results, &mut request);
+
+        let values = hook_applied_values(&session_dir);
+        assert!(
+            values.is_empty(),
+            "key-reordered no-op must not write hook_applied markers, got {values:?}"
+        );
+    }
+
+    /// issue #24: a hook that changes one field of the request still
+    /// writes one `hook_applied` marker per transforming hook.
+    #[test]
+    fn changed_field_writes_one_marker_per_transform() {
+        let root = tempfile::tempdir().unwrap();
+        let session_dir = root.path().join("sessions").join("test");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let cfg = stub_cfg(root.path());
+        let session = SessionDir {
+            path: session_dir.clone(),
+        };
+
+        let original = serde_json::json!({
+            "model": "m1",
+            "instructions": "base",
+            "input": []
+        });
+        let payload = serde_json::json!({
+            "request": {
+                "model": "m1",
+                "instructions": "base, changed",
+                "input": []
+            }
+        });
+        let results = vec![transform_result("harness-hook-goal-arm")];
+
+        let mut request = RequestFile {
+            json: original.clone(),
+        };
+        apply_model_before_transform(&cfg, &session, &payload, &results, &mut request);
+
+        let values = hook_applied_values(&session_dir);
+        assert_eq!(
+            values,
+            vec![Value::String("harness-hook-goal-arm".to_string())],
+            "one marker per transforming hook"
         );
     }
 }

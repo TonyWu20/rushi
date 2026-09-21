@@ -689,7 +689,7 @@ output. The tables pin the observable behavior.
 | `awaiting_approval` crash | a log ending in an unanswered `approval_request` | `step` re-waits; no `route` until an answer arrives |
 | `run.idle` continue | a `run.idle` hook returns `continue` with a `message` | one `user_message` (`queue=follow`) appended, the loop continues |
 | `run.idle` default | no `run.idle` hook registered | exit 0, byte-identical to the no-hooks path |
-| `model.before` transform | a `model.before` hook returns `transform` with an object `request` payload | the model call receives the transformed request; one `hook.model.before` marker with value `transform`, one `hook_applied` marker; a `transform` without an object `request` logs `hook.model.before.error` and the original request proceeds; the no-hooks path logs no `hook.model.before` or `hook_applied` markers (the gate in `scripts/model-before-transform-e2e.sh`) |
+| `model.before` transform | a `model.before` hook returns `transform` with an object `request` payload | the model call receives the transformed request; one `hook.model.before` marker with value `transform`, one `hook_applied` marker; a `transform` without an object `request` logs `hook.model.before.error` and the original request proceeds; when the applied request is semantically identical to the original the `hook_applied` markers are skipped (issue #24, key-order-insensitive `serde_json::Value` equality); the no-hooks path logs no `hook.model.before` or `hook_applied` markers (the gate in `scripts/model-before-transform-e2e.sh`) |
 | parity | one fixture session through old `step.sh` and `harness step` | byte-identical `events.jsonl` |
 
 The parity row is the mutation gate: a dropped rule in the port

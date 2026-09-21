@@ -265,6 +265,24 @@ visible. The log holds one marker per hook that returned
 command of that hook. The prompt prefix stays byte-stable for every
 other window.
 
+No-op skip (issue #24). Before applying the transform, the kernel
+snapshots the original `request` JSON. After the transform, fragment
+join, and `prompt_fragments` strip, it compares the final applied
+request against the snapshot using `serde_json::Value` equality.
+Because the `Map` is a `BTreeMap` (no `preserve_order`), the
+comparison is key-order-insensitive and matches the key-sorted wire
+form. When they are equal, no cache-break occurred and the
+`hook_applied` markers are skipped. This silences the always-transform,
+byte-stable steady-state hooks, which otherwise inflate the
+`hook_applied` count to one per model call.
+
+The `hook.model.before` decision marker and the
+`hook.model.before.transform` fragment-join marker both stay logged.
+The decision marker records that a transform decision factually
+happened, and its only consumer is the log. The fragment-join marker
+fires whenever fragments are present, regardless of whether the join
+changed bytes, and is out of scope for this change.
+
 #### Fragment placement
 
 The kernel joins fragment text onto the tail of
