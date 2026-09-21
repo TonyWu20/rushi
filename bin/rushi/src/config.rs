@@ -535,6 +535,13 @@ compact_reserve_tokens = 16384
         // (profile -> hm path -> store) must resolve to the store
         // package root so sibling dirs are found.
         let (_root, bin) = fake_pkg_layout();
+        // Compare against a canonical base: the resolved side below
+        // passes through fs::canonicalize, which also resolves
+        // platform-level symlinks (macOS $TMPDIR lives under /var,
+        // which links to /private/var), while the raw tempdir path is
+        // not canonical there. A raw-vs-canonical string comparison
+        // would pass on Linux (/tmp is real) and fail on macOS.
+        let bin = std::fs::canonicalize(&bin).unwrap();
         // Create the "rushi" binary placeholder inside the fake pkg.
         std::fs::write(bin.join("rushi"), "").unwrap();
 
