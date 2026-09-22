@@ -160,6 +160,46 @@
           };
         };
 
+       # TUI producer with the post-rushi-tui#22 binary name (issue #31):
+       # the only thing the configured package may gain is bin/rushi-tui.
+       fakeTuiNew =
+         pkgs.stdenv.mkDerivation {
+           pname = "fixture-tui-new";
+           version = "0";
+           src = placeholderSrc;
+           dontUnpack = true;
+           installPhase = ''
+             mkdir -p $out/bin
+             cat > $out/bin/rushi-tui <<'EOF'
+             #!/bin/sh
+             echo "fake rushi-tui (post-#22 name)"
+             EOF
+             chmod +x $out/bin/rushi-tui
+           '';
+           meta.description = "Fixture. TUI package shipping bin/rushi-tui (post-#22)";
+         };
+
+       # TUI producer pinned pre-#22: it still ships the old bin/tui.
+       # After the issue #31 cut-over this must degrade to a warning,
+       # not a fallback copy.
+       fakeTuiOld =
+         pkgs.stdenv.mkDerivation {
+           pname = "fixture-tui-old";
+           version = "0";
+           src = placeholderSrc;
+           dontUnpack = true;
+           installPhase = ''
+             mkdir -p $out/bin
+             cat > $out/bin/tui <<'EOF'
+             #!/bin/sh
+             echo "fake tui (pre-#22 name)"
+             EOF
+             chmod +x $out/bin/tui
+           '';
+           meta.description = "Fixture. pre-#22 TUI package shipping the old bin/tui";
+         };
+
+
       # ── Test cases ────────────────────────────────────────────────
 
       # Fully migrated producer set. The consumer sets no paths or
@@ -237,7 +277,28 @@
           modules = [ ({ config, lib, pkgs, ... }: {
             rushi.external_tools = [ lyingTool ];
           }) ];
+
         };
+       # Post-#22 TUI pin (issue #31): ships bin/rushi-tui only. The
+       # configured package must gain an executable bin/rushi-tui next
+       # to config.toml, with no bin/tui alias and no warning.
+       caseTuiNew =
+         mkCase {
+           modules = [ ({ config, lib, pkgs, ... }: {
+             rushi.tui = fakeTuiNew;
+           }) ];
+         };
+
+       # Pre-#22 TUI pin: ships the old bin/tui. Clean cut-over means
+       # the build succeeds with the "has no bin/rushi-tui" warning
+       # and ships no TUI binary at all (no old-name fallback).
+       caseTuiOld =
+         mkCase {
+           modules = [ ({ config, lib, pkgs, ... }: {
+             rushi.tui = fakeTuiOld;
+           }) ];
+         };
+
 
       # ── Eval-time values (nix eval tests/nix#evals.<case>.<field>) ──
       evals = {
@@ -276,6 +337,8 @@
         case-plain-path = casePlainPath.package;
         case-hook-guard = caseHookGuard.package;
         case-meta-mismatch = caseMetaMismatch.package;
+        case-tui-new = caseTuiNew.package;
+        case-tui-old = caseTuiOld.package;
       };
     };
 }
