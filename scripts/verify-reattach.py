@@ -28,7 +28,7 @@ USAGE
   verify-reattach.py [--repo PATH] [--bin PATH] [--session NAME]
 
 EXAMPLES
-  # the default: this repo, target/debug/tui, the better-ui session:
+  # the default: this repo, target/debug/rushi-tui, the better-ui session:
   verify-reattach.py
   # a session whose loop was just started with `harness run`:
   verify-reattach.py --session better-ui
@@ -81,12 +81,12 @@ def main():
     ap.add_argument("--repo", default=env_or("REPO", REPO),
                     help="the repo root (env REPO; default: the parent of scripts/)")
     ap.add_argument("--bin", default=None,
-                    help="the tui binary (default: $repo/target/debug/tui)")
+                    help="the TUI binary (default: $repo/target/debug/rushi-tui)")
     ap.add_argument("--session", default=env_or("SESSION", "better-ui"),
                     help="the session with a live external loop (env SESSION)")
     args = ap.parse_args()
     if args.bin is None:
-        args.bin = os.path.join(args.repo, "target", "debug", "tui")
+        args.bin = os.path.join(args.repo, "target", "debug", "rushi-tui")
 
     smoke = load_smoke()
 

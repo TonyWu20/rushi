@@ -244,10 +244,11 @@
             pkgs.python3
             pkgs.file
             # The Nix-built `rushi` binary on PATH (this flake's
-            # packages.default). The launcher finds `rushi-tui` on PATH
-            # after the side-by-side check (bin/rushi/src/main.rs, function
-            # resolve_tui_binary; issue #31). The rushi-tui .envrc puts its
-            # target/release on PATH for that lookup.
+            # packages.default). The kernel no longer launches a
+            # front-end (the `rushi tui` arm was retired in the
+            # issue #31 follow-up). The rushi-tui .envrc puts its
+            # target/release on PATH, so `rushi-tui` is invoked
+            # directly.
             rushi
           ];
           # Do not export RUSHI_KERNEL to the Nix store path: the

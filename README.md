@@ -65,11 +65,14 @@ Subcommands:
 
 | Command                                      | Purpose                                |
 | -------------------------------------------- | -------------------------------------- |
-| `rushi` _(default)_ or `rushi tui [SESSION]` | Launch the TUI                         |
+| `rushi` | Print the top-level help                             |
 | `rushi setup [--locked]`                     | Initialize a project from `rushi.toml` |
 | `rushi run SESSION`                          | Run the full turn loop                 |
 | `rushi step SESSION`                         | Run a single step                      |
 | `rushi docs [SECTION\|DOC]`                  | Print the embedded harness reference   |
+
+The TUI is the Tier-2 front-end `rushi-tui` (rushi-tui repo).
+Invoke it directly, e.g. as `rushi-tui`.
 
 ---
 
@@ -82,7 +85,7 @@ Subcommands:
   compact math,
   rewind/fork active-path math).
 - `bin/rushi/` — the `rushi` loop orchestrator
-  and CLI (`run`, `step`, `setup`, `docs`, `tui`).
+  and CLI (`run`, `step`, `setup`, `docs`).
 - `bin/{claim,assemble,model,parse,route,log,compact,user}/`
   — stage binaries the loop spawns.
 - `bin/hook-compact/` — built-in hook binary

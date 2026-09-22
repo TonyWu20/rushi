@@ -1,7 +1,11 @@
 //! `rushi` — the distribution entry point.
 //!
 //! Subcommands:
-//! - `rushi` (default) or `rushi tui [SESSION]` — open the TUI
+//! - `rushi` (no subcommand) — print the top-level help. The TUI is a
+//!   Tier-2 front-end (`rushi-tui`, rushi-tui repo); the kernel no
+//!   longer launches front-ends (docs/itches.md, 2026-09-20 user
+//!   decision; the `rushi tui` arm was removed in the issue #31
+//!   follow-up).
 //! - `rushi setup [--locked]` — initialize a project from `rushi.toml`
 //! - `rushi run SESSION [TASK]` — the full turn loop. With `TASK`, it
 //!   is first logged as the session's initial `user_message` (steer
@@ -17,7 +21,8 @@
 //!
 //! The loop stages (`claim`, `assemble`, `model`, `parse`, `route`,
 //! `compact`) are spawned as separate binaries. The TUI is a separate
-//! binary (`tui`) that `rushi` launches via the `tui` subcommand.
+//! front-end binary in the rushi-tui repo; invoke `rushi-tui`
+//! directly, the kernel no longer launches it.
 
 mod classifier;
 mod config;
@@ -33,26 +38,20 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "rushi", about = "The rushi distribution: TUI entry point and project setup")]
+#[command(name = "rushi", about = "The rushi distribution: loop engine, tools, and project setup")]
 struct Args {
     /// Path to config file (for the loop and `config` subcommands).
     /// When omitted, falls back to the Nix side-by-side config or CWD.
     #[arg(long, global = true)]
     config: Option<PathBuf>,
 
-    /// Subcommand. Omit to open the TUI.
+    /// Subcommand. Omit to print the top-level help.
     #[command(subcommand)]
     command: Option<Command>,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// Open the TUI (default when no subcommand is given)
-    Tui {
-        /// Session to open. If omitted, the TUI asks for a new session
-        /// name on its first event.
-        session: Option<String>,
-    },
     /// Initialize a project from `rushi.toml`
     Setup {
         /// Verify against an existing `rushi.lock` instead of
@@ -119,26 +118,20 @@ fn main() {
     // The CONFIG env var sets the config path, as the old scripts did.
     let config_path = rushi_common::paths::resolve_config_path(args.config.as_deref());
 
-    // Default to TUI when no subcommand is given.
-    let cmd = args.command.unwrap_or(Command::Tui { session: None });
+    // A bare `rushi` prints the top-level help and exits. The TUI is a
+    // Tier-2 front-end; the kernel no longer launches it (docs/itches.md,
+    // 2026-09-20 user decision; issue #31 follow-up).
+    let cmd = match args.command {
+        Some(c) => c,
+        None => {
+            use clap::CommandFactory;
+            let mut cmd = Args::command();
+            cmd.print_help().ok();
+            std::process::exit(0);
+        }
+    };
 
     match cmd {
-        Command::Tui { session } => {
-            let tui_bin = resolve_tui_binary(&config_path);
-            let mut child = std::process::Command::new(&tui_bin);
-            if let Some(s) = &session {
-                child.arg(s);
-            }
-            child.arg("--config").arg(config_path);
-            let status = child
-                .status()
-                .unwrap_or_else(|e| {
-                    eprintln!("rushi: failed to spawn tui ({tui_bin:?}): {e}");
-                    std::process::exit(1);
-                });
-            std::process::exit(status.code().unwrap_or(1));
-        }
-
         Command::Setup { locked } => {
             let project_dir = std::env::current_dir().unwrap_or_else(|e| {
                 eprintln!("rushi setup: cannot resolve CWD: {e}");
@@ -183,57 +176,5 @@ fn main() {
                 }
             }
         }
-    }
-}
-
-/// Find the `rushi-tui` binary. Resolution order:
-/// 1. `[tui].binary` in the config file (resolved relative to the config
-///    directory). This is the recommended way to point `rushi` at a
-///    locally-built TUI without editing the launcher.
-/// 2. Next to the `rushi` executable (side-by-side install).
-/// 3. `rushi-tui` on `PATH`.
-///
-/// The TUI flake (rushi-tui#22, commit 0996b52) renamed the entry
-/// binary `tui` → `rushi-tui` (issue #31). Clean cut-over: the old
-/// `tui` name is not looked up as a fallback.
-fn resolve_tui_binary(config_path: &str) -> String {
-    if let Some(p) = config_tui_binary(config_path) {
-        return p;
-    }
-    if let Some(exe) = config::resolved_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join("rushi-tui");
-            if candidate.exists() {
-                return candidate.to_string_lossy().into_owned();
-            }
-        }
-    }
-    "rushi-tui".into()
-}
-
-/// Read `[tui].binary` from the config file. The value is resolved
-/// relative to the config directory. Returns `None` when the key is
-/// absent, the value is empty, or the resolved path is not a file.
-fn config_tui_binary(config_path: &str) -> Option<String> {
-    let raw = std::fs::read_to_string(config_path).ok()?;
-    let cfg: toml::Value = raw.parse().ok()?;
-    let rel = cfg.get("tui")?.get("binary")?.as_str()?;
-    // An empty value means no binary is configured. Return None. The
-    // side-by-side resolver in resolve_tui_binary then finds the TUI
-    // next to rushi (the Nix package keeps it in bin/).
-    if rel.trim().is_empty() {
-        return None;
-    }
-    let config_dir = std::path::Path::new(config_path)
-        .canonicalize()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let p = config_dir.join(rel);
-    // A TUI binary is a file. Reject a directory or a missing path.
-    if p.is_file() {
-        Some(p.to_string_lossy().into_owned())
-    } else {
-        None
     }
 }
