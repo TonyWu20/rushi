@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# tests/nix/run.sh — issue #13 gate: meta.rushi eval-time derivation.
+# tests/nix/run.sh — nix gate: meta.rushi eval-time derivation (issue #13)
+# and the TUI binary-name cut-over (issue #31).
 #
 # Usage: bash tests/nix/run.sh
 #
@@ -188,6 +189,33 @@ if [ $mm_rc -ne 0 ]; then
   contains_f "case-meta-mismatch: build failed with meta-check" "$mm_log" "meta.rushi.entry 'nope' declared but"
 else
   bad "case-meta-mismatch: build unexpectedly succeeded"
+fi
+
+# 2g. case-tui-new (issue #31): post-rushi-tui#22 TUI pin ships
+# bin/rushi-tui only. The configured package must gain an executable
+# bin/rushi-tui next to config.toml, with no bin/tui alias and no
+# "TUI unavailable" warning.
+out=$(nix build "$FL#packages.x86_64-linux.case-tui-new" --print-out-paths 2>/dev/null)
+[ -n "$out" ] && [ -d "$out" ] && ok "case-tui-new: build succeeded" || bad "case-tui-new: build failed"
+if [ -n "$out" ] && [ -d "$out" ]; then
+  [ -f "$out/bin/rushi-tui" ] && ok "case-tui-new: bin/rushi-tui present" || bad "case-tui-new: bin/rushi-tui missing"
+  [ -x "$out/bin/rushi-tui" ] && ok "case-tui-new: bin/rushi-tui executable" || bad "case-tui-new: bin/rushi-tui not executable"
+  [ ! -e "$out/bin/tui" ] && ok "case-tui-new: no bin/tui alias" || bad "case-tui-new: unexpected bin/tui alias"
+  [ -f "$out/config.toml" ] && ok "case-tui-new: config.toml next to bin/" || bad "case-tui-new: config.toml missing"
+  log=$(nix log "$out" 2>/dev/null)
+  not_contains "case-tui-new: no TUI-unavailable warning" "$log" "TUI unavailable"
+fi
+
+# 2h. case-tui-old (issue #31): pre-#22 TUI pin still ships the old
+# bin/tui. Clean cut-over: the build succeeds with the old-name
+# warning and ships no TUI binary at all (no fallback copy).
+out=$(nix build "$FL#packages.x86_64-linux.case-tui-old" --print-out-paths 2>/dev/null)
+[ -n "$out" ] && [ -d "$out" ] && ok "case-tui-old: build succeeded" || bad "case-tui-old: build failed"
+if [ -n "$out" ] && [ -d "$out" ]; then
+  [ ! -e "$out/bin/tui" ] && ok "case-tui-old: no bin/tui fallback" || bad "case-tui-old: unexpected bin/tui"
+  [ ! -e "$out/bin/rushi-tui" ] && ok "case-tui-old: no bin/rushi-tui fallback" || bad "case-tui-old: unexpected bin/rushi-tui"
+  log=$(nix log "$out" 2>/dev/null)
+  contains "case-tui-old: old-name warning emitted" "$log" "has no bin/rushi-tui; TUI unavailable"
 fi
 
 # ── Summary ───────────────────────────────────────────────────────

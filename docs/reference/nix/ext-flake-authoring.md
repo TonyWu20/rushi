@@ -52,7 +52,7 @@ flake you must get right.
 | `rushi.external_tools` | `<tool>/tool.toml` + `<tool>/bin/<binary>` | `tools/<tool>/…` (additive to kernel tools) |
 | `rushi.external_ui_extensions` | `<ext>/ext.toml` + `<ext>/<binDir>/<bin>` (`binDir` = the ext.toml `command` path) | `ui_extensions/<ext>/…` |
 | `rushi.external_hooks` | a single executable **or** a `bin/` dir (e.g. `$out/bin/<hook>`) | `hooks/<hook>` |
-| `rushi.tui` (separate repo) | `$out/bin/tui` | `bin/tui` (kernel side-by-side resolver finds it) |
+| `rushi.tui` (separate repo) | `$out/bin/rushi-tui` | `bin/rushi-tui` (kernel side-by-side resolver finds it) |
 
 Concrete groundings:
 
@@ -73,8 +73,8 @@ Concrete groundings:
   `$out/bin/<hook>`, so **a `buildRustPackage` result is already a valid
   hook source — no repackage needed.**
 - **TUI** — `rushi.tui` (see `lib/rushi-options.nix`) requires the
-  binary at `$out/bin/tui` so the kernel's side-by-side resolver
-  (`<exe_dir>/tui`) finds it.
+  binary at `$out/bin/rushi-tui` so the kernel's side-by-side resolver
+  (`<exe_dir>/rushi-tui`) finds it.
 
 The copy steps, from `lib/mk-rushi.nix` (authoritative):
 
@@ -84,7 +84,7 @@ external_ui_extensions:  cp -rL "${src}/."      "$out/ui_extensions/"
 external_hooks:          [ -x src ] → cp src hooks/
                          [ -d src/bin ] → cp -rL src/bin/. hooks/
                          else → cp -rL src/. hooks/
-rushi.tui:               cp "${src}/bin/tui"    "$out/bin/tui"
+rushi.tui:               cp "${src}/bin/rushi-tui"  "$out/bin/rushi-tui"
 ```
 
 Because the copy is `cp -rL "<src>/. "`, the ext package's `$out` must
@@ -530,11 +530,14 @@ exposes one `wrapAsTool` package. The flake shape is identical; only the
 ### 5.1 The TUI case (`rushi-tui`)
 
 The TUI is a *fourth* output, not an `external_*`. It feeds `rushi.tui`
-and must expose the binary at `$out/bin/tui` (standard Nix package
-layout) so the kernel's side-by-side resolver (`<exe_dir>/tui`) finds it.
+and must expose the binary at `$out/bin/rushi-tui` (standard Nix package
+layout). Since rushi-tui#22 (issue #31) the entry binary is named
+`rushi-tui`. The kernel's side-by-side resolver
+(`<exe_dir>/rushi-tui`) finds it.
 
-The TUI flake now ships a `packages` output (the `tui` binary, built via
-`buildRustPackage` from `src = self`). The consumer wires it with:
+The TUI flake now ships a `packages` output (the `rushi-tui` binary,
+built via `buildRustPackage` from `src = self`). The consumer wires it
+with:
 
 ```nix
 # consumer flake
@@ -591,7 +594,7 @@ intra-repo `goal-state` path dep needs the whole tree as one source.
   `$out/<name>/bin/<binary>`; *ext* has `$out/<ext>/ext.toml` and
   `$out/<ext>/<binDir>/<binary>` where `<binDir>` matches the ext.toml
   `command` relative path; *hook* has `$out/bin/<binary>`; `rushi.tui`
-  has `$out/bin/tui`.
+  has `$out/bin/rushi-tui`.
 - **P2. intra-repo-deps.** A package whose crate path-deps on a sibling
   crate in the same repo builds without a manual kernel input
   (`goal-state` resolves via the flake's own source tree).

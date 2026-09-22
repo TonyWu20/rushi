@@ -488,16 +488,21 @@ let
     ) then [ tuiPkg ] else [ ];
 
   # Shell script to copy the TUI binary into the package.
+  #
+  # The TUI flake (rushi-tui#22, `0996b52`) renamed the entry binary
+  # `tui` → `rushi-tui` and now ships only `$out/bin/rushi-tui`
+  # (issue #31). Clean cut-over: no `bin/tui` alias, no old-name
+  # fallback — a configured package carries only `bin/rushi-tui`.
   tuiInstallScript = if tuiPkg != null then
     let tuiPath = toShellPath tuiPkg; in
     ''
       # ── TUI binary (rushi.tui) ──
       TUI_SRC="${tuiPath}"
-      if [ -f "$TUI_SRC/bin/tui" ]; then
-        cp "$TUI_SRC/bin/tui" "$out/bin/tui"
-        chmod +x "$out/bin/tui"
+      if [ -f "$TUI_SRC/bin/rushi-tui" ]; then
+        cp "$TUI_SRC/bin/rushi-tui" "$out/bin/rushi-tui"
+        chmod +x "$out/bin/rushi-tui"
       else
-        echo "WARNING: rushi.tui (${tuiPath}) has no bin/tui; TUI unavailable." >&2
+        echo "WARNING: rushi.tui (${tuiPath}) has no bin/rushi-tui; TUI unavailable." >&2
       fi
     ''
   else "";

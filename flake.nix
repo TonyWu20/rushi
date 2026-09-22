@@ -244,9 +244,9 @@
             pkgs.python3
             pkgs.file
             # The Nix-built `rushi` binary on PATH (this flake's
-            # packages.default). The launcher finds `tui` on PATH after
-            # the side-by-side check (bin/rushi/src/main.rs, function
-            # resolve_tui_binary). The rushi-tui .envrc puts its
+            # packages.default). The launcher finds `rushi-tui` on PATH
+            # after the side-by-side check (bin/rushi/src/main.rs, function
+            # resolve_tui_binary; issue #31). The rushi-tui .envrc puts its
             # target/release on PATH for that lookup.
             rushi
           ];

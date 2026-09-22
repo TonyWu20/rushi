@@ -186,25 +186,29 @@ fn main() {
     }
 }
 
-/// Find the `tui` binary. Resolution order:
+/// Find the `rushi-tui` binary. Resolution order:
 /// 1. `[tui].binary` in the config file (resolved relative to the config
 ///    directory). This is the recommended way to point `rushi` at a
 ///    locally-built TUI without editing the launcher.
 /// 2. Next to the `rushi` executable (side-by-side install).
-/// 3. `tui` on `PATH`.
+/// 3. `rushi-tui` on `PATH`.
+///
+/// The TUI flake (rushi-tui#22, commit 0996b52) renamed the entry
+/// binary `tui` → `rushi-tui` (issue #31). Clean cut-over: the old
+/// `tui` name is not looked up as a fallback.
 fn resolve_tui_binary(config_path: &str) -> String {
     if let Some(p) = config_tui_binary(config_path) {
         return p;
     }
     if let Some(exe) = config::resolved_exe() {
         if let Some(dir) = exe.parent() {
-            let candidate = dir.join("tui");
+            let candidate = dir.join("rushi-tui");
             if candidate.exists() {
                 return candidate.to_string_lossy().into_owned();
             }
         }
     }
-    "tui".into()
+    "rushi-tui".into()
 }
 
 /// Read `[tui].binary` from the config file. The value is resolved
