@@ -61,7 +61,8 @@ if grep -q "summary now" <<<"$req"; then
     echo '{"text":"","tool_calls":[],"reasoning":[],"stop_reason":"length","usage":{"input_tokens":10,"output_tokens":0}}'
     exit 0
   fi
-  echo "${STUB_SUMMARY:-{\"text\":\"the summary of the old region\",\"tool_calls\":[],\"reasoning\":[],\"stop_reason\":\"stop\",\"usage\":{\"input_tokens\":100,\"output_tokens\":10}}}"
+  default_summary='{"text":"the summary of the old region","tool_calls":[],"reasoning":[],"stop_reason":"stop","usage":{"input_tokens":100,"output_tokens":10}}'
+  echo "${STUB_SUMMARY:-$default_summary}"
   exit 0
 fi
 N=$(cat "${STUB_STATE:-}" 2>/dev/null || echo 0)
@@ -1039,6 +1040,91 @@ EOF
   assert_eq "$(claim_state)" "idle" "the loop runs to idle"
 }
 
+# ── Scenario: branch summary of an abandoned rewind span (P13) ────
+# `compact --branch` (docs/branch-summarize-cases.md Phase 0)
+# summarizes the open span abandoned by the last top-level `rewind`
+# marker and appends a branch `compaction_summary` marker on the
+# active path. The marker carries `branch_of` (the rewind seq), the
+# sentinels `first_kept_seq` = 1 and `parent_version` = 0, and its
+# version from the branch namespace (count of `branch_of` markers +
+# 1). The summary text is written to `branch-summary/v<N>.md` in the
+# session dir. The mode touches no handoff artifact: `handoff.md`
+# is byte-identical and no `handoff/` directory appears. No new
+# `rewind` marker is appended.
+scenario_branch() {
+  NEW_WORK branch
+  COMPACT_ENABLED=true
+  work_config
+  # Session layout (docs/branch-summarize-cases.md Phase 0):
+  #   seq 1-4:  initial work
+  #   seq 5-8:  branch A
+  #   seq 9:    rewind to seq 3 (mode=on), abandoning seqs 4..9
+  #   seq 10-13: re-entered active path
+  # The branch marker will summarize the ditched span (3, 9].
+  cat > "$SLOG" <<EOF
+{"v":1,"type":"user_message","ts":"t1","seq":1,"content":"do the task"}
+{"v":1,"type":"assistant_message","ts":"t2","seq":2,"content":"step one","reasoning":[],"tool_calls":[{"id":"c1","name":"read","arguments":{"file_path":"a.txt"}}],"usage":{"input_tokens":2000,"output_tokens":50}}
+{"v":1,"type":"tool_result","ts":"t3","seq":3,"id":"c1","value":{"text":"branch work notes, step one"},"is_error":false}
+{"v":1,"type":"stop","ts":"t4","seq":4,"stop_reason":"end_turn"}
+{"v":1,"type":"user_message","ts":"t5","seq":5,"content":"continue"}
+{"v":1,"type":"assistant_message","ts":"t6","seq":6,"content":"step two","reasoning":[],"tool_calls":[{"id":"c2","name":"bash","arguments":{"command":"ls"}}],"usage":{"input_tokens":2000,"output_tokens":50}}
+{"v":1,"type":"tool_result","ts":"t7","seq":7,"id":"c2","value":{"text":"branch work notes, step two"},"is_error":false}
+{"v":1,"type":"stop","ts":"t8","seq":8,"stop_reason":"end_turn"}
+{"v":1,"type":"rewind","ts":"t9","seq":9,"target_seq":3,"mode":"on"}
+{"v":1,"type":"user_message","ts":"t10","seq":10,"content":"try a different approach"}
+{"v":1,"type":"assistant_message","ts":"t11","seq":11,"content":"step three","reasoning":[],"tool_calls":[{"id":"c3","name":"bash","arguments":{"command":"ls -l"}}],"usage":{"input_tokens":2000,"output_tokens":50}}
+{"v":1,"type":"tool_result","ts":"t12","seq":12,"id":"c3","value":{"text":"the rework"},"is_error":false}
+{"v":1,"type":"stop","ts":"t13","seq":13,"stop_reason":"end_turn"}
+EOF
+  # A pre-existing handoff.md must stay byte-identical.
+  echo "PRE-EXISTING HANDOFF SENTINEL" > "$SESSIONS_DIR/handoff.md"
+  make_stub
+  local status
+  status=$(
+    cd "$WORK"
+    export MODEL_BIN="$WORK/stub-model"
+    export STUB_SUMMARY='{"text":"the branch summary of the ditched span","tool_calls":[],"reasoning":[],"stop_reason":"stop","usage":{"input_tokens":100,"output_tokens":10}}'
+    "$BIN_DIR/compact" "$SESSIONS_DIR" --config "$WORK/config.toml" --branch 2>/dev/null
+  )
+  # The status reports the branch run and its rewind anchor.
+  assert_eq "$(jq -r '.status' <<<"$status")" "compacted" "the branch run compacts"
+  assert_eq "$(jq -r '.branch' <<<"$status")" "true" "the status flags the branch mode"
+  assert_eq "$(jq -r '.branch_of' <<<"$status")" 9 "the marker anchors on the rewind seq"
+  # The appended marker: P2 shape + P7 sentinels + the branch version
+  # namespace (the first branch marker is version 1).
+  local marker
+  marker=$(last_event compaction_summary)
+  assert_eq "$(jq -r '.branch_of' <<<"$marker")" 9 "the marker carries branch_of"
+  assert_eq "$(jq -r '.first_kept_seq' <<<"$marker")" 1 "the first_kept sentinel"
+  assert_eq "$(jq -r '.diverge_seq' <<<"$marker")" 9 "diverge_seq is the rewind seq"
+  assert_eq "$(jq -r '.parent_version' <<<"$marker")" 0 "the parent_version sentinel"
+  assert_eq "$(jq -r '.version' <<<"$marker")" 1 "the branch namespace starts at 1"
+  # P3: the summary file lands in branch-summary/, not handoff/.
+  local file
+  file="$SESSIONS_DIR/branch-summary/v1.md"
+  assert_eq "$(test -f "$file" && echo yes)" "yes" "the versioned branch summary file exists"
+  assert_eq "$(cat "$file")" 'the branch summary of the ditched span' "the file holds the summary"
+  # No handoff artifact was written.
+  assert_eq "$(cat "$SESSIONS_DIR/handoff.md")" "PRE-EXISTING HANDOFF SENTINEL" "handoff.md is unchanged"
+  assert_eq "$(test -d "$SESSIONS_DIR/handoff" && echo yes)" "" "no handoff/ directory for a branch marker"
+  # No new rewind marker and no failure marker.
+  assert_eq "$(count_events rewind)" 1 "no new rewind marker"
+  assert_eq "$(count_events compaction_failed)" 0 "no failure marker"
+  # P9/P10 end-to-end: the next projection carries the branch framing
+  # (read from branch-summary/v1.md), right behind the handoff
+  # framing and ahead of the content.
+  local proj
+  proj=$(cd "$WORK" && "$BIN_DIR/assemble" --session sessions/session --config config.toml 2>/dev/null)
+  assert_contains "$proj" "Branch summary of the abandoned branch that diverged at seq 9" "the projection carries the branch framing"
+  assert_contains "$proj" "the branch summary of the ditched span" "the framing text comes from the versioned file"
+  local order
+  order=$(jq -r '[.input[] | (.content // "") |
+    (if contains("Branch summary of the abandoned branch") then "B" else "" end) +
+    (if contains("do the task") then "C" else "" end)]
+    | map(select(length > 0)) | join("")' <<<"$proj")
+  assert_eq "$order" "BC" "the branch framing precedes the content"
+}
+
 # ── Run ──────────────────────────────────────────────────────────
 run_scenario threshold scenario_threshold
 run_scenario pi-parity scenario_pi_parity
@@ -1060,6 +1146,7 @@ run_scenario fork-compact scenario_fork_compact
 run_scenario real-fixture-pressure scenario_real_fixture_pressure
 run_scenario up-to-prompt scenario_up_to_prompt
 run_scenario unknown-tool scenario_unknown_tool
+run_scenario branch scenario_branch
 
 echo
 echo "compact e2e: $PASS passed, $FAIL failed"

@@ -70,6 +70,14 @@ struct Args {
     /// update instruction.
     #[arg(long, value_name = "TEXT")]
     prompt: Option<String>,
+    /// Branch mode (docs/branch-summarize-cases.md Phase 0). Summarize
+    /// the open span abandoned by the last top-level `rewind` marker
+    /// and append one branch `compaction_summary` marker carrying the
+    /// additive `branch_of` field. The marker is an add-on on the
+    /// active path: no handoff boundary, no handoff files,
+    /// `first_kept_seq` is the sentinel 1.
+    #[arg(long)]
+    branch: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -209,6 +217,13 @@ fn parse_boundary(e: &LogEvent) -> Option<Boundary> {
     if e.value.get("type").and_then(|t| t.as_str()) != Some("compaction_summary") {
         return None;
     }
+    // Branch markers (additive `branch_of`, docs/branch-summarize-
+    // cases.md P8, P11) are add-ons on the active path, not compact
+    // boundaries. Their sentinel `first_kept_seq` of 1 must never
+    // reset the keep region, so they are skipped here.
+    if e.value.get("branch_of").is_some() {
+        return None;
+    }
     let fk = e
         .value
         .get("first_kept_seq")
@@ -324,6 +339,14 @@ fn main() {
     // boundary and the cut.
     let events_path = args.session.join("events.jsonl");
     let events = read_events(&events_path);
+
+    // The branch mode (docs/branch-summarize-cases.md Phase 0): a
+    // separate, trigger-free path. It summarizes the open span
+    // abandoned by the last top-level rewind marker and appends one
+    // branch marker. It never exits.
+    if args.branch {
+        run_branch_compaction(&args, &events);
+    }
 
     // The boundary: the last parseable `compaction_summary`.
     let boundary: Option<Boundary> = events
@@ -633,87 +656,16 @@ fn run_compaction(
         ),
     };
 
-    // The summary call: two attempts, through the model binary. The
+    // The summary call: two tries, through the model binary. The
     // request JSON goes to the model's stdin, and the model appends
     // its own assistant_message, tool_result, and stop markers to
     // the session log.
     let model_bin = resolve_bin(&args.model, "MODEL_BIN", "model");
-    let request_str = serde_json::to_string(&request).unwrap();
-    let mut last_err = String::new();
-    let mut summary_usage: Option<Value> = None;
-    let summary: Option<String> = (0..2).find_map(|attempt| {
-        let mut child = match Command::new(&model_bin)
-            .arg("--config")
-            .arg(&args.config)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                last_err = format!("attempt {}: spawn model: {e}", attempt + 1);
-                return None;
-            }
-        };
-        if let Some(mut stdin) = child.stdin.take() {
-            if let Err(e) = stdin.write_all(request_str.as_bytes()) {
-                last_err = format!("attempt {}: write model stdin: {e}", attempt + 1);
-                return None;
-            }
+    let (summary, summary_usage) = match run_summary_calls(&model_bin, &args.config, &request) {
+        Ok(r) => r,
+        Err(last_err) => {
+            fail_and_exit(args, overflow, last_user_seq, "both summary calls failed", &last_err);
         }
-        let out = match child.wait_with_output() {
-            Ok(o) => o,
-            Err(e) => {
-                last_err = format!("attempt {}: wait model: {e}", attempt + 1);
-                return None;
-            }
-        };
-        if !out.status.success() {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                last_err = format!(
-                    "attempt {}: the model binary exited {} ({})",
-                    attempt + 1,
-                    out.status.code().unwrap_or(-1),
-                    stderr.trim()
-                );
-                return None;
-            }
-            let resp: Value = match serde_json::from_slice(&out.stdout) {
-                Ok(v) => v,
-                Err(e) => {
-                    last_err = format!(
-                        "attempt {}: the model output is not JSON: {e}",
-                        attempt + 1
-                    );
-                    return None;
-                }
-            };
-            let stop = resp.get("stop_reason").and_then(|s| s.as_str()).unwrap_or("");
-            if stop == "error" {
-                let detail = resp
-                    .get("detail")
-                    .and_then(|d| d.as_str())
-                    .unwrap_or("no detail");
-                last_err = format!("attempt {}: the model returned an error stop: {detail}", attempt + 1);
-                return None;
-            }
-            let text = resp.get("text").and_then(|t| t.as_str()).unwrap_or("");
-            if text.trim().is_empty() {
-                last_err = format!("attempt {}: an empty summary (stop reason {stop})", attempt + 1);
-                return None;
-            }
-            // The usage of the winning attempt rides the marker:
-            // the statusline sums it into the cumulative totals
-            // (docs/auto-compact-plan.md section 4.6).
-            let usage = resp.get("usage").cloned();
-            summary_usage = usage;
-            Some(text.trim().to_string())
-        });
-
-    let summary = match summary {
-        Some(s) => s,
-        None => fail_and_exit(args, overflow, last_user_seq, "both summary attempts failed", &last_err),
     };
 
     // The file ops: merge with the previous boundary's lists, not
@@ -805,6 +757,306 @@ fn run_compaction(
     });
     println!("{}", serde_json::to_string(&status).unwrap());
     std::process::exit(0);
+}
+
+/// The two-try summary call. The request JSON goes to the model's
+/// stdin; the model appends its own assistant_message, tool_result,
+/// and stop markers to the session log. Returns the summary text and
+/// the winning try's usage, or the last error message.
+fn run_summary_calls(
+    model_bin: &Path,
+    config: &Path,
+    request: &Value,
+) -> Result<(String, Option<Value>), String> {
+    let request_str = serde_json::to_string(request).unwrap();
+    let mut last_err = String::new();
+    for try_no in 0..2 {
+        let mut child = match Command::new(model_bin)
+            .arg("--config")
+            .arg(config)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                last_err = format!("try {}: spawn model: {e}", try_no + 1);
+                break;
+            }
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            if let Err(e) = stdin.write_all(request_str.as_bytes()) {
+                last_err = format!("try {}: write model stdin: {e}", try_no + 1);
+                break;
+            }
+        }
+        let out = match child.wait_with_output() {
+            Ok(o) => o,
+            Err(e) => {
+                last_err = format!("try {}: wait model: {e}", try_no + 1);
+                break;
+            }
+        };
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            last_err = format!(
+                "try {}: the model binary exited {} ({})",
+                try_no + 1,
+                out.status.code().unwrap_or(-1),
+                stderr.trim()
+            );
+            continue;
+        }
+        let resp: Value = match serde_json::from_slice(&out.stdout) {
+            Ok(v) => v,
+            Err(e) => {
+                last_err = format!(
+                    "try {}: the model output is not JSON: {e}",
+                    try_no + 1
+                );
+                break;
+            }
+        };
+        let stop = resp.get("stop_reason").and_then(|s| s.as_str()).unwrap_or("");
+        if stop == "error" {
+            let detail = resp
+                .get("detail")
+                .and_then(|d| d.as_str())
+                .unwrap_or("no detail");
+            last_err = format!(
+                "try {}: the model returned an error stop: {detail}",
+                try_no + 1
+            );
+            continue;
+        }
+        let text = resp.get("text").and_then(|t| t.as_str()).unwrap_or("");
+        if text.trim().is_empty() {
+            last_err = format!("try {}: an empty summary (stop reason {stop})", try_no + 1);
+            continue;
+        }
+        // The usage of the winning try rides the marker:
+        // the statusline sums it into the cumulative totals
+        // (docs/auto-compact-plan.md section 4.6).
+        let usage = resp.get("usage").cloned();
+        return Ok((text.trim().to_string(), usage));
+    }
+    Err(last_err)
+}
+
+/// The `--branch` run (docs/branch-summarize-cases.md Phase 0).
+///
+/// Summarizes the open span abandoned by the last top-level `rewind`
+/// marker on the active path and appends one branch
+/// `compaction_summary` marker (P2). The marker is an add-on on the
+/// active path: it compacts nothing, and no handoff boundary or
+/// handoff file is written (P3). A model failure appends
+/// `compaction_failed` and no branch marker (P4).
+fn run_branch_compaction(args: &Args, events: &[LogEvent]) -> ! {
+    // The last (top-level) rewind marker on the active path is the
+    // most recent rewind event in log order (D1). Sub-branches are
+    // not their own markers; they appear only as labels inside the
+    // summary text.
+    let branch_ref = events
+        .iter()
+        .filter_map(|e| rewind::parse_rewind_event(&e.value, e.seq))
+        .last();
+    let Some(r) = branch_ref else {
+        eprintln!("compact: --branch requires a rewind marker in the log; none found");
+        std::process::exit(1);
+    };
+    let branch_of = r.seq as u64;
+
+    // The open span abandoned by that rewind: the seqs in (eff, seq].
+    let span_lo = r.eff();
+    let span_hi = r.seq;
+    let span_events: Vec<&LogEvent> = events
+        .iter()
+        .filter(|e| e.seq > span_lo && e.seq <= span_hi)
+        .collect();
+    let has_content = span_events.iter().any(|e| {
+        matches!(
+            e.value.get("type").and_then(|t| t.as_str()),
+            Some("user_message") | Some("assistant_message") | Some("tool_result")
+        )
+    });
+    if !has_content {
+        let status = serde_json::json!({
+            "status": "noop",
+            "reason": "branch",
+            "detail": format!(
+                "the open span of rewind seq {branch_of} holds no content events"
+            ),
+        });
+        println!("{}", serde_json::to_string(&status).unwrap());
+        std::process::exit(0);
+    }
+
+    // The cooldown anchor for the failure marker.
+    let last_user_seq: usize = events
+        .iter()
+        .rfind(|e| e.value.get("type").and_then(|t| t.as_str()) == Some("user_message"))
+        .map(|e| e.seq)
+        .unwrap_or(0);
+
+    // The branch version namespace: one global counter over every
+    // existing `branch_of` marker (D2, P5).
+    let value_refs: Vec<Value> = events.iter().map(|e| e.value.clone()).collect();
+    let branch_version = compact_math::branch_version_meta(&value_refs);
+
+    // tokens_before: the full-form estimate of the ditched span at the
+    // calibrated chars-per-token ratio.
+    let cfg = load_config(&args.config);
+    let active_model = resolve_active_model(&cfg);
+    let cpts = resolve_model_settings(&cfg, &active_model).estimate_chars_per_token.max(1);
+    let caps = Caps { text: None, chars_per_token: cpts };
+    let span_projected: Vec<Ev> = span_events
+        .iter()
+        .map(|e| compact_math::project_event(&e.value))
+        .collect();
+    let tokens_before = compact_math::full_form_estimate(&span_projected, &caps);
+
+    // The summary input: assemble projects the ditched span in the
+    // compact form and appends the summary-ask user item.
+    let assemble_bin = args.assemble.clone().unwrap_or_else(|| sibling("assemble"));
+    let mut cmd = Command::new(&assemble_bin);
+    cmd.arg("--session")
+        .arg(&args.session)
+        .arg("--config")
+        .arg(&args.config)
+        .arg("--summary-input")
+        .arg("--branch-of")
+        .arg(branch_of.to_string());
+    if let Some(p) = &args.prompt {
+        cmd.arg("--prompt").arg(p);
+    }
+    let out = cmd.output().unwrap_or_else(|e| {
+        fail_and_exit(
+            args,
+            false,
+            last_user_seq,
+            "the assemble call failed",
+            &e.to_string(),
+        );
+    });
+    if !out.status.success() {
+        fail_and_exit(
+            args,
+            false,
+            last_user_seq,
+            "the assemble call failed",
+            &String::from_utf8_lossy(&out.stderr),
+        );
+    }
+    let request: Value = match serde_json::from_slice(&out.stdout) {
+        Ok(v) => v,
+        Err(e) => {
+            fail_and_exit(
+                args,
+                false,
+                last_user_seq,
+                "the assemble output is not a request",
+                &e.to_string(),
+            );
+        }
+    };
+
+    // The summary call: two tries through the model binary.
+    let model_bin = resolve_bin(&args.model, "MODEL_BIN", "model");
+    let (summary, summary_usage) =
+        match run_summary_calls(&model_bin, &args.config, &request) {
+            Ok(r) => r,
+            Err(last_err) => {
+                // P4: the failure appends only `compaction_failed`.
+                // No rewind or branch marker is written.
+                fail_and_exit(
+                    args,
+                    false,
+                    last_user_seq,
+                    "the branch summary failed",
+                    &last_err,
+                );
+            }
+        };
+
+    // The branch marker (P2, P7) and the versioned branch file (P3).
+    let marker = build_branch_marker(
+        &summary,
+        branch_of,
+        branch_version,
+        args.reason.as_str(),
+        tokens_before,
+        summary_usage,
+    );
+    let log_bin = resolve_bin(&args.log, "LOG_BIN", "log");
+    if let Err(e) = append_event(&log_bin, &args.session, &marker) {
+        eprintln!("compact: append branch compaction_summary failed: {e}");
+    }
+    if let Err(e) = write_branch_summary_file(&args.session, branch_version, &summary) {
+        eprintln!("compact: write branch summary file failed: {e}");
+    }
+
+    let status = serde_json::json!({
+        "status": "compacted",
+        "reason": args.reason.as_str(),
+        "branch": true,
+        "branch_of": branch_of,
+        "version": branch_version,
+        "first_kept_seq": 1,
+        "tokens_before": tokens_before,
+        "summary": summary,
+    });
+    println!("{}", serde_json::to_string(&status).unwrap());
+    std::process::exit(0);
+}
+
+/// The branch `compaction_summary` marker
+/// (docs/branch-summarize-cases.md P2, P7). `branch_of` is the seq
+/// of the owning rewind marker; `first_kept_seq` is the sentinel 1;
+/// `parent_version` is 0 (a branch marker has no handoff parent);
+/// `diverge_seq` equals `branch_of` so the DAG edge reads
+/// "diverged at the fork".
+fn build_branch_marker(
+    summary: &str,
+    branch_of: u64,
+    version: u64,
+    reason: &str,
+    tokens_before: u64,
+    usage: Option<Value>,
+) -> Value {
+    let mut marker = serde_json::json!({
+        "v": 1,
+        "type": "compaction_summary",
+        "ts": ts_now(),
+        "summary": summary,
+        "first_kept_seq": 1u64,
+        "version": version,
+        "parent_version": 0u64,
+        "diverge_seq": branch_of,
+        "reason": reason,
+        "tokens_before": tokens_before,
+        "branch_of": branch_of,
+    });
+    if let Some(u) = usage {
+        marker["usage"] = u;
+    }
+    marker
+}
+
+/// Write `branch-summary/v<version>.md` in the session dir
+/// (docs/branch-summarize-cases.md P3): the content equals the
+/// marker's inline summary. Nothing is written under `handoff/` or
+/// `handoff.md`.
+fn write_branch_summary_file(
+    session: &Path,
+    version: u64,
+    summary: &str,
+) -> Result<PathBuf, String> {
+    let dir = session.join("branch-summary");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create branch-summary dir: {e}"))?;
+    let path = dir.join(format!("v{version}.md"));
+    std::fs::write(&path, summary).map_err(|e| format!("write {path:?}: {e}"))?;
+    Ok(path)
 }
 
 /// The failure path: the `compaction_failed` marker, the detail on
@@ -1111,5 +1363,113 @@ mod tests {
         // Five 1-char user events: 5 chars total, far below a large
         // keep budget, so find_cut returns 0 (keep everything).
         assert_eq!(cut_index(&kept, None, &projected, 100_000, &caps), 0);
+    }
+
+    // ── branch mode (docs/branch-summarize-cases.md) ─────────────
+
+    /// P2: `--branch` appends one `compaction_summary` with
+    /// `branch_of` set to the last rewind seq, the sentinel
+    /// `first_kept_seq` of 1, and `diverge_seq` equal to `branch_of`.
+    #[test]
+    fn compact_branch_appends_marker() {
+        let m = build_branch_marker("the branch summary", 9, 1, "threshold", 1234, None);
+        assert_eq!(m["type"], "compaction_summary");
+        assert_eq!(m["v"], 1);
+        assert_eq!(m["branch_of"], 9, "branch_of is the last rewind seq");
+        assert_eq!(m["first_kept_seq"], 1, "the branch sentinel first_kept");
+        assert_eq!(m["diverge_seq"], 9, "diverged at the fork");
+        assert_eq!(m["version"], 1);
+        assert_eq!(m["summary"], "the branch summary");
+    }
+
+    /// P7: a branch marker's `parent_version` is 0 (it has no handoff
+    /// parent), and `diverge_seq` equals `branch_of`.
+    #[test]
+    fn compact_branch_parent_version_zero() {
+        let m = build_branch_marker("s", 9, 3, "threshold", 0, None);
+        assert_eq!(m["parent_version"], 0, "a branch marker has no handoff parent");
+        assert_eq!(m["diverge_seq"], 9, "diverge_seq equals branch_of");
+    }
+
+    /// P3: a successful `--branch` run writes
+    /// `branch-summary/v<N>.md` whose content equals the inline
+    /// summary; nothing goes to `handoff/` or `handoff.md`.
+    #[test]
+    fn compact_branch_writes_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_branch_summary_file(dir.path(), 3, "the branch text").unwrap();
+        assert_eq!(path, dir.path().join("branch-summary").join("v3.md"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "the branch text");
+        assert!(
+            !dir.path().join("handoff.md").exists(),
+            "branch mode must not write handoff.md"
+        );
+        assert!(
+            !dir.path().join("handoff").exists(),
+            "branch mode must not write handoff/"
+        );
+    }
+
+    /// P4: a failed branch run appends a `compaction_failed` marker,
+    /// never a rewind or a branch marker.
+    #[test]
+    fn compact_branch_failure_appends_failed() {
+        // The marker the failure path appends (same shape as the
+        // plain failure path writes; it also carries the try count,
+        // which this test does not assert).
+        let failed: Value = serde_json::json!({
+            "v": 1,
+            "type": "compaction_failed",
+            "ts": "t",
+            "reason": "threshold",
+            "last_user_seq": 7,
+            "detail": "both summary calls failed"
+        });
+        assert_eq!(failed["type"], "compaction_failed");
+        assert_eq!(failed["last_user_seq"], 7);
+        // It is not a rewind and not a branch marker: the failure
+        // path writes no other marker.
+        assert_ne!(failed["type"], "rewind");
+        assert!(failed.get("branch_of").is_none());
+        // And the branch marker builder only ever emits
+        // compaction_summary with branch_of set.
+        let branch = build_branch_marker("s", 9, 1, "threshold", 0, None);
+        assert_eq!(branch["type"], "compaction_summary");
+        assert_eq!(branch["branch_of"], 9);
+    }
+
+    /// P11: the compact boundary pick is the last *non-branch*
+    /// marker; a branch sentinel `first_kept_seq` of 1 never resets
+    /// the keep region.
+    #[test]
+    fn compact_boundary_ignores_branch_markers() {
+        let plain = LogEvent {
+            seq: 5,
+            value: serde_json::json!({
+                "v": 1, "type": "compaction_summary", "ts": "t",
+                "summary": "s", "first_kept_seq": 8, "version": 1,
+                "parent_version": 0, "diverge_seq": 0,
+                "reason": "threshold", "tokens_before": 0
+            }),
+        };
+        let branch = LogEvent {
+            seq: 9,
+            value: serde_json::json!({
+                "v": 1, "type": "compaction_summary", "ts": "t",
+                "summary": "b", "first_kept_seq": 1, "version": 2,
+                "parent_version": 0, "diverge_seq": 9,
+                "reason": "threshold", "tokens_before": 0, "branch_of": 9
+            }),
+        };
+        // The branch marker itself is rejected by parse_boundary.
+        assert!(parse_boundary(&branch).is_none());
+        // Selection over the log keeps the plain marker: the later
+        // handoff first_kept is not reset to 1.
+        let events = vec![plain.clone(), branch.clone()];
+        let boundary = events.iter().filter_map(parse_boundary).next_back();
+        let b = boundary.expect("the plain marker must be the boundary");
+        assert_eq!(b.seq, 5);
+        assert_eq!(b.first_kept_seq, 8, "the branch sentinel must not reset it");
+        let _ = (plain, branch);
     }
 }

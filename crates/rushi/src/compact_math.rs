@@ -174,8 +174,13 @@ pub fn estimate_from_events(events: &[Value], cpts: u64) -> u64 {
         .map(|(i, v)| (i + 1, v))
         .collect();
 
+    // The boundary is the last *plain* compaction_summary: a branch
+    // marker (additive `branch_of`, docs/branch-summarize-cases.md
+    // P11) sits on the active path as an add-on, its sentinel
+    // `first_kept_seq` of 1 must never reset the keep region.
     let boundary = active_events.iter().rposition(|(_, v)| {
         v.get("type").and_then(|t| t.as_str()) == Some("compaction_summary")
+            && !is_branch_marker(v)
     });
 
     if let Some(b) = boundary {
@@ -456,6 +461,15 @@ pub fn extract_file_ops(events: &[Value]) -> (Vec<String>, Vec<String>) {
     (reads, modified)
 }
 
+/// A `compaction_summary` event that carries the additive `branch_of`
+/// field (docs/branch-summarize-cases.md D1, P1). Such a marker is an
+/// add-on on the active path that summarizes an abandoned rewind
+/// span: it is not a handoff boundary.
+pub fn is_branch_marker(v: &Value) -> bool {
+    v.get("type").and_then(|t| t.as_str()) == Some("compaction_summary")
+        && v.get("branch_of").is_some()
+}
+
 /// Handoff versioning metadata (docs/handoff-versioning-design.md).
 ///
 /// Given the raw event log (in log order), derive:
@@ -467,24 +481,48 @@ pub fn extract_file_ops(events: &[Value]) -> (Vec<String>, Vec<String>) {
 ///   there is no parent). This is the log seq at which this new handoff
 ///   diverges from its predecessor — the DAG link that gives each
 ///   versioned handoff its identity.
+///
+/// Branch markers (the additive `branch_of` field,
+/// docs/branch-summarize-cases.md P6) live in a separate version
+/// namespace: they never count toward the handoff counter, and a
+/// handoff `version` / `parent_version` / `diverge_seq` never points
+/// at one.
 pub fn handoff_version_meta(events: &[Value]) -> (u64, u64, u64) {
     let mut count: u64 = 0;
     let mut parent_first_kept: u64 = 0;
     for v in events {
-        if v.get("type").and_then(|t| t.as_str()) == Some("compaction_summary") {
-            count += 1;
-            // Track the most recent boundary's first_kept_seq.
-            if let Some(fk) = v
-                .get("first_kept_seq")
-                .and_then(|f| f.as_u64())
-            {
-                parent_first_kept = fk;
-            }
+        if v.get("type").and_then(|t| t.as_str()) != Some("compaction_summary") {
+            continue;
+        }
+        if is_branch_marker(v) {
+            // P6: the handoff counter counts plain markers only.
+            continue;
+        }
+        count += 1;
+        // Track the most recent boundary's first_kept_seq.
+        if let Some(fk) = v
+            .get("first_kept_seq")
+            .and_then(|f| f.as_u64())
+        {
+            parent_first_kept = fk;
         }
     }
     let version = count + 1;
     let parent_version = count;
     (version, parent_version, parent_first_kept)
+}
+
+/// The branch version namespace (docs/branch-summarize-cases.md D2, P5).
+///
+/// There is one global counter across all branch markers, not one
+/// per `branch_of` value: the version of the next branch marker is the
+/// count of every existing `branch_of` marker plus one.
+pub fn branch_version_meta(events: &[Value]) -> u64 {
+    let n = events
+        .iter()
+        .filter(|v| is_branch_marker(v))
+        .count() as u64;
+    n + 1
 }
 
 #[cfg(test)]
@@ -850,6 +888,24 @@ mod tests {
         })
     }
 
+    /// A branch `compaction_summary` marker: carries `branch_of`, the
+    /// sentinel `first_kept_seq` of 1, and a branch-namespace version.
+    fn jv_compaction_branch(version: u64, branch_of: u64) -> Value {
+        serde_json::json!({
+            "v": 1,
+            "type": "compaction_summary",
+            "ts": "t",
+            "summary": "b",
+            "first_kept_seq": 1,
+            "version": version,
+            "parent_version": 0,
+            "diverge_seq": branch_of,
+            "reason": "threshold",
+            "tokens_before": 0,
+            "branch_of": branch_of
+        })
+    }
+
     #[test]
     fn version_meta_no_boundaries() {
         let events: Vec<Value> = vec![
@@ -887,6 +943,81 @@ mod tests {
         assert_eq!(v, 3, "third compaction is version 3");
         assert_eq!(pv, 2, "parent is the most recent boundary");
         assert_eq!(ds, 15, "diverge point is the last boundary's first_kept_seq");
+    }
+
+    /// P11 support (docs/branch-summarize-cases.md): a branch marker
+    /// with the sentinel `first_kept_seq` of 1 never acts as the
+    /// estimate boundary. The last plain marker keeps the region, so
+    /// the estimate is identical with or without the branch marker.
+    #[test]
+    fn estimate_from_events_skips_branch_markers() {
+        // No measured readings anywhere: the estimate uses the
+        // boundary's summary framing cost plus the kept region,
+        // margin included. A long plain summary makes the boundary
+        // choice observable: plain (seq 2) gives framing 400/4 =
+        // 100; a branch boundary (seq 3, summary "b") gives 0.
+        let big = "s".repeat(400);
+        let plain = serde_json::json!({
+            "v": 1, "type": "compaction_summary", "ts": "t",
+            "summary": big, "first_kept_seq": 2, "version": 1,
+            "parent_version": 0, "diverge_seq": 0,
+            "reason": "threshold", "tokens_before": 0
+        });
+        let branch = jv_compaction_branch(1, 5);
+        let user5 = jv_user(5, &"a".repeat(800)); // 200 tokens
+        let events: Vec<Value> = vec![jv_user(1, "hi"), plain.clone(), branch, user5.clone()];
+        // kept = [branch(3), user(5)] -> 0 + 200; framing 100;
+        // raw 300, margin -> 375.
+        let est = estimate_from_events(&events, 4);
+        assert_eq!(est, 375, "the branch sentinel must not reset the boundary");
+        // Without the branch marker the estimate is the same: the
+        // branch marker contributes nothing and shifts no boundary.
+        let events_plain: Vec<Value> = vec![jv_user(1, "hi"), plain, user5];
+        assert_eq!(estimate_from_events(&events_plain, 4), est);
+    }
+
+    /// P5 (docs/branch-summarize-cases.md): the branch version is a
+    /// single global counter over every `branch_of` marker, not one
+    /// per `branch_of` value.
+    #[test]
+    fn version_meta_branch_namespace() {
+        // Two branch markers on the same branch, one on another.
+        let events: Vec<Value> = vec![
+            jv_compaction_branch(1, 8),
+            jv_compaction_branch(2, 8),
+            jv_compaction_branch(3, 11),
+        ];
+        assert_eq!(branch_version_meta(&events), 4, "three branch markers, next is 4");
+        // A plain marker does not advance the branch counter.
+        let mixed: Vec<Value> = vec![jv_compaction_v2(1, 8), jv_compaction_branch(1, 8)];
+        assert_eq!(branch_version_meta(&mixed), 2, "only branch_of markers count");
+        // An empty log starts the counter at 1.
+        assert_eq!(branch_version_meta(&[]), 1);
+    }
+
+    /// P6 (docs/branch-summarize-cases.md): the handoff counter counts
+    /// plain `compaction_summary` markers only; branch markers never
+    /// enter it, so a handoff version/parent_version never references
+    /// a branch marker.
+    #[test]
+    fn version_meta_handoff_skips_branch() {
+        let events: Vec<Value> = vec![
+            jv_compaction_v2(1, 8),
+            jv_compaction_branch(1, 8),
+            jv_user(9, "more"),
+            jv_compaction_v2(2, 15),
+            jv_compaction_branch(2, 15),
+        ];
+        let (v, pv, ds) = handoff_version_meta(&events);
+        assert_eq!(v, 3, "two plain markers, next handoff is version 3");
+        assert_eq!(pv, 2, "parent is the last plain marker, not a branch one");
+        assert_eq!(ds, 15, "diverge point is the last plain marker's first_kept_seq");
+        // A branch marker alone never starts the handoff namespace.
+        let only_branch: Vec<Value> = vec![jv_compaction_branch(1, 8)];
+        let (v, pv, ds) = handoff_version_meta(&only_branch);
+        assert_eq!(v, 1, "no plain marker: handoff version is still 1");
+        assert_eq!(pv, 0);
+        assert_eq!(ds, 0);
     }
 
     #[test]
