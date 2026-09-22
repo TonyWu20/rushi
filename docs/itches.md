@@ -533,8 +533,11 @@ The kernel does not host per-front-end launcher subcommands.
       Today `rushi` with no args launches the TUI (main.rs:123).
 - [ ] Update the README subcommand table and the `[tui]` section of
       `docs/reference/README.md`.
-      Also update the `flake.nix` devShell comment (lines 247-250)
-      that documents the `tui`-on-PATH lookup.
+- [x] flake.nix devShell comment that documents the TUI-on-PATH
+      lookup.
+      Done 2026-09-22 in issue #31.
+      The comment now documents the `rushi-tui` lookup
+      (side-by-side, then PATH).
 - [x] Config-path discovery for self-wired front-ends.
       Done 2026-09-20.
       The 4-step resolver ($CONFIG > CLI > Nix side-by-side > CWD)
