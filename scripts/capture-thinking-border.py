@@ -15,7 +15,7 @@ specialization: it compares the SGR color families the input-area
 border emits for a marker log against a marker-free log.
 
 WHAT IT DOES
-  Runs the built `tui` under a pseudo-terminal against two sessions:
+  Runs the built `rushi-tui` under a pseudo-terminal against two sessions:
   one whose log holds a `model_thinking` ext_status (value 4, the
   yellow bucket) and one with no marker (the default, gray). It
   classifies every emitted SGR sequence into color families and
@@ -30,10 +30,10 @@ USAGE
                             [--cols N] [--rows N] [--seconds N]
 
 EXAMPLES
-  # the default: repo-local sessions, target/debug/tui:
+  # the default: repo-local sessions, target/debug/rushi-tui:
   capture-thinking-border.py
   # a release binary, custom session names:
-  capture-thinking-border.py --bin ../target/release/tui \
+  capture-thinking-border.py --bin ../target/release/rushi-tui \
       --marker-session think-yellow --plain-session think-gray
 """
 import argparse
@@ -139,7 +139,7 @@ def main() -> int:
     ap.add_argument("--repo", default=REPO,
                     help="the repo root (default: the parent of scripts/)")
     ap.add_argument("--bin", default=None,
-                    help="the tui binary to run (default: $repo/target/debug/tui)")
+                    help="the TUI binary to run (default: $repo/target/debug/rushi-tui)")
     ap.add_argument("--marker-session", default="scratch-thinking-publish",
                     help="the session with a model_thinking marker in its log")
     ap.add_argument("--plain-session", default="scratch-thinking-none",
@@ -150,7 +150,7 @@ def main() -> int:
                     help="how long to watch each run before SIGKILL")
     args = ap.parse_args()
     if args.bin is None:
-        args.bin = os.path.join(args.repo, "target", "debug", "tui")
+        args.bin = os.path.join(args.repo, "target", "debug", "rushi-tui")
 
     # A session with no marker in the log: the default gray border.
     plain_dir = os.path.join(args.repo, "sessions", args.plain_session)

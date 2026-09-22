@@ -319,7 +319,7 @@ lib.mkMerge [
 ```
 $out/
   bin/
-    rushi              # kernel binary (loop engine + tui launcher).
+    rushi              # kernel binary (loop engine + tools).
                        # When rushi.environment is set, this is a thin
                        # shell wrapper that exports the vars from
                        # $out/rushi.env and exec's the real binary at

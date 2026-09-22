@@ -214,7 +214,7 @@ trailing newline if the source file lacks one.
 # text = "You are an expert coding assistant..."
 
 # --- [tui] ---
-# binary = "target/release/tui"
+# binary = "target/release/rushi-tui"  # front-end config key; not read by the kernel
 # color = "truecolor"
 # color_scheme = "catppuccin macchiato"
 # [tui.tool_display]

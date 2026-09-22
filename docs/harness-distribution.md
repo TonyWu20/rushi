@@ -44,11 +44,11 @@ applications do not ship here. They live in the project repo.
 The published binary is `rushi`. It has one subcommand and one default
 behavior:
 
-- `rushi` or `rushi tui` → open the TUI (default)
+- `rushi` → print the top-level help (the TUI is launched directly, as `rushi-tui`)
 - `rushi setup` → initialize a project from `rushi.toml`
 
 The user does not run the loop stages by hand. The TUI supervises the
-opaque loop command. `rushi setup` is the only non-TUI operation the
+opaque loop command. `rushi setup` is the only kernel operation the
 user runs.
 
 ## 4. Global install, per-project registration
@@ -351,7 +351,7 @@ own name.
 | Current | Target | Role |
 |---|---|---|
 | `bin/harness` | `bin/rushi` | The totem. Loop engine and composition root. Gains `setup` and `tui` subcommands (§3). The binary a user installs and invokes. |
-| `bin/tui` | `bin/tui` (unchanged) | Tier-2 front-end. Launched by `rushi tui` (or inlined later). A different front-end can replace it without renaming anything. |
+| `bin/tui` | `rushi-tui` repo | Tier-2 front-end in the rushi-tui repo. Launched directly (`rushi-tui`), not by the kernel. A different front-end can replace it without kernel changes. |
 | `crates/rushi` (crate `rushi-common`) | `crates/rushi` (crate `rushi-common`) | Shared kernel types, event vocabulary, `SessionPort`. Crate name follows the distribution name. |
 | `config.toml` | `rushi.toml` (user-edited manifest) + `config.toml` (generated) | The user edits `rushi.toml`; `rushi setup` generates `config.toml` from it (§5, §7). |
 

@@ -383,7 +383,7 @@ pub fn render_config(manifest: &RushiManifest, version: &str, kernel_commit: &st
          # text = \"You are an expert coding assistant...\"\n\
          #\n\
          # [tui]\n\
-         # binary = \"target/release/tui\"   # path to the TUI binary the launcher spawns (relative to this config)\n\
+         # binary = \"target/release/rushi-tui\"   # front-end config key; not read by the kernel\n\
          # color = \"truecolor\"              # force color level: truecolor, 256, 8, 16 (default: detect)\n\
          # color_scheme = \"catppuccin macchiato\"\n\
          #\n\
