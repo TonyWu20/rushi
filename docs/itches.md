@@ -527,12 +527,18 @@ The kernel does not host per-front-end launcher subcommands.
   Sharing now is the cheaper path.
 
 **Follow-ups (open, P0-gated. Build only on a recorded episode):**
-- [ ] Remove `Command::Tui`, `resolve_tui_binary`, and
+- [x] Remove `Command::Tui`, `resolve_tui_binary`, and
       `config_tui_binary` from `bin/rushi/src/main.rs`.
-      Decide the bare-`rushi` default.
-      Today `rushi` with no args launches the TUI (main.rs:123).
-- [ ] Update the README subcommand table and the `[tui]` section of
+      Done 2026-09-22 in the issue #31 follow-up.
+      The bare-`rushi` default now prints the top-level help
+      and exits 0. The kernel no longer launches front-ends;
+      the TUI is invoked directly as `rushi-tui` (P2: the kernel
+      stays front-end-agnostic).
+- [x] Update the README subcommand table and the `[tui]` section of
       `docs/reference/README.md`.
+      Done 2026-09-22 in the issue #31 follow-up. The `rushi tui`
+      row is gone; the `[tui]` example marks `binary` as a key the
+      kernel does not read.
 - [x] flake.nix devShell comment that documents the TUI-on-PATH
       lookup.
       Done 2026-09-22 in issue #31.
