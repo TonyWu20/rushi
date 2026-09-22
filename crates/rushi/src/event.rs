@@ -245,6 +245,13 @@ pub struct CompactionSummary {
     pub modified_files: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    /// Additive optional field (docs/branch-summarize-cases.md D1, P1).
+    /// The 1-based log seq of the `rewind` marker whose abandoned open
+    /// span this marker summarizes. Present on branch markers only;
+    /// handoff markers have no `branch_of`. A branch marker is an
+    /// add-on on the active path, not a handoff boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_of: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -362,6 +369,10 @@ mod tests {
         r#"{"v":1,"type":"compaction_summary","ts":"2025-01-01T00:00:07Z","summary":"did stuff","first_kept_seq":10,"version":1,"parent_version":0,"diverge_seq":0,"reason":"threshold","tokens_before":100000,"tokens_after":500,"read_files":["/a"],"modified_files":["/b"],"usage":{"input_tokens":90,"output_tokens":10}}"#
     }
 
+    fn compaction_summary_branch_line() -> &'static str {
+        r#"{"v":1,"type":"compaction_summary","ts":"2025-01-01T00:00:07Z","summary":"the ditched branch tried X","first_kept_seq":1,"version":2,"parent_version":0,"diverge_seq":9,"reason":"threshold","tokens_before":40000,"branch_of":9}"#
+    }
+
     fn compaction_failed_line() -> &'static str {
         r#"{"v":1,"type":"compaction_failed","ts":"2025-01-01T00:00:08Z","reason":"overflow","detail":"context overflow","last_user_seq":5}"#
     }
@@ -452,6 +463,26 @@ mod tests {
     #[test]
     fn round_trip_compaction_summary() {
         round_trip(compaction_summary_line());
+    }
+
+    /// P1 (docs/branch-summarize-cases.md): the additive `branch_of`
+    /// field round-trips losslessly and `v` stays 1. A legacy line
+    /// without `branch_of` still parses (the field is optional).
+    #[test]
+    fn round_trip_compaction_summary_with_branch_of() {
+        round_trip(compaction_summary_branch_line());
+        let ev: Event = parse_event(compaction_summary_branch_line()).unwrap();
+        let Event::CompactionSummary(c) = ev else {
+            panic!("expected CompactionSummary")
+        };
+        assert_eq!(c.branch_of, Some(9), "branch_of must round-trip");
+        assert_eq!(c.v, 1, "v must stay 1");
+        // The legacy line parses with branch_of absent.
+        let ev: Event = parse_event(compaction_summary_line()).unwrap();
+        let Event::CompactionSummary(c) = ev else {
+            panic!("expected CompactionSummary")
+        };
+        assert_eq!(c.branch_of, None, "legacy lines have no branch_of");
     }
 
     #[test]

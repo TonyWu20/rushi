@@ -70,6 +70,15 @@ struct Args {
     /// repo). Absent: the default first-time or update instruction.
     #[arg(long, value_name = "TEXT")]
     prompt: Option<String>,
+
+    /// The 1-based log seq of the `rewind` marker whose abandoned
+    /// open span the summary-input mode projects
+    /// (docs/branch-summarize-cases.md Phase 0). Used with
+    /// `--summary-input` instead of `--up-to`: the projected region
+    /// is the span between the marker's effective target and the
+    /// marker itself.
+    #[arg(long, value_name = "SEQ")]
+    branch_of: Option<usize>,
 }
 
 /// One log event, projected to model input items.
@@ -147,6 +156,7 @@ fn step_groups(events: &[&Ev]) -> Vec<(usize, usize)> {
 /// The projection boundary: the last `compaction_summary` event and
 /// the first log sequence its summary does not cover
 /// (docs/auto-compact-plan.md section 4.1).
+#[derive(Clone)]
 struct Boundary {
     /// The 1-based log seq of the compaction_summary event.
     #[allow(dead_code)]
@@ -167,8 +177,14 @@ struct Boundary {
 /// Parse one `compaction_summary` event into the projection
 /// boundary. A value that cannot be parsed is rejected: `None`
 /// re-renders without the summary (docs/auto-compact-plan.md
-/// section 4.1).
+/// section 4.1). Branch markers (the additive `branch_of` field,
+/// docs/branch-summarize-cases.md P8, P11) are add-ons on the
+/// active path, not boundaries: they are rejected here so their
+/// sentinel `first_kept_seq` of 1 never resets the keep region.
 fn parse_boundary(event: &serde_json::Value, seq: usize) -> Option<Boundary> {
+    if event.get("branch_of").is_some() {
+        return None;
+    }
     let first_kept_seq = event.get("first_kept_seq")?.as_u64()? as usize;
     if first_kept_seq < 1 {
         return None;
@@ -204,6 +220,93 @@ fn summary_framing_item(summary: &str) -> serde_json::Value {
             "[Session context summary of the events before this point. The events after it are kept.]\n\n{summary}"
         )
     })
+}
+
+/// One branch marker seen in the log
+/// (docs/branch-summarize-cases.md P9). A `compaction_summary` that
+/// carries `branch_of`: a summary of an abandoned rewind span,
+/// appended on the active path.
+struct BranchMarker {
+    /// The 1-based log seq of the marker itself. Carried for
+    /// diagnostics; the projection only needs branch_of/version.
+    #[allow(dead_code)]
+    seq: usize,
+    /// The 1-based log seq of the owning `rewind` marker.
+    branch_of: u64,
+    /// The branch-namespace version of this marker.
+    version: u64,
+    /// The inline summary text: the fallback when the versioned
+    /// `branch-summary/v<N>.md` file is missing or empty.
+    summary: String,
+}
+
+/// Project the branch markers into add-on user-role framing items
+/// (docs/branch-summarize-cases.md P9).
+///
+/// One item per `branch_of` value: the highest-version marker of the
+/// group wins (later markers win ties). The text is read from
+/// `branch-summary/v<version>.md` in the session dir; a missing or
+/// empty file falls back to the marker's inline `summary`. Groups are
+/// emitted in ascending `branch_of` order so the framing is
+/// byte-stable for a given log.
+fn build_branch_framings(
+    markers: &[BranchMarker],
+    session_dir: &std::path::Path,
+) -> Vec<serde_json::Value> {
+    if markers.is_empty() {
+        return Vec::new();
+    }
+    let mut best: HashMap<u64, &BranchMarker> = HashMap::new();
+    for m in markers {
+        match best.get(&m.branch_of) {
+            Some(cur) if cur.version > m.version => {}
+            _ => {
+                best.insert(m.branch_of, m);
+            }
+        }
+    }
+    let mut branch_ofs: Vec<u64> = best.keys().copied().collect();
+    branch_ofs.sort();
+    branch_ofs
+        .into_iter()
+        .map(|bo| {
+            let m = best[&bo];
+            let file = session_dir
+                .join("branch-summary")
+                .join(format!("v{}.md", m.version));
+            let text = std::fs::read_to_string(&file)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| m.summary.trim().to_string());
+            serde_json::json!({
+                "type": "message",
+                "role": "user",
+                "content": format!(
+                    "[Branch summary of the abandoned branch that diverged at seq {bo}. \
+                     It is not part of the active path.]\n\n{text}"
+                )
+            })
+        })
+        .collect()
+}
+
+/// Insert the framing items ahead of the projected content
+/// (docs/branch-summarize-cases.md P10). The handoff boundary
+/// framing takes the lead slot when present; the branch framings
+/// follow it, all before any read or event content.
+fn insert_framing_items(
+    items: &mut Vec<serde_json::Value>,
+    handoff_framing: &Option<serde_json::Value>,
+    branch_framings: &[serde_json::Value],
+) {
+    if let Some(f) = handoff_framing {
+        items.insert(0, f.clone());
+    }
+    for (i, f) in branch_framings.iter().enumerate() {
+        let pos = if handoff_framing.is_some() { 1 + i } else { i };
+        items.insert(pos, f.clone());
+    }
 }
 
 /// The first-time compaction prompt (docs/auto-compact-plan.md
@@ -745,6 +848,7 @@ fn estimate_ev_tokens(ev: &Ev, chars_per_token: u64) -> u64 {
 fn estimate_request_tokens(
     kept_events: &[&Ev],
     framing: &Option<serde_json::Value>,
+    extra_framing_chars: u64,
     chars_per_token: u64,
 ) -> u64 {
     // When a compaction boundary exists, the last measured usage in
@@ -790,6 +894,11 @@ fn estimate_request_tokens(
                 trailing += content.chars().count() as u64 / 4;
             }
         }
+        // The branch framing items (docs/branch-summarize-cases.md
+        // P9) ride the request as well; count their content. Zero
+        // for logs without branch markers, so legacy estimates are
+        // untouched (P12).
+        trailing += extra_framing_chars / 4;
     }
 
     anchor + trailing
@@ -806,10 +915,11 @@ fn estimate_request_tokens(
 fn hard_trim_groups(
     events: &[&Ev],
     framing: &Option<serde_json::Value>,
+    extra_framing_chars: u64,
     target: u64,
     chars_per_token: u64,
 ) -> Option<usize> {
-    if estimate_request_tokens(events, framing, chars_per_token) <= target {
+    if estimate_request_tokens(events, framing, extra_framing_chars, chars_per_token) <= target {
         return Some(0);
     }
     let groups = step_groups(events);
@@ -819,7 +929,9 @@ fn hard_trim_groups(
         } else {
             events.len()
         };
-        if estimate_request_tokens(&events[start..], framing, chars_per_token) <= target {
+        if estimate_request_tokens(&events[start..], framing, extra_framing_chars, chars_per_token)
+            <= target
+        {
             return Some(drop);
         }
     }
@@ -973,6 +1085,11 @@ fn main() {
     let mut event_seqs: Vec<usize> = Vec::new();
     let mut seq: usize = 0;
     let mut boundary: Option<Boundary> = None;
+    // Branch markers: `compaction_summary` events that carry the
+    // additive `branch_of` field. They project to add-on framing
+    // items, never to the projection boundary
+    // (docs/branch-summarize-cases.md P8, P9).
+    let mut branch_markers: Vec<BranchMarker> = Vec::new();
     let mut rewinds: Vec<rewind::RewindRef> = Vec::new();
     for line in lines.lines() {
         let line = line.trim();
@@ -1108,7 +1225,28 @@ fn main() {
                 // The projection boundary. A value that cannot be
                 // parsed is rejected: the log re-renders without the
                 // summary (docs/auto-compact-plan.md section 4.1).
-                if let Some(b) = parse_boundary(&event, seq) {
+                // Branch markers (additive `branch_of`) are add-ons
+                // on the active path: they are recorded for the
+                // framing items, never become the boundary
+                // (docs/branch-summarize-cases.md P8, P9).
+                if event.get("branch_of").is_some() {
+                    branch_markers.push(BranchMarker {
+                        seq,
+                        branch_of: event
+                            .get("branch_of")
+                            .and_then(|b| b.as_u64())
+                            .unwrap_or(0),
+                        version: event
+                            .get("version")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0),
+                        summary: event
+                            .get("summary")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    });
+                } else if let Some(b) = parse_boundary(&event, seq) {
                     boundary = Some(b);
                 }
             }
@@ -1131,6 +1269,38 @@ fn main() {
     // A boundary whose first_kept_seq outgrows the log is corrupt:
     // re-render without the summary.
     let boundary = boundary.filter(|b| b.first_kept_seq <= seq.max(1));
+
+    // Pre-compute the branch summary-input region
+    // (docs/branch-summarize-cases.md Phase 0) while `events`,
+    // `event_seqs`, and `rewinds` are still valid: the later
+    // projection steps consume `event_seqs` and `rewinds`. The
+    // branch region is the full-log span (eff, seq] abandoned by the
+    // rewind marker at `--branch-of`. It projects from the unfiltered
+    // log because the ditched span may hold seqs before the handoff
+    // boundary's first_kept_seq.
+    let branch_region: Option<Vec<&Ev>> = match args.branch_of {
+        Some(branch_seq) => {
+            let marker = match rewinds.iter().find(|r| r.seq == branch_seq) {
+                Some(m) => m,
+                None => {
+                    eprintln!(
+                        "Error: --branch-of {branch_seq} does not match a rewind marker in the log"
+                    );
+                    std::process::exit(1);
+                }
+            };
+            let lo = marker.eff();
+            Some(
+                events
+                    .iter()
+                    .zip(event_seqs.iter())
+                    .filter(|(_, s)| **s > lo && **s <= branch_seq)
+                    .map(|(ev, _)| ev)
+                    .collect(),
+            )
+        }
+        None => None,
+    };
 
     // Load tool schemas
     let mut tool_schemas: Vec<serde_json::Value> = Vec::new();
@@ -1314,26 +1484,46 @@ fn main() {
     // the bare model request. No budget decision. No state write.
     // bin/compact runs the mode and pipes the output to model.
     if args.summary_input {
-        let up_to = match args.up_to {
-            Some(u) if u >= 1 => u,
-            _ => {
-                eprintln!("Error: --summary-input requires --up-to <seq>, a 1-based log sequence");
-                std::process::exit(1);
+        // Two region sources, mutually exclusive
+        // (docs/branch-summarize-cases.md Phase 0): the `--up-to`
+        // boundary over the active-path kept region (the default), or
+        // the ditched open span of a `rewind` marker via
+        // `--branch-of`.
+        let old_region: Vec<&Ev> = if args.branch_of.is_some() {
+            // The branch region was pre-computed above, while
+            // `rewinds` and `event_seqs` were still valid.
+            branch_region.clone().expect("computed above for --branch-of")
+        } else {
+            let up_to = match args.up_to {
+                Some(u) if u >= 1 => u,
+                _ => {
+                    eprintln!("Error: --summary-input requires --up-to <seq>, a 1-based log sequence");
+                    std::process::exit(1);
+                }
+            };
+            let cut = kept_seqs
+                .iter()
+                .position(|&s| s > up_to)
+                .unwrap_or(kept_events.len());
+            let mut old_region: Vec<&Ev> = kept_events[..cut].to_vec();
+            // The strip flag excludes the last assistant group (the
+            // logged length-stop group) from the summary input.
+            if args.drop_last_assistant {
+                old_region = drop_last_assistant_group(&old_region);
             }
+            old_region
         };
         let base_caps = Caps {
             text: compact_text_chars,
         };
-        let cut = kept_seqs
-            .iter()
-            .position(|&s| s > up_to)
-            .unwrap_or(kept_events.len());
-        let mut old_region: Vec<&Ev> = kept_events[..cut].to_vec();
-        // The strip flag excludes the last assistant group (the
-        // logged length-stop group) from the summary input.
-        if args.drop_last_assistant {
-            old_region = drop_last_assistant_group(&old_region);
-        }
+        // Branch mode summarizes a standalone span: it carries no
+        // previous-summary block, so the first-time instruction
+        // stands (or the custom `--prompt` replaces it wholesale).
+        let prev: Option<Boundary> = if args.branch_of.is_some() {
+            None
+        } else {
+            boundary.clone()
+        };
         // The summary request must fit the window with room for its
         // own output cap. Under the `context_budget` base the wire
         // budget is the full window, so the drop search bounds the
@@ -1347,7 +1537,7 @@ fn main() {
         let summary_input_target = budget_tokens.min(window_input);
         let builder = summary_input_request()
             .old(&old_region)
-            .prev(&boundary)
+            .prev(&prev)
             .model(&model_settings.model_id)
             .max_out_cap(model_settings.max_output_tokens)
             .caps(&base_caps)
@@ -1417,6 +1607,21 @@ fn main() {
         (None, None) => None,
     };
 
+    // The branch framing items (docs/branch-summarize-cases.md P9,
+    // P10): one add-on user-role item per summarized branch, reading
+    // the versioned branch file with the inline summary as fallback.
+    // They sit behind the handoff framing, ahead of all content.
+    let branch_framings = build_branch_framings(&branch_markers, session_dir);
+    let branch_framing_chars: u64 = branch_framings
+        .iter()
+        .map(|f| {
+            f.get("content")
+                .and_then(|c| c.as_str())
+                .map(|s| s.chars().count() as u64)
+                .unwrap_or(0)
+        })
+        .sum();
+
     // The projected events: post-boundary when a boundary exists,
     // else the full log, masked to the active path when rewinds
     // exist. No sticky state, no keep halving, no group-drop levers
@@ -1440,8 +1645,18 @@ fn main() {
         .unwrap_or(16384)
         .max(0) as u64;
     let trim_target = trigger_level_for(budget_tokens as u64, compact_reserve);
-    let est_before = estimate_request_tokens(&sel_events, &framing, chars_per_token);
-    if est_before > trim_target && hard_trim_groups(&sel_events, &framing, trim_target, chars_per_token).is_none() {
+    let est_before =
+        estimate_request_tokens(&sel_events, &framing, branch_framing_chars, chars_per_token);
+    if est_before > trim_target
+        && hard_trim_groups(
+            &sel_events,
+            &framing,
+            branch_framing_chars,
+            trim_target,
+            chars_per_token,
+        )
+        .is_none()
+    {
         let mut items = build_items(
             &sel_events,
             sel_events.len(),
@@ -1449,9 +1664,7 @@ fn main() {
             &ptrs,
             model_settings.vision,
         );
-        if let Some(f) = &framing {
-            items.insert(0, f.clone());
-        }
+        insert_framing_items(&mut items, &framing, &branch_framings);
         let request = make_request(&items);
         let exhausted = serde_json::json!({
             "v": 1,
@@ -1471,9 +1684,7 @@ fn main() {
         &ptrs,
         model_settings.vision,
     );
-    if let Some(f) = &framing {
-        items.insert(0, f.clone());
-    }
+    insert_framing_items(&mut items, &framing, &branch_framings);
     let request = make_request(&items);
 
     println!("{}", request);
@@ -1686,8 +1897,8 @@ context_budget_tokens = 999999
         let evs = hard_trim_events();
         let refs = hard_trim_refs(&evs);
         let framing: Option<serde_json::Value> = None;
-        assert_eq!(hard_trim_groups(&refs, &framing, 4000, 4), Some(0));
-        assert_eq!(hard_trim_groups(&refs, &framing, 4001, 4), Some(0));
+        assert_eq!(hard_trim_groups(&refs, &framing, 0, 4000, 4), Some(0));
+        assert_eq!(hard_trim_groups(&refs, &framing, 0, 4001, 4), Some(0));
     }
 
     #[test]
@@ -1700,9 +1911,9 @@ context_budget_tokens = 999999
         // 999 drops nothing that fits: even the smallest non-empty
         // suffix (user B, 1000) exceeds 999, so the walk drops to
         // the empty suffix, which is 0 tokens.
-        assert_eq!(hard_trim_groups(&refs, &framing, 3000, 4), Some(1));
-        assert_eq!(hard_trim_groups(&refs, &framing, 1500, 4), Some(2));
-        assert_eq!(hard_trim_groups(&refs, &framing, 999, 4), Some(3));
+        assert_eq!(hard_trim_groups(&refs, &framing, 0, 3000, 4), Some(1));
+        assert_eq!(hard_trim_groups(&refs, &framing, 0, 1500, 4), Some(2));
+        assert_eq!(hard_trim_groups(&refs, &framing, 0, 999, 4), Some(3));
     }
 
     #[test]
@@ -1714,7 +1925,7 @@ context_budget_tokens = 999999
         // assistant message (the head of the call/result group) or a
         // user message. A target that fits exactly one group keeps
         // the group whole.
-        let drop = hard_trim_groups(&refs, &framing, 2000, 4).expect("trims to one group");
+        let drop = hard_trim_groups(&refs, &framing, 0, 2000, 4).expect("trims to one group");
         let start = step_groups(&refs)[drop].0;
         assert!(matches!(refs[start], Ev::Assistant { .. } | Ev::User { .. }));
     }
@@ -1730,9 +1941,9 @@ context_budget_tokens = 999999
             "role": "user",
             "content": "f".repeat(20000)
         }));
-        assert_eq!(hard_trim_groups(&refs, &framing, 4000, 4), None);
+        assert_eq!(hard_trim_groups(&refs, &framing, 0, 4000, 4), None);
         // A target above the framing cost fits with zero events kept.
-        assert_eq!(hard_trim_groups(&refs, &framing, 5000, 4), Some(3));
+        assert_eq!(hard_trim_groups(&refs, &framing, 0, 5000, 4), Some(3));
     }
 
     fn ev_res(id: &str, text: &str) -> Ev {
@@ -2823,7 +3034,7 @@ not json at all
         ];
         let refs: Vec<&Ev> = evs.iter().collect();
         // anchor = 1000 + 500 = 1500, no trailing events.
-        let est = estimate_request_tokens(&refs, &None, 4);
+        let est = estimate_request_tokens(&refs, &None, 0, 4);
         assert_eq!(est, 1500, "anchor must add input + output tokens");
     }
 
@@ -2843,7 +3054,196 @@ not json at all
         ];
         let refs: Vec<&Ev> = evs.iter().collect();
         // anchor = 800 + 0 = 800.
-        let est = estimate_request_tokens(&refs, &None, 4);
+        let est = estimate_request_tokens(&refs, &None, 0, 4);
         assert_eq!(est, 800, "no output: anchor is input only");
+    }
+
+    // ── branch markers (docs/branch-summarize-cases.md) ─────────
+
+    fn plain_summary_marker(first_kept: u64) -> serde_json::Value {
+        serde_json::json!({
+            "v": 1,
+            "type": "compaction_summary",
+            "ts": "t",
+            "summary": "plain summary",
+            "first_kept_seq": first_kept,
+            "version": 1,
+            "parent_version": 0,
+            "diverge_seq": 0,
+            "reason": "threshold",
+            "tokens_before": 0
+        })
+    }
+
+    fn branch_marker(version: u64, branch_of: u64, summary: &str) -> serde_json::Value {
+        serde_json::json!({
+            "v": 1,
+            "type": "compaction_summary",
+            "ts": "t",
+            "summary": summary,
+            "first_kept_seq": 1,
+            "version": version,
+            "parent_version": 0,
+            "diverge_seq": branch_of,
+            "reason": "threshold",
+            "tokens_before": 0,
+            "branch_of": branch_of
+        })
+    }
+
+    /// P8: a branch marker never becomes the projection boundary.
+    /// The last *non-branch* marker stands, and the branch sentinel
+    /// `first_kept_seq` of 1 never resets the keep region.
+    #[test]
+    fn assemble_boundary_ignores_branch_markers() {
+        let plain = plain_summary_marker(8);
+        let branch = branch_marker(2, 9, "the ditched branch");
+        // The branch marker is rejected outright.
+        assert!(parse_boundary(&branch, 9).is_none(), "branch markers are rejected");
+        // Selection keeps the plain marker even when the branch
+        // marker is later in the log.
+        let mut boundary: Option<Boundary> = None;
+        for (i, event) in [plain.clone(), branch.clone()].iter().enumerate() {
+            if let Some(b) = parse_boundary(event, i + 1) {
+                boundary = Some(b);
+            }
+        }
+        let b = boundary.expect("the plain marker must be the boundary");
+        assert_eq!(b.seq, 1);
+        assert_eq!(b.first_kept_seq, 8, "the branch sentinel must not reset it");
+        let _ = (plain, branch);
+    }
+
+    /// P9: one framing item per `branch_of` value, from the
+    /// highest-version marker of the group; the versioned
+    /// `branch-summary/v<N>.md` file wins, the inline summary is the
+    /// fallback.
+    #[test]
+    fn assemble_projects_branch_framing() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = dir.path();
+        // Two markers on branch_of=4 (v1, v2 with a file), one on
+        // branch_of=7 (no file: inline fallback).
+        let markers = vec![
+            BranchMarker {
+                seq: 10,
+                branch_of: 4,
+                version: 1,
+                summary: "branch four, first".to_string(),
+            },
+            BranchMarker {
+                seq: 14,
+                branch_of: 4,
+                version: 2,
+                summary: "branch four, inline v2".to_string(),
+            },
+            BranchMarker {
+                seq: 20,
+                branch_of: 7,
+                version: 3,
+                summary: "branch seven, inline".to_string(),
+            },
+        ];
+        let bdir = session.join("branch-summary");
+        std::fs::create_dir_all(&bdir).unwrap();
+        std::fs::write(bdir.join("v2.md"), "branch four, from the file\n").unwrap();
+
+        let items = build_branch_framings(&markers, session);
+        assert_eq!(items.len(), 2, "one item per branch_of");
+        // Ascending branch_of order; the v2 file beats the inline
+        // text, branch 7 falls back to its inline summary.
+        assert!(items[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("branch four, from the file"));
+        assert!(items[1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("branch seven, inline"));
+        for it in &items {
+            assert_eq!(it["type"], "message");
+            assert_eq!(it["role"], "user");
+        }
+    }
+
+    /// P10: the handoff boundary framing takes the lead slot; the
+    /// branch framings follow it, all before any read/event content.
+    #[test]
+    fn assemble_branch_framing_precedes_reads() {
+        let handoff = Some(serde_json::json!({
+            "type": "message",
+            "role": "user",
+            "content": "H"
+        }));
+        let branch1 =
+            serde_json::json!({ "type": "message", "role": "user", "content": "B1" });
+        let branch2 =
+            serde_json::json!({ "type": "message", "role": "user", "content": "B2" });
+        let read =
+            serde_json::json!({ "type": "function_call_output", "call_id": "c1", "output": "R" });
+        let user = serde_json::json!({ "type": "message", "role": "user", "content": "U" });
+
+        let mut items = vec![read.clone(), user.clone()];
+        insert_framing_items(&mut items, &handoff, &[branch1.clone(), branch2.clone()]);
+        // Identify each item by its content (messages) or output
+        // (tool results), so the read item is checked too.
+        let label = |i: &serde_json::Value| {
+            i.get("content")
+                .or_else(|| i.get("output"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("<no text>")
+                .to_string()
+        };
+        let got: Vec<String> = items.iter().map(label).collect();
+        assert_eq!(
+            got,
+            vec!["H", "B1", "B2", "R", "U"],
+            "handoff leads, branch framings follow, content last"
+        );
+
+        // Without a handoff framing the branch items take the slots.
+        let mut bare = vec![read.clone(), user.clone()];
+        insert_framing_items(&mut bare, &None, &[branch1.clone(), branch2.clone()]);
+        let bare_got: Vec<String> = bare.iter().map(label).collect();
+        assert_eq!(bare_got, vec!["B1", "B2", "R", "U"]);
+
+        // No framings at all: the content is untouched.
+        let mut untouched = vec![read.clone(), user.clone()];
+        insert_framing_items(&mut untouched, &None, &[]);
+        assert_eq!(untouched.len(), 2);
+    }
+
+    /// P12: a session without any `branch_of` field projects
+    /// identically to the pre-change behavior: no branch framing
+    /// items, no estimate change, plain boundaries stand.
+    #[test]
+    fn assemble_legacy_session_identical() {
+        // Legacy log: no branch markers, so no branch framing items.
+        let markers: Vec<BranchMarker> = Vec::new();
+        let items = build_branch_framings(&markers, std::path::Path::new("/nonexistent"));
+        assert!(items.is_empty(), "a legacy log projects no branch framing");
+
+        // The insertion with empty branch framings is the legacy
+        // behavior: only the handoff framing, at the head.
+        let handoff =
+            Some(serde_json::json!({ "type": "message", "role": "user", "content": "H" }));
+        let content = serde_json::json!({ "type": "message", "role": "user", "content": "C" });
+        let mut legacy = vec![content.clone()];
+        insert_framing_items(&mut legacy, &handoff, &[]);
+        assert_eq!(legacy.len(), 2, "only the handoff framing is added");
+        assert_eq!(legacy[0]["content"], "H");
+        assert_eq!(legacy[1], content);
+
+        // The estimate with zero extra framing chars is the legacy
+        // estimate: an anchored region with no trailing events.
+        let evs: Vec<Ev> = vec![Ev::User { text: "go".to_string() }];
+        let refs: Vec<&Ev> = evs.iter().collect();
+        let est_legacy = estimate_request_tokens(&refs, &None, 0, 4);
+        let est_reference = estimate_request_tokens(&refs, &None, 0, 4);
+        assert_eq!(est_legacy, est_reference, "branch-free estimates are unchanged");
+
+        // A plain boundary parses as before.
+        let b = parse_boundary(&plain_summary_marker(8), 5).expect("plain marker parses");
+        assert_eq!(b.first_kept_seq, 8);
     }
 }

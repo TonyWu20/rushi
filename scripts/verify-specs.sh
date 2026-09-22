@@ -22,6 +22,7 @@ IN_SCOPE=(
   "architecture.md"
   "auto-compact-plan.md"
   "bash-tool.md"
+  "branch-summarize-cases.md"
   "ft-005-logline.md"
   "harness-distribution.md"
   "handoff-strategy.md"
