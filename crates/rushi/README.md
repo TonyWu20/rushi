@@ -37,7 +37,7 @@ Its only external dependencies are
 | `rewind` | Active-path computation over rewind events. `RewindRef`, `active_ranges`, `seq_in_ranges`. |
 | `model_settings` | Shared model-section resolution. `resolve_model_settings`, `active_model_from_config`. |
 | `config_check` | Legacy key detection. `legacy_key_report`. |
-| `paths` | Config-path discovery shared by the kernel and front-ends. `resolve_config_path` ($CONFIG > CLI > Nix side-by-side > CWD), `resolved_exe` (issue #25 symlink recovery). |
+| `paths` | Config-path discovery shared by the kernel and front-ends. `resolve_config_path` (CLI flag > `$CONFIG` > Nix side-by-side > CWD; issue #36), `resolved_exe` (issue #25 symlink recovery). |
 
 ---
 
