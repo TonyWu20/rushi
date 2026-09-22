@@ -563,3 +563,37 @@ The kernel does not host per-front-end launcher subcommands.
 
 **Remote record:** PR #23 review comment at
 `github.com/TonyWu20/rushi/pull/23#issuecomment-5759736599`.
+
+## Explicit `--config` must outrank the ambient `$CONFIG` (2026-09-23, issue #36)
+
+**Observed.** The resolver shipped in `rushi-common` 0.1.3 checked
+`$CONFIG` before the CLI flag. So an exported `CONFIG` (dev shell,
+rc file, tmux session) silently ignored an explicit `--config`.
+
+Incident: rushi-tui's PTY smoke tests pass their temp config via
+`--config`. The spawned child inherited the dev `$CONFIG`. The TUI
+then loaded the dev config. All seven `ext_*` marker checks failed
+with misleading "markers not seen" output. The TUI-side workaround
+drops the inherited `CONFIG` in the PTY test children.
+
+**Decision (issue #36).** Swap the top two steps in
+`rushi_common::paths::resolve_config_path`:
+
+1. the explicit `--config` flag (most specific input, outranks
+   everything)
+2. the `$CONFIG` env var (ambient override, still above the
+   package layouts)
+3. Nix side-by-side `<exe_dir>/../config.toml`
+4. `./config.toml` in CWD
+
+Landed in `rushi-common` 0.1.4. The unit test now sets `$CONFIG`
+itself. It asserts the flag wins. A mutex serializes it with the
+CWD fallback test, so parallel tests cannot see a half-updated
+environment. Docs updated in `crates/rushi/README.md`,
+`docs/reference/README.md` §4, `docs/config-dump.md`,
+`docs/INDEX.md`, and the `bin/rushi` help text.
+
+**Follow-ups.**
+- [ ] rushi-tui repo: pin `rushi-common` to the 0.1.4 release that
+      lands this fix. Its PTY test workaround may stay for
+      determinism.

@@ -6,7 +6,7 @@ file the harness would actually use to stdout.
 ## 1. Motivation
 
 The config the loop runs on may live anywhere in the resolution order
-(`$CONFIG`, `--config`, the Nix side-by-side `<exe_dir>/../config.toml`,
+(`--config`, `$CONFIG`, the Nix side-by-side `<exe_dir>/../config.toml`,
 or `./config.toml` in CWD). To tweak a key for local use, e.g.
 `[paths] sessions_root`, the user first has to know which file is in
 effect. Finding a Nix store path or a `$CONFIG` override is

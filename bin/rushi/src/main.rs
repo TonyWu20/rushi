@@ -41,7 +41,8 @@ use std::path::PathBuf;
 #[command(name = "rushi", about = "The rushi distribution: loop engine, tools, and project setup")]
 struct Args {
     /// Path to config file (for the loop and `config` subcommands).
-    /// When omitted, falls back to the Nix side-by-side config or CWD.
+    /// Outranks the `$CONFIG` env var; when omitted, falls back to
+    /// `$CONFIG`, then the Nix side-by-side config, then CWD.
     #[arg(long, global = true)]
     config: Option<PathBuf>,
 
@@ -105,8 +106,8 @@ enum Command {
     },
     /// Print the config file that would be used to stdout.
     ///
-    /// Resolves the config like the loop subcommands (`$CONFIG`, then
-    /// `--config`, then the Nix side-by-side layout, then CWD) and
+    /// Resolves the config like the loop subcommands (`--config`, then
+    /// `$CONFIG`, then the Nix side-by-side layout, then CWD) and
     /// prints its raw contents. Useful for dumping the active config to
     /// disk for tweaking, e.g. `rushi config > my-config.toml`.
     Config,
@@ -115,7 +116,8 @@ enum Command {
 fn main() {
     let args = Args::parse();
 
-    // The CONFIG env var sets the config path, as the old scripts did.
+    // The --config flag sets the config path; the CONFIG env var is
+    // the fallback when the flag is omitted (issue #36).
     let config_path = rushi_common::paths::resolve_config_path(args.config.as_deref());
 
     // A bare `rushi` prints the top-level help and exits. The TUI is a

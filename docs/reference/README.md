@@ -131,10 +131,11 @@ pair were retired 2026-09-17 (`docs/lean-driven-development.md` §8).
 
 ## 4. Configuration (`config.toml`)
 
-The loop binary reads a TOML config. Resolution order for the config path:
+The loop binary reads a TOML config. Resolution order for the config
+path (issue #36: the explicit flag outranks the ambient env var):
 
-1. `$CONFIG` environment variable
-2. `--config` CLI flag
+1. `--config` CLI flag
+2. `$CONFIG` environment variable
 3. `<exe_dir>/../config.toml` (Nix side-by-side layout)
 4. `./config.toml` in CWD (dev checkout)
 
