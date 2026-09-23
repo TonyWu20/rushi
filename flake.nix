@@ -59,62 +59,7 @@
       #
       # See docs/reference/nix/nix-flake-module.md for the full option
       # schema and the pi-flake → rushi capability mapping (§9).
-      lib = {
-        # Build a fully configured rushi package from Nix modules.
-        #
-        # Parameters:
-        #   pkgs              — nixpkgs for the target system (fenix overlay for Rust)
-        #   modules           — list of NixOS-style module functions (lib.evalModules)
-        #   rustToolchain     — optional pre-resolved toolchain (auto-resolved if null)
-        #   extraSpecialArgs  — extra args injected into every module's scope
-        #
-        # Returns: { package, config, version, options, configAttrs,
-        #   extensionToolPaths, uiExtensionNames }
-        #   config      = generated config.toml text
-        #   options     = full lib.mkOption schema (for nixosOptionsDoc)
-        #   configAttrs = deep-merged Nix attrset (pre-TOML)
-        #   extensionToolPaths = final [paths] extension_tool_paths list
-        #   uiExtensionNames   = final [ui_extensions] enabled list
-        #   (the two lists are filled from meta.rushi at eval time when
-        #   the consumer leaves them unset; issue #13)
-        mkRushi =
-          {
-            pkgs,
-            modules ? [ ],
-            rustToolchain ? null,
-            extraSpecialArgs ? { },
-            ...
-          }:
-          (import ./lib/mk-rushi.nix) {
-            inherit
-              pkgs
-              modules
-              rustToolchain
-              extraSpecialArgs
-              ;
-            src = self;
-            # Pass the kernel's Cargo.lock as a Nix path reference, resolved
-            # relative to this flake's root so it works whether the kernel is
-            # the root flake or a flake path input. The contents form
-            # (lockFileContents) does not resolve reliably in the path-input
-            # context; a Nix path reference does.
-            kernelCargoLock = {
-              lockFile = ./Cargo.lock;
-            };
-          };
-
-        # Kernel defaults (for inspection or custom overlay construction).
-        defaults = import ./lib/rushi-defaults.nix;
-
-        # Extension / tool source helpers (pi-flake extNoDeps / extWithDeps
-        # equivalents). Each takes { pkgs, … } and returns a derivation
-        # suitable for rushi.external_tools / external_ui_extensions.
-        fetchExt = args: (import ./lib/fetch-ext.nix).fetchExt args;
-
-        fetchTool = args: (import ./lib/fetch-ext.nix).fetchTool args;
-
-        resolvePlatformHash = args: (import ./lib/fetch-ext.nix).resolvePlatformHash args;
-      };
+      lib = import ./lib;
 
       # ── NixOS / home-manager integration (pi-flake nixosModules /
       #    homeModules equivalents). Adds the configured package to
