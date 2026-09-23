@@ -84,7 +84,10 @@ swappable blocking point in `docs/phase-2-plan-audit.md` section 2.2.
   marker so the cache-break is visible (4.5). A `transform` without
   an object `request` field is a non-blocking failure: the log
   carries `hook.model.before.error` and the original request
-  proceeds. Keep the cache guard on any change.
+  proceeds. Keep the cache guard on any change. Superseded by the
+  pipeline model (section 12, issue #38): `model.before` becomes a
+  pure transform pipeline, and the `transform` decision word is
+  retired.
 - `model.after` — after the `model` call. Carries `stop_reason`,
   `detail`, and `usage`. Observation. No decision.
 
@@ -214,6 +217,10 @@ For each window, the harness spawns each registered hook:
 - One `write` of the JSON. Then the harness reads `stdout`.
 
 ### 4.3 The decision contract
+
+Superseded by the pipeline model (section 12, settled 2026-09-24,
+implementation pending, issue #38). This section documents the
+Phase-2 ABI shipped today.
 
 A hook returns one of three outcomes:
 
@@ -517,6 +524,155 @@ points, not just the terminal action.
   spawn beyond the stage runners and the hook spawn. The guardrails
   in `architecture.md` section 7 hold.
 
+## 12. The pipeline model (settled 2026-09-24, supersedes 4.3)
+
+Status: settled design, implementation pending, tracked in
+issue #38. This section is the target ABI. Sections 4.3 and P2
+document the Phase-2 ABI shipped today.
+
+### 12.1 The decision, and why
+
+Principle: transparent to the user, and fully under the
+user's control. The flat ordered `hooks.on` list left
+composition order implicit in file position. The
+first-explicit fold then dropped later hooks' transforms.
+The log still claimed they had applied. The pipeline model
+makes order explicit data. It composes every step and logs
+every step's outcome.
+
+Mental model: a unix pipeline over JSON. A window is an
+event emitted by the kernel at a fixed loop point. The
+pipeline is its handler chain.
+
+Each step is a transform of the accumulated state.
+Composition is sequential, matrix-product style. Order is
+meaning. Resolution is synchronous: the loop halts, the
+chain runs, and the resolved state folds back. No event
+bus. No async.
+
+### 12.2 Configuration
+
+```toml
+[hooks]
+timeout_ms = 30000
+
+[hooks.defs.goal-arm]
+command = "/path/to/harness-hook-goal-arm"
+
+[hooks.defs.simple-english]
+command = "/path/to/harness-hook-simple-english"
+
+[hooks.pipeline."model.before"]
+steps = ["goal-arm", "simple-english"]
+
+[hooks.pipeline."model.after"]
+steps = ["goal-tokens"]
+```
+
+- `hooks.defs.<name>`: one named hook definition. A
+  `command`, optional `args`, optional `timeout_ms`.
+- `[hooks.pipeline."<window>"]`: an ordered `steps` list of
+  def names. List order is the composition order.
+- Load rules: a step name with no matching def is a config
+  load error. A def used by no pipeline is a warning. A
+  window with no pipeline entry runs zero steps and the
+  window default applies.
+- Hard cutover: `[[hooks.on]]` is retired. There is no
+  dual-mode reader.
+
+### 12.3 ABI: typed exit statuses
+
+| exit | status | meaning |
+|------|--------|---------|
+| 0 | ok | step completed. stdout carries the step's state |
+| 2 | abort | veto the window's default action. Sticky |
+| 3 | fail | step-level failure |
+
+- The exit code is the type tag. The stdout JSON is the
+  payload. The kernel honors stdout on every status.
+- An exit code outside the closed set is treated as `fail`
+  with detail "unknown exit N".
+- A step killed by the window timeout is a `fail` with the
+  timeout detail (P5 holds).
+- Each hook's `--help` prints its status set.
+
+### 12.4 Execution
+
+- Steps run sequentially in list order over the
+  accumulated state. Step N+1 receives step N's output.
+- The first terminal event stops the chain:
+  - `abort` (exit 2): the chain halts. The window's
+    default action is vetoed. An optional abort payload
+    (reason or effect fields) is honored.
+  - `fail` (exit 3, crash, or timeout): the chain halts.
+    The window resolves to its default. An error marker
+    names the step and the detail.
+- Stop-on-fail is the only failure behavior. There is no
+  policy knob. The abnormality is surfaced by the error
+  marker. The remedy is to file the issue in the hook's
+  repo and drop the step from the pipeline for the task.
+- The loop itself never wedges. P4 holds at the loop
+  level: the window default applies, the error marker is
+  logged, and the run continues.
+
+### 12.5 State fields replace the decision vocabs
+
+The per-window closed decision vocabs are dropped. Hooks
+express effects as concrete state fields, and the kernel
+honors a small declarable table of fields per window (the
+effect table).
+
+- `tool.before`: `blocked_calls = [{id, reason}]`,
+  `approval = {call_id, prompt}`.
+- `run.idle`: a follow-up `user_message` is appended by
+  the hook itself to the session log. The loop drains
+  pending messages as usual.
+- `overflow.resolve` and `exhausted.handle`:
+  `stop = {reason}` vetoes the strategy cycle.
+- `compact.before`: `cancel` or `replace = {summary,
+  boundary}`.
+- `model.before`: no control fields. A pure transform
+  pipeline (12.6).
+- Unknown fields are inert and logged once per window.
+
+`abort` is the one generic control word. The old
+per-window words were instances of one operation: veto the
+window's default action.
+
+### 12.6 The `model.before` transform pipeline
+
+- A step's output is the full replacement request object,
+  or the accumulated request unchanged.
+- Earlier steps' `prompt_fragments` entries stay visible
+  to later steps by id for the pipeline's duration. The
+  kernel joins fragments into `instructions` and strips
+  the field exactly once, at the end of the pipeline. On
+  a same-id collision the later step's entry wins.
+- No-op detection is unchanged (issue #24): a step whose
+  output is semantically equal to its input breaks
+  nothing.
+
+### 12.7 Log markers
+
+- `hook.<window>.chain`: one marker per run. An ordered
+  list of per-step outcomes (`noop`, `ok`,
+  `abort(<reason>)`, `fail(<detail>)`) plus the stop
+  point.
+- `hook.<window>`: the window's resolved outcome.
+- `hook.<window>.error`: failure detail, per failed step.
+
+### 12.8 Migration
+
+- Hard config cutover in one commit, with the doc
+  examples. Includes the `goal-tokens` mis-registration
+  fix: a `model.after`-targeting hook registered on
+  `model.before`, dead today.
+- Existing hooks stay near-compatible: their exit-0 paths
+  map to `ok` and their exit-2 paths to `abort`. The
+  sibling repos (`rushi-exts`, `rushi-simple-english`)
+  adopt exit 3 and the state-field payloads in follow-up
+  commits.
+
 ## Properties
 
 Lean-style invariants for this spec (see `lean-driven-development.md`).
@@ -528,7 +684,8 @@ P1. no-hooks-identical: given a session with no hooks registered,
     `compact-e2e.sh` fixtures.
 P2. decision-fold: given a hook on a window that exits 0 with a JSON
     decision, observe the harness fold that decision and log a
-    `hook.<window>` marker.
+    `hook.<window>` marker. Superseded by P7 under the pipeline
+    model (section 12, issue #38).
 P3. tool-block: given a `tool.before` hook returning `block` with a
     reason, observe one `tool_result` per blocked call with
     `is_error` true and no `route` spawn for those calls.
@@ -541,6 +698,12 @@ P6. shadow-compact: given a `context_exhausted` form under the `compact`
     strategy, observe one `compaction_summary` event, one `handoff.md`
     in the session dir, the shadowed range logged, and the next
     `assemble` skip shadowed events.
+P7. pipeline-compose: given a window with N pipeline steps, observe the
+    harness run the steps in list order over the accumulated state,
+    step N+1 receiving step N's output; the first abort or fail stops
+    the chain; an abort vetoes the window's default action and a fail
+    applies the window default with an error marker; and the
+    `hook.<window>.chain` marker records every step's outcome.
 
 ## Verification
 
@@ -555,6 +718,7 @@ and passes. `open` names the blocker and what unblocks it.
 | P4 | nonblocking-fail | `fold_failed_hooks_yield_no_decision` in `crates/rushi/src/hooks.rs` | proven |
 | P5 | hook-timeout | `a_slow_hook_times_out` in `crates/rushi/src/hooks.rs` | proven |
 | P6 | shadow-compact | Blocked: the shadow-compact conformance row (one `compaction_summary`, one `handoff.md`, shadowed range, next `assemble` skips it) is not yet an e2e. Unblocked by adding that row to `scripts/compact-e2e.sh` | open |
+| P7 | pipeline-compose | Blocked: the pipeline model (section 12) is not yet implemented. Unblocked by the pipeline kernel, the `hooks.defs`/`hooks.pipeline` config surface, chain markers, and a two-`model.before`-transforms-compose row in `scripts/model-before-transform-e2e.sh` (issue #38) | open |
 
 ## Gate
 
