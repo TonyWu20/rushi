@@ -40,11 +40,11 @@
         rustToolchain
         extraSpecialArgs
         ;
-      # The flake source as Nix sees it. For git-scheme inputs
-      # (github: / git:) Nix supplies the git-tracked tree, so no
-      # cleanSource is needed; for local path inputs this is the
-      # working tree as-is, same as the old `src = self`. (The
-      # pinned nixpkgs has no lib.gitCleanSource, only cleanSource.)
+      # The flake source as Nix sees it. Kernel consumers pin with
+      # git-scheme inputs (github: / git:), not path inputs, so the
+      # source is always the git-tracked tree and no source cleaning
+      # is needed. (The pinned nixpkgs has no lib.gitCleanSource,
+      # only lib.cleanSource.)
       src = ../.;
       # Pass the kernel's Cargo.lock as a Nix path reference. `../.` and
       # `../Cargo.lock` resolve relative to this file's directory
