@@ -7,6 +7,21 @@
       url = "github:nix-community/fenix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # The TUI front-end repo (docs/tui-ext-repo-split.md lives there).
+    # GitHub input — not a local path, since this flake is git-tracked
+    # and hostable: a git tree respects rushi-tui's .gitignore (no
+    # target/, sessions/, or .git copies into the store) and works on
+    # any machine. Since PR #35 the kernel no longer carries a `tui`
+    # subcommand, so the devShell below puts the Nix-built
+    # `rushi-tui` binary on PATH next to the Nix-built `rushi`.
+    # `follows` keeps its nixpkgs/fenix pinned with the top level.
+    # The input name is `rushiTui` because hyphenated input names are
+    # not legal Nix identifiers in the outputs destructuring.
+    rushiTui = {
+      url = "github:TonyWu20/rushi-tui";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.fenix.follows = "fenix";
+    };
   };
 
   outputs =
@@ -14,6 +29,7 @@
       self,
       nixpkgs,
       fenix,
+      rushiTui,
       ...
     }:
     rec {
@@ -272,12 +288,16 @@
               pkgs.python3
               pkgs.file
               # The Nix-built `rushi` binary on PATH (this flake's
-              # packages.default). The kernel no longer launches a
-              # front-end (the `rushi tui` arm was retired in the
-              # issue #31 follow-up). The rushi-tui .envrc puts its
-              # target/release on PATH, so `rushi-tui` is invoked
-              # directly.
+              # packages.default). Since PR #35 the kernel no longer
+              # carries a `tui` subcommand, so the TUI front-end comes
+              # from the rushi-tui repo (the `rushiTui` input) instead.
               rushi
+              # The Nix-built `rushi-tui` binary on PATH (the
+              # rushi-tui flake's packages.default, imported above as
+              # `rushiTui`). The kernel's side-by-side check
+              # (<exe_dir>/rushi-tui) misses across store paths, but
+              # its PATH fallback finds the binary here.
+              rushiTui.packages.${system}.default
             ];
             # Do not export RUSHI_KERNEL to the Nix store path: the
             # built package has no tools/ dir, and `rushi setup` would
