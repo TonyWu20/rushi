@@ -74,6 +74,45 @@ pub fn resolve_config_path(cli_config: Option<&Path>) -> String {
     "config.toml".into()
 }
 
+/// Resolve one `[paths]` tool entry against the config dir.
+///
+/// Absolute entries stay as given. Relative entries join against
+/// `config_dir` (the dir that holds `config.toml`). The kernel
+/// (`assemble`) applies this rule to `native_tool_paths` and
+/// `extension_tool_paths`. The TUI applies the same rule at startup
+/// so a tool entry means the same thing on both sides.
+pub fn resolve_tool_entry(config_dir: &Path, entry: &str) -> PathBuf {
+    let p = PathBuf::from(entry);
+    if p.is_absolute() {
+        p
+    } else {
+        config_dir.join(p)
+    }
+}
+
+/// The tool dirs one resolved tool entry yields.
+///
+/// A tool dir holds `tool.toml` directly. A root dir holds tool
+/// sub-dirs, one `tool.toml` each. A missing dir yields none. The
+/// kernel skips an empty entry silently; the TUI reports it at
+/// startup. Both sides share this scan so they cannot drift.
+pub fn tool_dirs_in(path: &Path) -> Vec<PathBuf> {
+    let direct_toml = path.join("tool.toml");
+    if direct_toml.exists() {
+        return vec![path.to_path_buf()];
+    }
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let sub = entry.path();
+            if sub.is_dir() && sub.join("tool.toml").exists() {
+                dirs.push(sub);
+            }
+        }
+    }
+    dirs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,5 +173,38 @@ mod tests {
         if let Some(v) = prev {
             std::env::set_var("CONFIG", v);
         }
+    }
+
+    #[test]
+    fn resolve_tool_entry_keeps_absolute_and_joins_relative() {
+        let base = std::path::PathBuf::from("/nix/store/abc-config");
+        let abs = resolve_tool_entry(&base, "/nix/store/tool-pkg/tools/bash");
+        assert_eq!(abs, std::path::Path::new("/nix/store/tool-pkg/tools/bash"));
+        let rel = resolve_tool_entry(&base, "tools/bash");
+        assert_eq!(rel, std::path::Path::new("/nix/store/abc-config/tools/bash"));
+    }
+
+    #[test]
+    fn tool_dirs_in_direct_manifest_and_root_layouts() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // A tool dir: tool.toml directly under the entry.
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::write(root.join("a").join("tool.toml"), "[tool]\n").unwrap();
+        // A root dir: tool sub-dirs, each with a tool.toml.
+        std::fs::create_dir_all(root.join("root").join("b")).unwrap();
+        std::fs::write(root.join("root").join("b").join("tool.toml"), "[tool]\n").unwrap();
+        std::fs::create_dir_all(root.join("root").join("c")).unwrap();
+        std::fs::write(root.join("root").join("c").join("tool.toml"), "[tool]\n").unwrap();
+        // An empty dir yields nothing.
+        std::fs::create_dir_all(root.join("empty")).unwrap();
+        let direct = tool_dirs_in(&root.join("a"));
+        assert_eq!(direct, vec![root.join("a")]);
+        let root_dirs = tool_dirs_in(&root.join("root"));
+        let mut sorted: Vec<_> = root_dirs.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec![root.join("root").join("b"), root.join("root").join("c")]);
+        assert!(tool_dirs_in(&root.join("empty")).is_empty());
+        assert!(tool_dirs_in(&root.join("no-such-dir")).is_empty());
     }
 }

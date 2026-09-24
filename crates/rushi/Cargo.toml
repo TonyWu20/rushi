@@ -1,8 +1,8 @@
 [package]
 name = "rushi-common"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
-description = "Shared types and math for the rushi agent harness (event log, hook ABI, compact math, stage types, rewind/fork active-path math, config-path resolution)"
+description = "Shared types and math for the rushi agent harness (event log, hook ABI, compact math, stage types, rewind/fork active-path math, config-path resolution, tool-entry resolution)"
 license = "MIT"
 repository = "https://github.com/TonyWu20/rushi"
 homepage = "https://github.com/TonyWu20/rushi"

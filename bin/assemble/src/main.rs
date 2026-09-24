@@ -1001,7 +1001,9 @@ fn main() {
 
     // Native tool paths (each entry is a tool dir containing a
     // tool.toml, or a root dir holding tool sub-dirs). Relative
-    // entries resolve against the config dir.
+    // entries resolve against the config dir. The per-entry
+    // resolution and dir enumeration are shared with the TUI via
+    // `rushi_common::paths` (single source of truth).
     let config_dir = PathBuf::from(&args.config)
         .parent()
         .map(|p| p.to_path_buf())
@@ -1014,14 +1016,7 @@ fn main() {
         .map(|arr| {
             arr.iter()
                 .filter_map(|v| v.as_str())
-                .map(|s| {
-                    let p = PathBuf::from(s);
-                    if p.is_relative() {
-                        config_dir.join(p)
-                    } else {
-                        p
-                    }
-                })
+                .map(|s| rushi_common::paths::resolve_tool_entry(&config_dir, s))
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -1036,14 +1031,7 @@ fn main() {
         .map(|arr| {
             arr.iter()
                 .filter_map(|v| v.as_str())
-                .map(|s| {
-                    let p = PathBuf::from(s);
-                    if p.is_relative() {
-                        config_dir.join(p)
-                    } else {
-                        p
-                    }
-                })
+                .map(|s| rushi_common::paths::resolve_tool_entry(&config_dir, s))
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -1302,27 +1290,10 @@ fn main() {
         None => None,
     };
 
-    // Load tool schemas
+    // Load tool schemas. The per-dir enumeration is the shared
+    // `rushi_common::paths::tool_dirs_in` (single source of truth with
+    // the TUI).
     let mut tool_schemas: Vec<serde_json::Value> = Vec::new();
-
-    /// Collect tool dirs from a tool path (tool dir or root dir).
-    /// Returns the list of tool dir paths that carry a `tool.toml`.
-    fn tool_dirs_in(path: &Path) -> Vec<std::path::PathBuf> {
-        let direct_toml = path.join("tool.toml");
-        if direct_toml.exists() {
-            return vec![path.to_path_buf()];
-        }
-        let mut dirs: Vec<std::path::PathBuf> = Vec::new();
-        if let Ok(entries) = fs::read_dir(path) {
-            for entry in entries.flatten() {
-                let sub = entry.path();
-                if sub.is_dir() && sub.join("tool.toml").exists() {
-                    dirs.push(sub);
-                }
-            }
-        }
-        dirs
-    }
 
     // Build one model tool schema from a `tool.toml` manifest.
     fn load_tool_schema(tool_toml: &Path, name: &str) -> Option<serde_json::Value> {
@@ -1363,7 +1334,7 @@ fn main() {
             .iter()
             .filter_map(|s| s.get("name").and_then(|n| n.as_str()).map(str::to_string))
             .collect();
-        for tool_dir in tool_dirs_in(path) {
+        for tool_dir in rushi_common::paths::tool_dirs_in(path) {
             let name = tool_dir
                 .file_name()
                 .and_then(|n| n.to_str())

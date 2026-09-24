@@ -12,6 +12,8 @@
 //!   (docs/rewind-fork-design.md section 3).
 //! - `model_settings` — shared model-section resolution and defaults
 //!   (docs/itches.md: the "hard copies" itch).
+//! - `paths` — config-file discovery and `[paths]` tool-entry
+//!   resolution shared by the kernel and the front-ends.
 
 pub mod event;
 pub mod logline;
