@@ -153,7 +153,9 @@ fn main() {
 /// Validate model output and emit execution events.
 ///
 /// Returns `(exit_code, event_lines)`.
-/// Exit codes: 1 = tool calls to route, 2 = terminal error or truncated turn.
+/// Exit codes: 1 = tool calls to route, 2 = terminal error, truncated
+/// turn, or a turn in which every call was malformed (the turn is
+/// logged with recoverable not-run results, so the step ends clean).
 fn process(
     model_output: &serde_json::Value,
     valid_tools: &std::collections::HashSet<String>,
@@ -240,30 +242,28 @@ fn process(
     // argument validation would hard-fail on that truncated call, so skip
     // it here. The "length" branch below records the truncation and the
     // loop can recover.
+    //
+    // A call whose arguments do not normalize to a JSON object is
+    // recorded, not fatal (correction 66): the turn is logged
+    // with the bad calls' arguments defaulted, each bad call gets a
+    // recoverable not-run error tool_result, and the model re-issues
+    // the call on the next turn — the same shape as the length-stop
+    // path. Healthy calls in the same turn still route.
     let validate = stop_reason != "length";
-    for tc in &tool_calls {
+    let mut malformed: Vec<usize> = Vec::new();
+    for (i, tc) in tool_calls.iter().enumerate() {
         if !validate {
             continue;
         }
-        let tc_id = tc.get("id").and_then(|id| id.as_str()).unwrap_or("unknown");
         let tc_name = tc.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
 
-        // Check arguments parse as JSON object
-        if let Some(args_val) = tc.get("arguments") {
-            match normalize_arguments(Some(args_val)) {
-                Some(serde_json::Value::Object(_)) => {}
-                _ => {
-                    lines.push(error_event(&format!(
-                        "Model emitted malformed tool arguments for call {tc_id}."
-                    )));
-                    return (2, lines);
-                }
-            }
-        } else {
-            lines.push(error_event(&format!(
-                "Model emitted malformed tool arguments for call {tc_id}."
-            )));
-            return (2, lines);
+        // Arguments must normalize to a JSON object: a present value
+        // that is broken JSON or a non-object, or an absent value.
+        if !matches!(
+            normalize_arguments(tc.get("arguments")),
+            Some(serde_json::Value::Object(_))
+        ) {
+            malformed.push(i);
         }
 
         // Check the tool name against the manifest.
@@ -287,13 +287,24 @@ fn process(
     // Emit events based on stop_reason
     match stop_reason {
         "stop" | "tool_calls" => {
-            let (code, ev) = emit_assistant_and_tool_calls(
-                &text,
-                &tool_calls,
-                stop_reason,
-                usage.as_ref(),
-                &reasoning,
-            );
+            let (code, ev) = if malformed.is_empty() {
+                emit_assistant_and_tool_calls(
+                    &text,
+                    &tool_calls,
+                    stop_reason,
+                    usage.as_ref(),
+                    &reasoning,
+                )
+            } else {
+                emit_recoverable_malformed(
+                    &text,
+                    &tool_calls,
+                    &malformed,
+                    stop_reason,
+                    usage.as_ref(),
+                    &reasoning,
+                )
+            };
             lines.extend(ev);
             (code, lines)
         }
@@ -432,6 +443,91 @@ fn emit_assistant_and_tool_calls(
         lines.push(serde_json::to_string(&tool_call_event).unwrap());
     }
     (1, lines)
+}
+
+/// Recoverable variant of [`emit_assistant_and_tool_calls`] for the
+/// case where some calls carry malformed arguments (correction entry
+/// 57). The assistant turn is logged with every call — the bad ones
+/// carry their arguments defaulted to an empty object, the
+/// length-branch convention — so the pair-stranding invariant
+/// (docs/rewind-fork-design.md P4) holds: each logged call carries
+/// its result. Healthy calls get `tool_call` events for routing; each
+/// malformed call gets a not-run error `tool_result` that the model
+/// sees on the next turn and re-issues from. Exits 1 when at least
+/// one healthy call routes; 2 when none do (the step ends clean and
+/// the next turn — user continue or goal continuation — feeds the
+/// error results back to the model).
+fn emit_recoverable_malformed(
+    text: &str,
+    tool_calls: &[serde_json::Value],
+    malformed: &[usize],
+    stop_reason: &str,
+    usage: Option<&serde_json::Value>,
+    reasoning: &[serde_json::Value],
+) -> (i32, Vec<String>) {
+    let ts = chrono_utc_now();
+    let mut lines: Vec<String> = Vec::new();
+
+    let assistant_tool_calls: Vec<serde_json::Value> = tool_calls
+        .iter()
+        .map(|tc| {
+            serde_json::json!({
+                "id": tc.get("id").and_then(|id| id.as_str()).unwrap_or(""),
+                "name": tc.get("name").and_then(|n| n.as_str()).unwrap_or(""),
+                "arguments": normalize_arguments(tc.get("arguments")).unwrap_or(serde_json::json!({}))
+            })
+        })
+        .collect();
+
+    let mut assistant_message = serde_json::json!({
+        "v": 1,
+        "type": "assistant_message",
+        "ts": ts,
+        "content": text,
+        "tool_calls": assistant_tool_calls,
+        "stop_reason": stop_reason
+    });
+    if let Some(u) = usage {
+        assistant_message["usage"] = u.clone();
+    }
+    if !reasoning.is_empty() {
+        assistant_message["reasoning"] = serde_json::json!(reasoning);
+    }
+    lines.push(serde_json::to_string(&assistant_message).unwrap());
+
+    let mut routed = 0usize;
+    for (i, tc) in tool_calls.iter().enumerate() {
+        let tc_id = tc.get("id").and_then(|id| id.as_str()).unwrap_or("");
+        if malformed.contains(&i) {
+            let tool_result = serde_json::json!({
+                "v": 1,
+                "type": "tool_result",
+                "ts": ts,
+                "id": tc_id,
+                "value": {
+                    "text": format!(
+                        "Model emitted malformed tool arguments for call {tc_id} \
+                         (the arguments did not parse as a JSON object). \
+                         Re-issue the call with a valid JSON arguments object."
+                    )
+                },
+                "is_error": true
+            });
+            lines.push(serde_json::to_string(&tool_result).unwrap());
+            continue;
+        }
+        routed += 1;
+        let tool_call_event = serde_json::json!({
+            "v": 1,
+            "type": "tool_call",
+            "ts": ts,
+            "id": tc_id,
+            "name": tc.get("name").and_then(|n| n.as_str()).unwrap_or(""),
+            "arguments": normalize_arguments(tc.get("arguments")).unwrap_or(serde_json::json!({}))
+        });
+        lines.push(serde_json::to_string(&tool_call_event).unwrap());
+    }
+    (if routed > 0 { 1 } else { 2 }, lines)
 }
 
 fn normalize_arguments(args: Option<&serde_json::Value>) -> Option<serde_json::Value> {
@@ -842,11 +938,15 @@ mod tests {
     }
 
     #[test]
-    fn non_length_malformed_args_still_fail() {
-        // A non-length stop with malformed arguments is a genuine model
-        // error: it must still hard-fail with the malformed-args message.
+    #[test]
+    fn malformed_args_single_call_recover_not_terminal() {
+        // Correction 66: a non-length stop with malformed arguments no longer
+        // hard-fails. The turn is logged (assistant_message with the
+        // call, arguments defaulted), the bad call gets a not-run error
+        // tool_result, and the step ends clean (exit 2) so the next
+        // turn can re-issue.
         let raw = r#"{
-            "text": "",
+            "text": "trying a tool",
             "tool_calls": [ { "id": "call_1", "name": "bash", "arguments": "not json at all" } ],
             "stop_reason": "stop"
         }"#;
@@ -855,10 +955,88 @@ mod tests {
             std::iter::once("bash".to_string()).collect();
         let (code, lines) = process(&model_output, &valid_tools);
         let joined = lines.join("\n");
-        assert_eq!(code, 2);
+        assert_eq!(code, 2, "no healthy calls to route: the step ends clean");
         assert!(
-            joined.contains("malformed tool arguments"),
-            "a non-length malformed call must hard-fail: {joined}"
+            joined.contains("assistant_message"),
+            "the turn is logged so the error result pairs with its call: {joined}"
+        );
+        assert!(
+            joined.contains("Re-issue the call with a valid JSON arguments object"),
+            "the not-run result tells the model to re-issue: {joined}"
+        );
+        assert!(
+            joined.contains("\"is_error\":true"),
+            "the not-run result is flagged as an error: {joined}"
+        );
+        assert!(
+            !joined.contains("\"type\":\"tool_call\""),
+            "the malformed call must not be routed: {joined}"
+        );
+    }
+
+    #[test]
+    fn malformed_args_mixed_calls_route_the_healthy_ones() {
+        let raw = r#"{
+            "text": "",
+            "tool_calls": [
+              { "id": "call_bad", "name": "bash", "arguments": "{oops" },
+              { "id": "call_ok", "name": "bash", "arguments": "{\"command\":\"ls\"}" }
+            ],
+            "stop_reason": "stop"
+        }"#;
+        let model_output: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let valid_tools: std::collections::HashSet<String> =
+            std::iter::once("bash".to_string()).collect();
+        let (code, lines) = process(&model_output, &valid_tools);
+        let joined = lines.join("\n");
+        assert_eq!(code, 1, "a healthy call still routes");
+        let tool_call_lines: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("\"type\":\"tool_call\""))
+            .collect();
+        assert_eq!(tool_call_lines.len(), 1, "only the healthy call routes");
+        assert!(tool_call_lines[0].contains("call_ok"));
+        assert!(
+            joined.contains("\"id\":\"call_bad\"") && joined.contains("is_error"),
+            "the bad call reports its not-run result: {joined}"
+        );
+        // The assistant message carries both calls (P4 pairing: every
+        // logged call has a result, errored or routed).
+        let assistant = lines
+            .iter()
+            .find(|l| l.contains("\"assistant_message\""))
+            .unwrap();
+        assert!(assistant.contains("call_bad") && assistant.contains("call_ok"));
+    }
+
+    #[test]
+    fn wellformed_args_unaffected() {
+        // Both object-form and JSON-string-form arguments route as
+        // before; no not-run results, no malformed message.
+        let raw = r#"{
+            "text": "",
+            "tool_calls": [
+              { "id": "c1", "name": "read", "arguments": { "file_path": "a.txt" } },
+              { "id": "c2", "name": "bash", "arguments": "{\"command\":\"ls\"}" }
+            ],
+            "stop_reason": "stop"
+        }"#;
+        let model_output: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let valid_tools: std::collections::HashSet<String> =
+            ["read".to_string(), "bash".to_string()]
+                .into_iter()
+                .collect();
+        let (code, lines) = process(&model_output, &valid_tools);
+        let joined = lines.join("\n");
+        assert_eq!(code, 1);
+        assert!(joined.contains("\"type\":\"tool_call\""), "both calls route: {joined}");
+        assert!(
+            !joined.contains("is_error"),
+            "healthy calls must not error-report: {joined}"
+        );
+        assert!(
+            !joined.contains("malformed tool arguments"),
+            "no malformed message: {joined}"
         );
     }
 

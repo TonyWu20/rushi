@@ -960,3 +960,41 @@ The `valid_tools` set stays in `parse`. Only the exit-2 consequence was dropped.
 The three `route` message tests pin the not-run text. The compact e2e `unknown-tool` scenario drives a stub model that emits an unknown tool call. The log gains a not-run `tool_result` with `Unknown tool` text. No terminal `error` event appears. `claim` returns `awaiting_model`. The loop continues to the next model call.
 
 `length_stop_unknown_tool_is_not_validated` and `non_length_malformed_args_still_fail` still hold. The full compact-e2e suite passes 102 of 102. All workspace unit tests pass.
+
+### 66. The tool-call leak root cause, and the malformed-args recovery
+
+**Reference:** `bin/parse`, `bin/assemble`, `rushi-common`
+(`crates/rushi` `paths`), the `rushi-config` flake, `rushi-tui`
+`bin/tui` (config load plus startup check), FT-027
+
+**Root cause of defect 1 (the `<function>` text-marker leak):** The leak was not a model-side marker mismatch. The TUI store package shipped a `config.toml` with relative tool paths. The package bundles no `tools/` directory. `assemble` resolves relative entries against the config file's directory. Every tool entry dangles, so the model request carries zero tool schemas.
+
+The model then falls back to text-based tool markers that the parser does not read. The markers leak into `content` and the loop idles. This chain was replayed with the store `assemble` binary: the old TUI store config yields zero tools, and the new absolute-path config yields all nine.
+
+**Decision:** No re-bundling of `tools/` into the TUI package. The flake writes absolute store paths into the TUI package config. Native tools point at the kernel package `tools/` dir. Extension tools point at each ext tool package out path. The `tuiFull` derivation pulls those packages into its closure. The configured package keeps relative paths because it bundles `tools/` beside its config.
+
+**Decision (shared resolution):** Put the tool-entry join and the
+tool-dir enumeration in `rushi-common` `paths`. The TUI already
+depends on `rushi-common`, so a shared helper costs nothing. A
+single scan is the only design that stops the kernel `assemble`
+and the TUI from resolving `[paths]` differently. The rejected
+alternative was a TUI-local copy of the scan in `config.rs`.
+
+**Fix (TUI, lifted to `rushi-common`):** The entry join and the
+tool-dir enumeration now live in `rushi-common` `paths` as
+`resolve_tool_entry` and `tool_dirs_in`. The kernel `assemble` and
+the TUI both call them, so the two sides cannot drift.
+`rushi-common` 0.1.5 carries the helpers. The TUI resolves the
+`[paths]` entries at startup with the shared scan. An entry that
+yields no tool dir is reported by name in a startup warning and a
+first-draw flash.
+
+**Fix (parse, FT-027):** Malformed structured tool arguments no longer hard-fail the loop. `parse` logs the `assistant_message` and defaults bad arguments to an empty object. Healthy calls in the same turn still route. Each malformed call gets a not-run error `tool_result` with a re-issue hint. Only a turn where every call is malformed still exits 2. This mirrors the `length`-stop recovery.
+
+The closing claim of entry 65 that `non_length_malformed_args_still_fail` still holds is superseded by this entry. That test was replaced.
+
+**Verification:** The `assemble` replay is the decisive check: old store config gives zero tools, new config gives all nine. The TUI startup warning lists the nine dangling dirs on the old config and stays silent on the new one. The parse test `malformed_args_single_call_recover_not_terminal` pins the not-run result and the clean step end. `malformed_args_mixed_calls_route_the_healthy_ones` pins mixed routing. All 25 parse tests pass. The TUI suite is green: 501 unit plus 23 pty smoke.
+
+The shared helpers are pinned by two `rushi-common` tests:
+`resolve_tool_entry_keeps_absolute_and_joins_relative` and
+`tool_dirs_in_direct_manifest_and_root_layouts`.

@@ -1218,21 +1218,26 @@ stop truncation path is unchanged. The `valid_tools` name
 machinery stays in parse per the FT-026 operator
 decision. `bin/model` is unchanged.
 
-**Status:** Open, deferred. Tracked from the 2026-09-15
-FT-026 scope decision. The malformed-arguments hard-fail
-stays out of the FT-026 fix and is tracked here.
+**Status:** Fixed. Implemented as correction 66 on
+2026-09-24. `parse` now collects the malformed calls of a
+turn instead of exiting 2 on the first. It logs the
+`assistant_message` with the bad arguments defaulted. It
+routes the healthy calls. Each malformed call settles to a
+not-run error `tool_result` with a re-issue hint. Only a
+turn where every call is malformed still exits 2.
 
-**Verification:** None yet. When implemented, pin:
-- a parse test: missing or non-object `arguments` on a
-  non-`length` stop exits 1. The `tool_call` is emitted
-  and no `error` event appears.
-- the existing `non_length_malformed_args_still_fail`
-  test is flipped. It pins exit 2 today.
-- a stub-model e2e on the `scripts/compact-e2e.sh`
-  pattern.
-- the session log holds an errored `tool_result` with the
-  resend text. `claim` reports `awaiting_model`. The loop
-  continues to the next model call.
+**Deviation from the proposal:** The proposal forwarded
+the bad calls to `route`. The implementation settles them
+in `parse` itself. Each bad call gets its own errored
+`tool_result` with the re-issue hint. The shape matches
+the existing `length`-stop recovery.
+
+**Verification:** Pinned by correction 66. The `parse`
+test `malformed_args_single_call_recover_not_terminal`
+pins the not-run result and the clean step end.
+`malformed_args_mixed_calls_route_the_healthy_ones` pins
+the mixed routing. The old `non_length_malformed_args_
+still_fail` test was replaced. All 25 parse tests pass.
 
 ## FT-028 — The PR #26 regression test fails on the macOS CI
 
