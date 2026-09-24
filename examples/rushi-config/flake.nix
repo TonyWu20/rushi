@@ -190,28 +190,27 @@
               # ══════════════════════════════════════════════
               ({ config, lib, pkgs, ... }:
               {
+                # Pipeline hook model (issue #38): named defs under
+                # [hooks.defs.<name>], wired to windows by ordered
+                # [hooks.pipeline."<window>"] steps lists.
                 rushi.config.hooks = {
                   timeout_ms = 30000;
-                  on = [
-                    {
-                      window = "exhausted.handle";
+                  defs = {
+                    compact = {
                       command = "harness-hook-compact";
-                      args = [ ];
-                    }
-                    {
-                      window = "overflow.resolve";
-                      command = "harness-hook-compact";
-                      args = [ ];
-                    }
-                    # Goal-continuation hooks (from rushi-exts).
+                    };
+                    # Goal-continuation def (from rushi-exts).
                     # Uncomment when the exts hook binaries are shipped
                     # via rushi.external_hooks.
-                    # {
-                    #   window = "run.idle";
+                    # "goal-idle" = {
                     #   command = "harness-hook-goal-idle";
-                    #   args = [ ];
-                    # }
-                  ];
+                    # };
+                  };
+                  pipeline = {
+                    "exhausted.handle" = { steps = [ "compact" ]; };
+                    "overflow.resolve" = { steps = [ "compact" ]; };
+                    # "run.idle" = { steps = [ "goal-idle" ]; };
+                  };
                 };
 
                 # rushi.config.system_prompt.text = ''

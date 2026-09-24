@@ -211,13 +211,14 @@
             rushi.external_ui_extensions = [ goalExt ];
             rushi.external_hooks = [ fakeHook ];
             rushi.config.hooks = {
-              on = [
-                {
-                  window = "run.idle";
+              defs = {
+                fake = {
                   command = "harness-hook-fake";
-                  args = [ ];
-                }
-              ];
+                };
+              };
+              pipeline = {
+                "run.idle" = { steps = [ "fake" ]; };
+              };
             };
           }) ];
         };
@@ -260,13 +261,14 @@
           modules = [ ({ config, lib, pkgs, ... }: {
             rushi.external_hooks = [ fakeHook ];
             rushi.config.hooks = {
-              on = [
-                {
-                  window = "run.idle";
+              defs = {
+                fake = {
                   command = "harness-hook-never-shipped";
-                  args = [ ];
-                }
-              ];
+                };
+              };
+              pipeline = {
+                "run.idle" = { steps = [ "fake" ]; };
+              };
             };
           }) ];
         };

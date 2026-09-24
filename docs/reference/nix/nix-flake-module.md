@@ -113,9 +113,11 @@ rushi = {
     };
 
     # [hooks]
+    # Pipeline model (issue #38): the legacy `on` list is retired.
+    # Consumers opt in via `defs.<name>` + `pipeline."<window>"`
+    # (a section with only `timeout_ms` means "no hooks").
     hooks = {
       timeout_ms = 30000;
-      on = [ ];   # list of { window = "exhausted.handle"; command = "..."; args = [ ]; }
     };
 
     # [loop]
@@ -369,9 +371,35 @@ The mapping is direct:
 | `config.tui.tool_display.preset` | `[tui.tool_display] preset = "..."` |
 | `config.paths.extension_tool_paths` | `[paths] extra_tools_roots = [ ... ]` |
 
-Empty strings / zero values / empty lists are **omitted** from the
-generated TOML (the kernel default stands). This keeps the config
-minimal and readable.
+Empty strings, zero values, and empty lists are **serialized as-is**.
+The kernel treats them as "use the kernel default" sentinels (for
+example `text = ""`, `context_budget_tokens = 0`, `extension_tool_paths = []`).
+Set only the values you need to override.
+
+### Hook declaration migration (issue #38, 2026-09-24)
+
+The kernel's hard cutover (commit `61362da`) rejects any legacy
+`[hooks] on` key at config load, even an empty one. The Nix side was
+completed in the same session:
+
+- `lib/rushi-defaults.nix` no longer ships the legacy `on = []`
+  default. An empty list would have been serialized into every
+  generated `config.toml` (the serializer emits values as-is) and
+  rejected at load. The default is now `hooks = { timeout_ms = 30000 }`,
+  which means "no hooks" (the kernel reads `defs` / `pipeline` as
+  optional).
+- `examples/rushi-config/flake.nix` module 3 and the `tests/nix`
+  cases (`case-meta`, `case-hook-guard`) declare hooks via
+  `rushi.config.hooks.defs.<name>` plus
+  `rushi.config.hooks.pipeline."<window>"` steps lists.
+- Build-time drift guard (`lib/mk-rushi.nix`) iterates
+  `hooks.defs.<name>.command` only. A bare command not covered by a
+  producer's `meta.rushi.bin` fails the build (verified by
+  `tests/nix` `case-hook-guard`).
+
+Decision (2026-09-24 session): the Nix side ships the pipeline model
+only. No `on`-shape compat layer, matching the kernel's no-dual-mode
+cutover. Gate: `bash tests/nix/run.sh` (40/40).
 
 ## 5. Consumer example (rushi-config)
 
@@ -445,10 +473,15 @@ rushiConfigured = rushiFlake.lib.mkRushi {
       # ];
       rushi.config.hooks = {
         timeout_ms = 30000;
-        on = [
-          { window = "exhausted.handle"; command = "harness-hook-compact"; args = [ ]; }
-          { window = "overflow.resolve"; command = "harness-hook-compact"; args = [ ]; }
-        ];
+        # Pipeline model (issue #38): named defs wired to windows by
+        # ordered steps lists. The legacy `on` list is retired.
+        defs = {
+          compact = { command = "harness-hook-compact"; };
+        };
+        pipeline = {
+          "exhausted.handle" = { steps = [ "compact" ]; };
+          "overflow.resolve" = { steps = [ "compact" ]; };
+        };
       };
     })
 

@@ -58,9 +58,12 @@
     };
 
     # [hooks]
+    # Pipeline model (issue #38): no legacy `on` list. Consumers opt in
+    # via `hooks.defs.<name>` + `hooks.pipeline."<window>"`. A section
+    # with only `timeout_ms` means "no hooks" (the kernel reads defs /
+    # pipeline as optional).
     hooks = {
       timeout_ms = 30000;
-      on = [ ];
     };
 
     # [loop]
