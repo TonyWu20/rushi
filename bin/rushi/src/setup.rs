@@ -353,14 +353,16 @@ pub fn render_config(manifest: &RushiManifest, version: &str, kernel_commit: &st
     out.push_str(&comment_defaults(&toml::to_string(&hooks).unwrap(), &active_keys));
     out.push('\n');
     out.push_str(
-        "# EXAMPLE ONLY, not activated by default — one [[hooks.on]] table per entry:\n\
-         # [[hooks.on]]\n\
-         # window  = \"exhausted.handle\"\n\
+        "# EXAMPLE ONLY, not activated by default — one named def per hook,\n\
+         # one steps list per window (docs/loop-lifecycle-hooks.md 12):\n\
+         # [hooks.defs.hook-compact]\n\
          # command = \"harness-hook-compact\"\n\
          #\n\
-         # [[hooks.on]]\n\
-         # window  = \"overflow.resolve\"\n\
-         # command = \"harness-hook-compact\"\n",
+         # [hooks.pipeline.\"exhausted.handle\"]\n\
+         # steps = [\"hook-compact\"]\n\
+         #\n\
+         # [hooks.pipeline.\"overflow.resolve\"]\n\
+         # steps = [\"hook-compact\"]\n",
     );
     out.push('\n');
 
@@ -784,6 +786,11 @@ mod tests {
         assert!(text.contains("[paths]"));
         assert!(text.contains("[limits]"));
         assert!(text.contains("[hooks]"));
+        // The hooks template is the pipeline model, not the retired
+        // flat list (docs/loop-lifecycle-hooks.md 12, issue #38).
+        assert!(text.contains("# [hooks.defs.hook-compact]"));
+        assert!(text.contains("# [hooks.pipeline.\"exhausted.handle\"]"));
+        assert!(!text.contains("[[hooks.on]]"));
     }
 
     #[test]

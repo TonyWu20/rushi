@@ -98,100 +98,115 @@ heart of this design.
 
 - `compact.before` — before any `compact` spawn. Carries `reason`
   (`threshold` | `overflow` | `last_resort`) and a `force` flag.
-  Decisions: `proceed`, `cancel`, `replace`. `replace` lets a hook
-  supply its own summary and boundary. This mirrors the pi
-  `session_before_compact` cancel-or-customize room.
+  State fields (§12.5): `cancel` or `replace = {summary, boundary}`.
+  `replace` lets a hook supply its own summary and boundary. This
+  mirrors the pi `session_before_compact` cancel-or-customize room.
 - `compact.after` — after a `compact` completes. Carries `status`
   (`noop` | `compacted` | `failed`) and `reason`. Observation.
 - `overflow.resolve` — fires when the loop classifies a model call as
   overflow, silent overflow, a truncation stop, or a recoverable
   length stop. It carries `kind`, `stop_reason`, `detail`, `usage`,
   the `input_budget`, the `context_tokens`, and a `can_recover`
-  boolean. Decisions: `stay_compact`, `stop`.
+  boolean. State field (§12.5): `stop = {reason}` vetoes the
+  strategy cycle. Absence keeps the default `stay_compact`.
   This is the swappable point. The default answer is in-session
   shadow compact (`stay_compact`): the compact step produces a
   handoff document that shadows the old log region, and the session
-  continues in place. The `handoff` decision value is reserved for
-  future strategies. No second strategy ships in Phase 2.
+  continues in place. No second strategy ships in Phase 2.
 - `exhausted.handle` — fires when `assemble` returns the
   `context_exhausted` form (the assembled context exceeds the input
   budget). It carries `input_budget`,
-  `context_tokens`, and the last `compact` status. Decisions:
-  `stay_compact` or `stop`. The default answer is `stay_compact`:
-  the loop runs one in-session shadow compact and retries. The
-  `handoff` decision value is reserved for future strategies.
+  `context_tokens`, and the last `compact` status. State field
+  (§12.5): `stop = {reason}` vetoes the strategy cycle. Absence
+  keeps the default `stay_compact`. The default answer is
+  `stay_compact`. The loop runs one in-session shadow compact and
+  retries.
 
 ### 3.5 Tool scope (per `route` batch)
 
 - `tool.before` — before `route` for a pending tool batch. Carries
-  the pending `tool_call`s. Three decisions:
-  - `proceed` (the default when no hook answers) — route the batch.
-  - `block` — the payload carries a `reason` string and an optional
-    `calls` list (default: all pending calls). The loop synthesizes a
+  the pending `tool_call`s. State fields (§12.5):
+  - `blocked_calls = [{id, reason}]` — the kernel synthesizes a
     `tool_result` per blocked call with `is_error: true` and the
-    reason as the text. It skips `route` for those calls. The model
+    reason as text. It skips `route` for those calls. The model
     reads the reason on the next step and can correct the command.
-  - `approve` — the payload carries a `prompt` string and a
-    `call_id`. The loop appends an `approval_request` event, holds
-    the batch, and waits for an `approval` answer. On `allow` the
-    tool runs (with optionally edited arguments). On `deny` the
-    loop synthesizes a `tool_result` with `is_error: true` and the
-    prompt text. See `phase-2-plan.md` §4.8.
-- `tool.after` — after `route`. Carries the results. Observation.
+  - `approval = {call_id, prompt}` — the kernel appends an
+    `approval_request` event, holds the batch, and waits for the
+    answer. On `allow` the tool runs (with optionally edited
+    arguments). On `deny` the loop synthesizes a `tool_result` with
+    `is_error: true` and the prompt text. See `phase-2-plan.md`
+    §4.8.
+  - Default when the chain contributes nothing: proceed with the
+    whole batch. An `abort` (exit 2) blocks the whole batch.
+- `tool.after` — after `route`. Carries the results. State field
+  (§12.5): `results`, a map from call id to a replacement
+  `tool_result` object. The kernel splices each entry into the
+  routed results. Unmentioned calls pass through untouched. An
+  optional `reason` field is recorded alongside the rewrite.
 
 ### 3.6 Run-loop scope (per `harness run` iteration)
 
 - `run.idle` — fires when the `run` loop is about to stop on an
   `idle` claim with no pending follow-ups. Carries the session
-  name and the last `assistant_message` id. Two decisions:
-  - `stop` (default) — the loop exits. This is the current
-    behavior with no hooks registered.
-  - `continue` — the payload carries a `message` string. The loop
-    appends a `user_message` event with `queue = "follow"` and that
-    text, then the next `step` drains it as a new turn. This is the
-    seam for goal-continuation hooks (the `pi-goal` pattern): a
-    hook that knows the goal is not yet complete returns `continue`
-    with a continuation prompt.
-  - `continue` with `"log_message": false` in the payload keeps the
-    loop alive without appending the visible `user_message` event.
-    The hook carries its text to the model through its own
-    `model.before` transform; the kernel only keeps the loop alive
-    (issue #4). Absent or
-    `true` preserves the historical behavior, byte-identical.
+  name and the last `assistant_message` id. Effect (§12.5): the
+  hook appends its own follow-up `user_message` to the session log
+  via `LOG_BIN`. The loop then drains pending messages as usual,
+  so the follow-up becomes a new turn. An `abort` (exit 2) vetoes
+  the default stop and keeps the loop alive. The default stops the
+  loop. This is the seam for goal-continuation hooks (the
+  `pi-goal` pattern, issue #4).
   - The in-place silent `refire` turn (issue #6) is retired. A hook
-    that wants the model to act on its own feedback returns
-    `continue` with a `message`, so the loop logs a follow
-    `user_message` and drains it as a new turn. The transcript
-    keeps a normal user/assistant alternation: the model sees a
-    genuine user turn, not a re-presented reply.
+    that wants the model to act on its own feedback appends the
+    message itself. The loop then logs a follow `user_message` and
+    drains it as a new turn. The transcript keeps a normal
+    user/assistant alternation: the model sees a genuine user turn,
+    not a re-presented reply.
 
 ## 4. The hook ABI (the Unix contract)
 
 ### 4.1 Registration
 
-Registration is a config registry in Phase 2, with a documented path
-for discovery later. The config surface:
+Registration is a config registry: named hook defs plus an ordered
+per-window pipeline (section 12.2). The legacy flat `[[hooks.on]]`
+list is retired by the hard cutover (issue #38): the reader is not
+dual-mode, a legacy `on` key is a config-load error. The config
+surface:
 
 ```toml
 [hooks]
 timeout_ms = 30000
 
-[[hooks.on]]
-window  = "exhausted.handle"
+[hooks.defs.hook-compact]
 command = "harness-hook-compact"
 
-[[hooks.on]]
-window  = "overflow.resolve"
-command = "harness-hook-compact"
-args    = []
+[hooks.defs.goal-arm]
+command = "harness-hook-goal-arm"
+
+[hooks.defs.simple-english]
+command = "harness-hook-simple-english"
+
+[hooks.pipeline."exhausted.handle"]
+steps = ["hook-compact"]
+
+[hooks.pipeline."overflow.resolve"]
+steps = ["hook-compact"]
+
+[hooks.pipeline."model.before"]
+steps = ["goal-arm", "simple-english"]
 ```
 
 Rules:
 
-- The `on` list is ordered. The harness runs hooks in that order.
-- A hook binds to exactly one `window`. There is no matcher DSL. No
-  `if "tool(rm *)"` rules. No tool-name globs. Filtering is the
-  hook's own job, from the JSON on `stdin`.
+- Each def is one named hook (`command`, optional `args`, optional
+  per-def `timeout_ms`). A step name with no matching def is a
+  config-load error. A def no pipeline references is a warning.
+- Each `[hooks.pipeline."<window>"]` carries an ordered `steps` list
+  of def names. List order is the composition order: step N+1
+  receives step N's output (section 12.4).
+- A window with no pipeline entry runs zero steps and logs nothing
+  for it (the byte-identical no-hooks default, P1).
+- There is no matcher DSL. No `if "tool(rm *)"` rules. No tool-name
+  globs. Filtering is the hook's own job, from the JSON on `stdin`.
 - The growth path is path discovery: a `hooks/<window>/<name>/`
   layout, each dir holding a `hook.toml` manifest (`command`, `args`,
   `timeout_ms`, `description`). The harness scans the dir, as `route`
@@ -219,8 +234,8 @@ For each window, the harness spawns each registered hook:
 ### 4.3 The decision contract
 
 Superseded by the pipeline model (section 12, settled 2026-09-24,
-implementation pending, issue #38). This section documents the
-Phase-2 ABI shipped today.
+shipped in issue #38). This section documents the Phase-2 ABI that
+preceded the cutover.
 
 A hook returns one of three outcomes:
 
@@ -249,13 +264,20 @@ vocabulary. The application owns its own logic.
 
 ### 4.4 The event channel stays the log
 
-Window firings and decisions log as `ext_status` markers:
-`id = "hook.<window>"`, `value = "<decision>"`. No new event type.
-No `v` bump. The log stays the source of truth and the TUI reattach
-channel. The `context_exhausted` marker is part of the existing
-schema. In Phase 2 the in-session shadow compact does not create a
-new session, so the TUI stays on the same session dir and re-tails
-the same `events.jsonl`.
+Window firings log as `ext_status` markers. One `hook.<window>`
+marker carries the window's resolved outcome (section 12.7). One
+`hook.<window>.chain` marker carries the per-step outcomes and the
+stop point.
+
+One `hook.<window>.error` marker is written per failed step.
+`hook.<window>.unknown_fields` records inert state fields once per
+window. No new event type. No `v` bump. The log stays the source
+of truth and the TUI reattach channel.
+
+The `context_exhausted` marker is part of the existing schema. In
+Phase 2 the in-session shadow compact does not create a new
+session. The TUI stays on the same session dir and re-tails the
+same `events.jsonl`.
 
 ### 4.5 Self-documentation and cache
 
@@ -266,8 +288,8 @@ section 4.
 
 A hook that mutates prompt content runs at `model.before`. The
 harness records a `hook_applied` marker so the cache-break is
-visible. The log holds one marker per hook that returned
-`transform`, in registration order (issue #19). Each marker is an
+visible. The log holds one marker per step that ran `ok`, when the
+applied request changed, in step order (issue #19). Each marker is an
 `ext_status` event with `id = "hook_applied"`. Its value is the
 command of that hook. The prompt prefix stays byte-stable for every
 other window.
@@ -526,9 +548,9 @@ points, not just the terminal action.
 
 ## 12. The pipeline model (settled 2026-09-24, supersedes 4.3)
 
-Status: settled design, implementation pending, tracked in
-issue #38. This section is the target ABI. Sections 4.3 and P2
-document the Phase-2 ABI shipped today.
+Status: shipped (issue #38). This section is the current ABI.
+Sections 4.3 and P2 document the Phase-2 ABI that preceded the
+hard cutover.
 
 ### 12.1 The decision, and why
 
@@ -713,12 +735,12 @@ and passes. `open` names the blocker and what unblocks it.
 | P# | Property | Proof | Status |
 |----|----------|-------|--------|
 | P1 | no-hooks-identical | the `default` scenario in `scripts/model-before-transform-e2e.sh` and the no-hooks runs in `scripts/compact-e2e.sh` assert a marker-free byte-identical default | proven |
-| P2 | decision-fold | `fold_prefers_the_first_explicit_decision`, `window_roundtrip` in `crates/rushi/src/hooks.rs`; the `transform` scenario in `scripts/model-before-transform-e2e.sh` | proven |
+| P2 | decision-fold | Superseded by P7 under the pipeline model (section 12, issue #38). The folded-decision tests (`fold_prefers_the_first_explicit_decision`, `fold_failed_hooks_yield_no_decision`) are retired with the fold; their guarantees live on in the `run_pipeline` tests and the chain-marker e2e rows | superseded by P7 |
 | P3 | tool-block | Blocked: no e2e drives a `tool.before` block decision to synthesized `tool_result`s. Unblocked by a `tool.before`-block e2e row | open |
-| P4 | nonblocking-fail | `fold_failed_hooks_yield_no_decision` in `crates/rushi/src/hooks.rs` | proven |
-| P5 | hook-timeout | `a_slow_hook_times_out` in `crates/rushi/src/hooks.rs` | proven |
+| P4 | nonblocking-fail | `the_first_fail_stops_the_chain_and_the_default_applies` in `crates/rushi/src/hooks.rs`; the `fail` scenario in `scripts/tool-after-transform-e2e.sh` | proven |
+| P5 | hook-timeout | `a_slow_step_times_out_and_fails` in `crates/rushi/src/hooks.rs` | proven |
 | P6 | shadow-compact | Blocked: the shadow-compact conformance row (one `compaction_summary`, one `handoff.md`, shadowed range, next `assemble` skips it) is not yet an e2e. Unblocked by adding that row to `scripts/compact-e2e.sh` | open |
-| P7 | pipeline-compose | Blocked: the pipeline model (section 12) is not yet implemented. Unblocked by the pipeline kernel, the `hooks.defs`/`hooks.pipeline` config surface, chain markers, and a two-`model.before`-transforms-compose row in `scripts/model-before-transform-e2e.sh` (issue #38) | open |
+| P7 | pipeline-compose | `two_ok_steps_compose_the_state` in `crates/rushi/src/hooks.rs`; the `compose` scenario in `scripts/model-before-transform-e2e.sh` (two `model.before` transforms compose, chain marker records every step) (issue #38) | proven |
 
 ## Gate
 

@@ -1,29 +1,43 @@
 //! Legacy key detection for the tools_root rename.
 
-/// Detect legacy `[paths]` keys in a parsed config.
+/// Detect legacy keys in a parsed config.
 ///
 /// Returns an error message per legacy key found. Empty means clean.
 pub fn legacy_key_report(cfg: &toml::Value) -> Vec<String> {
     let mut errs = Vec::new();
-    let paths = match cfg.get("paths") {
-        Some(t) => t,
-        None => return errs,
-    };
-    if paths.get("tools_root").is_some() {
-        errs.push(
-            "config [paths] contains legacy key `tools_root` \
-             (renamed to `native_tool_paths` in commit 353424a). \
-             Update the key or run `rushi setup` to regenerate."
-                .to_string(),
-        );
+    if let Some(paths) = cfg.get("paths") {
+        if paths.get("tools_root").is_some() {
+            errs.push(
+                "config [paths] contains legacy key `tools_root` \
+                 (renamed to `native_tool_paths` in commit 353424a). \
+                 Update the key or run `rushi setup` to regenerate."
+                    .to_string(),
+            );
+        }
+        if paths.get("extra_tools_roots").is_some() {
+            errs.push(
+                "config [paths] contains legacy key `extra_tools_roots` \
+                 (renamed to `extension_tool_paths` in commit 353424a). \
+                 Update the key or run `rushi setup` to regenerate."
+                    .to_string(),
+            );
+        }
     }
-    if paths.get("extra_tools_roots").is_some() {
-        errs.push(
-            "config [paths] contains legacy key `extra_tools_roots` \
-             (renamed to `extension_tool_paths` in commit 353424a). \
-             Update the key or run `rushi setup` to regenerate."
-                .to_string(),
-        );
+
+    // Hard cutover (issue #38): the flat `[[hooks.on]]` list is
+    // retired. The reader is not dual-mode; a legacy entry is a load
+    // error with a migration hint.
+    if let Some(hooks) = cfg.get("hooks") {
+        if hooks.get("on").is_some() {
+            errs.push(
+                "config [hooks] contains legacy key `on` (the flat \
+                 `[[hooks.on]]` list, retired by the pipeline model, \
+                 docs/loop-lifecycle-hooks.md section 12, issue #38). \
+                 Migrate to `[hooks.defs.<name>]` + \
+                 `[hooks.pipeline.\"<window>\"] steps = [...]`."
+                    .to_string(),
+            );
+        }
     }
     errs
 }

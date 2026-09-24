@@ -5,8 +5,9 @@
 //! - `event` — the typed event vocabulary (docs/typed-events.md).
 //! - `compact_math` — pure trigger math and cut walk.
 //! - `stage` — the `StageRunner` trait and payload types.
-//! - `hooks` — lifecycle-window dispatcher and decision types.
-//! - `hook_io` — typed payload builders for hook decisions (the
+//! - `hooks` — lifecycle-window pipeline runner (docs/
+//!   loop-lifecycle-hooks.md section 12, issue #38).
+//! - `hook_io` — typed state builders for hook steps (the
 //!   extension side of the hook ABI).
 //! - `rewind` — the active-path computation over rewind events
 //!   (docs/rewind-fork-design.md section 3).

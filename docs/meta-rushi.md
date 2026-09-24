@@ -101,7 +101,7 @@ build-time discovery still runs in `installPhase`:
   rewrite the shipped `config.toml` line via `sed`.
 - `[ui_extensions] enabled` — glob `"$out"/ui_extensions/*/ext.toml` and
   append the discovered entry names.
-- Hook drift guard — still verifies every bare `config.hooks.on[].command`
+- Hook drift guard — still verifies every bare `config.hooks.defs.*.command`
   that is **not** covered by a `meta.rushi.bin` resolves to a file in
   `$out/bin/` or `$out/hooks/`.
 

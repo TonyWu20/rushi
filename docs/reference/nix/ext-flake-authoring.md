@@ -271,9 +271,12 @@ Notes on the skeleton:
 - **Hooks** reuse `buildCrate` directly (no wrapper) because a
   `buildRustPackage` output (`$out/bin/<binary>`) is already a valid
   `external_hooks` source. The binary name is whatever `[[bin]] name`
-  is in that crate's `Cargo.toml` (e.g. `harness-hook-goal-idle`, not
-  the crate name `hook-goal-idle`); it must match the `command` field
-  in `config.toml`'s `[[hooks.on]]`. Pass the same name to the `bin`
+  is in that crate's `Cargo.toml` (e.g. `harness-hook-goal-idle`,
+  not the crate name `hook-goal-idle`). It must match the `command`
+  field of a `[hooks.defs.<name>]` entry in `config.toml`. A
+  `[hooks.pipeline."<window>"]` steps list wires that def into its
+  window (the legacy `[[hooks.on]]` form is retired, issue #38).
+  Pass the same name to the `bin`
   parameter of `buildCrate` so the package declares `meta.rushi.bin`
   and the consumer's bare hook command is exempt from the build-time
   drift guard (issue #13).

@@ -22,10 +22,10 @@ kernel. The KISS decision moves all of that to an extension.
   Completions.
 - A flat per-image token estimate so the trigger and the compact cut
   count image tokens.
-- A `tool.after` `transform` decision that lets an extension rewrite
-  tool results by call id.
-- The `hook_io` helper crate so extensions build the decision JSON
-  without hand-rolling the envelope.
+- A `tool.after` `results` state field that lets an extension
+  rewrite tool results by call id.
+- The `hook_io` helper crate so extensions build the `tool.after`
+  state JSON without hand-rolling it.
 
 **Extension (out of the kernel):**
 
@@ -46,7 +46,7 @@ kernel. The KISS decision moves all of that to an extension.
    file under the size cap.
 5. The hook builds a success `tool_result` with
    `value.details = {type: "image", mime_type, data (base64), path}`
-   and emits a `transform` decision.
+   and emits it as the `results` map entry keyed by call id.
 6. The kernel splices the rewrites into the routed results by call
    id and appends it to the log.
 7. `assemble` sees `value.details.type == "image"` with non-empty
@@ -104,18 +104,19 @@ carries an image in `value.details`. This keeps the loop, the compact
 binary, and the assemble estimator consistent. It is the token-budget
 safeline on the compaction side.
 
-### 4.5 `bin/rushi/src/step.rs` — `tool.after` `transform`
+### 4.5 `bin/rushi/src/step/tool.rs` — `tool.after` result rewrite
 
 The `tool.after` window now carries the routed `calls` (with their
-arguments) alongside the `results`. A hook may emit a `transform`
-decision with `payload.results`, a keyed map from call id to new
-`tool_result` JSON. The kernel splices each entry into the routed
-results by matching the call id. Unmentioned calls keep their routed
-result. A transform that lists every call id is a whole swap.
+arguments) alongside the `results`. A step may emit a `results`
+state field: a keyed map from call id to a new `tool_result` JSON
+(`docs/loop-lifecycle-hooks.md` 12.5). The kernel splices each entry
+into the routed results by matching the call id. Unmentioned calls
+keep their routed result. A rewrite that lists every call id is a
+whole swap.
 
-The `transform` word is shared with `model.before`, where the payload
-is the whole request object instead of a keyed map. One word, two
-payload shapes. Each window knows its own shape.
+Each window owns its own state shape: `model.before`'s state is the
+whole request object (12.6), while `tool.after` carries the keyed
+`results` map.
 
 The transformed results are what get appended to the log.
 

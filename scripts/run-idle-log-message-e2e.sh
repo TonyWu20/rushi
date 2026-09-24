@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
-# e2e for the run idle log message flag, issue 4
+# e2e for the run.idle pipeline window (docs/loop-lifecycle-hooks.md
+# 12.5, issue #38; the log-message semantics of issue #4).
+#
+# Under the pipeline ABI the run.idle hook appends its own follow-up
+# `user_message` to the session log through the `LOG_BIN` env var
+# (the `log` stage binary); the loop drains pending messages as
+# usual. An `abort` (exit 2) vetoes the default stop and keeps the
+# loop alive; a `fail` (exit 3) logs `hook.run.idle.error` and the
+# window resolves to its default (stop) — the loop never wedges
+# (P4).
 
 set -uo pipefail
 
@@ -52,10 +61,41 @@ text = "test"
 [hooks]
 timeout_ms = 30000
 
-[[hooks.on]]
-window  = "run.idle"
+[hooks.defs.hook-run-idle]
 command = "$WORK/hook-run-idle"
-args    = []
+
+[hooks.pipeline."run.idle"]
+steps = ["hook-run-idle"]
+EOF
+}
+
+work_config_bare() {
+  # No pipeline entry: the byte-identical no-hooks default (P1).
+  cat > "$WORK/config.toml" <<EOF
+[model]
+api = "responses"
+max_output_tokens = 4096
+
+[model.stub]
+model_id = "stub-model"
+base_url = "http://127.0.0.1:1"
+api_key_env = "DUMMY"
+context_tokens = 8000
+
+[active]
+model = "stub"
+
+[paths]
+sessions_root = "sessions"
+
+[limits]
+context_budget_tokens = 8000
+compact_reserve_tokens = 500
+compact_keep_tokens = 2000
+compact_enabled = false
+
+[system_prompt]
+text = "test"
 EOF
 }
 
@@ -83,25 +123,30 @@ EOF
   chmod +x "$WORK/stub-model"
 }
 
-# The hook counts firings and stops on the second.
+# The hook appends its own follow user_message via LOG_BIN on the
+# first firing (issue #4's plain behavior), then stops.
 make_hook_plain() {
   printf '%s\n' '#!/usr/bin/env bash' > "$WORK/hook-run-idle"
   cat >> "$WORK/hook-run-idle" <<EOF
 set -u
-cat > /dev/null
+payload=\$(cat)
 n=\$(( \$(cat "$COUNT" 2>/dev/null || echo 0) + 1 ))
 echo "\$n" > "$COUNT"
 
 if [[ \$n -eq 1 ]]; then
-  echo '{"decision":"continue","payload":{"message":"revise"}}'
-else
-  echo '{"decision":"stop"}'
+  ts=\$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  jq -cn --arg ts "\$ts" '{v:1, type:"user_message", ts:\$ts, content:"revise", queue:"follow"}' \
+    | "\$LOG_BIN" --session "\$SESSION"
 fi
+echo '{}'
 EOF
   chmod +x "$WORK/hook-run-idle"
 }
 
-make_hook_silent() {
+# The veto hook (12.4): exit 2 on the first firing keeps the loop
+# alive without appending a message; the second firing lets the
+# loop stop.
+make_hook_veto() {
   printf '%s\n' '#!/usr/bin/env bash' > "$WORK/hook-run-idle"
   cat >> "$WORK/hook-run-idle" <<EOF
 set -u
@@ -110,10 +155,23 @@ n=\$(( \$(cat "$COUNT" 2>/dev/null || echo 0) + 1 ))
 echo "\$n" > "$COUNT"
 
 if [[ \$n -eq 1 ]]; then
-  echo '{"decision":"continue","payload":{"message":"revise","log_message":false}}'
-else
-  echo '{"decision":"stop"}'
+  echo '{"reason":"goal still open"}'
+  exit 2
 fi
+echo '{}'
+EOF
+  chmod +x "$WORK/hook-run-idle"
+}
+
+# The failing hook (P4): exit 3 logs the error; the window resolves
+# to its default (stop) and the loop stops.
+make_hook_fail() {
+  printf '%s\n' '#!/usr/bin/env bash' > "$WORK/hook-run-idle"
+  cat >> "$WORK/hook-run-idle" <<EOF
+set -u
+cat > /dev/null
+echo '{"reason":"idle hook crashed"}'
+exit 3
 EOF
   chmod +x "$WORK/hook-run-idle"
 }
@@ -148,6 +206,10 @@ count_markers() {
   echo "$n"
 }
 
+marker_values() {
+  jq -c "select(.type == \"ext_status\" and .id == \"$1\") | .value" "$SLOG" 2>/dev/null
+}
+
 assert_eq() {
   local n
   if [ "$1" = "$2" ]; then
@@ -168,7 +230,8 @@ NEW_WORK() {
   echo "==== scenario: $1"
 }
 
-# plain appends the follow user message.
+# plain: the hook appends the follow user message; the loop drains
+# it and runs a second turn, then stops.
 scenario_plain() {
   NEW_WORK plain
   work_config
@@ -178,7 +241,7 @@ scenario_plain() {
   run_loop
   assert_eq "$(claim_state)" "idle" "the run loop ends at idle"
   assert_eq "$(user_message_count)" "2" \
-    "the seed plus the follow user_message"
+    "the seed plus the follow user_message the hook appended"
   local follow
   follow="$(follow_user_message)"
   assert_eq "$(jq -r '.content' <<<"$follow")" "revise" \
@@ -188,31 +251,88 @@ scenario_plain() {
   assert_eq "$(cat "$COUNT")" "2" "the hook fired twice"
   assert_eq "$(count_markers "hook.run.idle.error")" "0" \
     "no failure marker for a successful hook"
+  assert_eq "$(count_markers "hook.run.idle")" "2" \
+    "one resolution marker per run.idle firing"
+  assert_eq "$(marker_values "hook.run.idle" | sed -n 1p)" '"continue"' \
+    "the first firing resolved to continue"
+  assert_eq "$(marker_values "hook.run.idle" | sed -n 2p)" '"stop"' \
+    "the second firing resolved to stop"
+  assert_eq "$(jq -c 'select(.id == "hook.run.idle.chain") | .value.steps' "$SLOG" 2>/dev/null | head -1)" \
+    '["noop"]' "the step emitted no state (the effect is the LOG_BIN append)"
 }
 
-# silent appends no user message but the loop stays alive.
-scenario_silent() {
-  NEW_WORK silent
+# veto: an exit-2 abort vetoes the default stop. No message is
+# appended; the loop stays alive for one more turn, then the
+# hook lets it stop.
+scenario_veto() {
+  NEW_WORK veto
   work_config
   seed_session
   make_stub
-  make_hook_silent
+  make_hook_veto
   run_loop
   assert_eq "$(claim_state)" "idle" "the run loop ends at idle"
   assert_eq "$(user_message_count)" "1" \
-    "only the seed user_message"
+    "only the seed user_message (an abort appends nothing)"
   assert_eq "$(follow_user_message)" "" \
     "no follow user_message was appended"
   assert_eq "$(wc -l < "$STUB_REQLOG" | tr -d ' ')" "1" \
     "one model turn only"
   assert_eq "$(cat "$COUNT")" "2" \
-    "the hook fired twice, the loop stayed alive"
+    "the hook fired twice, the veto kept the loop alive"
   assert_eq "$(count_markers "hook.run.idle.error")" "0" \
-    "no failure marker for a successful hook"
+    "an abort is not a failure marker"
+  assert_eq "$(jq -c 'select(.id == "hook.run.idle.chain") | .value.steps' "$SLOG" 2>/dev/null | head -1)" \
+    '["abort(goal still open)"]' \
+    "the chain marker records the abort with its reason"
+  assert_eq "$(jq -r 'select(.id == "hook.run.idle.chain") | .value.stop_kind' "$SLOG" 2>/dev/null | head -1)" \
+    "abort" "the chain stopped on the veto"
+}
+
+# fail: an exit-3 step logs the error; the window default (stop)
+# applies and the loop stops (P4: it never wedges).
+scenario_fail() {
+  NEW_WORK fail
+  work_config
+  seed_session
+  make_stub
+  make_hook_fail
+  run_loop
+  assert_eq "$(claim_state)" "idle" "the run loop ends at idle"
+  assert_eq "$(user_message_count)" "1" \
+    "only the seed user_message"
+  assert_eq "$(wc -l < "$STUB_REQLOG" | tr -d ' ')" "1" \
+    "one model turn only"
+  assert_eq "$(count_markers "hook.run.idle.error")" "1" \
+    "one error marker for the failed step"
+  assert_eq "$(jq -c 'select(.id == "hook.run.idle.chain") | .value.steps' "$SLOG" 2>/dev/null)" \
+    '["fail(idle hook crashed)"]' \
+    "the chain marker records the fail with its detail"
+  assert_eq "$(marker_values "hook.run.idle")" '"stop"' \
+    "the failed chain resolved to the window default"
+}
+
+# default: no pipeline entry — zero steps, no markers, the loop
+# stops after one turn (P1).
+scenario_default() {
+  NEW_WORK default
+  work_config_bare
+  seed_session
+  make_stub
+  run_loop
+  assert_eq "$(claim_state)" "idle" "the run loop ends at idle"
+  assert_eq "$(user_message_count)" "1" "only the seed user_message"
+  assert_eq "$(wc -l < "$STUB_REQLOG" | tr -d ' ')" "1" \
+    "one model turn only"
+  assert_eq "$(count_markers "hook.run.idle")" "0" "no resolution marker"
+  assert_eq "$(count_markers "hook.run.idle.chain")" "0" "no chain marker"
+  assert_eq "$(count_markers "hook.run.idle.error")" "0" "no error marker"
 }
 
 scenario_plain
-scenario_silent
+scenario_veto
+scenario_fail
+scenario_default
 
 echo
 echo "run-idle-log-message-e2e: $PASS passed, $FAIL failed"
