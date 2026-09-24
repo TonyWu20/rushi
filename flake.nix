@@ -32,6 +32,9 @@
       rushiTui,
       ...
     }:
+    let 
+      rushiVersion="0.1.5";
+    in
     rec {
 
       # ── Shared library (system-independent) ──
@@ -113,7 +116,7 @@
 
           rushi = pkgs.rustPlatform.buildRustPackage {
             pname = "rushi";
-            version = "0.1.3";
+            version = rushiVersion;
             src = self;
             cargoLock = {
               lockFile = ./Cargo.lock;
@@ -211,7 +214,7 @@
 
           rushi = pkgs.rustPlatform.buildRustPackage {
             pname = "rushi";
-            version = "0.1.3";
+            version = rushiVersion;
             src = self;
             cargoLock = {
               lockFile = ./Cargo.lock;
@@ -223,6 +226,12 @@
               mkdir -p $out/tools
               cp -r $src/tools/. $out/tools/
             '';
+            meta = with pkgLib; {
+              description = "rushi — Unix-philosophy agent harness (kernel + distribution)";
+              homepage = "https://github.com/TonyWu20/rushi";
+              license = licenses.mit;
+              mainProgram = "rushi";
+            };
           };
         in
         {
@@ -244,14 +253,6 @@
               # its PATH fallback finds the binary here.
               rushiTui.packages.${system}.default
             ];
-            # Do not export RUSHI_KERNEL to the Nix store path: the
-            # built package has no tools/ dir, and `rushi setup` would
-            # materialize zero tools. From a dev checkout, `rushi setup`
-            # falls back to CWD/tools, which works without the variable.
-            # Uncomment only when a store copy carries tools/:
-            # shellHook = ''
-            #   export RUSHI_KERNEL="${rushi}"
-            # '';
           };
         }
       );
