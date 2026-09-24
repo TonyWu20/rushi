@@ -98,7 +98,6 @@ validator itches are closed: both live once in `crates/rushi/`
 | `subagent-design.md`                              | Spec, not yet built | 2026-09-14   | Subagent mode: `spawn_agent` tool + `config_gen` generator (D6 tool-path lists and D8 typed events landed as independent changes). Blocking v1, depth via tool availability, headless child. Properties P1-P8 |
 | `typed-events.md`                                   | Implemented       | 2026-09-15   | Typed event vocabulary in `rushi-common`: the `Event` enum and per-type structs replace runtime JSON-Schema validation with `serde` (de)serialization. `parse_event` is the single validation step. No `schemas_dir`. The `schemas/events/v1/` files were removed from the repo 2026-09-15. Properties P1-P6 |
 | `commit-hygiene.md`                                   | Active            | 2026-09-15   | Commit-message policy: AI co-author trailers are stripped at commit time by `.githooks/commit-msg` (enabled via `git config core.hooksPath .githooks`), and the 2026-09-15 filter-branch rewrite of main with the backup branch and force-push note |
-| `rushi-queue-design.md`                                 | Draft             | 2026-09-23   | Headless goal-queue layer (`rq`): SLURM-style `submit`/`queue`/`hold`/`release`/`attach`/`cancel` over goal-driven loops. Decided 2026-09-23: new sibling repo `rushi-queue`, `rushi-goal` headless seeder binary (issue to `rushi-goal-mode`), kernel stdin-prompt change (issue to `rushi`), `notify-rust` + dashboard live stack, all-smi-style agent+view for multi-machine aggregation, systemd/launchd units for the node agent |
 | `tool-entry-resolution.md`                               | Implemented     | 2026-09-24   | Decision record: tool entry resolution and tool dir enumeration live in `rushi-common` `paths` (`resolve_tool_entry`, `tool_dirs_in`, shipped 0.1.5). The kernel `assemble` and every front-end call them, no private copies. Rationale: the two private copies drifted, which shipped a TUI package with dangling tool paths and a zero-tool model request. Rejected: re-bundling `tools/` into the TUI package, TUI-local mirror |
 
 Status legend:
@@ -135,6 +134,7 @@ Moved docs (not in this repo anymore):
 - `../rushi-exts/docs/goal-rule-reinject.md` — goal prompt injection (superseded).
 - `../rushi-exts/docs/pi-extension-port-investigation.md` — pi extension porting.
 - `../rushi-exts/docs/pi-goal-readiness.md` — pi-goal port readiness.
+- `../rushi-queue/docs/rushi-queue-design.md` — headless goal-queue layer (`rq`), moved to the `rushi-queue` repo 2026-09-24.
 
 ## Reading order for a new session
 
