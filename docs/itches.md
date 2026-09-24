@@ -554,6 +554,13 @@ The kernel does not host per-front-end launcher subcommands.
       already path-depend on.
       No kernel endpoint is needed, so the
       `rushi config --print-path` idea is retired.
+- [x] Tool-entry resolution lift.
+      Done 2026-09-24.
+      `resolve_tool_entry` and `tool_dirs_in` joined the same
+      shared `rushi-common` `paths` module in 0.1.5.
+      The kernel `assemble` and the TUI startup check both call
+      the shared scan, so they cannot drift.
+      Decision record: `docs/tool-entry-resolution.md`.
 - [ ] rushi-tui repo: ship the entry point as one `rushi-tui`
       command. It resolves its own config (`$CONFIG`, `--config`,
       or CWD) and owns session/loop wiring.

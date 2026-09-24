@@ -979,6 +979,7 @@ depends on `rushi-common`, so a shared helper costs nothing. A
 single scan is the only design that stops the kernel `assemble`
 and the TUI from resolving `[paths]` differently. The rejected
 alternative was a TUI-local copy of the scan in `config.rs`.
+The decision record lives in `docs/tool-entry-resolution.md`.
 
 **Fix (TUI, lifted to `rushi-common`):** The entry join and the
 tool-dir enumeration now live in `rushi-common` `paths` as
