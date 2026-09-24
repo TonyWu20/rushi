@@ -5,6 +5,13 @@ document produced by the in-session shadow compact step. It amends
 `docs/phase-2-plan.md`. It follows the unix-philosophy model in
 `docs/skill-remapped-to-os-apps.md`.
 
+ABI note: the hook decision contract in section 2 (the
+`{"decision": "..."}` envelopes and the reserved `handoff` value)
+is superseded. See the pipeline model in
+`docs/loop-lifecycle-hooks.md` section 12 (issue #38).
+`harness-hook-compact` now exits `0` or `3` and passes its state
+through. The kernel resolves `stop` via the state fields.
+
 ## 1. The decision
 
 The terminal context strategy is in-session shadow compact. The

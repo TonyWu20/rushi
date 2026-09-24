@@ -64,6 +64,27 @@ pub fn publish_loop_phase(cfg: &HarnessConfig, session_dir: &Path, phase: &str) 
     append_event(cfg, session_dir, &event);
 }
 
+/// Publish one arbitrary `ext_status` marker (docs/typed-events.md).
+/// Used for the hook pipeline markers (`hook.<window>.chain`,
+/// `hook.<window>.error`, `hook.<window>`; docs/loop-lifecycle-hooks.md
+/// 12.7).
+pub fn publish_ext_status(
+    cfg: &HarnessConfig,
+    session_dir: &Path,
+    id: &str,
+    value: &Value,
+) {
+    let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let event = serde_json::json!({
+        "v": 1,
+        "type": "ext_status",
+        "ts": ts,
+        "id": id,
+        "value": value,
+    });
+    append_event(cfg, session_dir, &event);
+}
+
 /// Append a terminal error event.
 pub fn append_terminal_error(cfg: &HarnessConfig, session_dir: &Path, message: &str) {
     let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);

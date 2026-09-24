@@ -7,7 +7,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use rushi_common::compact_math;
-use rushi_common::hooks::{self, Window};
+use rushi_common::hooks::{PipelineRun, StepStatus, Window};
 use rushi_common::stage::{
     AssembleOpts, Claim, CompactOutcome, CompactReason, ModelOutput, RequestFile, SessionDir,
     StageRunner, ToolCallEvent,
@@ -17,9 +17,12 @@ use crate::classifier::is_overflow;
 use crate::config::HarnessConfig;
 use crate::stage_runner::SubprocessRunner;
 use crate::step::compact::{post_compact_sanity, try_compact_with_hooks};
-use crate::step::hook::{fire_overflow_resolve, hook_env, log_hook_window};
+use crate::step::hook::{
+    fire_observation, fire_overflow_resolve, log_pipeline, resolve_strategy_window, run_window,
+};
 use crate::step::logio::{
-    append_event, append_line, append_terminal_error, last_user_message_seq, publish_loop_phase,
+    append_event, append_line, append_terminal_error, last_user_message_seq, publish_ext_status,
+    publish_loop_phase,
 };
 use crate::step::tool::route_and_append;
 use crate::step::{check_signal, StepMode};
@@ -282,17 +285,9 @@ fn fire_and_handle_exhausted(
         "input_budget": cfg.input_budget,
         "context_tokens": cfg.context_tokens,
     });
-    let results = hooks::fire_hooks(
-        &cfg.hooks,
-        Window::ExhaustedHandle,
-        &payload,
-        &hook_env(cfg, session, "step", Window::ExhaustedHandle),
-        cfg.hooks_timeout_ms,
-    );
-    let (decision_opt, _) = hooks::fold_decision(&results, Window::ExhaustedHandle);
-    let decision = decision_opt
-        .unwrap_or_else(|| hooks::window_default(Window::ExhaustedHandle).to_string());
-    log_hook_window(cfg, session, "exhausted.handle", &decision, &results);
+    let run = run_window(cfg, session, Window::ExhaustedHandle, &payload, "step");
+    let decision = resolve_strategy_window(&run).to_string();
+    log_pipeline(cfg, session, Window::ExhaustedHandle, &run, Some(&decision), Some(&payload));
 
     match decision.as_str() {
         "stay_compact" => {
@@ -324,137 +319,141 @@ fn fire_and_handle_exhausted(
     }
 }
 
-/// Apply a `model.before` `transform` decision.
+/// Apply a `model.before` pipeline run (docs/loop-lifecycle-hooks.md
+/// 12.6, issue #38).
 ///
-/// A valid transform replaces the request JSON with the hook's
-/// `request` object. The harness logs the `hook.model.before`
-/// decision marker and one `hook_applied` marker per hook that
-/// returned `transform`, in registration order (docs/loop-lifecycle-hooks.md
-/// 4.5, issue #19). A transform without an object `request` field is
-/// a non-blocking failure: the log carries `hook.model.before.error`
-/// and the original request proceeds.
+/// A completed chain hands over the accumulated request object; the
+/// kernel merges `prompt_fragments` into `instructions` and strips
+/// the field exactly once at the end of the pipeline. Fragments stay
+/// visible for the whole chain: the merge walks the original request
+/// and every step's output in order, keeps first-seen id order, and
+/// later step text wins on a same-id collision.
 ///
-/// Fragment join (docs/system-prompt-generation.md D5): when the
-/// transformed request carries `prompt_fragments` (an ordered array
-/// of `[id, text]` pairs), the kernel joins the text values in
-/// order and appends them to `request.instructions`, then removes
-/// the field so it never reaches the model. This is the generic
-/// kernel join step: one pass, no knowledge of fragment meaning.
-/// The fragment key list is logged as a `hook.model.before.transform`
-/// marker (keys only, never the values).
-fn apply_model_before_transform(
+/// An aborted or failed chain leaves the original request in place
+/// (the window default, P4); the chain marker records the stop
+/// point and a failed step's `hook.model.before.error` marker. A
+/// final state that is not a request object (for instance the
+/// legacy `decision`/`payload` envelope of a hook not yet migrated
+/// to the pipeline ABI) is a non-blocking failure: the log carries
+/// `hook.model.before.error` and the original request proceeds.
+///
+/// issue #24 no-op detection: a chain whose final request is
+/// semantically equal to the original breaks no cache, so no
+/// `hook_applied` marker is written; a changed request writes one
+/// marker per step that ran ok.
+fn apply_model_before_pipeline(
     cfg: &HarnessConfig,
     session: &SessionDir,
-    payload_val: &Value,
-    results: &[hooks::HookResult],
+    run: &PipelineRun,
     request: &mut RequestFile,
 ) {
-    let new_request = match payload_val.get("request") {
-        Some(r) if r.is_object() => Some(r.clone()),
-        _ => None,
-    };
-    match new_request {
-        Some(r) => {
-            // issue #24: capture the original so we can detect a no-op
-            // transform and skip the `hook_applied` markers.
-            let original_request = request.json.clone();
-            request.json = r;
-            // Join the hook-supplied `prompt_fragments` into
-            // `instructions`, then strip the field so the model call
-            // never sees it (docs/system-prompt-generation.md D5).
-            // The kernel joins generically: it walks the ordered
-            // `[id, text]` pairs, concatenates the text values, and
-            // appends them after the existing `instructions`. It has
-            // no knowledge of what any fragment means; each extension
-            // owns its own key. Only the key list is logged, never
-            // the values (cache + privacy discipline).
-            if let Some(fragments) = request.json
-                .get("prompt_fragments")
-                .and_then(|f| f.as_array())
-            {
-                let mut keys: Vec<String> = Vec::new();
-                let mut joined: String = String::new();
-                for pair in fragments {
-                    let n = pair.as_array().map_or(0, |a| a.len());
-                    if n < 2 {
-                        continue;
-                    }
-                    if let Some(id) = pair.get(0).and_then(|v| v.as_str()) {
-                        keys.push(id.to_string());
-                    }
-                    if let Some(text) = pair.get(1).and_then(|v| v.as_str()) {
-                        if !text.is_empty() {
-                            if !joined.is_empty() {
-                                joined.push_str("\n\n");
-                            }
-                            joined.push_str(text);
-                        }
-                    }
+    if run.aborted || run.failed {
+        log_pipeline(cfg, session, Window::ModelBefore, run, Some("noop"), None);
+        return;
+    }
+
+    let original = request.json.clone();
+
+    // A completed chain's state is the request object itself (12.6).
+    // A state that is not a request object fails the window
+    // non-blocking (P4): log the error, keep the original request.
+    let is_request = run.state.is_object()
+        && run.state.get("input").map(|v| !v.is_null()).unwrap_or(false);
+    if !is_request {
+        publish_ext_status(
+            cfg,
+            &session.path,
+            "hook.model.before.error",
+            &Value::String(
+                "model.before pipeline state is not a request object; the original request proceeds"
+                    .to_string(),
+            ),
+        );
+        log_pipeline(cfg, session, Window::ModelBefore, run, Some("noop"), None);
+        return;
+    }
+
+    request.json = run.state.clone();
+
+    // Join `prompt_fragments` into `instructions` and strip the
+    // field exactly once at the end of the pipeline
+    // (docs/system-prompt-generation.md D5). The merge walks the
+    // original request and each step's output in list order;
+    // first-seen id order is kept, later step text wins on a
+    // same-id collision. The key list is logged (keys only, never
+    // the values: cache + privacy discipline).
+    let mut order: Vec<String> = Vec::new();
+    let mut texts: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    for src in std::iter::once(&original).chain(run.step_outputs.iter()) {
+        if let Some(arr) = src.get("prompt_fragments").and_then(|f| f.as_array()) {
+            for pair in arr {
+                let n = pair.as_array().map_or(0, |a| a.len());
+                if n < 2 {
+                    continue;
                 }
-                if !joined.is_empty() {
-                    let base = request
-                        .json
-                        .get("instructions")
-                        .and_then(|i| i.as_str())
-                        .unwrap_or("");
-                    let new_instructions = if base.is_empty() {
-                        joined
-                    } else {
-                        format!("{base}\n\n{joined}")
-                    };
-                    request.json["instructions"] = Value::String(new_instructions);
+                let Some(id) = pair.get(0).and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let Some(text) = pair.get(1).and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if text.is_empty() {
+                    continue;
                 }
-                if let Some(obj) = request.json.as_object_mut() {
-                    obj.remove("prompt_fragments");
+                if !texts.contains_key(id) {
+                    order.push(id.to_string());
                 }
-                if !keys.is_empty() {
-                    let ts =
-                        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-                    let marker = serde_json::json!({
-                        "v": 1,
-                        "type": "ext_status",
-                        "ts": ts,
-                        "id": "hook.model.before.transform",
-                        "value": { "fragments": keys },
-                    });
-                    append_event(cfg, &session.path, &marker);
-                }
-            }
-            log_hook_window(cfg, session, "model.before", "transform", results);
-            // issue #24: only write `hook_applied` markers when the
-            // transform actually changed the request.  If the folded
-            // payload is semantically identical to the original
-            // (key-order-insensitive `serde_json::Value` equality,
-            // which matches the key-sorted wire form because Map is
-            // a BTreeMap without `preserve_order`), no cache-break
-            // occurred and the markers would be misleading.
-            if request.json != original_request {
-                // One `hook_applied` marker per hook that returned
-                // `transform`, in registration order (issue #19).
-                for r in results.iter().filter(|r| r.decision.as_deref() == Some("transform")) {
-                    let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-                    let marker = serde_json::json!({
-                        "v": 1,
-                        "type": "ext_status",
-                        "ts": ts,
-                        "id": "hook_applied",
-                        "value": r.command.clone(),
-                    });
-                    append_event(cfg, &session.path, &marker);
-                }
+                texts.insert(id.to_string(), text.to_string());
             }
         }
-        None => {
-            let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-            let marker = serde_json::json!({
-                "v": 1,
-                "type": "ext_status",
-                "ts": ts,
-                "id": "hook.model.before.error",
-                "value": "transform payload missing an object `request` field",
-            });
-            append_event(cfg, &session.path, &marker);
-            log_hook_window(cfg, session, "model.before", "", results);
+    }
+    if !order.is_empty() {
+        let joined: String = order
+            .iter()
+            .map(|id| texts[id].as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let base = request
+            .json
+            .get("instructions")
+            .and_then(|i| i.as_str())
+            .unwrap_or("");
+        let new_instructions = if base.is_empty() {
+            joined
+        } else {
+            format!("{base}\n\n{joined}")
+        };
+        request.json["instructions"] = Value::String(new_instructions);
+        if let Some(obj) = request.json.as_object_mut() {
+            obj.remove("prompt_fragments");
+        }
+        let ts =
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let marker = serde_json::json!({
+            "v": 1,
+            "type": "ext_status",
+            "ts": ts,
+            "id": "hook.model.before.transform",
+            "value": { "fragments": order },
+        });
+        append_event(cfg, &session.path, &marker);
+    }
+
+    let changed = request.json != original;
+    log_pipeline(
+        cfg,
+        session,
+        Window::ModelBefore,
+        run,
+        Some(if changed { "transform" } else { "noop" }),
+        None,
+    );
+    if changed {
+        // One `hook_applied` marker per step that ran ok (issue #19,
+        // step order). The value is the step's command (docs 4.5).
+        for s in run.steps.iter().filter(|s| s.status == StepStatus::Ok) {
+            publish_ext_status(cfg, &session.path, "hook_applied", &Value::String(s.command.clone()));
         }
     }
 }
@@ -486,28 +485,13 @@ fn model_retry_loop(
     'outer: loop {
         check_signal(mode);
 
-        // model.before decision window
-        // (docs/loop-lifecycle-hooks.md 3.3, 4.5).
-        let payload = serde_json::json!({
-            "window": "model.before",
-            "session": session.path.to_string_lossy(),
-            "model": describe.model_id,
-            "projected_tokens": estimate_context(cfg, &session.path),
-            "request": request.json,
-        });
-        let results = hooks::fire_hooks(
-            &cfg.hooks,
-            Window::ModelBefore,
-            &payload,
-            &hook_env(cfg, session, "step", Window::ModelBefore),
-            cfg.hooks_timeout_ms,
-        );
-        let (decision, payload_val) = hooks::fold_decision(&results, Window::ModelBefore);
-        if decision.as_deref() == Some("transform") {
-            apply_model_before_transform(cfg, session, &payload_val, &results, request);
-        } else {
-            log_hook_window(cfg, session, "model.before", "", &results);
-        }
+        // model.before pipeline (docs/loop-lifecycle-hooks.md 12.6):
+        // the accumulated state is the request object itself. Steps
+        // run in list order; step N+1 receives step N's output. An
+        // aborted or failed chain leaves the original request in
+        // place.
+        let run = run_window(cfg, session, Window::ModelBefore, &request.json, "step");
+        apply_model_before_pipeline(cfg, session, &run, request);
 
         // Delivery-boundary marker (docs/tui-pending-user-messages.md P7):
         // record the last user_message seq in the log. The claim state
@@ -549,13 +533,7 @@ fn model_retry_loop(
             "detail": last_output.json.get("detail").cloned().unwrap_or(Value::Null),
             "usage": last_output.json.get("usage").cloned().unwrap_or(Value::Null),
         });
-        let _ = hooks::fire_hooks(
-            &cfg.hooks,
-            Window::ModelAfter,
-            &payload,
-            &hook_env(cfg, session, "step", Window::ModelAfter),
-            cfg.hooks_timeout_ms,
-        );
+        fire_observation(cfg, session, Window::ModelAfter, &payload);
 
         let stop_reason = last_output
             .json
@@ -946,7 +924,7 @@ fn log_truncated_group(cfg: &HarnessConfig, session: &SessionDir, output: &Value
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rushi_common::hooks::HookResult;
+    use rushi_common::hooks::{PipelineRun, StepOutcome, StepStatus};
 
     /// Minimal `HarnessConfig` for marker tests: `append_event`
     /// ignores the cfg, so every field just needs to exist.
@@ -973,7 +951,8 @@ mod tests {
             estimate_chars_per_token: 4,
             approval_timeout_s: None,
             hooks_timeout_ms: 10000,
-            hooks: vec![],
+            hook_defs: std::collections::BTreeMap::new(),
+            hook_pipelines: std::collections::BTreeMap::new(),
             model_bin: bin.join("model"),
             compact_bin: bin.join("compact"),
             assemble_bin: bin.join("assemble"),
@@ -984,14 +963,30 @@ mod tests {
         }
     }
 
-    fn transform_result(command: &str) -> HookResult {
-        HookResult {
-            decision: Some("transform".to_string()),
-            payload: Value::Null,
-            blocking_default: false,
-            failed: false,
-            failure_detail: String::new(),
-            command: command.to_string(),
+    /// Build a `model.before` `PipelineRun`: per-step statuses + def
+    /// names, the final accumulated state, and the per-step outputs
+    /// (so fragment accumulation across the chain is exercised).
+    fn model_before_run(
+        steps: &[(StepStatus, &str)],
+        final_state: Value,
+        step_outputs: Vec<Value>,
+    ) -> PipelineRun {
+        PipelineRun {
+            window: Window::ModelBefore,
+            steps: steps
+                .iter()
+                .map(|(st, def)| StepOutcome {
+                    def: def.to_string(),
+                    command: def.to_string(),
+                    status: *st,
+                    detail: String::new(),
+                })
+                .collect(),
+            stop: None,
+            aborted: steps.iter().any(|(st, _)| *st == StepStatus::Abort),
+            failed: steps.iter().any(|(st, _)| *st == StepStatus::Fail),
+            state: final_state,
+            step_outputs,
         }
     }
 
@@ -1008,10 +1003,11 @@ mod tests {
             .collect()
     }
 
-    /// issue #19: two hooks both returning `transform` must produce
-    /// two `hook_applied` markers, in registration order.
+    /// issue #19 (pipeline form, P7): a chain whose two steps both
+    /// run ok produces one `hook_applied` marker per step that ran
+    /// ok, in step order.
     #[test]
-    fn two_transform_hooks_emit_two_markers() {
+    fn two_ok_steps_emit_two_applied_markers() {
         let root = tempfile::tempdir().unwrap();
         let session_dir = root.path().join("sessions").join("test");
         std::fs::create_dir_all(&session_dir).unwrap();
@@ -1020,18 +1016,19 @@ mod tests {
             path: session_dir.clone(),
         };
 
-        let payload = serde_json::json!({
-            "request": { "model": "m2", "instructions": "base instructions" }
-        });
-        let results = vec![
-            transform_result("harness-hook-goal-arm"),
-            transform_result("harness-simple-english"),
-        ];
+        let original = serde_json::json!({ "model": "m1", "instructions": "base", "input": [] });
+        let step1_out = serde_json::json!({ "model": "m1", "instructions": "base", "input": [] });
+        let final_state = serde_json::json!({ "model": "m2", "instructions": "base instructions", "input": [] });
+        let run = model_before_run(
+            &[(StepStatus::Ok, "harness-hook-goal-arm"), (StepStatus::Ok, "harness-simple-english")],
+            final_state,
+            vec![step1_out],
+        );
 
         let mut request = RequestFile {
-            json: serde_json::json!({ "model": "m1", "instructions": "base" }),
+            json: original.clone(),
         };
-        apply_model_before_transform(&cfg, &session, &payload, &results, &mut request);
+        apply_model_before_pipeline(&cfg, &session, &run, &mut request);
 
         let values = hook_applied_values(&session_dir);
         assert_eq!(values.len(), 2, "expected two hook_applied markers");
@@ -1041,16 +1038,16 @@ mod tests {
                 Value::String("harness-hook-goal-arm".to_string()),
                 Value::String("harness-simple-english".to_string()),
             ],
-            "markers must be in registration order"
+            "markers must be in step order"
         );
         // The transform itself must have landed.
         assert_eq!(request.json.get("model").and_then(|m| m.as_str()), Some("m2"));
     }
 
-    /// A mixed chain (proceed, transform, transform) still emits one
-    /// marker per transforming hook, in order.
+    /// A mixed chain (noop, ok, ok) emits one marker per step that
+    /// ran ok, in step order.
     #[test]
-    fn mixed_decisions_emit_one_marker_per_transform() {
+    fn mixed_steps_emit_one_marker_per_ok_step() {
         let root = tempfile::tempdir().unwrap();
         let session_dir = root.path().join("sessions").join("test");
         std::fs::create_dir_all(&session_dir).unwrap();
@@ -1059,21 +1056,24 @@ mod tests {
             path: session_dir.clone(),
         };
 
-        let payload = serde_json::json!({
-            "request": { "model": "m3", "instructions": "x" }
-        });
-        let mut passthrough = transform_result("harness-hook-passthrough");
-        passthrough.decision = Some("proceed".to_string());
-        let results = vec![
-            passthrough,
-            transform_result("harness-hook-a"),
-            transform_result("harness-hook-b"),
-        ];
+        let original = serde_json::json!({ "model": "m1", "input": [] });
+        let step1_out = original.clone();
+        let step2_out = serde_json::json!({ "model": "m2", "input": [] });
+        let final_state = serde_json::json!({ "model": "m3", "instructions": "x", "input": [] });
+        let run = model_before_run(
+            &[
+                (StepStatus::Noop, "harness-hook-passthrough"),
+                (StepStatus::Ok, "harness-hook-a"),
+                (StepStatus::Ok, "harness-hook-b"),
+            ],
+            final_state,
+            vec![step1_out, step2_out],
+        );
 
         let mut request = RequestFile {
-            json: serde_json::json!({ "model": "m1" }),
+            json: original,
         };
-        apply_model_before_transform(&cfg, &session, &payload, &results, &mut request);
+        apply_model_before_pipeline(&cfg, &session, &run, &mut request);
 
         let values = hook_applied_values(&session_dir);
         assert_eq!(
@@ -1085,14 +1085,13 @@ mod tests {
         );
     }
 
-    /// issue #24: a hook that re-emits the request unchanged (the
-    /// byte-stable steady state of the goal-arm and simple-english
-    /// transforms) must produce no `hook_applied` marker. The
-    /// `hook.model.before` decision marker is still logged: the
-    /// decision factually happened, only the cache-break marker is
-    /// suppressed.
+    /// issue #24 (pipeline form): a chain whose final request is
+    /// semantically equal to the original (a fragment join that
+    /// reconstructs the same `instructions`) breaks no cache, so no
+    /// `hook_applied` marker is written. The `hook.model.before`
+    /// resolution marker is still logged.
     #[test]
-    fn noop_transform_writes_no_applied_marker() {
+    fn noop_chain_writes_no_applied_marker() {
         let root = tempfile::tempdir().unwrap();
         let session_dir = root.path().join("sessions").join("test");
         std::fs::create_dir_all(&session_dir).unwrap();
@@ -1101,55 +1100,51 @@ mod tests {
             path: session_dir.clone(),
         };
 
-        // The folded transform is byte-identical to the original
-        // request (steady state).
+        // The original request already carries the joined fragment.
         let original = serde_json::json!({
             "model": "m1",
             "instructions": "base\n\ngoal-fragment",
             "input": []
         });
-        let payload = serde_json::json!({
-            "request": {
-                "model": "m1",
-                "instructions": "base",
-                "input": [],
-                "prompt_fragments": [["goal", "goal-fragment"]]
-            }
+        // Step outputs re-expose the fragment instead of the joined
+        // text; the kernel joins it back at the end of the pipeline.
+        let step_out = serde_json::json!({
+            "model": "m1",
+            "instructions": "base",
+            "input": [],
+            "prompt_fragments": [["goal", "goal-fragment"]]
         });
-        let results = vec![
-            transform_result("harness-hook-goal-arm"),
-            transform_result("harness-simple-english"),
-        ];
+        let run = model_before_run(
+            &[(StepStatus::Ok, "harness-hook-goal-arm"), (StepStatus::Ok, "harness-simple-english")],
+            step_out.clone(),
+            vec![step_out],
+        );
 
         let mut request = RequestFile {
             json: original.clone(),
         };
-        apply_model_before_transform(&cfg, &session, &payload, &results, &mut request);
+        apply_model_before_pipeline(&cfg, &session, &run, &mut request);
 
         let values = hook_applied_values(&session_dir);
         assert!(
             values.is_empty(),
-            "no-op transform must not write hook_applied markers, got {values:?}"
+            "no-op chain must not write hook_applied markers, got {values:?}"
         );
         // The applied request is back to the original.
         assert_eq!(request.json, original);
-        // The `hook.model.before` decision marker is still logged.
+        // The `hook.model.before` resolution marker is still logged.
         let data = std::fs::read_to_string(session_dir.join("events.jsonl")).unwrap();
-        let decisions = data
+        let resolutions = data
             .lines()
             .filter(|l| l.contains("\"id\":\"hook.model.before\""))
             .count();
-        assert_eq!(
-            decisions, 1,
-            "the decision marker stays logged on a no-op transform"
-        );
+        assert_eq!(resolutions, 1, "the resolution marker stays logged on a no-op chain");
     }
 
-    /// issue #24: key order is irrelevant to the no-op check. A
-    /// transform whose payload is semantically identical to the
-    /// original but lists the keys in another order still compares
-    /// equal (the `Map` is a `BTreeMap`, matching the key-sorted
-    /// wire form) and writes no marker.
+    /// issue #24 (pipeline form): key order is irrelevant to the
+    /// no-op check. A chain whose final request is semantically equal
+    /// to the original but lists the keys in another order still
+    /// compares equal and writes no marker.
     #[test]
     fn reordered_keys_compare_equal_and_write_no_marker() {
         let root = tempfile::tempdir().unwrap();
@@ -1160,17 +1155,19 @@ mod tests {
             path: session_dir.clone(),
         };
 
-        let original = serde_json::json!({ "model": "m1", "instructions": "base" });
+        let original = serde_json::json!({ "model": "m1", "instructions": "base", "input": [] });
         // Same content, keys in another order.
-        let payload = serde_json::json!({
-            "request": { "instructions": "base", "model": "m1" }
-        });
-        let results = vec![transform_result("harness-hook-goal-arm")];
+        let reordered = serde_json::json!({ "instructions": "base", "model": "m1", "input": [] });
+        let run = model_before_run(
+            &[(StepStatus::Ok, "harness-hook-goal-arm")],
+            reordered.clone(),
+            vec![reordered],
+        );
 
         let mut request = RequestFile {
             json: original.clone(),
         };
-        apply_model_before_transform(&cfg, &session, &payload, &results, &mut request);
+        apply_model_before_pipeline(&cfg, &session, &run, &mut request);
 
         let values = hook_applied_values(&session_dir);
         assert!(
@@ -1179,10 +1176,11 @@ mod tests {
         );
     }
 
-    /// issue #24: a hook that changes one field of the request still
-    /// writes one `hook_applied` marker per transforming hook.
+    /// issue #24 (pipeline form): a step that changes one field of
+    /// the request writes one `hook_applied` marker per step that
+    /// ran ok.
     #[test]
-    fn changed_field_writes_one_marker_per_transform() {
+    fn changed_field_writes_one_marker_per_ok_step() {
         let root = tempfile::tempdir().unwrap();
         let session_dir = root.path().join("sessions").join("test");
         std::fs::create_dir_all(&session_dir).unwrap();
@@ -1196,25 +1194,27 @@ mod tests {
             "instructions": "base",
             "input": []
         });
-        let payload = serde_json::json!({
-            "request": {
-                "model": "m1",
-                "instructions": "base, changed",
-                "input": []
-            }
+        let final_state = serde_json::json!({
+            "model": "m1",
+            "instructions": "base, changed",
+            "input": []
         });
-        let results = vec![transform_result("harness-hook-goal-arm")];
+        let run = model_before_run(
+            &[(StepStatus::Ok, "harness-hook-goal-arm")],
+            final_state.clone(),
+            vec![final_state],
+        );
 
         let mut request = RequestFile {
-            json: original.clone(),
+            json: original,
         };
-        apply_model_before_transform(&cfg, &session, &payload, &results, &mut request);
+        apply_model_before_pipeline(&cfg, &session, &run, &mut request);
 
         let values = hook_applied_values(&session_dir);
         assert_eq!(
             values,
             vec![Value::String("harness-hook-goal-arm".to_string())],
-            "one marker per transforming hook"
+            "one marker per step that ran ok"
         );
     }
 }

@@ -171,7 +171,7 @@
                 # ];
 
                 # Hook binaries (goal-continuation, lean-verify, …).
-                # Each bare command in config.hooks.on is verified at
+                # Each bare command under config.hooks.defs is verified at
                 # build time against the bundled bin/ + hooks/. Commands
                 # covered by a producer's meta.rushi.bin are exempt from
                 # the build-time guard (issue #13).

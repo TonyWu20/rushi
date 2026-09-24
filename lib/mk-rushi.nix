@@ -295,13 +295,13 @@ let
     && uiFallbackSources != [ ];
 
   # Bare hook commands the build-time guard still checks: every bare
-  # `config.hooks.on[].command` that is not statically known from a
-  # bundled hook package's `meta.rushi.bin` (issue #13).
-  hooksOn =
-    mergedConfig.hooks.on;
+  # command of a `[hooks.defs.<name>]` entry that is not statically
+  # known from a bundled hook package's `meta.rushi.bin` (issue #13).
+  hookDefs =
+    mergedConfig.hooks.defs or { };
   hookCommands =
-    builtins.map (e: if builtins.isAttrs e then e.command or "" else "")
-      hooksOn;
+    builtins.map (d: if builtins.isAttrs d then d.command or "" else "")
+      (builtins.attrValues hookDefs);
   bareHookCommands =
     builtins.filter (c: c != "" && builtins.match "^[^/]+$" c != null)
       hookCommands;
@@ -699,7 +699,7 @@ let
       done
       if [ -n "$missing_hooks" ]; then
         echo "mkRushi: hook command(s) not found in $out/bin/ or $out/hooks/:$missing_hooks" >&2
-        echo "  Bundle them via rushi.external_hooks (meta.rushi.bin recommended), or set a full path in config.hooks.on[].command." >&2
+        echo "  Bundle them via rushi.external_hooks (meta.rushi.bin recommended), or set a full path in [hooks.defs.<name>].command." >&2
         exit 1
       fi
 

@@ -195,7 +195,7 @@ rushi = {
   # dir first, then the package hooks/ dir, so generated configs can
   # use bare names without relying on PATH.
   # Build-time drift guard: every bare command in
-  # rushi.config.hooks.on[].command that is not covered by a
+  # rushi.config.hooks.defs.*.command that is not covered by a
   # meta.rushi.bin declaration is verified to resolve to a file in
   # $out/bin/ or $out/hooks/; a typo or an unbundled hook fails the
   # build with the missing binary named. Commands covered by
@@ -362,8 +362,8 @@ The mapping is direct:
 | `config.model.api` | `[model] api = "..."` |
 | `config.model."deepseek".base_url` | `[model.deepseek] base_url = "..."` |
 | `config.limits.read_limit` | `[limits] read_limit = 2000` |
-| `config.hooks.on[0].window` | `[[hooks.on]] window = "..."` |
-| `config.hooks.on[0].command` | `[[hooks.on]] command = "..."` |
+| `config.hooks.defs."name".command` | `[hooks.defs.name] command = "..."` |
+| `config.hooks.pipeline."tool.before".steps` | `[hooks.pipeline."tool.before"] steps = [ "..." ]` |
 | `config.loop.command` | `[loop] command = "..."` |
 | `config.system_prompt.text` | `[system_prompt] text = "..."` |
 | `config.tui.tool_display.preset` | `[tui.tool_display] preset = "..."` |

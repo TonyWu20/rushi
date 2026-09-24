@@ -1,15 +1,15 @@
 //! Compact with compact.before / compact.after hooks, the
 //! post-compact sanity check, and the handoff document writers.
 
-use rushi_common::hooks::{self, Window};
+use rushi_common::hooks::Window;
 use rushi_common::stage::{
     CompactOutcome, CompactOpts, CompactReason, CompactStatus, SessionDir, StageRunner,
 };
 
 use crate::config::HarnessConfig;
 use crate::stage_runner::SubprocessRunner;
-use crate::step::hook::{hook_env, log_hook_window};
-use crate::step::logio::append_event;
+use crate::step::hook::{fire_observation, log_pipeline, run_window};
+use crate::step::logio::{append_event, publish_ext_status};
 
 /// Compact with compact.before / compact.after hooks.
 pub fn try_compact_with_hooks(
@@ -26,34 +26,50 @@ pub fn try_compact_with_hooks(
         "reason": reason.as_str(),
         "force": force,
     });
-    let results = hooks::fire_hooks(
-        &cfg.hooks,
-        Window::CompactBefore,
-        &payload,
-        &hook_env(cfg, session, "step", Window::CompactBefore),
-        cfg.hooks_timeout_ms,
-    );
-    let (decision_opt, payload_val) =
-        hooks::fold_decision(&results, Window::CompactBefore);
-    let decision = decision_opt
-        .unwrap_or_else(|| hooks::window_default(Window::CompactBefore).to_string());
-    log_hook_window(cfg, session, "compact.before", &decision, &results);
+    let run = run_window(cfg, session, Window::CompactBefore, &payload, "step");
+    let state = &run.state;
 
-    if decision == "cancel" {
-        eprintln!("rushi: compact.before hook cancelled the compaction");
+    // Resolution (docs/loop-lifecycle-hooks.md 12.5 effect table).
+    // `cancel` or an `abort` (exit 2) vetoes the default and skips the
+    // compact. A `replace` state object supplies its own summary and
+    // boundary. A failed chain falls back to the default (run the
+    // compact binary, P4).
+    let outcome = if run.failed {
+        "proceed"
+    } else if run.aborted
+        || state
+            .get("cancel")
+            .and_then(|c| c.as_bool())
+            .unwrap_or(false)
+    {
+        "cancel"
+    } else if state.get("replace").map(|v| v.is_object()).unwrap_or(false) {
+        "replace"
+    } else {
+        "proceed"
+    };
+    log_pipeline(cfg, session, Window::CompactBefore, &run, Some(outcome), Some(&payload));
+
+    if outcome == "cancel" {
+        eprintln!("rushi: compact.before pipeline cancelled the compaction");
         return CompactStatus::noop();
     }
 
-    if decision == "replace" {
+    if outcome == "replace" {
         // The hook supplies its own summary and boundary.
-        let summary = payload_val
+        let replace = state.get("replace").cloned().unwrap_or(serde_json::Value::Null);
+        let summary = replace
             .get("summary")
             .and_then(|s| s.as_str())
             .unwrap_or("")
             .to_string();
-        let first_kept_seq = payload_val
-            .get("first_kept_seq")
+        // The settled field name is `boundary` (12.5); the legacy
+        // `first_kept_seq` name is read as a fallback for hooks still
+        // shipping the old payload shape.
+        let first_kept_seq = replace
+            .get("boundary")
             .and_then(|v| v.as_u64())
+            .or_else(|| replace.get("first_kept_seq").and_then(|v| v.as_u64()))
             .unwrap_or(1);
         // Compute version metadata for the DAG link.
         let log_vals: Vec<serde_json::Value> = std::fs::read_to_string(
@@ -82,7 +98,7 @@ pub fn try_compact_with_hooks(
             parent_version,
             diverge_seq,
         );
-        eprintln!("rushi: compact.before hook replaced the compaction");
+        eprintln!("rushi: compact.before pipeline replaced the compaction");
         return CompactStatus {
             outcome: CompactOutcome::Compacted,
             first_kept_seq: Some(first_kept_seq),
@@ -120,13 +136,7 @@ pub fn try_compact_with_hooks(
                 "reason": reason.as_str(),
                 "status": status_str,
             });
-            let _ = hooks::fire_hooks(
-                &cfg.hooks,
-                Window::CompactAfter,
-                &payload2,
-                &hook_env(cfg, session, "step", Window::CompactAfter),
-                cfg.hooks_timeout_ms,
-            );
+            fire_observation(cfg, session, Window::CompactAfter, &payload2);
             status
         }
         Err(e) => {
@@ -135,14 +145,13 @@ pub fn try_compact_with_hooks(
             // (the binary was killed or hung, and never reached its own
             // failure path). Publish the failure so the session log shows
             // why the context stayed above the trigger.
-            let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
             let detail = e.to_string();
             let event = serde_json::json!({
                 "v": 1,
                 "type": "ext_status",
-                "ts": ts,
+                "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                 "id": "compact.failed",
-                "value": detail,
+                "value": detail.clone(),
                 "reason": reason.as_str(),
                 "detail": detail,
             });
@@ -167,15 +176,14 @@ pub fn post_compact_sanity(
     };
     let trigger = cfg.trigger_level();
     if trigger > 0 && tokens_after > trigger {
-        let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let event = serde_json::json!({
-            "v": 1,
-            "type": "ext_status",
-            "ts": ts,
-            "id": "compact_sanity",
-            "value": format!("post-compact estimate {tokens_after} still exceeds trigger {trigger}"),
-        });
-        append_event(cfg, &session.path, &event);
+        publish_ext_status(
+            cfg,
+            &session.path,
+            "compact_sanity",
+            &serde_json::json!(format!(
+                "post-compact estimate {tokens_after} still exceeds trigger {trigger}"
+            )),
+        );
     }
 }
 
@@ -195,7 +203,7 @@ fn write_handoff(
     if let Err(e) = std::fs::write(&vpath, summary) {
         eprintln!("rushi: cannot write handoff/v{}.md: {e}", version);
     }
-    // Keep handoff.md as the latest version for backward compat.
+    // Keep handoff.md as the latest version.
     if let Err(e) = std::fs::write(session.path.join("handoff.md"), summary) {
         eprintln!("rushi: cannot write handoff.md: {e}");
     }

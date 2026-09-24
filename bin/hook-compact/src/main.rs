@@ -1,21 +1,27 @@
 //! `harness-hook-compact` — the in-session shadow-compact hook.
 //!
-//! Registered on the `overflow.resolve` and `exhausted.handle` windows.
-//! It reads the window JSON on stdin, runs the in-session shadow
-//! compact by invoking the `compact` binary, and returns a decision
-//! envelope on stdout.
+//! Registered on the `overflow.resolve` and `exhausted.handle`
+//! windows via `[hooks.defs]` + `[hooks.pipeline."<window>"]`
+//! (docs/loop-lifecycle-hooks.md section 12, issue #38).
 //!
-//! Decision contract (docs/loop-lifecycle-hooks.md §4.3):
-//! - exit 0 + `{}` → no decision, apply window default
-//! - exit 0 + `{"decision":"stay_compact",...}` → in-session shadow compact
-//! - exit 2 → blocking default (stop the strategy cycle)
-//! - exit ≠ 0, ≠ 2 → non-blocking failure, loop applies default
+//! Pipeline-ABI contract (12.3, 12.5):
+//! - stdin carries the accumulated window state JSON.
+//! - exit 0 — `ok`. The step's stdout JSON becomes the accumulated
+//!   state. This hook is an identity transform: on a successful
+//!   compaction it passes the input state through and adds no state
+//!   fields (the window's default, `stay_compact`, applies).
+//! - exit 3 — `fail`: the compact binary failed or could not be run.
+//!   The kernel stops the chain, logs `hook.<window>.error`, and the
+//!   window falls back to its default (the loop never wedges, P4).
+//! - exit 2 — `abort`: not used by this hook.
+//! - any other exit code is treated as `fail` with an "unknown exit
+//!   N" detail by the kernel.
 
 use std::io::{self, Read};
 use std::process::{Command, Stdio};
 
 fn main() {
-    // --help / self-documentation (docs/loop-lifecycle-hooks.md §4.5)
+    // --help / self-documentation (docs/loop-lifecycle-hooks.md 4.5, 12.3)
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
         print_help();
@@ -35,7 +41,7 @@ fn main() {
             handle_compact_window(&stdin_payload);
         }
         _ => {
-            // Not our window; no-op.
+            // Not our window; no-op step (empty state contribution).
             println!("{{}}");
         }
     }
@@ -102,8 +108,10 @@ fn handle_compact_window(payload: &serde_json::Value) {
     {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("harness-hook-compact: failed to spawn compact: {e}");
-            std::process::exit(1);
+            // Spawn failure: a step-level failure. The kernel logs
+            // `hook.<window>.error` and the window falls back to its
+            // default (P4: the loop never wedges).
+            fail(format!("failed to spawn compact: {e}"));
         }
     };
 
@@ -114,42 +122,49 @@ fn handle_compact_window(payload: &serde_json::Value) {
 
     match status_str {
         "compacted" | "noop" => {
-            // The compact ran successfully. Return the stay_compact
-            // decision so the loop knows the strategy completed.
-            let resp = serde_json::json!({
-                "decision": "stay_compact",
-                "payload": {
-                    "compact_status": status_str,
-                    "status": status,
-                },
-            });
-            println!("{}", resp);
+            // The compaction completed. No state-field effect is
+            // needed: the window default (`stay_compact`) continues
+            // the strategy cycle. Pass the accumulated state through
+            // unchanged.
+            println!("{}", payload);
             std::process::exit(0);
         }
         _ => {
-            // The compact failed. Log to stderr and signal blocking
-            // default (stop the strategy cycle).
-            eprintln!(
-                "harness-hook-compact: compact failed (status={status_str}): {}",
+            // The compact failed: a step-level failure, not a veto.
+            // The kernel stops the chain, logs the error, and the
+            // window resolves to its default (the kernel's own
+            // shadow-compact strategy continues; P4).
+            fail(format!(
+                "compact failed (status={status_str}): {}",
                 String::from_utf8_lossy(&output.stderr)
-            );
-            std::process::exit(2);
+            ));
         }
     }
+}
+
+/// Emit the failure detail on stdout (the kernel reads `reason` from
+/// stdout on a `fail` exit) and exit 3.
+fn fail(reason: String) -> ! {
+    eprintln!("harness-hook-compact: {reason}");
+    println!("{}", serde_json::json!({ "reason": reason }));
+    std::process::exit(3);
 }
 
 fn print_help() {
     println!("harness-hook-compact — in-session shadow-compact hook");
     println!();
     println!("Windows: overflow.resolve, exhausted.handle");
-    println!("Input (stdin): window JSON object with keys:");
+    println!("Input (stdin): the accumulated window state JSON object:");
     println!("  window: string");
     println!("  session: string (also in $SESSION)");
     println!("  force: bool (optional)");
-    println!("Output (stdout): one JSON decision object");
-    println!("  {{\"decision\":\"stay_compact\",\"payload\":{{\"compact_status\":\"...\"}}}}");
-    println!("Exit codes:");
-    println!("  0  success or no-op");
-    println!("  2  blocking: compact failed, stop the strategy cycle");
-    println!("  other  non-blocking failure (loop applies default)");
+    println!("Output (stdout): the step's state JSON object;");
+    println!("  on success this hook passes the input state through unchanged.");
+    println!("Exit codes (docs/loop-lifecycle-hooks.md 12.3):");
+    println!("  0  ok — compaction succeeded, no state-field effect");
+    println!("  3  fail — compact binary failed or could not run; the");
+    println!("      kernel logs the error and the window falls back to its");
+    println!("      default (stay_compact)");
+    println!("  (exit 2 abort is unused by this hook; any other exit code");
+    println!("   is treated as fail with an \"unknown exit N\" detail)");
 }

@@ -1,8 +1,8 @@
 # lib/to-toml.nix — minimal TOML document generator for the rushi config.
 #
 # Handles the specific config structure: flat sections, nested
-# per-model tables, and array-of-tables ([[hooks.on]]). Not a general
-# TOML serializer.
+# table-of-tables ([hooks.defs.<name>], [hooks.pipeline."<window>"]),
+# and per-model tables. Not a general TOML serializer.
 #
 # Usage:
 #   toTomlDocument = import ./lib/to-toml.nix;

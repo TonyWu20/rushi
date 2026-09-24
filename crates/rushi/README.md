@@ -32,8 +32,8 @@ Its only external dependencies are
 | `logline` | The `LogLine` type. The only value that may write to the session log. FT-005: one `write(2)` of the whole line under an exclusive `flock`. |
 | `compact_math` | Pure trigger math and cut walk for auto-compaction. `estimate_from_events`, `trigger_fired`, `find_cut`, `post_compact_sanity`. |
 | `stage` | The `StageRunner` trait and all payload types (`Claim`, `ModelOutput`, `ParsedEvents`, `RouteEnv`, `CompactOpts`, `CompactStatus`, `StageError`). |
-| `hooks` | Lifecycle-window dispatcher. The `Window` enum, `fire_hooks`, `fold_decision`, `hook_env`. |
-| `hook_io` | Typed payload builders for hook decisions. `ToolAfterTransform` and friends. No serde derive needed. |
+| `hooks` | Lifecycle-window pipeline runner (section 12 model, issue #38). The `Window` enum, `run_pipeline`, `PipelineRun`, `StepStatus`, `hook_env`. |
+| `hook_io` | Typed state builders for hook steps. `ToolAfterTransform` and friends. No serde derive needed. |
 | `rewind` | Active-path computation over rewind events. `RewindRef`, `active_ranges`, `seq_in_ranges`. |
 | `model_settings` | Shared model-section resolution. `resolve_model_settings`, `active_model_from_config`. |
 | `config_check` | Legacy key detection. `legacy_key_report`. |

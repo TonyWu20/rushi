@@ -74,7 +74,11 @@ in
                          plus per-model nested tables (e.g. model."deepseek")
           [paths]         sessions_root, native_tool_paths, extension_tool_paths
           [limits]        read/write/bash/compact limits
-          [hooks]         timeout_ms, on = [ { window, command, args } ]
+          [hooks]         timeout_ms, defs.<name> = { command, args,
+                         timeout_ms },
+                         pipeline.<window>.steps = [ def names ]
+                         (pipeline model, docs/loop-lifecycle-hooks.md
+                         section 12, issue #38)
           [loop]          command, args, arg_style
           [system_prompt] text (empty = kernel default)
           [tui]           binary, color, color_scheme, ext_dirs,
@@ -217,8 +221,10 @@ in
         strings). Each source must produce an executable or a `bin/`
         directory. Copied into the package's `hooks/` dir.
 
-        Hook binaries are referenced by bare name in
-        `config.hooks.on[].command`. A source declaring
+        Hook binaries are referenced by bare name in a
+        `config.hooks.defs.<name>.command` entry, which a
+        `[hooks.pipeline."<window>"]` steps list then wires into a
+        window. A source declaring
         `meta.rushi = { bin = "…" }` (issue #13) is checked at eval
         time: bare commands matching a declared bin are trusted, and
         the build verifies the binary actually landed in `hooks/`.

@@ -67,14 +67,16 @@ the separate `user` binary, which plain installs do not ship
 ### Loop lifecycle
 
 - **Normal turn:** claim → assemble → model → parse → route → log → repeat.
-- **Idle claim:** no pending user messages; the loop stops (unless a
-  `run.idle` hook returns `continue`).
+- **Idle claim:** no pending user messages. The loop stops unless
+  the `run.idle` pipeline keeps it alive (it appended a follow-up
+  message, or it vetoed the stop).
 - **Overflow:** when the assembled context exceeds the input budget, the
   `overflow.resolve` hook fires. Default: in-session shadow compact.
 - **Context exhausted:** when even the compacted context exceeds budget,
   the `exhausted.handle` hook fires. Default: one more shadow compact.
-- **Approval:** a `tool.before` hook can return `approve`, which inserts an
-  `approval_request` event and waits for a human `approval` event.
+- **Approval:** a `tool.before` step can emit the `approval` state
+  field, which inserts an `approval_request` event and waits for a
+  human `approval` event.
 
 ---
 
@@ -202,9 +204,11 @@ trailing newline if the source file lacks one.
 # --- [hooks] ---
 # timeout_ms = 30000
 
-# [[hooks.on]]
-# window  = "exhausted.handle"
-# command = "harness-hook-compact"
+# [hooks.defs.my-hook]
+# command = "my-overflow-hook"
+
+# [hooks.pipeline."overflow.resolve"]
+# steps = ["my-hook"]
 
 # --- [loop] ---
 # command = "rushi"
@@ -301,18 +305,25 @@ fixed lifecycle window. The ABI is bytes over pipes.
 [hooks]
 timeout_ms = 30000
 
-[[hooks.on]]
-window  = "overflow.resolve"
+[hooks.defs.overflow-hook]
 command = "my-overflow-hook"
-args    = []
 
-[[hooks.on]]
-window  = "tool.before"
+[hooks.defs.approval-hook]
 command = "my-approval-hook"
+
+[hooks.pipeline."overflow.resolve"]
+steps = ["overflow-hook"]
+
+[hooks.pipeline."tool.before"]
+steps = ["approval-hook"]
 ```
 
-- The `on` list is ordered. Hooks run in order.
-- One hook binds to exactly one window.
+- Each `[hooks.defs.<name>]` names one hook (`command`, optional
+  `args`, optional per-def `timeout_ms`). A def referenced by no
+  pipeline is a load-time warning.
+- Each `[hooks.pipeline."<window>"]` carries an ordered `steps`
+  list of def names. List order is the composition order: step N+1
+  receives step N's output state.
 - No matcher DSL; filtering is the hook's own job from the JSON on stdin.
 - The `command` field resolves against the package layout: the sibling
   `bin/` dir (kernel-shipped hooks), then the package `hooks/` dir
@@ -323,54 +334,64 @@ command = "my-approval-hook"
 
 ### 6.2 Invocation
 
-- **stdin:** one JSON object with the window's event fields plus a
-  `window` field and `session` name.
-- **env:** `SESSION`, `SESSIONS_ROOT`, `CONFIG`, `HARNESS_PHASE`, window name.
-- The harness writes one JSON object to stdin, reads one JSON object from
-  stdout, then checks the exit code.
+- **stdin:** the accumulated state. Step 1 receives the window's
+  event fields plus a `window` field and the `session` name. Each
+  later step receives the previous step's stdout state.
+- **env:** `SESSION`, `SESSIONS_ROOT`, `CONFIG`, `HARNESS_PHASE`,
+  `HARNESS_WINDOW`, `LOG_BIN`.
+- The harness writes one JSON object to stdin, reads one JSON object
+  from stdout, then reads the exit code as the step's status.
 
-### 6.3 Decision Contract
+### 6.3 Status Contract
 
-| Exit | stdout | Meaning |
+The exit code is the type tag. The stdout JSON is the data channel,
+and it is honored on every status.
+
+| Exit | Status | Meaning |
 |------|--------|---------|
-| `0` | empty or `{}` | No decision. Window default applies. |
-| `0` | `{"decision":"<name>","payload":{...}}` | Apply the named decision. |
-| `2` | (ignored) | Blocking default (see per-window table). |
-| other non-zero | (ignored) | Non-blocking failure. Log `ext_status` marker. Window default applies. |
-| timeout | (killed) | Same as non-blocking failure. |
+| `0` | `ok` | Step completed. Its stdout state replaces the accumulated state. |
+| `0` | `noop` | stdout is empty or `{}`. The accumulated state is unchanged. |
+| `2` | `abort` | Vetoes the window's default action. The chain stops. Sticky. |
+| `3` | `fail` | Step-level failure. The chain stops. The window default applies. |
+| other | `fail` | Treated as a fail, with an "unknown exit N" detail. |
+| timeout | `fail` | The watchdog kills the step. The detail names the timeout. No hang. |
 
-### 6.4 Windows and Decision Vocab
+### 6.4 Windows and Effect Fields
 
-| Window | Scope | Decisions | Default |
+| Window | Scope | Effect fields (state) | Default |
 |--------|-------|-----------|---------|
 | `session.start` | per `rushi run` | *(observation only)* | — |
 | `session.end` | per `rushi run` | *(observation only)* | — |
 | `step.start` | per step | *(observation only)* | — |
 | `step.end` | per step | *(observation only)* | — |
-| `model.before` | per model call | `transform` | proceed unchanged |
+| `model.before` | per model call | the whole request object is the state | proceed unchanged |
 | `model.after` | per model call | *(observation only)* | — |
-| `compact.before` | before compact | `proceed`, `cancel`, `replace` | proceed |
+| `compact.before` | before compact | `cancel` (bool), `replace = {summary, boundary}` | proceed |
 | `compact.after` | after compact | *(observation only)* | — |
-| `overflow.resolve` | on overflow | `stay_compact`, `stop` | `stay_compact` |
-| `exhausted.handle` | on context exhaustion | `stay_compact`, `stop` | `stay_compact` |
-| `tool.before` | per tool batch | `proceed`, `block`, `approve` | `proceed` |
-| `tool.after` | per tool batch | *(observation only)* | — |
-| `run.idle` | on idle claim | `stop`, `continue` | `stop` |
+| `overflow.resolve` | on overflow | `stop = {reason}` | `stay_compact` |
+| `exhausted.handle` | on context exhaustion | `stop = {reason}` | `stay_compact` |
+| `tool.before` | per tool batch | `blocked_calls = [{id, reason}]`, `approval = {call_id, prompt}` | proceed |
+| `tool.after` | per tool batch | `results` map rewrites results by call id | proceed |
+| `run.idle` | on idle claim | the step appends its own follow-up `user_message` | stop |
 
-`run.idle` `continue` payload: `{"message": "..."}` appends a follow
-`user_message` before continuing. Adding `"log_message": false` keeps
-the loop alive but skips that `user_message` append — the hook routes
-its text to the model through its own `model.before` transform instead.
-The flag is optional and defaults to `true` (today's behavior).
+`run.idle`: the step appends its own follow-up `user_message` to the
+session log via the `LOG_BIN` env var. The loop then drains pending
+messages as usual. An `abort` (exit 2) vetoes the stop and keeps
+the loop alive without appending a message (issue #4).
 
 ### 6.5 Writing a Hook
 
-1. Write a binary/script that reads one JSON object from stdin.
-2. Write one JSON object to stdout (or nothing for no-decision).
-3. Exit `0` (normal), `2` (blocking), or `1` (error).
-4. Register it in `config.toml` under `[[hooks.on]]`.
+1. Write a binary/script that reads the accumulated state JSON
+   object from stdin.
+2. Write the step's state JSON object to stdout (or nothing for a
+   no-op step).
+3. Exit `0` (ok), `2` (abort: veto the window default), or `3`
+   (fail). Any other exit is treated as a fail with an
+   "unknown exit N" detail.
+4. Register it: a `[hooks.defs.<name>]` entry plus a
+   `[hooks.pipeline."<window>"]` steps list in `config.toml`.
 5. Support `--help` to self-document the window, input shape, and
-   decision vocab.
+   the step's status set.
 
 The built-in `bin/hook-compact` is a reference implementation.
 
@@ -477,9 +498,11 @@ Add `"my_tool"` to `[tools] enabled` in `rushi.toml`. Done.
 ```bash
 # 1. Write your hook binary/script, ensure --help works.
 # 2. Register in config.toml:
-[[hooks.on]]
-window  = "tool.before"
-command = "my-guard-hook"
+# [hooks.defs.my-guard]
+# command = "my-guard-hook"
+
+# [hooks.pipeline."tool.before"]
+# steps = ["my-guard"]
 ```
 
 ### Add a prompt fragment

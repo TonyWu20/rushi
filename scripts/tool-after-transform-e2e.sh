@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# The tool.after transform e2e (docs/image-read-kiss.md section 4.5).
+# The tool.after transform e2e (docs/image-read-kiss.md section 4.5,
+# pipeline ABI per docs/loop-lifecycle-hooks.md 12.5, issue #38).
 # Drives `rushi step` with a scriptable stub model and a jq-based
-# tool.after hook. Asserts the transform decision splices the
-# replaced result into the log, that unmentioned results pass
-# through, and the byte-identical no-hooks default.
+# tool.after pipeline step. The step receives the accumulated state
+# (the routed calls and results) on stdin and may emit a `results`
+# map rewriting results by call id. Asserts the splice, the
+# resolution and chain markers, the fail path, and the
+# byte-identical no-hooks default.
 
 set -uo pipefail
 
@@ -21,8 +24,7 @@ ko() {
   echo "FAIL: $1"
 }
 
-# ── The work config ───────────────────────────────────────────────
-
+# $1 = non-empty adds the tool.after pipeline to the config.
 work_config() {
   cat > "$WORK/config.toml" <<EOF
 [model]
@@ -56,10 +58,11 @@ EOF
 [hooks]
 timeout_ms = 30000
 
-[[hooks.on]]
-window  = "tool.after"
+[hooks.defs.hook-tool-after]
 command = "$WORK/hook-tool-after"
-args    = []
+
+[hooks.pipeline."tool.after"]
+steps = ["hook-tool-after"]
 EOF
   fi
 }
@@ -93,38 +96,60 @@ EOF
   chmod +x "$WORK/stub-model"
 }
 
-# ── The tool.after hook ───────────────────────────────────────────
-# Replaces the result for call-1 with an image result. Unmentioned
-# calls pass through untouched.
+# ── The tool.after pipeline step ──────────────────────────────────
+# The pipeline ABI (12.3): stdin is the accumulated state (the
+# routed calls + results), stdout is the step's state. A `results`
+# map rewrites results by call id; unmentioned calls pass through.
 make_hook() {
   cat > "$WORK/hook-tool-after" <<'EOF'
 #!/usr/bin/env bash
 set -u
 payload=$(cat)
 jq -cn '{
-  decision: "transform",
-  payload: {
-    results: {
-      "call-1": {
-        "v": 1,
-        "type": "tool_result",
-        "id": "call-1",
-        "ts": "2026-01-01T00:00:00Z",
-        "value": {
-          "text": "Read image file [image/png] (4242 bytes)",
-          "details": {
-            "type": "image",
-            "mime_type": "image/png",
-            "data": "AAAA",
-            "path": "/nonexistent"
-          }
-        },
-        "is_error": false
-      }
-    },
-    reason: "e2e: replaced read result with image"
-  }
+  results: {
+    "call-1": {
+      "v": 1,
+      "type": "tool_result",
+      "id": "call-1",
+      "ts": "2026-01-01T00:00:00Z",
+      "value": {
+        "text": "Read image file [image/png] (4242 bytes)",
+        "details": {
+          "type": "image",
+          "mime_type": "image/png",
+          "data": "AAAA",
+          "path": "/nonexistent"
+        }
+      },
+      "is_error": false
+    }
+  },
+  reason: "e2e: replaced read result with image"
 }'
+EOF
+  chmod +x "$WORK/hook-tool-after"
+}
+
+# The no-op step: empty state contribution, the routed results stand.
+make_hook_noop() {
+  cat > "$WORK/hook-tool-after" <<'EOF'
+#!/usr/bin/env bash
+set -u
+cat > /dev/null
+echo '{}'
+EOF
+  chmod +x "$WORK/hook-tool-after"
+}
+
+# The failing step (P4): exit 3 — the routed results stand
+# unchanged and the error marker is logged.
+make_hook_fail() {
+  cat > "$WORK/hook-tool-after" <<'EOF'
+#!/usr/bin/env bash
+set -u
+cat > /dev/null
+echo '{"reason":"rewriter exploded"}'
+exit 3
 EOF
   chmod +x "$WORK/hook-tool-after"
 }
@@ -136,8 +161,9 @@ run_step() {
     export MODEL_BIN="$WORK/stub-model"
     export STUB_REQLOG="$WORK/reqlog"
     : >"$STUB_REQLOG"
-    # One step: model call, tool routing, then the tool.after hook.
-    # The step lands at awaiting_model. The next model call is owed.
+    # One step: model call, tool routing, then the tool.after
+    # pipeline. The step lands at awaiting_model. The next model
+    # call is owed.
     "$BIN_DIR/rushi" step session
   ) >/dev/null 2>&1
   true
@@ -172,8 +198,8 @@ NEW_WORK() {
   echo "==== scenario: $1"
 }
 
-# ── Scenario 1: the transform decision ────────────────────────────
-# The hook replaces the call-1 result. The log carries the replaced
+# ── Scenario 1: the rewrite ────────────────────────────────────────
+# The step replaces the call-1 result. The log carries the replaced
 # result, not the original error.
 scenario_transform() {
   NEW_WORK transform
@@ -195,14 +221,17 @@ scenario_transform() {
   assert_eq "$(jq -r '.is_error' <<<"$replaced")" \
     "false" \
     "the replaced result is not an error"
-  # The decision marker is logged.
+  # The resolution marker is logged.
   assert_eq "$(count_markers "hook.tool.after")" 1 "one hook.tool.after marker"
   assert_eq "$(jq -r "select(.type == \"ext_status\" and .id == \"hook.tool.after\") | .value" "$SLOG")" \
-    "transform" "the decision marker carries the decision word"
+    "transform" "the resolution marker carries the outcome"
+  assert_eq "$(jq -c 'select(.id == "hook.tool.after.chain") | .value.steps' "$SLOG" 2>/dev/null)" \
+    '["ok"]' "the chain marker records the step outcome"
 }
 
 # ── Scenario 2: the no-hooks default ──────────────────────────────
-# No hook registered: the tool result goes through untouched.
+# No pipeline entry: zero steps, the tool result goes through
+# untouched, no markers (P1).
 scenario_default() {
   NEW_WORK default
   work_config ""
@@ -215,37 +244,57 @@ scenario_default() {
   assert_eq "$(jq -r '.is_error' <<<"$orig")" \
     "true" \
     "the original error result is in the log"
-  assert_eq "$(count_markers "hook.tool.after")" 0 "no decision marker"
+  assert_eq "$(count_markers "hook.tool.after")" 0 "no resolution marker"
+  assert_eq "$(count_markers "hook.tool.after.chain")" 0 "no chain marker"
 }
 
-# ── Scenario 3: the no-op transform ───────────────────────────────
-# The hook emits a transform with an empty results map: nothing is
-# replaced, the original results stand.
+# ── Scenario 3: the no-op step ─────────────────────────────────────
+# The step contributes no state: nothing is spliced, the original
+# results stand, the resolution is `noop`.
 scenario_noop() {
   NEW_WORK noop
   work_config 1
   seed_session
   make_stub
-  cat > "$WORK/hook-tool-after" <<'EOF'
-#!/usr/bin/env bash
-set -u
-cat > /dev/null
-echo '{"decision":"transform","payload":{"results":{}}}'
-EOF
-  chmod +x "$WORK/hook-tool-after"
+  make_hook_noop
   run_step
   assert_eq "$(claim_state)" "awaiting_model" "step lands at awaiting_model (tool result logged)"
   local orig
   orig=$(jq -c 'select(.type == "tool_result" and .id == "call-1")' "$SLOG" 2>/dev/null)
   assert_eq "$(jq -r '.is_error' <<<"$orig")" \
     "true" \
-    "the empty transform leaves the original result"
+    "the no-op step leaves the original result"
   assert_eq "$(count_markers "hook.tool.after")" 1 "one hook.tool.after marker"
+  assert_eq "$(jq -r "select(.type == \"ext_status\" and .id == \"hook.tool.after\") | .value" "$SLOG")" \
+    "noop" "the resolution marker carries the noop outcome"
+}
+
+# ── Scenario 4: the failing step (P4) ─────────────────────────────
+# A step failure stops the chain; the routed results stand and the
+# error marker names the step and detail.
+scenario_fail() {
+  NEW_WORK fail
+  work_config 1
+  seed_session
+  make_stub
+  make_hook_fail
+  run_step
+  assert_eq "$(claim_state)" "awaiting_model" "step lands at awaiting_model (tool result logged)"
+  local orig
+  orig=$(jq -c 'select(.type == "tool_result" and .id == "call-1")' "$SLOG" 2>/dev/null)
+  assert_eq "$(jq -r '.is_error' <<<"$orig")" \
+    "true" \
+    "a failed step leaves the original result"
+  assert_eq "$(count_markers "hook.tool.after.error")" 1 "one error marker"
+  assert_eq "$(jq -c 'select(.id == "hook.tool.after.chain") | .value.steps' "$SLOG" 2>/dev/null)" \
+    '["fail(rewriter exploded)"]' \
+    "the chain marker records the fail with its detail"
 }
 
 scenario_transform
 scenario_default
 scenario_noop
+scenario_fail
 
 echo
 echo "tool-after-transform-e2e: $PASS passed, $FAIL failed"

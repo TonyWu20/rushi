@@ -14,12 +14,13 @@
 use std::path::Path;
 
 use rushi_common::event::{Event, UserMessage};
-use rushi_common::hooks::{self, Window};
+use rushi_common::hooks::Window;
 use rushi_common::stage::{Claim, SessionDir, StageRunner};
 
 use crate::config::HarnessConfig;
 use crate::signals;
-use crate::step::{append_event, append_line, hook_env, make_runner, StepMode};
+use crate::step::hook::{log_pipeline, run_window};
+use crate::step::{append_line, make_runner, StepMode};
 
 /// The `rushi run` entry point.
 ///
@@ -101,53 +102,40 @@ pub fn run(cfg: &HarnessConfig, session_dir: &Path, task: Option<&str>, no_run: 
         };
 
         if claim.state == "idle" && claim.pending_follow_ups.is_empty() {
-            // Fire the run.idle window before stopping.
+            // Fire the run.idle pipeline before stopping
+            // (docs/loop-lifecycle-hooks.md 12.5): the hook appends
+            // its own follow-up `user_message` to the session log via
+            // the `LOG_BIN` env var, and the loop drains pending
+            // messages on the next iteration. An `abort` (exit 2)
+            // vetoes the default stop and keeps the loop alive; a
+            // failed chain stops the loop (P4).
             let last_msg_id = read_last_assistant_message_id(session_dir);
             let payload = serde_json::json!({
                 "window": "run.idle",
                 "session": session.path.to_string_lossy(),
                 "last_assistant_message_id": last_msg_id,
             });
-            let results = hooks::fire_hooks(
-                &cfg.hooks,
-                Window::RunIdle,
-                &payload,
-                &hook_env(cfg, &session, "run", Window::RunIdle),
-                cfg.hooks_timeout_ms,
-            );
-            log_hook_results(cfg, &session, "run.idle", &results);
-
-            let (decision, payload_val) = first_decision(&results);
-            if decision == Some("continue") {
-                let message = payload_val
-                    .get("message")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                // `log_message: false` (issue #4) keeps the loop alive
-                // without a visible `user_message`: the hook routes its
-                // text to the model through its own `model.before`
-                // transform. Absent or `true` (the default) preserves
-                // the historical byte-identical behavior.
-                let log_message = payload_val
-                    .get("log_message")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
-                if log_message {
-                    let ts =
-                        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-                    let event = serde_json::json!({
-                        "v": 1,
-                        "type": "user_message",
-                        "ts": ts,
-                        "content": message,
-                        "queue": "follow",
-                    });
-                    append_event(cfg, &session.path, &event);
-                }
+            let run = run_window(cfg, &session, Window::RunIdle, &payload, "run");
+            let keep_alive = if run.failed {
+                false
+            } else if run.aborted {
+                true
+            } else if !run.steps.is_empty() {
+                // The pipeline may have appended a follow-up
+                // `user_message` itself; drain it on the next turn.
+                matches!(
+                    runner.claim(&session),
+                    Ok(c) if !c.pending_follow_ups.is_empty() || c.state != "idle"
+                )
+            } else {
+                false
+            };
+            let resolution = if keep_alive { "continue" } else { "stop" };
+            log_pipeline(cfg, &session, Window::RunIdle, &run, Some(resolution), Some(&payload));
+            if keep_alive {
                 continue;
             }
-            // Decision is `stop` (default) or absent: stop the loop.
+            // The window default (or a failed chain): stop the loop.
             fire_session_end(cfg, &session, "idle");
             break;
         }
@@ -242,37 +230,27 @@ fn seed_initial_message(cfg: &HarnessConfig, session_dir: &Path, task: &str) -> 
     line
 }
 
-/// Fire a fire-and-forget observation window and log its failures.
+/// Fire a fire-and-forget observation window pipeline (phase `run`)
+/// and log its results. A window with no pipeline entry logs nothing
+/// (the byte-identical no-hooks default, P1).
 fn fire_observation(
     cfg: &HarnessConfig,
     session: &SessionDir,
     window: Window,
     payload: &serde_json::Value,
 ) {
-    let results = hooks::fire_hooks(
-        &cfg.hooks,
-        window,
-        payload,
-        &hook_env(cfg, session, "run", window),
-        cfg.hooks_timeout_ms,
-    );
-    log_hook_results(cfg, session, window.name(), &results);
+    let run = run_window(cfg, session, window, payload, "run");
+    log_pipeline(cfg, session, window, &run, None, None);
 }
 
-/// Fire the session.end window.
+/// Fire the session.end window (observation only).
 fn fire_session_end(cfg: &HarnessConfig, session: &SessionDir, reason: &str) {
     let payload = serde_json::json!({
         "window": "session.end",
         "session": session.path.to_string_lossy(),
         "reason": reason,
     });
-    let _ = hooks::fire_hooks(
-        &cfg.hooks,
-        Window::SessionEnd,
-        &payload,
-        &hook_env(cfg, session, "run", Window::SessionEnd),
-        cfg.hooks_timeout_ms,
-    );
+    fire_observation(cfg, session, Window::SessionEnd, &payload);
 }
 
 /// Read the id of the last `assistant_message` from the log.
@@ -292,43 +270,6 @@ fn read_last_assistant_message_id(session_dir: &Path) -> Option<String> {
         }
     }
     None
-}
-
-/// The first non-failed hook decision in the results, with its payload.
-fn first_decision(
-    results: &[rushi_common::hooks::HookResult],
-) -> (Option<&str>, serde_json::Value) {
-    for r in results {
-        if !r.failed {
-            if let Some(d) = &r.decision {
-                return (Some(d.as_str()), r.payload.clone());
-            }
-        }
-    }
-    (None, serde_json::Value::Null)
-}
-
-/// Log a hook window's results: one `ext_status` per failure, one for
-/// a non-empty decision.
-fn log_hook_results(
-    cfg: &HarnessConfig,
-    session: &SessionDir,
-    window: &str,
-    results: &[rushi_common::hooks::HookResult],
-) {
-    for r in results {
-        if r.failed {
-            let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-            let event = serde_json::json!({
-                "v": 1,
-                "type": "ext_status",
-                "ts": ts,
-                "id": format!("hook.{window}.error"),
-                "value": r.failure_detail.clone(),
-            });
-            append_event(cfg, &session.path, &event);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -360,7 +301,8 @@ mod tests {
             estimate_chars_per_token: 4,
             approval_timeout_s: None,
             hooks_timeout_ms: 30000,
-            hooks: Vec::new(),
+            hook_defs: std::collections::BTreeMap::new(),
+            hook_pipelines: std::collections::BTreeMap::new(),
             model_bin: PathBuf::from("model"),
             compact_bin: PathBuf::from("compact"),
             assemble_bin: PathBuf::from("assemble"),
