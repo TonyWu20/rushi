@@ -66,6 +66,16 @@ swappable blocking point in `docs/phase-2-plan-audit.md` section 2.2.
 - `session.end` — on any exit: clean stop, terminal error, or signal.
   Carries a `reason`. No decision.
 
+> **Decision (2026-09-28): `cwd` refresh at loop process (re)start.**
+> Before the first `claim`, `refresh_session_cwd` re-detects the loop's
+> working directory and rewrites `sessions/<n>/cwd`. The `cwd` file is
+> recorded once at session creation and goes stale when the project
+> directory moves or is deleted. A stale `cwd` makes every tool spawn
+> fail with ENOENT (the missing working directory, not the tool
+> binary). The refresh re-anchors a resumed session to the live
+> directory the entry point launched the loop from. It is core loop
+> behavior, not a hook window.
+
 ### 3.2 Step scope (once per `step`)
 
 - `step.start` — after `claim`, before the branch dispatch.

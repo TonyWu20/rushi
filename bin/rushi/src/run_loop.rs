@@ -47,6 +47,14 @@ pub fn run(cfg: &HarnessConfig, session_dir: &Path, task: Option<&str>, no_run: 
         eprintln!("rushi: warning: cannot write loop.pid: {e}");
     }
 
+    // Re-detect and update the session's persisted `cwd` to this
+    // (re)started loop process's working directory. This runs once at
+    // loop process start, so a session resumed from idle re-anchors to
+    // the live directory the entry point launched the loop from,
+    // instead of a stale recorded path whose directory was moved or
+    // deleted (a stale `cwd` makes every tool spawn fail with ENOENT).
+    refresh_session_cwd(session_dir);
+
     // Install signal handlers (SIGTERM → 143, SIGINT → 130).
     signals::install();
 
@@ -200,9 +208,12 @@ fn acquire_lock(session_dir: &Path) {
 /// - The message is a steer `user_message` (no `queue` field), so
 ///   `claim` reports `awaiting_model` and the loop's first step runs a
 ///   model turn on it.
-/// - The entry point owns the `cwd` decision: the working directory is
-///   recorded in `sessions/<n>/cwd` only when the file does not yet
+/// - The entry point records the `cwd`: the working directory is
+///   written to `sessions/<n>/cwd` only when the file does not yet
 ///   exist (same rule as `bin/user`; `assemble`/`route` only read it).
+///   On every loop start `refresh_session_cwd` re-detects and updates
+///   the file, so a session resumed after its project directory moved
+///   or was deleted re-anchors to the live working directory.
 fn seed_initial_message(cfg: &HarnessConfig, session_dir: &Path, task: &str) -> String {
     let cwd_path = session_dir.join("cwd");
     if !cwd_path.exists() {
@@ -228,6 +239,29 @@ fn seed_initial_message(cfg: &HarnessConfig, session_dir: &Path, task: &str) -> 
         });
     append_line(cfg, session_dir, &line);
     line
+}
+
+/// Refresh the session's persisted `cwd` file to this loop process's
+/// working directory.
+///
+/// Called once at loop process start, before the first tool call. The
+/// `cwd` file is written once at session creation and would otherwise
+/// go stale when the user's project directory is moved or deleted; a
+/// stale `cwd` makes every tool spawn fail with ENOENT (the missing
+/// working directory, not the tool binary). Re-detecting at each
+/// process (re)start keeps the session's `cwd` live.
+fn refresh_session_cwd(session_dir: &Path) {
+    let cwd_path = session_dir.join("cwd");
+    let cwd = match std::env::current_dir() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("rushi: warning: cannot resolve cwd for refresh: {e}");
+            return;
+        }
+    };
+    if let Err(e) = std::fs::write(&cwd_path, cwd.to_string_lossy().as_bytes()) {
+        eprintln!("rushi: warning: cannot refresh cwd file: {e}");
+    }
 }
 
 /// Fire a fire-and-forget observation window pipeline (phase `run`)
@@ -353,5 +387,26 @@ mod tests {
         seed_initial_message(&cfg, &sess2, "task");
         let cwd = std::fs::read_to_string(sess2.join("cwd")).unwrap();
         assert_eq!(cwd, std::env::current_dir().unwrap().to_string_lossy());
+    }
+
+    #[test]
+    fn refresh_session_cwd_reanchors_a_stale_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let sess = dir.path().join("sess");
+        std::fs::create_dir_all(&sess).unwrap();
+        // A recorded project directory that no longer exists (moved or
+        // deleted while the session sat idle).
+        let gone = dir.path().join("project");
+        std::fs::create_dir_all(&gone).unwrap();
+        std::fs::write(sess.join("cwd"), gone.to_string_lossy().as_bytes()).unwrap();
+        std::fs::remove_dir(&gone).unwrap();
+
+        // The loop process (re)start re-detects and updates the file.
+        refresh_session_cwd(&sess);
+        assert_eq!(
+            std::fs::read_to_string(sess.join("cwd")).unwrap(),
+            std::env::current_dir().unwrap().to_string_lossy(),
+            "a stale recorded cwd is replaced by the live process cwd"
+        );
     }
 }
