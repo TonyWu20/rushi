@@ -39,7 +39,8 @@ const KEEP: &[&str] = &[
 #[derive(Parser)]
 #[command(
     name = "rushi-sessions",
-    about = "rushi-sessions television channel backend"
+    about = "rushi-sessions television channel backend",
+    version
 )]
 struct Args {
     #[command(subcommand)]
@@ -66,6 +67,17 @@ enum Command {
 }
 
 fn main() {
+    // Behave like a normal Unix program when stdout is a pipe that the
+    // reader closes early (e.g. `rushi-sessions source | head`): restore
+    // the default SIGPIPE disposition so a write to a broken pipe ends the
+    // process silently instead of Rust's default EPIPE panic trace.
+    #[cfg(unix)]
+    {
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        }
+    }
+
     let args = Args::parse();
     match args.command {
         Command::Source => source(),
