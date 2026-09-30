@@ -25,7 +25,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Directory names that the `source` walk prunes (the old `fd -E` set).
+/// `.git` and `.nix` are also hidden, so the hidden check below covers
+/// them too; they are listed here for parity with the old `fd -E` flags.
 const PRUNE: &[&str] = &["target", ".git", "node_modules", "scratch", ".nix"];
+
+/// Whether a directory is pruned from the walk: the `fd -E` name set, or
+/// any hidden directory. The old `fd` call skipped hidden directories by
+/// default (no `--no-hidden`), so skipping them keeps the walk domain
+/// identical to the channel's previous behaviour.
+fn is_pruned(name: &str) -> bool {
+    name.starts_with('.') || PRUNE.iter().any(|p| *p == name)
+}
 
 /// ext_status ids that always show in the preview's recent-event list.
 const KEEP: &[&str] = &[
@@ -182,7 +192,8 @@ fn source() {
 /// Find every directory named `sessions` under the CWD (a `fd`
 /// substitute), returned as **absolute** paths like
 /// `/home/u/repo/sessions` (matching the old `fd` output, which was
-/// given an absolute start point).
+/// given an absolute start point). Hidden directories are skipped, as
+/// the old `fd` call did.
 fn find_sessions() -> Vec<String> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut rel: Vec<String> = Vec::new();
@@ -205,7 +216,7 @@ fn walk_rel(dir: &str, out: &mut Vec<String>) {
     };
     for entry in rd.flatten() {
         let f = entry.file_name().to_string_lossy().into_owned();
-        if PRUNE.iter().any(|p| *p == f) {
+        if is_pruned(&f) {
             continue;
         }
         if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
@@ -631,5 +642,21 @@ mod tests {
         assert_eq!(repo_of("sessions"), ".");
         assert_eq!(repo_of("repo/sessions"), "repo");
         assert_eq!(repo_of("/home/u/repo/sessions"), "repo");
+    }
+
+    #[test]
+    fn prunes_hidden_and_fd_names() {
+        for p in [
+            ".cache",
+            ".git",
+            ".nix",
+            "target",
+            "node_modules",
+            "scratch",
+        ] {
+            assert!(is_pruned(p), "must prune {p}");
+        }
+        assert!(!is_pruned("sessions"));
+        assert!(!is_pruned("programming"));
     }
 }
