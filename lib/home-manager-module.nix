@@ -18,7 +18,10 @@
 # `enableTelevisionIntegration` writes the `rushi-sessions` channel into
 # `programs.television.channels` (the home-manager television module
 # serializes it to `~/.config/television/cable/rushi-sessions.toml`).
-# It needs the home-manager television module loaded.
+# The channel's source/preview commands run the `rushi-sessions` binary
+# (kernel bin/rushi-sessions), so enabling the integration also adds
+# the rushi `package` to `home.packages` when it is set. The channel
+# needs the home-manager television module loaded.
 #
 # Exposed via the kernel flake's `homeManagerModules.rushi` output.
 
@@ -49,7 +52,10 @@ in
       rushi-sessions television channel. When enabled, writes
       `programs.television.channels.rushi-sessions`. The channel peeks at
       rushi sessions: status, loop phase, last activity, last messages.
-      It needs the home-manager `programs.television` module loaded.
+      Its commands run the `rushi-sessions` binary, which ships in the
+      rushi `package`; when this option is set, that package is added
+      to `home.packages` (alongside `enable`). It needs the
+      home-manager `programs.television` module loaded.
     '';
 
     televisionChannel = lib.mkOption {
@@ -65,13 +71,15 @@ in
   };
 
   config = lib.mkMerge [
-    (lib.mkIf cfg.enable {
+    (lib.mkIf (cfg.enable || cfg.enableTelevisionIntegration) {
       home.packages =
         if cfg.package != null then [ cfg.package ] else [ ];
     })
     (lib.mkIf cfg.enableTelevisionIntegration {
       programs.television.channels.rushi-sessions =
-        if cfg.televisionChannel != null
+        if cfg.package == null
+        then builtins.throw "programs.rushi.enableTelevisionIntegration needs `package` set: the channel commands run the `rushi-sessions` binary, which ships in the rushi package"
+        else if cfg.televisionChannel != null
         then cfg.televisionChannel
         else defaultChannel;
     })
