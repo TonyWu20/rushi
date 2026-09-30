@@ -34,7 +34,7 @@ const PRUNE: &[&str] = &["target", ".git", "node_modules", "scratch", ".nix"];
 /// default (no `--no-hidden`), so skipping them keeps the walk domain
 /// identical to the channel's previous behaviour.
 fn is_pruned(name: &str) -> bool {
-    name.starts_with('.') || PRUNE.iter().any(|p| *p == name)
+    name.starts_with('.') || PRUNE.contains(&name)
 }
 
 /// ext_status ids that always show in the preview's recent-event list.
@@ -198,9 +198,17 @@ fn find_sessions() -> Vec<String> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut rel: Vec<String> = Vec::new();
     walk_rel("", &mut rel);
-    rel.into_iter()
+    let mut abs: Vec<String> = rel
+        .into_iter()
         .map(|r| cwd.join(&r).to_string_lossy().into_owned())
-        .collect()
+        .collect();
+    // `fd` also reports the start point when its own name matches, so a
+    // start point named `sessions` lists its children as sessions.
+    let self_named = cwd.file_name().map(|n| n == "sessions").unwrap_or(false);
+    if self_named {
+        abs.push(cwd.to_string_lossy().into_owned());
+    }
+    abs
 }
 
 fn walk_rel(dir: &str, out: &mut Vec<String>) {
@@ -658,5 +666,22 @@ mod tests {
         }
         assert!(!is_pruned("sessions"));
         assert!(!is_pruned("programming"));
+    }
+
+    #[test]
+    fn start_point_named_sessions_is_a_root() {
+        // A start point named `sessions` matches the old `fd` pattern
+        // against its own start dir, so it must be a session root too.
+        let base = std::env::temp_dir().join(format!("rs-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("sessions");
+        std::fs::create_dir_all(dir.join("s1")).unwrap();
+        std::fs::write(dir.join("s1/cwd"), "/tmp").unwrap();
+        let old = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        let found = find_sessions();
+        std::env::set_current_dir(&old).unwrap();
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(found, vec![dir.to_string_lossy().into_owned()]);
     }
 }
