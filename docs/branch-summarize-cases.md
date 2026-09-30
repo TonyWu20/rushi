@@ -79,6 +79,11 @@ Consequences:
   tree or DAG view of the log. It highlights the affected region for each of
   the existing four options. It shows the tree behavior without user-pick. No
   region-pick protocol and no new binary flags.
+  - Status 2026-09-30: the TUI repo wired both summarize options
+    (rushi-tui commit `140f82e`). `Summarize the branch` and `Summarize
+    with custom prompt` spawn `bin/compact --branch`. The kernel appends
+    the P2 branch marker. The TUI tailer delivers it and the transcript
+    renders it as an always-visible leaf line.
 - **Phase 2, user-pick, deferred.** The user selects the branch span and the
   handoff region in the tree. That is the user taking over `assemble`
   region-pick for one step. It is deferred because it opens the biggest
