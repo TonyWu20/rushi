@@ -15,12 +15,21 @@
 #     };
 #   }
 #
+# `enableTelevisionIntegration` writes the `rushi-sessions` channel into
+# `programs.television.channels` (the home-manager television module
+# serializes it to `~/.config/television/cable/rushi-sessions.toml`).
+# It needs the home-manager television module loaded.
+#
 # Exposed via the kernel flake's `homeManagerModules.rushi` output.
 
 { config, lib, ... }:
 
 let
   cfg = config.programs.rushi;
+  # The rushi-sessions channel, as a TOML-serializable value. This is the
+  # Nix source of truth for the channel. The home-manager television
+  # module renders it to cable/rushi-sessions.toml.
+  defaultChannel = import ./rushi-sessions-channel.nix;
 in
 {
   options.programs.rushi = {
@@ -35,10 +44,36 @@ in
         when `programs.rushi.enable` is set.
       '';
     };
+
+    enableTelevisionIntegration = lib.mkEnableOption ''
+      rushi-sessions television channel. When enabled, writes
+      `programs.television.channels.rushi-sessions`. The channel peeks at
+      rushi sessions: status, loop phase, last activity, last messages.
+      It needs the home-manager `programs.television` module loaded.
+    '';
+
+    televisionChannel = lib.mkOption {
+      type = lib.types.raw;
+      default = null;
+      description = ''
+        The value written to `programs.television.channels.rushi-sessions`
+        when `enableTelevisionIntegration` is set. Defaults to the
+        built-in `rushi-sessions` channel. Set a custom channel attrset to
+        override it.
+      '';
+    };
   };
 
-  config = lib.mkIf cfg.enable {
-    home.packages =
-      if cfg.package != null then [ cfg.package ] else [ ];
-  };
+  config = lib.mkMerge [
+    (lib.mkIf cfg.enable {
+      home.packages =
+        if cfg.package != null then [ cfg.package ] else [ ];
+    })
+    (lib.mkIf cfg.enableTelevisionIntegration {
+      programs.television.channels.rushi-sessions =
+        if cfg.televisionChannel != null
+        then cfg.televisionChannel
+        else defaultChannel;
+    })
+  ];
 }
