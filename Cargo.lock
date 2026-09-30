@@ -1370,6 +1370,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rushi-sessions"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "libc",
+ "serde_json",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

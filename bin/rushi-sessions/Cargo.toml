@@ -1,0 +1,15 @@
+[package]
+name = "rushi-sessions"
+version = "0.1.0"
+publish = false
+edition = "2021"
+
+[[bin]]
+name = "rushi-sessions"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+serde_json = { workspace = true }
+libc = { workspace = true }
+chrono = { workspace = true }
