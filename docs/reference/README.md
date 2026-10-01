@@ -59,9 +59,12 @@ cancellation signals, and manages the session lock (`loop.pid`).
 
 The loop binary can also seed a session: `rushi run <session> <task>`
 logs `<task>` as the session's initial `user_message` (steer queue)
-before the loop starts. `--no-run` logs the message without running the
-loop. This keeps `rushi` self-contained for starting a session without
-the separate `user` binary, which plain installs do not ship
+before the loop starts. `--no-run` is the lock-free append form. It
+takes only the log-line lock, then logs the message and exits 0.
+The call never takes the session lock and writes no `loop.pid`.
+It works against a running loop. It fails without a task. This keeps
+`rushi` self-contained for starting a session without the separate
+`user` binary, which plain installs do not ship
 (`docs/subagent-design.md`, the subagent spawn contract).
 
 ### Loop lifecycle
@@ -521,9 +524,11 @@ Add `"my_tool"` to `[tools] enabled` in `rushi.toml`. Done.
 
 - Do not poll a long task with `sleep`. Write a small monitor script,
   launch it detached with `nohup`, and have it wake the idle session on a
-  state change or finish. Use `user --no-run` when the session loop is
-  alive. Use `rushi run <session> "<msg>"` when it is dead. The full
-  pattern is bundled: `rushi docs monitoring`.
+  state change or finish. While the loop is alive, use the lock-free
+  `rushi run <session> "<msg>" --no-run` (`user --no-run` is an
+  equivalent dev-install form). When the loop is dead, use
+  `rushi run <session> "<msg>"` to start it. The full pattern is
+  bundled: `rushi docs monitoring`.
 
 ---
 

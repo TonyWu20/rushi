@@ -1385,9 +1385,9 @@ fn main() {
          Read it when the user asks how rushi works, how to configure it, or how to extend it.\n\
          Long-running tasks: do not poll with `sleep`.\n\
          Write a small monitor script and launch it detached with `nohup`.\n\
-         The script wakes this idle session with `user --no-run` when the loop\n\
-         is alive, or `rushi run <session> \"<msg>\"` when it is not. See\n\
-         `rushi docs monitoring`.",
+         While the loop is alive, poke it lock-free: `rushi run <session> \"<msg>\" --no-run`\n\
+         (`user --no-run` is the equivalent dev-install form). When the loop is dead,\n\
+         use `rushi run <session> \"<msg>\"` to start it. See `rushi docs monitoring`.",
     );
 
     // Append prompt fragments (docs/system-prompt-generation.md D5).

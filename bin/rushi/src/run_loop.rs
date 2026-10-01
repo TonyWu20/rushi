@@ -4,10 +4,16 @@
 //! step → claim → (`run.idle` window) → repeat until idle-without-follow
 //! or exhausted.
 //!
+//! `--no-run` skips the lock and the loop. It appends the task as a
+//! steer `user_message` with the log-line lock only, prints the event
+//! line, and exits 0. This is the lock-free poke that works against
+//! a live loop (the `user --no-run` equivalent, docs/itches.md).
+//!
 //! # Exit codes
 //! - `0` — clean stop (idle with no pending follow-ups, exhausted, or a
-//!   logged terminal error event)
-//! - `1` — hard failure (config unreadable, log append fails, lock held)
+//!   logged terminal error event), or a `--no-run` append succeeded
+//! - `1` — hard failure (config unreadable, log append fails, lock held,
+//!   or `--no-run` without a task)
 //! - `143` — SIGTERM
 //! - `130` — SIGINT
 
@@ -28,13 +34,42 @@ use crate::step::{append_line, make_runner, StepMode};
 /// present it is logged as a steer `user_message` before the loop
 /// starts, so `claim` reports `awaiting_model` and the first step runs
 /// a model turn on it — the subagent spawn contract
-/// (docs/subagent-design.md section 4). `no_run`: log the task and
-/// exit without running the loop.
+/// (docs/subagent-design.md section 4).
+///
+/// `no_run`: lock-free append mode, equivalent to `user --no-run`
+/// (bin/user). It seeds `task` with the log-line lock only (FT-005)
+/// and exits. It never takes the session lock (`.loop.lock`) or writes
+/// `loop.pid`, so it succeeds against a live loop, which drains the
+/// message at its next step. A missing or empty task is a hard error:
+/// there is nothing to append.
 pub fn run(cfg: &HarnessConfig, session_dir: &Path, task: Option<&str>, no_run: bool) {
     // The session dir must exist (create it).
     if let Err(e) = std::fs::create_dir_all(session_dir) {
         eprintln!("rushi: cannot create session dir: {e}");
         std::process::exit(1);
+    }
+
+    // Lock-free append mode (`--no-run`), equivalent to `user --no-run`.
+    // Seed the task with the log-line lock only and exit. Skip the
+    // session lock, `loop.pid`, the `cwd` refresh, the signal handlers,
+    // and the loop. This makes a valid poke of a live session and lets
+    // a plain install (which ships only `rushi`) drive a live loop.
+    if no_run {
+        match task {
+            Some(t) if !t.trim().is_empty() => {
+                let line = seed_initial_message(cfg, session_dir, t);
+                println!("{line}");
+                std::process::exit(0);
+            }
+            Some(_) => {
+                eprintln!("rushi: task must not be empty");
+                std::process::exit(1);
+            }
+            None => {
+                eprintln!("rushi: --no-run requires a task");
+                std::process::exit(1);
+            }
+        }
     }
 
     // Acquire the exclusive session lock for the process life.
@@ -60,17 +95,14 @@ pub fn run(cfg: &HarnessConfig, session_dir: &Path, task: Option<&str>, no_run: 
 
     // Seed the initial user message before the first step. A steer
     // message leaves the claim in `awaiting_model`, so the loop runs
-    // the prompt instead of idling out.
+    // the prompt instead of idling out. (`--no-run` is handled above,
+    // before the lock.)
     if let Some(task) = task {
         if task.trim().is_empty() {
             eprintln!("rushi: task must not be empty");
             std::process::exit(1);
         }
-        let line = seed_initial_message(cfg, session_dir, task);
-        if no_run {
-            println!("{line}");
-            std::process::exit(0);
-        }
+        seed_initial_message(cfg, session_dir, task);
     }
 
     let runner = make_runner(cfg);

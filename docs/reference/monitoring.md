@@ -22,8 +22,9 @@ only when the monitor sends a message.
    immediately.
 3. The monitor loops on the task's own conditions.
 4. On a state change or finish, the monitor pokes this session with one
-   short message. Use `user --no-run` when the session loop is alive. Use
-   a full `rushi run` when it is dead.
+   short message. While the loop is alive, use the lock-free
+   `rushi run <session> "<msg>" --no-run`. When the loop is dead, use
+   `rushi run <session> "<msg>"` to start it.
 5. The message reattaches the session and wakes the agent.
 
 The monitor sends a message only on a change, never per poll. It tracks
@@ -56,8 +57,9 @@ notify() { # $1 = short message. Append to a live loop, or start one.
   local msg="$1"
   if loop_alive "$SESSION"; then
     # Lock-free append. The running loop drains the message at its
-    # next step.
-    user --session "$SESSION" --no-run "$msg" >> "$LOG" 2>&1
+    # next step. `rushi run --no-run` works on plain installs;
+    # `user --no-run` is the equivalent dev-install form.
+    rushi run "$SESSION" "$msg" --no-run >> "$LOG" 2>&1
   else
     # No live loop: start one. It logs the task and runs it.
     rushi run "$SESSION" "$msg" >> "$LOG" 2>&1
@@ -96,25 +98,26 @@ The bash call returns immediately. The agent then waits for the message.
 
 The monitor pokes the session in two cases:
 
-- The loop is alive. `user --session <session> --no-run "<msg>"` appends
-  the message and exits. It takes only the log-line lock, so it does not
-  collide with the running loop. The live loop drains the message at its
-  next step.
+- The loop is alive. Use the lock-free `rushi run <session> "<msg>"
+  --no-run`. It takes only the log-line lock, so it never collides with
+  the running loop. The live loop drains the message at its next step.
+  `user --session <session> --no-run "<msg>"` is the equivalent
+  dev-install form.
 - The loop is dead. `rushi run <session> "<msg>"` logs the message and
   starts the loop, which runs it.
 
 Lock behavior, verified in `bin/rushi/src/run_loop.rs`:
 
-- `rushi run` gets the exclusive `.loop.lock` before it logs the task.
-- `rushi run --no-run` does the same. It is not lock-free. Against a live
-  loop it exits 1 and logs nothing.
-- `user --no-run` writes only the `user_message` log line and exits. It
-  never takes `.loop.lock`.
+- `rushi run` (without `--no-run`) takes the exclusive `.loop.lock`
+  before it logs the task.
+- `rushi run --no-run` is append-only. It takes only the log-line lock,
+  writes the `user_message`, and exits 0. It works against a live loop.
+- `user --no-run` has the same lock behavior.
 
-The `user` binary queues the message as `steer` by default, and the live
-loop drains it at the next step. Plain installs ship only the `rushi`
-binary. In that case, the monitor uses `rushi run` and keeps a failed
-poke pending for the next cycle.
+Both forms queue the message as `steer` by default. The live loop drains
+it at the next step. Plain installs ship only the `rushi` binary. In
+that case the monitor uses `rushi run --no-run` for live sessions. A
+failed poke stays pending for the next cycle.
 
 ## Rules
 

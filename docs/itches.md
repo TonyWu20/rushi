@@ -605,7 +605,7 @@ environment. Docs updated in `crates/rushi/README.md`,
       lands this fix. Its PTY test workaround may stay for
       determinism.
 
-## `rushi run --no-run` is not lock-free (2026-10-01)
+## `rushi run --no-run` is not lock-free (2026-10-01) → resolved 2026-10-01
 
 `rushi run <session> "<msg>" --no-run` takes the exclusive session lock
 before it logs the task. `bin/rushi/src/run_loop.rs` calls
@@ -629,15 +629,30 @@ A second quirk found while tracing this: `rushi run <session> --no-run`
 with no task runs the loop. The `--no-run` check lives inside the task
 block, so an absent task skips it.
 
-**Fix options (open).**
+**Resolution (2026-10-01).** Fix option 1 was chosen.
+`rushi run --no-run` is now the append-only form.
 
-- Make `rushi run --no-run` append-only: when the flag is set, skip
-  `acquire_lock` and seed the task with the log-line lock only. That
-  matches `user --no-run` and lets a plain install (which ships only
-  `rushi`) poke a live session.
-- Or drop the `--no-run` flag from `rushi run` and point users at the
-  `user` binary.
+The change sits in `bin/rushi/src/run_loop.rs`.
+The `--no-run` branch now runs before `acquire_lock`.
+It seeds the task with `seed_initial_message`.
+That takes only the log-line lock (FT-005).
+It prints the event line and exits 0.
+No `.loop.lock`, no `loop.pid`, no `cwd` refresh, no loop.
 
-**Status.** The workaround is documented. `rushi docs monitoring` and
-the system prompt hint (`bin/assemble/src/main.rs`) steer monitors to
-`user --no-run` for live loops. The kernel behavior is unchanged.
+`user --no-run` was already lock-free. `rushi run --no-run` now
+matches it. A plain install can poke a live session.
+The command is `rushi run <session> "<msg>" --no-run`.
+
+A missing or empty task exits 1. The old quirk (a bare `--no-run`
+started the loop) is gone.
+
+**Proof.** `scripts/no-run-lock-free-e2e.sh` carries 7 checks and runs
+in CI as "e2e: no-run lock-free". A live loop holds the lock during
+the poke. A full `rushi run` is rejected, but the `--no-run` poke
+succeeds. The live loop drains the poked message at its next step.
+Missing and empty tasks fail, and no `loop.pid` is written.
+
+Docs updated: `docs/reference/monitoring.md`,
+`docs/reference/README.md`, `docs/INDEX.md`, and the assemble system
+prompt hint. `user --no-run` is unchanged and stays the dev-install
+equivalent.

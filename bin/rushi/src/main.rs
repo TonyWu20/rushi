@@ -11,7 +11,9 @@
 //!   is first logged as the session's initial `user_message` (steer
 //!   queue) so the loop starts by running a model turn on it — the
 //!   subagent spawn contract (docs/subagent-design.md section 4).
-//!   `--no-run` logs the task without running the loop.
+//!   `--no-run` is the lock-free append form: it logs `TASK` with the
+//!   log-line lock only (equivalent to `user --no-run`) and exits
+//!   without running the loop, so it can poke a live session.
 //! - `rushi step SESSION` — one step (internal, TUI-supervised)
 //! - `rushi docs [SECTION|DOC]` — print the embedded harness reference;
 //!   a section of the default reference, or a bundled sub-document by
@@ -74,11 +76,14 @@ enum Command {
 
         /// Initial prompt, logged as a `user_message` before the loop
         /// starts. Omit to continue from the log's current state.
+        /// With `--no-run`, a task is needed.
         task: Option<String>,
 
-        /// Log the task without running the loop (append-only mode,
-        /// mirrors `user --no-run`). The event line is printed to
-        /// stdout.
+        /// Lock-free append mode (equivalent to `user --no-run`):
+        /// log the task with the log-line lock only, print the event
+        /// line, and exit without running the loop. Works against a
+        /// live session, which drains the message at its next step.
+        /// A task is needed.
         #[arg(long)]
         no_run: bool,
     },
