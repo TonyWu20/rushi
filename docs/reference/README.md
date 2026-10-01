@@ -517,6 +517,14 @@ Add `"my_tool"` to `[tools] enabled` in `rushi.toml`. Done.
   `[ui_extensions] enabled`. The TUI discovers it on the extension host.
   The kernel does not know about it.
 
+### Monitor a long-running task
+
+- Do not poll a long task with `sleep`. Write a small monitor script,
+  launch it detached with `nohup`, and have it wake the idle session on a
+  state change or finish. Use `user --no-run` when the session loop is
+  alive. Use `rushi run <session> "<msg>"` when it is dead. The full
+  pattern is bundled: `rushi docs monitoring`.
+
 ---
 
 ## 10. Self-Documentation & This Doc

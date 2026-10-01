@@ -111,3 +111,7 @@ jobs:
       - name: "e2e: tool-after transform"
         if: matrix.e2e
         run: bash scripts/tool-after-transform-e2e.sh
+
+      - name: "e2e: no-long-sleep guard"
+        if: matrix.e2e
+        run: bash scripts/no-long-sleep-e2e.sh

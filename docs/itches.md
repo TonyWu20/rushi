@@ -604,3 +604,40 @@ environment. Docs updated in `crates/rushi/README.md`,
 - [ ] rushi-tui repo: pin `rushi-common` to the 0.1.4 release that
       lands this fix. Its PTY test workaround may stay for
       determinism.
+
+## `rushi run --no-run` is not lock-free (2026-10-01)
+
+`rushi run <session> "<msg>" --no-run` takes the exclusive session lock
+before it logs the task. `bin/rushi/src/run_loop.rs` calls
+`acquire_lock` before it seeds the task and before the `--no-run`
+exit. Against a live loop the call exits 1 with "session lock is
+held". It logs nothing. The flag cannot append to a running session.
+
+The lock-free append is `user --session <s> --no-run "<msg>"`
+(`bin/user/src/main.rs`). It takes only the log-line lock (FT-005),
+writes the `user_message` to the steer queue, and exits. It never
+touches `.loop.lock`. A live loop drains the message at its next step.
+
+The monitor pattern (`rushi docs monitoring`, "Poke forms") uses this
+split:
+
+- Loop alive: `user --no-run` (lock-free append).
+- Loop dead: `rushi run <session> "<msg>"` (start the loop. It drains
+  the queued message.)
+
+A second quirk found while tracing this: `rushi run <session> --no-run`
+with no task runs the loop. The `--no-run` check lives inside the task
+block, so an absent task skips it.
+
+**Fix options (open).**
+
+- Make `rushi run --no-run` append-only: when the flag is set, skip
+  `acquire_lock` and seed the task with the log-line lock only. That
+  matches `user --no-run` and lets a plain install (which ships only
+  `rushi`) poke a live session.
+- Or drop the `--no-run` flag from `rushi run` and point users at the
+  `user` binary.
+
+**Status.** The workaround is documented. `rushi docs monitoring` and
+the system prompt hint (`bin/assemble/src/main.rs`) steer monitors to
+`user --no-run` for live loops. The kernel behavior is unchanged.

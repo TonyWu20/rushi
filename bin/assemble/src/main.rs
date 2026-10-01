@@ -1382,7 +1382,12 @@ fn main() {
     system_prompt.push_str(
         "\n\nHarness reference: run `rushi docs` for the full rushi reference\n\
          (architecture, config, tool manifest, hook ABI, distribution).\n\
-         Read it when the user asks how rushi works, how to configure it, or how to extend it.",
+         Read it when the user asks how rushi works, how to configure it, or how to extend it.\n\
+         Long-running tasks: do not poll with `sleep`.\n\
+         Write a small monitor script and launch it detached with `nohup`.\n\
+         The script wakes this idle session with `user --no-run` when the loop\n\
+         is alive, or `rushi run <session> \"<msg>\"` when it is not. See\n\
+         `rushi docs monitoring`.",
     );
 
     // Append prompt fragments (docs/system-prompt-generation.md D5).

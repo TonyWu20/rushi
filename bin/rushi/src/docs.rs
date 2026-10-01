@@ -16,9 +16,11 @@
 /// The default reference document, baked in at compile time.
 const REFERENCE: &str = include_str!("../../../docs/reference/README.md");
 
-/// Bundled sub-documents under `docs/reference/nix/`, selectable by
-/// name from `rushi docs <name>`. Each is a whole document; per-section
-/// filtering is reserved for the default reference.
+/// Bundled sub-documents under `docs/reference/` (and `docs/reference/nix/`),
+/// selectable by name from `rushi docs <name>`. Each is a whole document;
+/// per-section filtering is reserved for the default reference.
+const MONITORING: &str =
+    include_str!("../../../docs/reference/monitoring.md");
 const NIX_FLAKE_MODULE: &str =
     include_str!("../../../docs/reference/nix/nix-flake-module.md");
 const EXT_FLAKE_AUTHORING: &str =
@@ -33,6 +35,11 @@ struct BundledDoc {
 
 /// The registry of bundled sub-documents. Order is the `--list` order.
 const BUNDLED_DOCS: &[BundledDoc] = &[
+    BundledDoc {
+        name: "monitoring",
+        title: "Monitoring long-running tasks (event-driven reattach via `rushi run`)",
+        text: MONITORING,
+    },
     BundledDoc {
         name: "nix-flake-module",
         title: "Nix flaking module (lib.mkRushi + the rushi.* option schema)",
