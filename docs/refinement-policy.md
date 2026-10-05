@@ -262,11 +262,13 @@ If any section is missing, the proposal is incomplete.
 - HTTP/WebSocket API (until a non-terminal/remote client is a current requirement)
 - Plugin system / dynamic loading (until script editing is insufficient)
 - NDJSON streaming for tools (until progress affects control flow)
-- Multi-agent scheduling (until a second concurrent session is actually in
-  use). The `docs/subagent-design.md` spec was retired 2026-10-05.
-  The pattern ships shell-native as the headless-mission scaffold
-  (`rushi docs headless-missions`). The arg-taking tool form is
-  parked as a P9 itch (`docs/itches.md`).
+- Multi-agent scheduling (do not build until triggered). A second
+  concurrent session is in use: the headless-mission fan-out.
+  Decision 2026-10-05 (user): no kernel scheduler for now. The
+  shell is the scheduler. The `docs/subagent-design.md` spec was
+  retired 2026-10-05. The pattern ships shell-native as the
+  headless-mission scaffold (`rushi docs headless-missions`). The
+  arg-taking tool form is parked as a P9 itch (`docs/itches.md`).
 - Approval policy engine beyond allow/deny/edit (until a real policy need appears)
 
 ## P9. Itches (parking lot)
