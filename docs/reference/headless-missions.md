@@ -7,11 +7,11 @@ a step. It runs to completion and pings the main session when it
 ends. The scaffold is a plain shell script. No new binary, no
 daemon, no owned schema.
 
-This is the async form of subagent mode. The blocking
-`spawn_agent` tool in `docs/subagent-design.md` is the in-tool
-version of the same pattern (designed, not built). The
-headless-mission scaffold is the shell-native one. Any number of
-sessions run in parallel. Each is a plain `rushi` process.
+This is the async form of subagent mode. The blocking in-tool
+version was specified in `docs/subagent-design.md`. That spec was
+retired 2026-10-05. It was not built. The headless-mission
+scaffold is the shell-native form. Any number of sessions run in
+parallel. Each is a plain `rushi` process.
 
 ## When to use
 
@@ -96,11 +96,8 @@ The agent reads `out_$i` when mission `i` ends.
 
 ## Monitor pointer
 
-- Watch one long external task: `rushi docs monitoring`. The
-  monitor blocks on a task event and pokes the session.
-- Watch N headless missions as a human: `tv rushi-sessions
-  [roots…] --watch N`. It is the human-side mirror of the
-  ping-back contract.
+Watch one long external task: `rushi docs monitoring`. The monitor
+blocks on a task event and pokes the session.
 
 ## The parked tool form
 

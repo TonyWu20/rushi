@@ -263,7 +263,10 @@ If any section is missing, the proposal is incomplete.
 - Plugin system / dynamic loading (until script editing is insufficient)
 - NDJSON streaming for tools (until progress affects control flow)
 - Multi-agent scheduling (until a second concurrent session is actually in
-  use). The `docs/subagent-design.md` spec is approved but not built.
+  use). The `docs/subagent-design.md` spec was retired 2026-10-05.
+  The pattern ships shell-native as the headless-mission scaffold
+  (`rushi docs headless-missions`). The arg-taking tool form is
+  parked as a P9 itch (`docs/itches.md`).
 - Approval policy engine beyond allow/deny/edit (until a real policy need appears)
 
 ## P9. Itches (parking lot)

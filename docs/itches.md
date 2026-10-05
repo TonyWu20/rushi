@@ -675,3 +675,6 @@ the scaffold) as a P9 itch. Two concrete triggers:
 
 If it ships later, it generates from this doc or links to it. It
 does not re-encode the scaffold. One source of truth.
+
+The retired `spawn_agent` spec (`docs/subagent-design.md`, retired
+2026-10-05) shares this trigger. It parks under the same entry.
