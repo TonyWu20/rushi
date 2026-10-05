@@ -4,17 +4,17 @@
 
 A headless mission is a detached `rushi` session the agent starts from
 a step. It runs to completion and pings the main session when it
-ends. The scaffold is a plain shell script. No new binary, no
-daemon, no owned schema.
+ends.
 
-This is the async form of subagent mode. The blocking in-tool
-version was specified in `docs/subagent-design.md`. That spec was
-retired 2026-10-05. It was not built. The headless-mission
-scaffold is the shell-native form. Any number of sessions run in
+This is the async form of subagent mode. Any number of sessions run in
 parallel. Each is a plain `rushi` process.
 
 ## When to use
 
+Use it when the task does not depend on the current session's
+context, such as a task to implement, fix, review or research
+something. The task text must carry every piece of context the
+mission needs. The mission session starts from zero context.
 Use it when the agent orchestrates multiple `rushi` sessions in one
 bash tool call. Or when it writes the orchestration to a script and
 runs it.
@@ -24,8 +24,6 @@ Typical shapes:
 - One session per task. Fan out, then wait.
 - One session per issue, in a git worktree.
 - One session per review pass over the same tree.
-
-For one long external task, use `rushi docs monitoring` instead.
 
 ## Mission shape
 
@@ -94,26 +92,11 @@ done
 That is native parallel orchestration with per-mission exit codes.
 The agent reads `out_$i` when mission `i` ends.
 
-## Monitor pointer
+## Difference with Monitoring
 
-Watch one long external task: `rushi docs monitoring`. The monitor
+A headless mission is the monitor pattern applied to a blocking
+`rushi run` call. Its exit is the event. The orchestrator blocks
+on it directly. No separate monitor is needed.
+
+Watch long external commands: `rushi docs monitoring`. The monitor
 blocks on a task event and pokes the session.
-
-## The parked tool form
-
-The tool form (an arg-taking tool that compiles this scaffold) is
-parked as a P9 itch (`docs/refinement-policy.md` P9, entry in
-`docs/itches.md`). It has two concrete triggers:
-
-- Three recorded episodes of an agent mis-composing the scaffold
-  despite this doc (the rule of three).
-- A non-agent caller (human CLI, cron, CI) that needs a stable,
-  machine-checkable arg schema.
-
-If it ships later, it generates from this doc or links to it. It
-does not re-encode the scaffold. One source of truth.
-
-## Scope
-
-Implementation stays in this (kernel) repo. The `rushi-queue` repo
-links to this doc. It does not duplicate it.

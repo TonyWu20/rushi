@@ -50,7 +50,6 @@ set -u
 cd /path/to/task
 SESSION="<session>"
 SESSIONS_ROOT="sessions" # match [paths] sessions_root
-MAX_HOURS=24
 LOG=logs/monitor.log
 
 loop_alive() { # $1 = session. Returns 0 when the loop process is alive.
@@ -81,10 +80,8 @@ notify() { # $1 = short message. Append to a live loop, or start one.
   fi
 }
 
-# Start the task as a child of the monitor. The `timeout` wrap is the
-# hard cap: a hung task cannot block the monitor forever.
-timeout "$((MAX_HOURS * 3600))" bash -c 'the long-running command' \
-  > "$LOG" 2>&1 &
+# Start the task as a child of the monitor.
+bash -c 'the long-running command' > "$LOG" 2>&1 &
 TASK_PID=$!
 echo "$TASK_PID" > logs/task.pid
 
@@ -95,8 +92,6 @@ RC=$?
 # Poke the session on completion.
 if [ "$RC" -eq 0 ]; then
   notify "task finished cleanly. Review the result and the state files."
-elif [ "$RC" -eq 124 ]; then
-  notify "task hit the time cap. Check its state and relaunch the monitor."
 else
   notify "task failed (exit $RC). $(tail -5 "$LOG" 2>/dev/null)"
 fi
@@ -111,6 +106,32 @@ echo $! > logs/monitor.pid
 
 The bash call returns immediately. The monitor blocks in the background on
 the task's exit. The agent then waits for the message.
+
+## Optional: cap the wait
+
+Before writing the monitor, ask the user whether to cap the wait.
+Give the decision to the user. A silent default is not transparent.
+
+- No cap: the monitor blocks on the task's exit. The recorded monitor
+  PID and the task's own state files are the safety net.
+- Cap: the user names the bound. Wrap the launch in `timeout` with it:
+
+```bash
+timeout "$((CAP_HOURS * 3600))" bash -c 'the long-running command' \
+  > "$LOG" 2>&1 &
+```
+
+With a cap, use the completion check with the 124 branch:
+
+```bash
+if [ "$RC" -eq 0 ]; then
+  notify "task finished cleanly. Review the result and the state files."
+elif [ "$RC" -eq 124 ]; then
+  notify "task hit the time cap. Check its state and relaunch the monitor."
+else
+  notify "task failed (exit $RC). $(tail -5 "$LOG" 2>/dev/null)"
+fi
+```
 
 ## Skeleton: block on a state event
 
@@ -169,9 +190,10 @@ loops. The lock stays the authority for liveness.
 - One message per event. Never send a message per timer tick.
 - Keep the message short. It reopens the session.
 - Record the monitor PID so the agent can check it is alive.
-- Wrap the blocking wait in a hard cap, a `timeout` or a watchdog. The
-  cap stops a hung task from blocking the monitor forever. It is a
-  safety net, not the wait mechanism.
+- Ask the user whether to cap the wait. Give the decision to the user.
+  A cap stops a hung task from blocking the monitor forever. It is a
+  safety net, not the wait mechanism. Without a cap, the recorded
+  monitor PID and the task's state files are the net.
 - The monitor blocks on an event. It does not poll on a timer.
 
 ## Enforcement: the no-long-sleep guard
