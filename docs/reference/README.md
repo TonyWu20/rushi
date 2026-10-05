@@ -534,6 +534,13 @@ Add `"my_tool"` to `[tools] enabled` in `rushi.toml`. Done.
   `rushi run <session> "<msg>"` to start it. The full pattern is
   bundled: `rushi docs monitoring`.
 
+### Run a headless mission
+
+- Fan out detached `rushi` sessions from one bash call: one mission
+  per task, one ping back to the main session per mission end. That
+  is the async form of subagent mode. The full scaffold is bundled:
+  `rushi docs headless-missions`.
+
 ---
 
 ## 10. Self-Documentation & This Doc
@@ -541,10 +548,10 @@ Add `"my_tool"` to `[tools] enabled` in `rushi.toml`. Done.
 - Every tool and hook binary supports `--help`.
 - This reference doc is embedded in the `rushi` binary via `include_str!`.
   Run `rushi docs` to print it, or `rushi docs <section>` to print one
-  section (matched by `## N. Title` heading). The `docs/reference/nix/`
-  sub-docs are bundled too: `rushi docs nix-flake-module` and
-  `rushi docs ext-flake-authoring` print each whole document; `rushi
-  docs --list` lists both the sections and the bundled docs.
+  section (matched by `## N. Title` heading). The bundled sub-docs each
+  print whole: `rushi docs monitoring`, `rushi docs headless-missions`,
+  `rushi docs nix-flake-module`, `rushi docs ext-flake-authoring`.
+  Run `rushi docs --list` to list the sections and the bundled docs.
 - The system prompt carries a one-line pointer:
   *"Harness reference: run `rushi docs` for the full rushi reference."*
 - The agent reads this doc on demand via the `bash` tool when the user

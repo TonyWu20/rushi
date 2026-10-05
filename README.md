@@ -276,6 +276,7 @@ rushi docs --list       # list sections and bundled docs
 rushi docs nix-flake-module
 rushi docs ext-flake-authoring
 rushi docs monitoring
+rushi docs headless-missions
 ```
 
 Key docs:

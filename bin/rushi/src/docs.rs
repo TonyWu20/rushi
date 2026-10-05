@@ -21,6 +21,8 @@ const REFERENCE: &str = include_str!("../../../docs/reference/README.md");
 /// per-section filtering is reserved for the default reference.
 const MONITORING: &str =
     include_str!("../../../docs/reference/monitoring.md");
+const HEADLESS_MISSIONS: &str =
+    include_str!("../../../docs/reference/headless-missions.md");
 const NIX_FLAKE_MODULE: &str =
     include_str!("../../../docs/reference/nix/nix-flake-module.md");
 const EXT_FLAKE_AUTHORING: &str =
@@ -39,6 +41,11 @@ const BUNDLED_DOCS: &[BundledDoc] = &[
         name: "monitoring",
         title: "Monitoring long-running tasks (event-driven reattach via `rushi run`)",
         text: MONITORING,
+    },
+    BundledDoc {
+        name: "headless-missions",
+        title: "Headless missions (the agent-orchestrated session fan-out scaffold)",
+        text: HEADLESS_MISSIONS,
     },
     BundledDoc {
         name: "nix-flake-module",
