@@ -656,3 +656,25 @@ Docs updated: `docs/reference/monitoring.md`,
 `docs/reference/README.md`, `docs/INDEX.md`, and the assemble system
 prompt hint. `user --no-run` is unchanged and stays the dev-install
 equivalent.
+
+## Headless-mission tool form stays parked (2026-10-05, issue #45)
+
+**Observed.** The Q8 decision (rushi-queue) rejected a fixed-arg
+tool for mission orchestration. The scaffold ships as the doc
+`docs/reference/headless-missions.md` (issue #45). It is bundled
+as `rushi docs headless-missions`. The doc teaches the idiom. The
+agent composes any bash it wants.
+
+**Decision.** Park the tool form (an arg-taking tool that compiles
+the scaffold) as a P9 itch. Two concrete triggers:
+
+- Three recorded episodes of an agent mis-composing the scaffold
+  despite the doc (the rule of three).
+- A non-agent caller (human CLI, cron, CI) that needs a stable,
+  machine-checkable arg schema.
+
+If it ships later, it generates from this doc or links to it. It
+does not re-encode the scaffold. One source of truth.
+
+The retired `spawn_agent` spec (`docs/subagent-design.md`, retired
+2026-10-05) shares this trigger. It parks under the same entry.

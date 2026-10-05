@@ -1,8 +1,16 @@
 # Subagent mode: a `spawn_agent` extension tool
 
-Status: **draft, not built.** This is a design spec for an extension tool
-and one kernel config change. It changes no kernel loop, no schema, and no
-tool contract.
+Status: **Retired 2026-10-05. Superseded by
+`docs/reference/headless-missions.md`.** The subagent pattern now
+ships shell-native and async. That form is the headless-mission
+scaffold (`rushi docs headless-missions`). The `spawn_agent` tool
+was not built. Its tool form is parked as a P9 itch
+(`docs/itches.md`).
+
+Two parts stay in force. The kernel seed contract (section 4, the
+`rushi run <session> <task>` form) is implemented. It is the
+spawn contract the kernel doc comments cite. The D6 and D8 deltas
+landed as independent changes. The rest of the spec is parked.
 
 A **subagent** is a second `rushi run` session the main agent starts from
 inside a step. The parent loop blocks for the child's lifetime, reads the

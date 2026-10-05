@@ -1388,7 +1388,9 @@ fn main() {
          The monitor blocks on a task event, not a timer. See `rushi docs monitoring`.\n\
          While the loop is alive, poke it lock-free: `rushi run <session> \"<msg>\" --no-run`\n\
          (`user --no-run` is the equivalent dev-install form). When the loop is dead,\n\
-         use `rushi run <session> \"<msg>\"` to start it.",
+         use `rushi run <session> \"<msg>\"` to start it.\n\
+         Headless missions: fan out detached `rushi` sessions from one bash call.\n\
+         That is the async form of subagent mode. See `rushi docs headless-missions`.",
     );
 
     // Append prompt fragments (docs/system-prompt-generation.md D5).
