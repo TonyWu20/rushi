@@ -55,13 +55,17 @@ rushi run <session> [task]
 | `user` | `bin/user` | Human I/O: read a user message from stdin or file, emit a `user_message` event. |
 
 The loop binary (`bin/rushi`) orchestrates these stages in sequence, handles
-cancellation signals, and manages the session lock (`loop.pid`).
+cancellation signals, and manages the session lock. After the lock it
+writes `loop.pid` and the `loop.meta` identity record (issue #44).
+`loop.meta` is the single source of session identity. Consumers match
+a name or dir against its recorded fields.
 
 The loop binary can also seed a session: `rushi run <session> <task>`
 logs `<task>` as the session's initial `user_message` (steer queue)
 before the loop starts. `--no-run` is the lock-free append form. It
 takes only the log-line lock, then logs the message and exits 0.
-The call never takes the session lock and writes no `loop.pid`.
+The call never takes the session lock and writes no `loop.pid` or
+`loop.meta`.
 It works against a running loop. It fails without a task. This keeps
 `rushi` self-contained for starting a session without the separate
 `user` binary, which plain installs do not ship

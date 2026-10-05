@@ -243,7 +243,7 @@ If any section is missing, the proposal is incomplete.
 | Shared Rust type | 3+ duplicated copies, or a divergence bug |
 | `core` crate | Typed event vocabulary stable 20 sessions + replay-tested loop state machine |
 | Retry/timeout on a stage | A real transient failure observed (e.g., model API 5xx) | **Done** for the model call: `step.rs` model retry loop (2 × 3 s) plus the `model_timeout_s` config knob |
-| Daemon + attachable TUI | TUI restart killing the loop becomes unacceptable | **Done** (loop.pid reattach) |
+| Daemon + attachable TUI | TUI restart killing the loop becomes unacceptable | **Done** (loop.pid reattach. Issue #44 adds `loop.meta`, the single source of session identity) |
 | In-process tool execution (remove the per-call fork/exec) | A tool's per-call process overhead is measured and exceeds the G8 budget (measurement not yet built. All base tools are already compiled Rust binaries, so the remaining cost is fork/exec plus shell spawn for `bash`) |
 | NDJSON streaming tools | A tool must emit progress that changes control flow |
 | Plugin/dynamic-loading system | Hot reload beyond editing scripts is a real requirement |
@@ -258,7 +258,7 @@ If any section is missing, the proposal is incomplete.
   Re-evaluation triggers are recorded in `architecture.md` Phase 3
   (decision 2026-09-16) and parked in `docs/itches.md`.
 - Compiled-in tools (see P7)
-- ~~Daemon/TUI split~~ — **done**: `rushi run` runs the loop as a standalone process; the TUI binary attaches via `loop.pid` and can reattach after restart to send SIGINT/SIGTERM
+- ~~Daemon/TUI split~~ — **done**: `rushi run` runs the loop as a standalone process. The TUI binary attaches via `loop.pid` and can reattach after restart to send SIGINT/SIGTERM. The loop writes a `loop.meta` identity record beside `loop.pid`. Consumers prefer it when present (issue #44)
 - HTTP/WebSocket API (until a non-terminal/remote client is a current requirement)
 - Plugin system / dynamic loading (until script editing is insufficient)
 - NDJSON streaming for tools (until progress affects control flow)

@@ -47,9 +47,18 @@ START_TS=$(date +%s)
 LOG=logs/monitor.log
 
 loop_alive() { # $1 = session. Returns 0 when the loop process is alive.
+  local dir="$SESSIONS_ROOT/$1"
   local pid
-  [ -f "$SESSIONS_ROOT/$1/loop.pid" ] || return 1
-  pid="$(cat "$SESSIONS_ROOT/$1/loop.pid")"
+  # Prefer loop.meta (issue #44): the loop records its own pid and
+  # session identity there. Old loops without the record fall back to
+  # the bare loop.pid.
+  if [ -f "$dir/loop.meta" ]; then
+    pid="$(sed -n 's/^pid = //p' "$dir/loop.meta")"
+  else
+    [ -f "$dir/loop.pid" ] || return 1
+    pid="$(cat "$dir/loop.pid")"
+  fi
+  [ -n "$pid" ] || return 1
   kill -0 "$pid" 2>/dev/null
 }
 
@@ -118,6 +127,12 @@ Both forms queue the message as `steer` by default. The live loop drains
 it at the next step. Plain installs ship only the `rushi` binary. In
 that case the monitor uses `rushi run --no-run` for live sessions. A
 failed poke stays pending for the next cycle.
+
+Liveness checks prefer `loop.meta` (issue #44). The loop writes that
+record beside `loop.pid` after the session lock. The record carries
+the loop pid and the recorded session identity. The skeleton above
+reads the pid from the record and falls back to `loop.pid` for old
+loops. The lock stays the authority for liveness.
 
 ## Rules
 

@@ -15,6 +15,9 @@
 //!   (docs/itches.md: the "hard copies" itch).
 //! - `paths` — config-file discovery and `[paths]` tool-entry
 //!   resolution shared by the kernel and the front-ends.
+//! - `loop_meta` — the `loop.meta` session-identity record written by
+//!   the live loop, plus the reader and the name-or-dir match that
+//!   consumers use instead of cmdline re-derivation (issue #44).
 
 pub mod event;
 pub mod logline;
@@ -26,3 +29,4 @@ pub mod rewind;
 pub mod model_settings;
 pub mod config_check;
 pub mod paths;
+pub mod loop_meta;
