@@ -155,7 +155,7 @@ fn main() {
             let cfg = config::HarnessConfig::load(&PathBuf::from(config_path));
             let session_dir = cfg.resolve_session(&session);
             signals::install();
-            run_loop::run(&cfg, &session_dir, task.as_deref(), no_run);
+            run_loop::run(&cfg, &session, &session_dir, task.as_deref(), no_run);
         }
 
         Command::Step { session } => {

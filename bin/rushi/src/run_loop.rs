@@ -39,10 +39,20 @@ use crate::step::{append_line, make_runner, StepMode};
 /// `no_run`: lock-free append mode, equivalent to `user --no-run`
 /// (bin/user). It seeds `task` with the log-line lock only (FT-005)
 /// and exits. It never takes the session lock (`.loop.lock`) or writes
-/// `loop.pid`, so it succeeds against a live loop, which drains the
-/// message at its next step. A missing or empty task is a hard error:
-/// there is nothing to append.
-pub fn run(cfg: &HarnessConfig, session_dir: &Path, task: Option<&str>, no_run: bool) {
+/// `loop.pid` or `loop.meta`, so it succeeds against a live loop,
+/// which drains the message at its next step. A missing or empty task
+/// is a hard error: there is nothing to append.
+///
+/// `session_arg` is the session argument as given on the command line
+/// (bare name or session dir). The loop records it in `loop.meta`
+/// (issue #44) as the single source of session identity.
+pub fn run(
+    cfg: &HarnessConfig,
+    session_arg: &str,
+    session_dir: &Path,
+    task: Option<&str>,
+    no_run: bool,
+) {
     // The session dir must exist (create it).
     if let Err(e) = std::fs::create_dir_all(session_dir) {
         eprintln!("rushi: cannot create session dir: {e}");
@@ -81,6 +91,12 @@ pub fn run(cfg: &HarnessConfig, session_dir: &Path, task: Option<&str>, no_run: 
     if let Err(e) = std::fs::write(session_dir.join("loop.pid"), format!("{my_pid}\n")) {
         eprintln!("rushi: warning: cannot write loop.pid: {e}");
     }
+
+    // Write the loop.meta identity record beside loop.pid (issue #44).
+    // It is the single source of session identity. Consumers match a
+    // name or dir against its recorded fields. The bare loop.pid stays
+    // for old readers.
+    write_loop_identity(session_dir, session_arg);
 
     // Re-detect and update the session's persisted `cwd` to this
     // (re)started loop process's working directory. This runs once at
@@ -190,6 +206,27 @@ pub fn run(cfg: &HarnessConfig, session_dir: &Path, task: Option<&str>, no_run: 
     }
 
     std::process::exit(0);
+}
+
+/// Write the session-identity record (`loop.meta`, issue #44) after
+/// the lock, beside the bare `loop.pid`.
+///
+/// The record is a flat TOML file with the loop pid, the recorded
+/// session name (the bare name, or the last component of a dir
+/// argument), the canonical session dir, the binary base name, and
+/// the start time. A failed write is a warning: the loop proceeds.
+/// The bare `loop.pid` plus the lock still carry liveness.
+fn write_loop_identity(session_dir: &Path, session_arg: &str) {
+    let meta = rushi_common::loop_meta::LoopMeta {
+        pid: std::process::id(),
+        session: rushi_common::loop_meta::session_name_for(session_arg),
+        dir: rushi_common::loop_meta::canonical_dir(session_dir),
+        binary: rushi_common::loop_meta::binary_name(),
+        started: chrono::Utc::now().timestamp(),
+    };
+    if let Err(e) = rushi_common::loop_meta::write_loop_meta(session_dir, &meta) {
+        eprintln!("rushi: warning: cannot write loop.meta: {e}");
+    }
 }
 
 /// Acquire the exclusive `flock` on `sessions/<n>/.loop.lock`. Exits 1
@@ -377,6 +414,42 @@ mod tests {
             parse_bin: PathBuf::from("parse"),
             log_bin: PathBuf::from("log"),
         }
+    }
+
+    #[test]
+    fn loop_meta_written_with_identity_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let sess = dir.path().join("issue-44");
+        std::fs::create_dir_all(&sess).unwrap();
+
+        write_loop_identity(&sess, "issue-44");
+        let meta = rushi_common::loop_meta::read_loop_meta(&sess)
+            .unwrap()
+            .expect("the record is present");
+        assert_eq!(meta.pid, std::process::id());
+        assert_eq!(meta.session, "issue-44");
+        assert_eq!(meta.dir, sess.canonicalize().unwrap().to_string_lossy());
+        assert_eq!(meta.binary, rushi_common::loop_meta::binary_name());
+        assert!(meta.started > 0, "the start time is set");
+    }
+
+    #[test]
+    fn loop_meta_records_the_bare_name_from_a_dir_arg() {
+        // The issue #44 case: the starter gave the absolute session
+        // dir. The recorded name is the last component, so a consumer
+        // probing the bare name matches the record.
+        let dir = tempfile::tempdir().unwrap();
+        let sess = dir.path().join("issue-29");
+        std::fs::create_dir_all(&sess).unwrap();
+        let abs = sess.canonicalize().unwrap();
+
+        write_loop_identity(&sess, abs.to_str().unwrap());
+        let meta = rushi_common::loop_meta::read_loop_meta(&sess)
+            .unwrap()
+            .expect("the record is present");
+        assert_eq!(meta.session, "issue-29");
+        assert_eq!(meta.dir, abs.to_string_lossy());
+        assert!(meta.matches_name_or_dir("issue-29"));
     }
 
     #[test]

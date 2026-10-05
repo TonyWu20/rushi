@@ -1267,3 +1267,37 @@ root for sibling hook discovery.
 - `cargo test --workspace` is green on the new base.
 - All three CI jobs passed on PR #28, including
   `macos-14`. The PR merged as `f901b8d`.
+
+## FT-029 — A loop started with an absolute session dir probes idle
+
+**Symptom:** The 2026-10-04 tv-rushi episode. `tv rushi-sessions`
+`send_message` starts a detached loop on the absolute session dir.
+The starter is `setsid rushi run <abs-session-dir> <msg>`. The TUI
+attached to that session never shows the running state.
+`stop_external_loop` does nothing.
+
+**Root cause:** Every consumer re-derived "which session is this pid".
+The TUI `loop_identity_ok` check needed the bare session name as a
+whole argument in the loop `/proc/<pid>/cmdline`. A loop started with
+the absolute dir failed that check. A consumer probing the dir it
+resolved itself may check a lock that another resolved dir leaves
+free. The bare `loop.pid` carries no session identity.
+
+**Fix:** The loop process writes a flat TOML `loop.meta` record beside
+`loop.pid` after the session lock (issue #44). The record holds
+`pid`, `session`, `dir`, `binary`, and `started`. `rushi-common`
+exposes the reader (`read_loop_meta`) and the name-or-dir match
+(`LoopMeta::matches_name_or_dir`). Consumers prefer the record when
+present. They fall back to the lock plus the bare `loop.pid` when it
+is absent. The lock stays the liveness authority. `loop.meta` is the
+identity authority. The consumer-side follow-ups (the TUI probe and
+stop, tv-rushi, `rq`) are filed against those repos.
+
+**Verification:**
+- Producer: `loop_meta_written_with_identity_fields` and
+  `loop_meta_records_the_bare_name_from_a_dir_arg` in
+  `bin/rushi/src/run_loop.rs`.
+- Reader: the roundtrip, absent-record, and malformed tests in
+  `rushi-common` `loop_meta.rs`.
+- Replay: an absent record reads as `None`. Old sessions probe as
+  today.
