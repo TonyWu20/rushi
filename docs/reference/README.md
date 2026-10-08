@@ -531,9 +531,8 @@ Add `"my_tool"` to `[tools] enabled` in `rushi.toml`. Done.
 - Do not poll a long task with `sleep`. Write a small monitor script,
   launch it detached with `nohup`, and have it wake the idle session on a
   state change or finish. The poke is always `rushi run <session> "<msg>"`.
-  The call branches on the session lock: a live loop drains the message,
-  a dead loop is started by the call. The monitor carries no liveness
-  check. The full pattern is bundled: `rushi docs monitoring`.
+  It works whether the loop is alive or dead. The monitor carries no
+  liveness check. The full pattern is bundled: `rushi docs monitoring`.
 
 ### Run a headless mission
 

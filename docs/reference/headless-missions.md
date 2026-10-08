@@ -67,8 +67,7 @@ rushi run <s> <task> && rushi run <main> "done" || rushi run <main> "failed: $(t
 ```
 
 The `rushi run` poke plus `&&` and `||` is the event trigger. The
-poke branches on the main session's lock: it appends while the main
-loop is alive and starts the loop when it is dead. No liveness check
+poke works whether the main loop is alive or dead. No liveness check
 in the script. The ping is the mission's terminal event. No daemon is
 needed.
 

@@ -29,10 +29,8 @@ The monitor waits for the event. It does not check on a timer.
 3. Launch the monitor with `nohup` or `setsid nohup`. The bash tool call
    returns immediately. The monitor blocks in the background.
 4. When the event fires, the monitor pokes this session with one short
-   message: `rushi run <session> "<msg>"`. The call branches on the
-   session lock. A live loop drains the message at its next step. A
-   dead loop is started by the call. The monitor carries no liveness
-   check.
+   message: `rushi run <session> "<msg>"`. The monitor carries no
+   liveness check.
 5. The message reattaches the session and wakes the agent.
 
 The monitor sends one message per event. It never sends one per timer
@@ -52,11 +50,10 @@ cd /path/to/task
 SESSION="<session>"
 LOG=logs/monitor.log
 
-notify() { # $1 = short message. Poke the session; the call branches.
+notify() { # $1 = short message. Poke the session.
   local msg="$1"
-  # The single canonical poke. `rushi run` takes the session lock's
-  # word: a live loop drains the message at its next step, a dead
-  # loop is started by the call. No liveness check, no timer.
+  # The single poke form. It works whether the loop is alive or
+  # dead. No liveness check, no timer.
   rushi run "$SESSION" "$msg" >> "$LOG" 2>&1
 }
 
@@ -135,30 +132,6 @@ A blocking `inotifywait -q runs/latest/done` is the same idiom when
 `inotifywait` is available. When the task emits no observable event, add
 one: a marker file, a log line, or a process the monitor can wait on.
 That is what makes the monitor event-driven.
-
-## The poke
-
-One form covers both loop states: `rushi run <session> "<msg>"`.
-
-Lock behavior, verified in `bin/rushi/src/run_loop.rs`:
-
-- The call attempts the exclusive `.loop.lock` without blocking.
-- A live loop holds the lock: the call appends the message with the
-  log-line lock only and exits 0. The live loop drains it at its next
-  step. It writes no `loop.pid` and starts no loop.
-- No live loop holds the lock: the call starts one. It logs the
-  message and runs it.
-
-The kernel releases the lock when the loop dies, so the lock is the
-authority for liveness. The caller never checks `loop.meta` or
-`loop.pid` itself.
-
-The message is queued as `steer` by default. The live loop drains it
-at the next step.
-
-`user --session <session> --no-run "<msg>"` is the append-only form
-(dev installs). It takes only the log-line lock and never starts a
-loop. Use it when a start is not wanted.
 
 ## Rules
 

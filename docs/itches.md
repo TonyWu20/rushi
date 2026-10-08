@@ -724,3 +724,12 @@ drops the liveness check; the poke is the single form),
 `docs/reference/headless-missions.md`, `docs/reference/README.md`,
 `docs/INDEX.md`, `docs/subagent-design.md`, and the assemble system
 prompt hint (`bin/assemble/src/main.rs`).
+
+**Refinement (same day).** The agent-facing docs drop the branch
+explanation. The "The poke" section of `docs/reference/monitoring.md`
+is removed. The agent needs only the command: `rushi run <session>
+"<msg>"`. The monitor skeleton, the headless-mission ping, the
+reference bullet, and the system-prompt hint now say: run the
+command, never check liveness. The lock-branch mechanism stays
+documented in `docs/reference/README.md` section 2 and in
+`bin/rushi/src/run_loop.rs`.
