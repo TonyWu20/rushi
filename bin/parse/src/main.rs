@@ -10,7 +10,8 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(
     name = "parse",
-    about = "Validate model output and emit execution events"
+    about = "Validate model output and emit execution events",
+    version
 )]
 struct Args {
     /// Path to config file

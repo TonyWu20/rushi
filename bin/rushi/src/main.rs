@@ -42,7 +42,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "rushi", about = "The rushi distribution: loop engine, tools, and project setup")]
+#[command(name = "rushi", about = "The rushi distribution: loop engine, tools, and project setup", version)]
 struct Args {
     /// Path to config file (for the loop and `config` subcommands).
     /// Outranks the `$CONFIG` env var; when omitted, falls back to

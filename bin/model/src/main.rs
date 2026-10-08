@@ -9,7 +9,7 @@ use std::io::{self, BufRead, Read, Write};
 
 /// Call the model API via Responses format
 #[derive(Parser)]
-#[command(name = "model", about = "Call the model API and output model response")]
+#[command(name = "model", about = "Call the model API and output model response", version)]
 struct Args {
     /// Path to config file
     #[arg(long, default_value = "config.toml")]

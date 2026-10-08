@@ -21,7 +21,7 @@ use std::path::PathBuf;
 /// the same seed `user_message` (steer queue) and then runs the loop
 /// in-process (docs/subagent-design.md section 4).
 #[derive(Parser)]
-#[command(name = "user", about = "Append a user message and run the agent loop")]
+#[command(name = "user", about = "Append a user message and run the agent loop", version)]
 struct Args {
     /// Session name or directory
     #[arg(long)]

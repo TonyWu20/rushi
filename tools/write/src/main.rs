@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 /// Write content to a file
 #[derive(Parser)]
-#[command(name = "write", about = "Write content to a file")]
+#[command(name = "write", about = "Write content to a file", version)]
 struct Args {
     /// Maximum content bytes
     #[arg(long, default_value = "1048576")]

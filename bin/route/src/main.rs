@@ -11,7 +11,7 @@ use std::process::{Child, Command, Stdio};
 
 /// Dispatch tool calls to subprocesses
 #[derive(Parser)]
-#[command(name = "route", about = "Dispatch tool calls to tool subprocesses")]
+#[command(name = "route", about = "Dispatch tool calls to tool subprocesses", version)]
 struct Args {
     /// Native tool dir (a dir containing a `tool.toml` manifest, or
     /// a root dir holding several tool sub-dirs). Repeated; each is

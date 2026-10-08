@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 #[derive(Parser)]
 #[command(
     name = "bash",
-    about = "Run a shell command in the session working directory"
+    about = "Run a shell command in the session working directory",
+    version
 )]
 struct Args {
     /// Maximum combined output bytes (shared by stdout and stderr)

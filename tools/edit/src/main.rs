@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 /// Edit a file by replacing strings
 #[derive(Parser)]
-#[command(name = "edit", about = "Edit a file by replacing strings")]
+#[command(name = "edit", about = "Edit a file by replacing strings", version)]
 struct Args {}
 
 fn main() {

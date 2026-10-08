@@ -10,7 +10,8 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(
     name = "claim",
-    about = "Determine what work is owed from the session log"
+    about = "Determine what work is owed from the session log",
+    version
 )]
 struct Args {
     /// Session directory path

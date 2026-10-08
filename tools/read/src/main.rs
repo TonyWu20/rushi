@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 /// Read a file and output its contents
 #[derive(Parser)]
-#[command(name = "read", about = "Read a file and output its contents")]
+#[command(name = "read", about = "Read a file and output its contents", version)]
 struct Args {
     /// Maximum number of lines to read
     #[arg(long, default_value = "2000")]
