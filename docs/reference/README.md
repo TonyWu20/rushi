@@ -61,12 +61,14 @@ writes `loop.pid` and the `loop.meta` identity record (issue #44).
 a name or dir against its recorded fields.
 
 The loop binary can also seed a session: `rushi run <session> <task>`
-logs `<task>` as the session's initial `user_message` (steer queue)
-before the loop starts. `--no-run` is the lock-free append form. It
-takes only the log-line lock, then logs the message and exits 0.
-The call never takes the session lock and writes no `loop.pid` or
-`loop.meta`.
-It works against a running loop. It fails without a task. This keeps
+logs `<task>` as the session's `user_message` (steer queue). The call
+branches on the session lock: a live loop holds it, so the task is
+appended with the log-line lock only and the call exits 0 — the live
+loop drains the message at its next step. No live loop: the call
+starts the loop, which logs the task and runs it. This is the single
+canonical poke of a session; the caller never branches on loop state
+(`docs/reference/monitoring.md`, "The poke"). The
+append-without-start form is `user --no-run` only. This keeps
 `rushi` self-contained for starting a session without the separate
 `user` binary, which plain installs do not ship
 (`docs/subagent-design.md`, the subagent spawn contract).
@@ -528,11 +530,10 @@ Add `"my_tool"` to `[tools] enabled` in `rushi.toml`. Done.
 
 - Do not poll a long task with `sleep`. Write a small monitor script,
   launch it detached with `nohup`, and have it wake the idle session on a
-  state change or finish. While the loop is alive, use the lock-free
-  `rushi run <session> "<msg>" --no-run` (`user --no-run` is an
-  equivalent dev-install form). When the loop is dead, use
-  `rushi run <session> "<msg>"` to start it. The full pattern is
-  bundled: `rushi docs monitoring`.
+  state change or finish. The poke is always `rushi run <session> "<msg>"`.
+  The call branches on the session lock: a live loop drains the message,
+  a dead loop is started by the call. The monitor carries no liveness
+  check. The full pattern is bundled: `rushi docs monitoring`.
 
 ### Run a headless mission
 

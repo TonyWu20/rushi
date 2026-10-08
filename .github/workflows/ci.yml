@@ -108,9 +108,9 @@ jobs:
         if: matrix.e2e
         run: bash scripts/steer-inflight-e2e.sh
 
-      - name: "e2e: no-run lock-free"
+      - name: "e2e: run lock-branch"
         if: matrix.e2e
-        run: bash scripts/no-run-lock-free-e2e.sh
+        run: bash scripts/run-lock-branch-e2e.sh
 
       - name: "e2e: tool-after transform"
         if: matrix.e2e

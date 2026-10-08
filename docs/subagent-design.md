@@ -614,12 +614,17 @@ parent agent sees in its next step.
   is superseded. The tool is exts-owned (decision 2026-09-16).
 
 - `rushi run` accepts an optional initial task (implemented
-  2026-09-18): `rushi run <session> [task] [--no-run]`. When a task
-  is given, `run_loop` logs it as a steer `user_message` before the
-  first step and records the session `cwd` file. `claim` then reports
-  `awaiting_model` and the first step runs the model turn on it.
-  This is the seed path for subagents and replaces the `user` binary
-  in distributed installs, which ship only `rushi`.
+  2026-09-18, lock-branch added 2026-10-06): `rushi run <session>
+  [task]`. When a task is given, `run_loop` logs it as a steer
+  `user_message` and branches on the session lock: a live loop holds
+  it, so the task is appended with the log-line lock only and the
+  call exits 0 (the live loop drains it at its next step). No live
+  loop: the call starts the loop and records the session `cwd` file.
+  `claim` then reports `awaiting_model` and the first step runs the
+  model turn on it. The `--no-run` flag is retired (2026-10-06);
+  the append-without-start form is `user --no-run` only. This is the
+  seed path for subagents and replaces the `user` binary in
+  distributed installs, which ship only `rushi`.
 
 - Route tool-env exports: `HARNESS_BIN` and `CONFIG` join
   `HARNESS_SESSION_DIR` in the tool subprocess env. The exts

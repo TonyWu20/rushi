@@ -8,12 +8,14 @@
 //!   follow-up).
 //! - `rushi setup [--locked]` — initialize a project from `rushi.toml`
 //! - `rushi run SESSION [TASK]` — the full turn loop. With `TASK`, it
-//!   is first logged as the session's initial `user_message` (steer
-//!   queue) so the loop starts by running a model turn on it — the
-//!   subagent spawn contract (docs/subagent-design.md section 4).
-//!   `--no-run` is the lock-free append form: it logs `TASK` with the
-//!   log-line lock only (equivalent to `user --no-run`) and exits
-//!   without running the loop, so it can poke a live session.
+//!   is first logged as the session's `user_message` (steer queue) so
+//!   the loop starts by running a model turn on it — the subagent
+//!   spawn contract (docs/subagent-design.md section 4). The call
+//!   branches on the session lock: a live loop holds it, so the task
+//!   is appended with the log-line lock only and the call exits 0
+//!   (the live loop drains the message at its next step). No live
+//!   loop: the call starts the loop. This is the single canonical poke
+//!   of a session; the caller never branches on loop state.
 //! - `rushi step SESSION` — one step (internal, TUI-supervised)
 //! - `rushi docs [SECTION|DOC]` — print the embedded harness reference;
 //!   a section of the default reference, or a bundled sub-document by
@@ -65,27 +67,25 @@ enum Command {
     /// Run the full turn loop (replaces `turn.sh`).
     ///
     /// With an optional `TASK`, the prompt is logged as the session's
-    /// initial `user_message` (steer queue) before the loop starts, so
-    /// the loop's first step runs a model turn on it. This makes `rushi`
-    /// self-contained for seeding a session (the subagent spawn
-    /// contract, docs/subagent-design.md section 4) without the
-    /// separate `user` binary, which plain installs do not ship.
+    /// `user_message` (steer queue). The call branches on the session
+    /// lock: a live loop holds it, so the task is appended with the
+    /// log-line lock only and the call exits 0 — the live loop drains
+    /// the message at its next step. No live loop: the call starts the
+    /// loop, which logs the task and runs it. This is the single
+    /// canonical poke of a session; the caller never branches on loop
+    /// state. The call keeps `rushi` self-contained for seeding a
+    /// session without the separate `user` binary, which plain
+    /// installs do not ship (the subagent spawn contract,
+    /// docs/subagent-design.md section 4).
     Run {
         /// Session name or directory
         session: String,
 
-        /// Initial prompt, logged as a `user_message` before the loop
-        /// starts. Omit to continue from the log's current state.
-        /// With `--no-run`, a task is needed.
+        /// Prompt, logged as a `user_message` (steer queue). Omit to
+        /// continue from the log's current state. Against a live loop
+        /// the prompt is appended and the call exits 0 without
+        /// starting a loop; the live loop drains it at its next step.
         task: Option<String>,
-
-        /// Lock-free append mode (equivalent to `user --no-run`):
-        /// log the task with the log-line lock only, print the event
-        /// line, and exit without running the loop. Works against a
-        /// live session, which drains the message at its next step.
-        /// A task is needed.
-        #[arg(long)]
-        no_run: bool,
     },
     /// Run a single step (replaces `step.sh`)
     Step {
@@ -151,11 +151,11 @@ fn main() {
             }
         }
 
-        Command::Run { session, task, no_run } => {
+        Command::Run { session, task } => {
             let cfg = config::HarnessConfig::load(&PathBuf::from(config_path));
             let session_dir = cfg.resolve_session(&session);
             signals::install();
-            run_loop::run(&cfg, &session, &session_dir, task.as_deref(), no_run);
+            run_loop::run(&cfg, &session, &session_dir, task.as_deref());
         }
 
         Command::Step { session } => {

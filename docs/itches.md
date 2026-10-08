@@ -642,6 +642,8 @@ No `.loop.lock`, no `loop.pid`, no `cwd` refresh, no loop.
 `user --no-run` was already lock-free. `rushi run --no-run` now
 matches it. A plain install can poke a live session.
 The command is `rushi run <session> "<msg>" --no-run`.
+(Superseded 2026-10-06: the flag is retired; the loop-state branch
+moves into `rushi run` itself. See the entry below.)
 
 A missing or empty task exits 1. The old quirk (a bare `--no-run`
 started the loop) is gone.
@@ -678,3 +680,47 @@ does not re-encode the scaffold. One source of truth.
 
 The retired `spawn_agent` spec (`docs/subagent-design.md`, retired
 2026-10-05) shares this trigger. It parks under the same entry.
+
+
+## `rushi run --no-run` is retired; the loop-state branch moves into `rushi run` (2026-10-06)
+
+**Problem.** The loop's active/idle state is meta-knowledge to a
+running agent. An agent that is generating a response believes its
+loop is active, so it picks `rushi run --no-run` for the ping back.
+When the loop is actually dead (the call returned to the user, the
+mission started), the `--no-run` append starts nothing and the ping
+is lost. No model can be entrusted to branch on loop state. The
+failure window must be zero.
+
+**Decision.** `rushi run` becomes the only acceptable poke of a
+session. The active/idle branch is internalized in the deterministic
+side (`bin/rushi/src/run_loop.rs`). The `--no-run` flag is removed
+from `rushi run`; it now fails as an unknown flag. The
+append-without-start behavior is `user --no-run` only.
+
+**Behavior.** `rushi run <session> <task>`:
+
+- An empty task exits 1 before the lock.
+- The call attempts the exclusive `.loop.lock` without blocking. The
+  kernel releases the `flock` when the holder dies, so the lock is
+  the authority for liveness: held means a live loop.
+- Held: the task is appended with the log-line lock only and the
+  call exits 0. It writes no `loop.pid` and starts no loop. The
+  live loop drains the message at its next step.
+- Free: the call starts the loop (lock, `loop.pid`, `loop.meta`,
+  `cwd` refresh, seed, run).
+- No task against a live loop: a notice and exit 0. Nothing to start.
+
+**Proof.** `scripts/run-lock-branch-e2e.sh` (CI: "e2e: run
+lock-branch") replaces `scripts/no-run-lock-free-e2e.sh` and carries
+12 checks. A live loop holds the lock while a plain `rushi run`
+poke appends and exits 0. The live loop drains the poked message.
+The task-less poke exits 0 without appending. `--no-run` fails as
+an unknown flag. A dead session starts the loop on a plain `rushi
+run`. `user --no-run` stays append-only and starts no loop.
+
+Docs updated: `docs/reference/monitoring.md` (the monitor skeleton
+drops the liveness check; the poke is the single form),
+`docs/reference/headless-missions.md`, `docs/reference/README.md`,
+`docs/INDEX.md`, `docs/subagent-design.md`, and the assemble system
+prompt hint (`bin/assemble/src/main.rs`).

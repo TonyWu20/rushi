@@ -576,7 +576,7 @@ output. No other TUI spawn change.
 same semantics as the TUI (command, args, `arg_style`, the config
 directory as working dir, the absolute `CONFIG`). The hardcoded
 `scripts/turn.sh` path goes. A missing `[loop]` table is a hard
-error. `--no-run` is unchanged.
+error. `user --no-run` is unchanged.
 
 ## 6. The `rushi-common` crate
 

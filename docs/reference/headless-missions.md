@@ -66,8 +66,11 @@ On mission end, the orchestrator pings the main session:
 rushi run <s> <task> && rushi run <main> "done" || rushi run <main> "failed: $(tail -n 5 log)"
 ```
 
-The blocking `rushi run` plus `&&` and `||` is the event trigger.
-The ping is the mission's terminal event. No daemon is needed.
+The `rushi run` poke plus `&&` and `||` is the event trigger. The
+poke branches on the main session's lock: it appends while the main
+loop is alive and starts the loop when it is dead. No liveness check
+in the script. The ping is the mission's terminal event. No daemon is
+needed.
 
 The main session is the one the agent is in. It wakes on the ping
 and reads the result. That is the same event-driven reattach that
@@ -99,4 +102,5 @@ A headless mission is the monitor pattern applied to a blocking
 on it directly. No separate monitor is needed.
 
 Watch long external commands: `rushi docs monitoring`. The monitor
-blocks on a task event and pokes the session.
+blocks on a task event and pokes the session with the same single
+`rushi run` form.

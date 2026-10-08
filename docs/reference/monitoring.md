@@ -29,9 +29,10 @@ The monitor waits for the event. It does not check on a timer.
 3. Launch the monitor with `nohup` or `setsid nohup`. The bash tool call
    returns immediately. The monitor blocks in the background.
 4. When the event fires, the monitor pokes this session with one short
-   message. While the loop is alive, use the lock-free
-   `rushi run <session> "<msg>" --no-run`. When the loop is dead, use
-   `rushi run <session> "<msg>"` to start it.
+   message: `rushi run <session> "<msg>"`. The call branches on the
+   session lock. A live loop drains the message at its next step. A
+   dead loop is started by the call. The monitor carries no liveness
+   check.
 5. The message reattaches the session and wakes the agent.
 
 The monitor sends one message per event. It never sends one per timer
@@ -49,35 +50,14 @@ not the wait mechanism.
 set -u
 cd /path/to/task
 SESSION="<session>"
-SESSIONS_ROOT="sessions" # match [paths] sessions_root
 LOG=logs/monitor.log
 
-loop_alive() { # $1 = session. Returns 0 when the loop process is alive.
-  local dir="$SESSIONS_ROOT/$1"
-  local pid
-  # Prefer loop.meta (issue #44): the loop records its own pid and
-  # session identity there. Old loops without the record fall back to
-  # the bare loop.pid.
-  if [ -f "$dir/loop.meta" ]; then
-    pid="$(sed -n 's/^pid = //p' "$dir/loop.meta")"
-  else
-    [ -f "$dir/loop.pid" ] || return 1
-    pid="$(cat "$dir/loop.pid")"
-  fi
-  [ -n "$pid" ] || return 1
-  kill -0 "$pid" 2>/dev/null
-}
-
-notify() { # $1 = short message. Append to a live loop, or start one.
+notify() { # $1 = short message. Poke the session; the call branches.
   local msg="$1"
-  if loop_alive "$SESSION"; then
-    # Lock-free append. The running loop drains the message at its next
-    # step. `user --no-run` is the equivalent dev-install form.
-    rushi run "$SESSION" "$msg" --no-run >> "$LOG" 2>&1
-  else
-    # No live loop: start one. It logs the task and runs it.
-    rushi run "$SESSION" "$msg" >> "$LOG" 2>&1
-  fi
+  # The single canonical poke. `rushi run` takes the session lock's
+  # word: a live loop drains the message at its next step, a dead
+  # loop is started by the call. No liveness check, no timer.
+  rushi run "$SESSION" "$msg" >> "$LOG" 2>&1
 }
 
 # Start the task as a child of the monitor.
@@ -105,7 +85,8 @@ echo $! > logs/monitor.pid
 ```
 
 The bash call returns immediately. The monitor blocks in the background on
-the task's exit. The agent then waits for the message.
+the task's exit. The agent then waits for the message. The poke resolves
+its config from the monitor's CWD, or from `$CONFIG` when set.
 
 ## Optional: cap the wait
 
@@ -155,35 +136,29 @@ A blocking `inotifywait -q runs/latest/done` is the same idiom when
 one: a marker file, a log line, or a process the monitor can wait on.
 That is what makes the monitor event-driven.
 
-## Poke forms
+## The poke
 
-The monitor pokes the session in two cases:
-
-- The loop is alive. Use the lock-free `rushi run <session> "<msg>"
-  --no-run`. It takes only the log-line lock, so it never collides with
-  the running loop. The live loop drains the message at its next step.
-  `user --session <session> --no-run "<msg>"` is the equivalent
-  dev-install form.
-- The loop is dead. `rushi run <session> "<msg>"` logs the message and
-  starts the loop, which runs it.
+One form covers both loop states: `rushi run <session> "<msg>"`.
 
 Lock behavior, verified in `bin/rushi/src/run_loop.rs`:
 
-- `rushi run` (without `--no-run`) takes the exclusive `.loop.lock`
-  before it logs the task.
-- `rushi run --no-run` is append-only. It takes only the log-line lock,
-  writes the `user_message`, and exits 0. It works against a live loop.
-- `user --no-run` has the same lock behavior.
+- The call attempts the exclusive `.loop.lock` without blocking.
+- A live loop holds the lock: the call appends the message with the
+  log-line lock only and exits 0. The live loop drains it at its next
+  step. It writes no `loop.pid` and starts no loop.
+- No live loop holds the lock: the call starts one. It logs the
+  message and runs it.
 
-Both forms queue the message as `steer` by default. The live loop drains
-it at the next step. Plain installs ship only the `rushi` binary. In
-that case the monitor uses `rushi run --no-run` for live sessions.
+The kernel releases the lock when the loop dies, so the lock is the
+authority for liveness. The caller never checks `loop.meta` or
+`loop.pid` itself.
 
-Liveness checks prefer `loop.meta` (issue #44). The loop writes that
-record beside `loop.pid` after the session lock. The record carries
-the loop pid and the recorded session identity. The skeleton above
-reads the pid from the record and falls back to `loop.pid` for old
-loops. The lock stays the authority for liveness.
+The message is queued as `steer` by default. The live loop drains it
+at the next step.
+
+`user --session <session> --no-run "<msg>"` is the append-only form
+(dev installs). It takes only the log-line lock and never starts a
+loop. Use it when a start is not wanted.
 
 ## Rules
 

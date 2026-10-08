@@ -9,6 +9,13 @@ use std::path::PathBuf;
 
 /// Append a user_message event to a session log and run the agent loop
 ///
+/// `user` is the append-only human entry point. With `--no-run` it
+/// appends the `user_message` and exits: it never starts the loop. It
+/// is the only append-without-start form. The single canonical poke of
+/// a session is `rushi run <session> <task>`, which branches on the
+/// session lock: a live loop drains the appended message, a dead loop
+/// is started by the call (docs/reference/monitoring.md, "The poke").
+///
 /// In distributed installs where only the `rushi` binary is shipped
 /// (plain `install.sh`), prefer `rushi run <session> <task>`. It logs
 /// the same seed `user_message` (steer queue) and then runs the loop

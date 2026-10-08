@@ -1,19 +1,24 @@
 //! The `rushi run` turn loop (docs/phase-2-plan.md section 4.1).
 //!
-//! Replaces `scripts/turn.sh`. Acquires the session lock, then loops:
-//! step → claim → (`run.idle` window) → repeat until idle-without-follow
-//! or exhausted.
+//! Replaces `scripts/turn.sh`. Branches on the session lock, then
+//! loops: step → claim → (`run.idle` window) → repeat until
+//! idle-without-follow or exhausted.
 //!
-//! `--no-run` skips the lock and the loop. It appends the task as a
-//! steer `user_message` with the log-line lock only, prints the event
-//! line, and exits 0. This is the lock-free poke that works against
-//! a live loop (the `user --no-run` equivalent, docs/itches.md).
+//! The session lock is the authority for loop liveness: the kernel
+//! releases the `flock` when the holder dies. When a live loop holds
+//! the lock, the call appends the task with the log-line lock only,
+//! prints the event line, and exits 0 without starting a loop. The
+//! live loop drains the message at its next step. When no live loop
+//! holds the lock, the call starts one. This makes `rushi run` the
+//! single canonical poke of a session: the caller never branches on
+//! loop state (docs/reference/monitoring.md, "The poke").
 //!
 //! # Exit codes
 //! - `0` — clean stop (idle with no pending follow-ups, exhausted, or a
-//!   logged terminal error event), or a `--no-run` append succeeded
-//! - `1` — hard failure (config unreadable, log append fails, lock held,
-//!   or `--no-run` without a task)
+//!   logged terminal error event), or a poke of a live session (the
+//!   task was appended, or there was no task to start)
+//! - `1` — hard failure (config unreadable, log append fails, or an
+//!   empty task)
 //! - `143` — SIGTERM
 //! - `130` — SIGINT
 
@@ -30,18 +35,25 @@ use crate::step::{append_line, make_runner, StepMode};
 
 /// The `rushi run` entry point.
 ///
-/// `task`: optional initial prompt (`rushi run SESSION [TASK]`). When
-/// present it is logged as a steer `user_message` before the loop
-/// starts, so `claim` reports `awaiting_model` and the first step runs
-/// a model turn on it — the subagent spawn contract
-/// (docs/subagent-design.md section 4).
+/// `task`: optional prompt (`rushi run SESSION [TASK]`). When present
+/// it is logged as a steer `user_message`, so `claim` reports
+/// `awaiting_model` and the first step runs a model turn on it — the
+/// subagent spawn contract (docs/subagent-design.md section 4).
 ///
-/// `no_run`: lock-free append mode, equivalent to `user --no-run`
-/// (bin/user). It seeds `task` with the log-line lock only (FT-005)
-/// and exits. It never takes the session lock (`.loop.lock`) or writes
-/// `loop.pid` or `loop.meta`, so it succeeds against a live loop,
-/// which drains the message at its next step. A missing or empty task
-/// is a hard error: there is nothing to append.
+/// The call branches on the session lock (`.loop.lock`), which is the
+/// authority for loop liveness (the kernel releases the `flock` when
+/// the holder dies):
+///
+/// - Held by a live loop: the task is appended with the log-line lock
+///   only (FT-005) and the call exits 0. It writes no `loop.pid` or
+///   `loop.meta` and starts no loop. The live loop drains the message
+///   at its next step. Without a task, the call prints a notice and
+///   exits 0: there is nothing to start.
+/// - Free: the call takes the lock and runs the full loop.
+///
+/// This is the single canonical poke of a session. The caller never
+/// branches on loop state. The append-without-start form is
+/// `user --no-run` (bin/user) only.
 ///
 /// `session_arg` is the session argument as given on the command line
 /// (bare name or session dir). The loop records it in `loop.meta`
@@ -51,7 +63,6 @@ pub fn run(
     session_arg: &str,
     session_dir: &Path,
     task: Option<&str>,
-    no_run: bool,
 ) {
     // The session dir must exist (create it).
     if let Err(e) = std::fs::create_dir_all(session_dir) {
@@ -59,31 +70,39 @@ pub fn run(
         std::process::exit(1);
     }
 
-    // Lock-free append mode (`--no-run`), equivalent to `user --no-run`.
-    // Seed the task with the log-line lock only and exit. Skip the
-    // session lock, `loop.pid`, the `cwd` refresh, the signal handlers,
-    // and the loop. This makes a valid poke of a live session and lets
-    // a plain install (which ships only `rushi`) drive a live loop.
-    if no_run {
-        match task {
-            Some(t) if !t.trim().is_empty() => {
-                let line = seed_initial_message(cfg, session_dir, t);
-                println!("{line}");
-                std::process::exit(0);
-            }
-            Some(_) => {
-                eprintln!("rushi: task must not be empty");
-                std::process::exit(1);
-            }
-            None => {
-                eprintln!("rushi: --no-run requires a task");
-                std::process::exit(1);
-            }
-        }
+    // An empty task is a hard error before the lock: there is
+    // nothing to append and nothing to say.
+    if task.is_some_and(|t| t.trim().is_empty()) {
+        eprintln!("rushi: task must not be empty");
+        std::process::exit(1);
     }
 
-    // Acquire the exclusive session lock for the process life.
-    acquire_lock(session_dir);
+    // The deterministic branch on the session lock. The kernel
+    // releases the flock when the holder dies, so a held lock means a
+    // live loop and a free lock means no live loop. The branch lives
+    // here, in the deterministic side: the caller never checks
+    // liveness.
+    if !try_acquire_lock(session_dir) {
+        // Live branch: a live loop holds the lock. Append the task
+        // with the log-line lock only and exit. The live loop drains
+        // the message at its next step. No `loop.pid`, no `loop.meta`,
+        // no `cwd` refresh, no loop.
+        if let Some(task) = task {
+            let line = seed_initial_message(cfg, session_dir, task);
+            println!("{line}");
+        }
+        let hint = liveness_hint(session_dir);
+        if task.is_some() {
+            println!(
+                "rushi: session loop is alive{hint}; message appended, the live loop will drain it."
+            );
+        } else {
+            println!("rushi: session loop is alive{hint}; nothing to start.");
+        }
+        std::process::exit(0);
+    }
+
+    // Dead branch: we hold the lock for the process life.
 
     // Write loop.pid after the lock. The harness is the only writer
     // (the TUI probe reads it; the TUI no longer writes it).
@@ -111,13 +130,8 @@ pub fn run(
 
     // Seed the initial user message before the first step. A steer
     // message leaves the claim in `awaiting_model`, so the loop runs
-    // the prompt instead of idling out. (`--no-run` is handled above,
-    // before the lock.)
+    // the prompt instead of idling out.
     if let Some(task) = task {
-        if task.trim().is_empty() {
-            eprintln!("rushi: task must not be empty");
-            std::process::exit(1);
-        }
         seed_initial_message(cfg, session_dir, task);
     }
 
@@ -229,9 +243,15 @@ fn write_loop_identity(session_dir: &Path, session_arg: &str) {
     }
 }
 
-/// Acquire the exclusive `flock` on `sessions/<n>/.loop.lock`. Exits 1
-/// when a live loop holds it, naming the holder from `loop.pid`.
-fn acquire_lock(session_dir: &Path) {
+/// Attempt the exclusive non-blocking `flock` on
+/// `sessions/<n>/.loop.lock`. On success the lock is held for the
+/// process life (the fd is leaked on purpose). Returns `true` when
+/// this call now owns the lock and `false` when another live loop
+/// holds it.
+///
+/// The kernel releases the `flock` when the holder dies, so the lock
+/// is the authority for loop liveness: a held lock means a live loop.
+fn try_acquire_lock(session_dir: &Path) -> bool {
     let lock_path = session_dir.join(".loop.lock");
     let lock_file = match std::fs::File::create(&lock_path) {
         Ok(f) => f,
@@ -245,25 +265,34 @@ fn acquire_lock(session_dir: &Path) {
     let fd = lock_file.as_raw_fd();
     let locked: i32 = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
     if locked != 0 {
-        let pid_hint = std::fs::read_to_string(session_dir.join("loop.pid"))
-            .ok()
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default();
-        if pid_hint.is_empty() {
-            eprintln!("rushi: session lock is held by another loop");
-        } else {
-            eprintln!(
-                "rushi: session lock is held by another loop (pid {pid_hint})"
-            );
-        }
-        // Keep the fd open for the process life so the lock is held.
-        std::mem::forget(lock_file);
-        std::process::exit(1);
+        // A live loop holds the lock. Drop this fd: it holds nothing.
+        return false;
     }
 
     // Hold the lock for the process life: forget the guard so the fd
     // (and the flock) are never released by a drop.
     std::mem::forget(lock_file);
+    true
+}
+
+/// A best-effort holder hint for the live-branch notice: the pid from
+/// the `loop.meta` record (issue #44), falling back to the bare
+/// `loop.pid`. The lock is the authority; the hint is cosmetic and
+/// may be absent.
+fn liveness_hint(session_dir: &Path) -> String {
+    if let Ok(Some(meta)) = rushi_common::loop_meta::read_loop_meta(session_dir) {
+        return format!(" (pid {})", meta.pid);
+    }
+    let pid = std::fs::read_to_string(session_dir.join("loop.pid"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default();
+    if pid.is_empty() {
+        String::new()
+    } else {
+        format!(" (pid {pid})")
+    }
 }
 
 /// Log the initial `user_message` into a fresh (or resumed) session and
@@ -450,6 +479,21 @@ mod tests {
         assert_eq!(meta.session, "issue-29");
         assert_eq!(meta.dir, abs.to_string_lossy());
         assert!(meta.matches_name_or_dir("issue-29"));
+    }
+
+    #[test]
+    fn try_acquire_lock_free_then_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let sess = dir.path().join("sess");
+        std::fs::create_dir_all(&sess).unwrap();
+
+        // The session dir is fresh: the lock is free and the call
+        // takes it (leaking the fd for the process life).
+        assert!(try_acquire_lock(&sess), "a free lock is acquired");
+
+        // The leaked fd still holds the flock, so a second probe
+        // reports a live loop. This is the live-branch of `run`.
+        assert!(!try_acquire_lock(&sess), "a held lock is reported");
     }
 
     #[test]
