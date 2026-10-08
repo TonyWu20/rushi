@@ -545,7 +545,7 @@ Add `"my_tool"` to `[tools] enabled` in `rushi.toml`. Done.
 
 ## 10. Self-Documentation & This Doc
 
-- Every tool and hook binary supports `--help`.
+- Every binary supports `--help` and `--version` (clap across the board).
 - This reference doc is embedded in the `rushi` binary via `include_str!`.
   Run `rushi docs` to print it, or `rushi docs <section>` to print one
   section (matched by `## N. Title` heading). The bundled sub-docs each

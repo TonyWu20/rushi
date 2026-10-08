@@ -16,17 +16,49 @@
 //! - exit 2 — `abort`: not used by this hook.
 //! - any other exit code is treated as `fail` with an "unknown exit
 //!   N" detail by the kernel.
+//!
+//! CLI (clap): `--help` prints the window ABI (after_help) and
+//! `--version` prints the crate version. Every other argument is
+//! absorbed and ignored: the kernel passes the `[hooks.defs]` `args`
+//! straight to the hook and the payload arrives on stdin. A strict
+//! parser would turn an unknown arg into exit 2 (abort) in the
+//! pipeline, so the hook stays lenient.
 
+use clap::Parser;
 use std::io::{self, Read};
 use std::process::{Command, Stdio};
 
+/// The hook's command line. All arguments are absorbed and ignored.
+#[derive(Parser)]
+#[command(
+    name = "harness-hook-compact",
+    about = "In-session shadow-compact hook",
+    version,
+    allow_hyphen_values = true,
+    after_help = r#"Windows: overflow.resolve, exhausted.handle
+Input (stdin): the accumulated window state JSON object:
+  window: string
+  session: string (also in $SESSION)
+  force: bool (optional)
+Output (stdout): the step's state JSON object;
+  on success this hook passes the input state through unchanged.
+Exit codes (docs/loop-lifecycle-hooks.md 12.3):
+  0  ok — compaction succeeded, no state-field effect
+  3  fail — compact binary failed or could not run; the
+      kernel logs the error and the window falls back to its
+      default (stay_compact)
+  (exit 2 abort is unused by this hook; any other exit code
+   is treated as fail with an "unknown exit N" detail)"#
+)]
+struct Args {
+    /// Trailing args. Absorbed, never read. The hook payload arrives
+    /// on stdin; the `[hooks.defs]` args pass through here.
+    #[arg(trailing_var_arg = true, required = false)]
+    extra: Vec<String>,
+}
+
 fn main() {
-    // --help / self-documentation (docs/loop-lifecycle-hooks.md 4.5, 12.3)
-    let args: Vec<String> = std::env::args().collect();
-    if args.iter().any(|a| a == "--help" || a == "-h") {
-        print_help();
-        return;
-    }
+    let _args = Args::parse();
 
     let stdin_payload = read_stdin_json();
 
@@ -150,21 +182,3 @@ fn fail(reason: String) -> ! {
     std::process::exit(3);
 }
 
-fn print_help() {
-    println!("harness-hook-compact — in-session shadow-compact hook");
-    println!();
-    println!("Windows: overflow.resolve, exhausted.handle");
-    println!("Input (stdin): the accumulated window state JSON object:");
-    println!("  window: string");
-    println!("  session: string (also in $SESSION)");
-    println!("  force: bool (optional)");
-    println!("Output (stdout): the step's state JSON object;");
-    println!("  on success this hook passes the input state through unchanged.");
-    println!("Exit codes (docs/loop-lifecycle-hooks.md 12.3):");
-    println!("  0  ok — compaction succeeded, no state-field effect");
-    println!("  3  fail — compact binary failed or could not run; the");
-    println!("      kernel logs the error and the window falls back to its");
-    println!("      default (stay_compact)");
-    println!("  (exit 2 abort is unused by this hook; any other exit code");
-    println!("   is treated as fail with an \"unknown exit N\" detail)");
-}

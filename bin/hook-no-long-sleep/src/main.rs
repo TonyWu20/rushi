@@ -19,6 +19,7 @@
 
 mod sleepcheck;
 
+use clap::Parser;
 use serde_json::{json, Value};
 use std::io::Read;
 
@@ -26,12 +27,50 @@ use std::io::Read;
 /// the `RUSHI_SLEEP_MAX_S` environment variable.
 const DEFAULT_MAX_S: f64 = 60.0;
 
+/// The hook's command line. All arguments are absorbed and ignored.
+/// A strict parser would turn an unknown arg into exit 2 (abort) in
+/// the pipeline, so the hook stays lenient.
+#[derive(Parser)]
+#[command(
+    name = "harness-hook-no-long-sleep",
+    about = "tool.before guard for long blocking waits",
+    version,
+    allow_hyphen_values = true,
+    after_help = r#"Window: tool.before
+Input (stdin): {window, session, calls:[{id, name, arguments}]}
+Checks every call whose `arguments.command` string is a shell
+command. It blocks:
+  - a `sleep` longer than the cap (default 60s, the sum of
+    consecutive values, `s`/`m`/`h`/`d` suffixes);
+  - a `while`/`until` loop that contains `sleep` (an unbounded
+    in-call poll);
+  - a `for` loop whose estimated total wait (iterations x
+    per-iteration sleep) exceeds the cap, or whose iteration
+    count or sleep duration is not a literal (uncountable).
+Known limits: sleeps inside `$( )` substitution and variable
+durations outside a loop are not detected; `for` iteration
+counts are estimated from literal lists, `{A..B}` ranges, and
+`$(seq ...)` only.
+Output (stdout):
+  {} — proceed (no violations in this step)
+  {"blocked_calls":[{"id":...,"reason":...}]} — block the listed
+  calls, merged with blocks an earlier step recorded. The loop
+  synthesizes a failed `tool_result` per blocked call, and the
+  reason points at the monitor pattern (`rushi docs monitoring`).
+Environment: RUSHI_SLEEP_MAX_S — the cap in seconds (default 60).
+Exit codes: 0 = ok (proceed, or block via `blocked_calls`)
+  (the hook never exits non-zero; a crash would fail the chain
+   and let the window default proceed)"#
+)]
+struct Args {
+    /// Trailing args. Absorbed, never read. The hook payload arrives
+    /// on stdin; the `[hooks.defs]` args pass through here.
+    #[arg(trailing_var_arg = true, required = false)]
+    extra: Vec<String>,
+}
+
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    if args.iter().any(|a| a == "--help" || a == "-h") {
-        print_help();
-        return;
-    }
+    let _args = Args::parse();
 
     let payload = read_stdin_json();
 
@@ -155,32 +194,3 @@ fn read_stdin_json() -> Value {
     serde_json::from_str(&buf).unwrap_or(json!({}))
 }
 
-fn print_help() {
-    println!("harness-hook-no-long-sleep — tool.before guard for long blocking waits");
-    println!();
-    println!("Window: tool.before");
-    println!("Input (stdin): {{window, session, calls:[{{id, name, arguments}}]}}");
-    println!("Checks every call whose `arguments.command` string is a shell");
-    println!("command. It blocks:");
-    println!("  - a `sleep` longer than the cap (default 60s, the sum of");
-    println!("    consecutive values, `s`/`m`/`h`/`d` suffixes);");
-    println!("  - a `while`/`until` loop that contains `sleep` (an unbounded");
-    println!("    in-call poll);");
-    println!("  - a `for` loop whose estimated total wait (iterations x");
-    println!("    per-iteration sleep) exceeds the cap, or whose iteration");
-    println!("    count or sleep duration is not a literal (uncountable).");
-    println!("Known limits: sleeps inside `$( )` substitution and variable");
-    println!("durations outside a loop are not detected; `for` iteration");
-    println!("counts are estimated from literal lists, `{{A..B}}` ranges, and");
-    println!("`$(seq ...)` only.");
-    println!("Output (stdout):");
-    println!("  {{}} — proceed (no violations in this step)");
-    println!("  {{\"blocked_calls\":[{{\"id\":...,\"reason\":...}}]}} — block the listed");
-    println!("  calls, merged with blocks an earlier step recorded. The loop");
-    println!("  synthesizes a failed `tool_result` per blocked call, and the");
-    println!("  reason points at the monitor pattern (`rushi docs monitoring`).");
-    println!("Environment: RUSHI_SLEEP_MAX_S — the cap in seconds (default 60).");
-    println!("Exit codes: 0 = ok (proceed, or block via `blocked_calls`)");
-    println!("  (the hook never exits non-zero; a crash would fail the chain");
-    println!("   and let the window default proceed)");
-}

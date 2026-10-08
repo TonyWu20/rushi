@@ -733,3 +733,33 @@ reference bullet, and the system-prompt hint now say: run the
 command, never check liveness. The lock-branch mechanism stays
 documented in `docs/reference/README.md` section 2 and in
 `bin/rushi/src/run_loop.rs`.
+
+## All binaries use clap; versions are per-crate; no loop.meta version (2026-10-06)
+
+**Decisions.**
+
+1. Every distribution binary uses `clap`. The two hook binaries
+   (`harness-hook-compact`, `harness-hook-no-long-sleep`) migrated
+   from hand-parsed args. The kernel passes the `[hooks.defs]`
+   `args` straight to the hook binary, so a strict parser would turn
+   an unknown arg into exit 2 (abort) in the pipeline. Both hooks
+   absorb all trailing args (`trailing_var_arg` plus
+   `allow_hyphen_values`) and stay lenient. Every binary now
+   answers `--help` and `--version`.
+2. Versions are per-crate (option B). Each crate keeps its own
+   version. No alignment with `rushi-common`. The `--version`
+   report is per-crate.
+3. No `version` field in `loop.meta`. Old readers ignore the extra
+   key. New readers need special handling for old records. Zero
+   benefit. Decision: NO.
+
+**Proof.** `harness-hook-compact --version` and
+`harness-hook-no-long-sleep --version` print 0.1.0. Unknown args
+are absorbed: `harness-hook-compact --force x` still reads stdin
+and exits 0. `--help` still prints the window ABI text, now via
+clap's `after_help`. `scripts/no-long-sleep-e2e.sh` (10 checks)
+and `scripts/compact-e2e.sh` (115 checks) pass.
+
+**Note.** The `rushi-common` hook-spawn tests are flaky in this
+environment: "Text file busy" on the temp hook script.
+Pass/fail/pass across three runs. Unrelated to this change.

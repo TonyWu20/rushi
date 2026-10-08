@@ -291,9 +291,9 @@ same `events.jsonl`.
 
 ### 4.5 Self-documentation and cache
 
-Each hook command supports `--help`. It prints the window it serves,
-the input JSON shape, and the decision vocab. There is no
-`SKILL.md` file. This matches `skill-remapped-to-os-apps.md`
+Each hook command supports `--help` and `--version` (clap).
+`--help` prints the window it serves, the input JSON shape, and the
+decision vocab. There is no `SKILL.md` file. This matches `skill-remapped-to-os-apps.md`
 section 4.
 
 A hook that mutates prompt content runs at `model.before`. The
@@ -626,7 +626,7 @@ steps = ["goal-tokens"]
   with detail "unknown exit N".
 - A step killed by the window timeout is a `fail` with the
   timeout detail (P5 holds).
-- Each hook's `--help` prints its status set.
+- Each hook's `--help` prints its status set. `--version` prints the crate version.
 
 ### 12.4 Execution
 
