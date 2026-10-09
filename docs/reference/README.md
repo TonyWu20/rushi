@@ -165,6 +165,16 @@ stdout holds only the config text. This keeps pipes clean. Errors such
 as a missing file go to stderr with exit code 1. The dump adds a
 trailing newline if the source file lacks one.
 
+### Overriding `sessions_root` per call
+
+`rushi run` accepts `--sessions-root <dir>`. This flag overrides the
+config `[paths] sessions_root` for one call. Absolute paths are used
+as-is. Relative paths resolve against the current directory.
+
+The override targets a session tree from any directory. You do not
+need to switch to the workspace first. The override wins over the
+config value for that call only. The config file stays unchanged.
+
 ### Keys
 
 ```toml

@@ -159,6 +159,26 @@ pub fn validate_hook_pipelines(
     (errors, warnings)
 }
 
+/// Resolve a sessions-root path value to an absolute path.
+///
+/// An absolute value is returned as-is. A relative value resolves
+/// against the current working directory, matching the rule `load`
+/// applies to the config's `[paths] sessions_root` (issue #16: the
+/// kernel canonicalizes session paths so the hook env vars stay
+/// unambiguous regardless of launch dir). The config key and the
+/// `--sessions-root` CLI override pass through this one rule, so
+/// they mean the same thing.
+pub fn resolve_sessions_root(raw: &Path) -> PathBuf {
+    if raw.is_relative() {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(raw),
+            Err(_) => raw.to_path_buf(),
+        }
+    } else {
+        raw.to_path_buf()
+    }
+}
+
 impl HarnessConfig {
     /// The ordered step names for one window's pipeline (empty when
     /// the window has no pipeline entry: zero steps, the window
@@ -198,22 +218,13 @@ impl HarnessConfig {
         // Sessions root (issue #16: resolve to an absolute path so the
         // hook env vars SESSION / SESSIONS_ROOT are unambiguous
         // regardless of where the kernel process is launched from).
-        let sessions_root = {
-            let raw = cfg
-                .get("paths")
-                .and_then(|p| p.get("sessions_root"))
-                .and_then(|s| s.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("sessions"));
-            if raw.is_relative() {
-                match std::env::current_dir() {
-                    Ok(cwd) => cwd.join(raw),
-                    Err(_) => raw,
-                }
-            } else {
-                raw
-            }
-        };
+        let raw_sessions_root = cfg
+            .get("paths")
+            .and_then(|p| p.get("sessions_root"))
+            .and_then(|s| s.as_str())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("sessions"));
+        let sessions_root = resolve_sessions_root(&raw_sessions_root);
 
         // Native tool paths (each entry is a tool dir containing a
         // tool.toml, or a root dir holding tool sub-dirs). Relative
@@ -529,6 +540,67 @@ compact_reserve_tokens = 16384
         )
         .unwrap();
         HarnessConfig::load(&path)
+    }
+
+    /// An absolute sessions-root value stays as given.
+    #[test]
+    fn resolve_sessions_root_keeps_absolute() {
+        assert_eq!(
+            resolve_sessions_root(Path::new("/abs/root")),
+            PathBuf::from("/abs/root")
+        );
+    }
+
+    /// A relative sessions-root value resolves against CWD, matching
+    /// the config key's rule (issue #16).
+    #[test]
+    fn resolve_sessions_root_joins_relative_to_cwd() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            resolve_sessions_root(Path::new("rel/sessions")),
+            cwd.join("rel/sessions")
+        );
+    }
+
+    /// The override flows through `resolve_session` for a bare name.
+    #[test]
+    fn sessions_root_override_flows_through_resolve_session() {
+        let mut cfg = load_toml("");
+        cfg.sessions_root = resolve_sessions_root(Path::new("/x/sessions"));
+        assert_eq!(
+            cfg.resolve_session("mysess"),
+            PathBuf::from("/x/sessions/mysess")
+        );
+    }
+
+    /// A relative config `[paths] sessions_root` resolves against CWD
+    /// (issue #16 regression; the refactor to `resolve_sessions_root`).
+    #[test]
+    fn load_resolves_relative_sessions_root_against_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+            [model]
+            api = "responses"
+            max_output_tokens = 32768
+
+            [model.stub]
+            model_id = "stub"
+            context_tokens = 262144
+
+            [active]
+            model = "stub"
+
+            [paths]
+            sessions_root = "mysess"
+            "#,
+        )
+        .unwrap();
+        let cfg = HarnessConfig::load(&path);
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(cfg.sessions_root, cwd.join("mysess"));
     }
 
     #[test]

@@ -86,6 +86,14 @@ enum Command {
         /// the prompt is appended and the call exits 0 without
         /// starting a loop; the live loop drains it at its next step.
         task: Option<String>,
+
+        /// Override `[paths] sessions_root` from the config for this
+        /// call. Absolute paths are used as-is; relative paths resolve
+        /// against the current directory. This lets `rushi run` target
+        /// a session tree from anywhere without switching to the
+        /// workspace first.
+        #[arg(long)]
+        sessions_root: Option<PathBuf>,
     },
     /// Run a single step (replaces `step.sh`)
     Step {
@@ -151,8 +159,15 @@ fn main() {
             }
         }
 
-        Command::Run { session, task } => {
-            let cfg = config::HarnessConfig::load(&PathBuf::from(config_path));
+        Command::Run {
+            session,
+            task,
+            sessions_root,
+        } => {
+            let mut cfg = config::HarnessConfig::load(&PathBuf::from(config_path));
+            if let Some(root) = &sessions_root {
+                cfg.sessions_root = config::resolve_sessions_root(root);
+            }
             let session_dir = cfg.resolve_session(&session);
             signals::install();
             run_loop::run(&cfg, &session, &session_dir, task.as_deref());
@@ -183,5 +198,97 @@ fn main() {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// The `--sessions-root` flag parses and lands on the Run variant.
+    #[test]
+    fn run_accepts_sessions_root_flag() {
+        let args = Args::try_parse_from([
+            "rushi",
+            "run",
+            "mysess",
+            "--sessions-root",
+            "/x/sessions",
+        ])
+        .unwrap();
+        match args.command.unwrap() {
+            Command::Run {
+                session,
+                task,
+                sessions_root,
+            } => {
+                assert_eq!(session, "mysess");
+                assert!(task.is_none());
+                assert_eq!(sessions_root, Some(PathBuf::from("/x/sessions")));
+            }
+            _ => panic!("expected the Run subcommand"),
+        }
+    }
+
+    /// Without the flag, `sessions_root` is `None` (config value wins).
+    #[test]
+    fn run_defaults_sessions_root_to_none() {
+        let args = Args::try_parse_from(["rushi", "run", "mysess"]).unwrap();
+        match args.command.unwrap() {
+            Command::Run {
+                session,
+                task,
+                sessions_root,
+            } => {
+                assert_eq!(session, "mysess");
+                assert!(task.is_none());
+                assert!(sessions_root.is_none());
+            }
+            _ => panic!("expected the Run subcommand"),
+        }
+    }
+
+    /// A relative value parses and is kept verbatim (resolved to CWD
+    /// later, in `resolve_sessions_root`).
+    #[test]
+    fn run_sessions_root_accepts_relative_path() {
+        let args = Args::try_parse_from([
+            "rushi",
+            "run",
+            "mysess",
+            "hello",
+            "--sessions-root",
+            "rel/sessions",
+        ])
+        .unwrap();
+        match args.command.unwrap() {
+            Command::Run {
+                session,
+                task,
+                sessions_root,
+            } => {
+                assert_eq!(session, "mysess");
+                assert_eq!(task, Some("hello".to_string()));
+                assert_eq!(sessions_root, Some(PathBuf::from("rel/sessions")));
+            }
+            _ => panic!("expected the Run subcommand"),
+        }
+    }
+
+    /// The flag shows up in the run help text.
+    #[test]
+    fn run_help_lists_sessions_root_flag() {
+        let cmd = crate::Args::command();
+        let mut sub = cmd
+            .get_subcommands()
+            .find(|c| c.get_name() == "run")
+            .cloned()
+            .unwrap();
+        let rendered = sub.render_help().to_string();
+        assert!(
+            rendered.contains("sessions-root"),
+            "missing flag:\n{rendered}"
+        );
     }
 }
