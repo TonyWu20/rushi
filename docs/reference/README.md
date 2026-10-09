@@ -165,15 +165,28 @@ stdout holds only the config text. This keeps pipes clean. Errors such
 as a missing file go to stderr with exit code 1. The dump adds a
 trailing newline if the source file lacks one.
 
-### Overriding `sessions_root` per call
+### Targeting a session tree from any directory
 
-`rushi run` accepts `--sessions-root <dir>`. This flag overrides the
-config `[paths] sessions_root` for one call. Absolute paths are used
-as-is. Relative paths resolve against the current directory.
+`rushi run` accepts two flags for running outside the workspace.
 
-The override targets a session tree from any directory. You do not
-need to switch to the workspace first. The override wins over the
-config value for that call only. The config file stays unchanged.
+`--sessions-root <dir>` overrides the config `[paths] sessions_root`
+for one call. It controls where the session state lives.
+
+`--cwd <dir>` sets the working directory the session's tools run in.
+It controls where the session work happens.
+
+Absolute paths are used as-is. Relative paths resolve against the
+current directory.
+
+The working directory follows this precedence:
+
+1. The `--cwd` flag, when given.
+2. Else the parent of a `--sessions-root` override.
+3. Else the call-site directory.
+
+In the standard `<project>/sessions` layout, step 2 is the project
+directory. This removes the hidden mismatch between the call site and
+the project. The config file stays unchanged.
 
 ### Keys
 

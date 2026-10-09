@@ -94,6 +94,15 @@ enum Command {
         /// workspace first.
         #[arg(long)]
         sessions_root: Option<PathBuf>,
+
+        /// Set the working directory the session's tools run in,
+        /// overriding the call-site directory. Absolute paths are
+        /// used as-is; relative paths resolve against the current
+        /// directory. When omitted, the working directory is the
+        /// parent of a `--sessions-root` override, or the call-site
+        /// directory when no override is given.
+        #[arg(long)]
+        cwd: Option<PathBuf>,
     },
     /// Run a single step (replaces `step.sh`)
     Step {
@@ -163,14 +172,38 @@ fn main() {
             session,
             task,
             sessions_root,
+            cwd,
         } => {
             let mut cfg = config::HarnessConfig::load(&PathBuf::from(config_path));
-            if let Some(root) = &sessions_root {
-                cfg.sessions_root = config::resolve_sessions_root(root);
-            }
+
+            // The --sessions-root override (if any) resolves to an
+            // absolute path. It becomes the basis for the default
+            // working directory below.
+            let flag_sessions_root = match &sessions_root {
+                Some(root) => {
+                    let resolved = config::resolve_dir_override(root);
+                    cfg.sessions_root = resolved.clone();
+                    Some(resolved)
+                }
+                None => None,
+            };
+
+            // Effective working directory for the call. Precedence:
+            // the --cwd flag, else the parent of a --sessions-root
+            // override, else the live process CWD (handled inside
+            // run).
+            let work_dir =
+                config::working_dir_for(cwd.as_deref(), flag_sessions_root.as_deref());
+
             let session_dir = cfg.resolve_session(&session);
             signals::install();
-            run_loop::run(&cfg, &session, &session_dir, task.as_deref());
+            run_loop::run(
+                &cfg,
+                &session,
+                &session_dir,
+                task.as_deref(),
+                work_dir.as_deref(),
+            );
         }
 
         Command::Step { session } => {
@@ -222,6 +255,7 @@ mod tests {
                 session,
                 task,
                 sessions_root,
+                ..
             } => {
                 assert_eq!(session, "mysess");
                 assert!(task.is_none());
@@ -240,6 +274,7 @@ mod tests {
                 session,
                 task,
                 sessions_root,
+                ..
             } => {
                 assert_eq!(session, "mysess");
                 assert!(task.is_none());
@@ -250,7 +285,7 @@ mod tests {
     }
 
     /// A relative value parses and is kept verbatim (resolved to CWD
-    /// later, in `resolve_sessions_root`).
+    /// later, in `resolve_dir_override`).
     #[test]
     fn run_sessions_root_accepts_relative_path() {
         let args = Args::try_parse_from([
@@ -267,6 +302,7 @@ mod tests {
                 session,
                 task,
                 sessions_root,
+                ..
             } => {
                 assert_eq!(session, "mysess");
                 assert_eq!(task, Some("hello".to_string()));
@@ -290,5 +326,52 @@ mod tests {
             rendered.contains("sessions-root"),
             "missing flag:\n{rendered}"
         );
+    }
+
+    /// The `--cwd` flag parses and is kept verbatim.
+    #[test]
+    fn run_accepts_cwd_flag() {
+        let args = Args::try_parse_from([
+            "rushi",
+            "run",
+            "mysess",
+            "--cwd",
+            "/w",
+        ])
+        .unwrap();
+        match args.command.unwrap() {
+            Command::Run {
+                session,
+                task,
+                sessions_root,
+                cwd,
+            } => {
+                assert_eq!(session, "mysess");
+                assert!(task.is_none());
+                assert!(sessions_root.is_none());
+                assert_eq!(cwd, Some(PathBuf::from("/w")));
+            }
+            _ => panic!("expected the Run subcommand"),
+        }
+    }
+
+    /// A relative `--cwd` value is kept verbatim (resolved to CWD
+    /// later, in `resolve_dir_override`).
+    #[test]
+    fn run_cwd_accepts_relative_path() {
+        let args = Args::try_parse_from([
+            "rushi",
+            "run",
+            "mysess",
+            "--cwd",
+            "rel/w",
+        ])
+        .unwrap();
+        match args.command.unwrap() {
+            Command::Run { cwd, .. } => {
+                assert_eq!(cwd, Some(PathBuf::from("rel/w")));
+            }
+            _ => panic!("expected the Run subcommand"),
+        }
     }
 }

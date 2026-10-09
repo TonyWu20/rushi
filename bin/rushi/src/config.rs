@@ -159,16 +159,16 @@ pub fn validate_hook_pipelines(
     (errors, warnings)
 }
 
-/// Resolve a sessions-root path value to an absolute path.
+/// Resolve a CLI-provided directory override to an absolute path.
 ///
 /// An absolute value is returned as-is. A relative value resolves
-/// against the current working directory, matching the rule `load`
-/// applies to the config's `[paths] sessions_root` (issue #16: the
-/// kernel canonicalizes session paths so the hook env vars stay
-/// unambiguous regardless of launch dir). The config key and the
-/// `--sessions-root` CLI override pass through this one rule, so
-/// they mean the same thing.
-pub fn resolve_sessions_root(raw: &Path) -> PathBuf {
+/// against the current working directory. The config's
+/// `[paths] sessions_root` key and the `--sessions-root` and
+/// `--cwd` CLI overrides pass through this one rule, so they mean
+/// the same thing (issue #16: the kernel canonicalizes session
+/// paths so the hook env vars stay unambiguous regardless of launch
+/// dir).
+pub fn resolve_dir_override(raw: &Path) -> PathBuf {
     if raw.is_relative() {
         match std::env::current_dir() {
             Ok(cwd) => cwd.join(raw),
@@ -176,6 +176,25 @@ pub fn resolve_sessions_root(raw: &Path) -> PathBuf {
         }
     } else {
         raw.to_path_buf()
+    }
+}
+
+/// Compute the effective working directory for a `rushi run` call.
+///
+/// Precedence: a `--cwd` override wins. Else the parent of a resolved
+/// `--sessions-root` override (the project dir in the standard
+/// `<project>/sessions` layout). Else `None`, which means the live
+/// process CWD is used (the pre-flag behavior).
+pub fn working_dir_for(
+    cwd_raw: Option<&Path>,
+    resolved_root: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(c) = cwd_raw {
+        return Some(resolve_dir_override(c));
+    }
+    match resolved_root {
+        Some(root) => root.parent().map(Path::to_path_buf),
+        None => None,
     }
 }
 
@@ -224,7 +243,7 @@ impl HarnessConfig {
             .and_then(|s| s.as_str())
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("sessions"));
-        let sessions_root = resolve_sessions_root(&raw_sessions_root);
+        let sessions_root = resolve_dir_override(&raw_sessions_root);
 
         // Native tool paths (each entry is a tool dir containing a
         // tool.toml, or a root dir holding tool sub-dirs). Relative
@@ -542,31 +561,59 @@ compact_reserve_tokens = 16384
         HarnessConfig::load(&path)
     }
 
-    /// An absolute sessions-root value stays as given.
+    /// An absolute directory override stays as given.
     #[test]
-    fn resolve_sessions_root_keeps_absolute() {
+    fn resolve_dir_override_keeps_absolute() {
         assert_eq!(
-            resolve_sessions_root(Path::new("/abs/root")),
+            resolve_dir_override(Path::new("/abs/root")),
             PathBuf::from("/abs/root")
         );
     }
 
-    /// A relative sessions-root value resolves against CWD, matching
+    /// A relative directory override resolves against CWD, matching
     /// the config key's rule (issue #16).
     #[test]
-    fn resolve_sessions_root_joins_relative_to_cwd() {
+    fn resolve_dir_override_joins_relative_to_cwd() {
         let cwd = std::env::current_dir().unwrap();
         assert_eq!(
-            resolve_sessions_root(Path::new("rel/sessions")),
+            resolve_dir_override(Path::new("rel/sessions")),
             cwd.join("rel/sessions")
         );
+    }
+
+    /// `--cwd` wins over a `--sessions-root` parent.
+    #[test]
+    fn working_dir_cwd_wins_over_root_parent() {
+        let got = working_dir_for(
+            Some(Path::new("/w")),
+            Some(Path::new("/proj/sessions")),
+        );
+        assert_eq!(got, Some(PathBuf::from("/w")));
+    }
+
+    /// Without `--cwd`, the working dir is the parent of the
+    /// resolved sessions root.
+    #[test]
+    fn working_dir_falls_back_to_root_parent() {
+        let got = working_dir_for(
+            None,
+            Some(Path::new("/proj/sessions")),
+        );
+        assert_eq!(got, Some(PathBuf::from("/proj")));
+    }
+
+    /// No overrides: the live process CWD is used (`None` here).
+    #[test]
+    fn working_dir_none_when_no_override() {
+        let got = working_dir_for(None, None);
+        assert!(got.is_none());
     }
 
     /// The override flows through `resolve_session` for a bare name.
     #[test]
     fn sessions_root_override_flows_through_resolve_session() {
         let mut cfg = load_toml("");
-        cfg.sessions_root = resolve_sessions_root(Path::new("/x/sessions"));
+        cfg.sessions_root = resolve_dir_override(Path::new("/x/sessions"));
         assert_eq!(
             cfg.resolve_session("mysess"),
             PathBuf::from("/x/sessions/mysess")
@@ -574,7 +621,7 @@ compact_reserve_tokens = 16384
     }
 
     /// A relative config `[paths] sessions_root` resolves against CWD
-    /// (issue #16 regression; the refactor to `resolve_sessions_root`).
+    /// (issue #16 regression; the refactor to `resolve_dir_override`).
     #[test]
     fn load_resolves_relative_sessions_root_against_cwd() {
         let dir = tempfile::tempdir().unwrap();
