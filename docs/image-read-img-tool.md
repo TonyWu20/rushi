@@ -73,9 +73,9 @@ GIF and WebP pass the first frame only.
 
 ## 4. Wiring
 
-rushi-config bundles the tool. The input `rushi-image-read` is a
-local path pin. Flip it to `github:TonyWu20/rushi-image-read` at
-hosting time. The `imgFlake` row lands in the exts table
-(`config/exts.nix` extTools). `rushi-full` bundles `tools/img`, and
-the generated config carries the img store path in
-`extension_tool_paths`.
+rushi-config bundles the tool. The input `rushi-image-read` is the
+hosted `github:TonyWu20/rushi-image-read` (rev `cac75a2`, lock-
+pinned). Bump with `nix flake update rushi-image-read`. The
+`imgFlake` row lands in the exts table (`config/exts.nix`
+extTools). `rushi-full` bundles `tools/img`, and the generated
+config carries the img store path in `extension_tool_paths`.
