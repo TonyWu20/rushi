@@ -488,6 +488,103 @@ fn log_pointers(
 /// event and need no tool log. Malformed lines drop out; the rest
 /// ride on. Later records for a call id win: a re-routed call has
 /// run more recently.
+/// The log seq of the last plain compaction boundary on the active
+/// path (FT-030), or None. The rewind mask applies: a marker on an
+/// abandoned branch does not gate. A marker that `parse_boundary`
+/// would reject (corrupt, or a branch marker) does not gate.
+fn last_boundary_marker_seq(lines: &str) -> Option<usize> {
+    let mut parsed: Vec<(usize, serde_json::Value)> = Vec::new();
+    let mut total = 0usize;
+    for line in lines.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        total += 1;
+        if let Ok(v) = serde_json::from_str(line) {
+            parsed.push((total, v));
+        }
+    }
+    let rewinds: Vec<rewind::RewindRef> = parsed
+        .iter()
+        .filter_map(|(s, v)| rewind::parse_rewind_event(v, *s))
+        .collect();
+    let active = rewind::active_ranges(total, &rewinds);
+    parsed
+        .iter()
+        .rev()
+        .find(|(s, v)| {
+            rewind::seq_in_ranges(*s, &active) && parse_boundary(v, *s).is_some()
+        })
+        .map(|(s, _)| *s)
+}
+
+/// The model-facing marker of an image tool result: the path and the
+/// tool's note, never the payload (FT-030). The base64 body belongs
+/// to the image part, not the text channel.
+fn image_marker(details: &serde_json::Value) -> String {
+    let get = |k: &str| details.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let path = get("path");
+    let note = get("note");
+    let mut marker = String::from("[image");
+    if !path.is_empty() {
+        marker.push_str(&format!(": {path}"));
+    }
+    marker.push(']');
+    if !note.is_empty() {
+        marker.push_str(&format!(" {note}"));
+    }
+    marker
+}
+
+/// Project one `tool_result` event into the `Ev` shape.
+///
+/// The model-facing text of an image result is the short marker,
+/// never the tool-log payload: the base64 body rides the image
+/// part. A compact boundary drops the image part: the pixel data
+/// does not re-cross a boundary (pi parity, docs/image-read-pi-
+/// study.md section 4). The marker stays: it names the file, and
+/// the model can re-read the image on demand.
+fn project_tool_result(
+    event: &serde_json::Value,
+    seq: usize,
+    tool_texts: &HashMap<String, String>,
+    last_boundary_seq: Option<usize>,
+) -> Ev {
+    let id = event
+        .get("id")
+        .and_then(|i| i.as_str())
+        .unwrap_or("")
+        .to_string();
+    let index_text = event
+        .get("value")
+        .and_then(|v| v.get("text"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    let details = event.get("value").and_then(|v| v.get("details"));
+    let is_image = details
+        .and_then(|d| d.get("type"))
+        .and_then(|t| t.as_str())
+        == Some("image");
+    let has_data = details
+        .and_then(|d| d.get("data"))
+        .and_then(|d| d.as_str())
+        .map_or(false, |s| !s.is_empty());
+    let dropped = is_image && has_data && last_boundary_seq.map_or(false, |b| seq < b);
+    let text = if is_image && has_data {
+        image_marker(details.expect("is_image implies details"))
+    } else {
+        tool_texts.get(&id).cloned().unwrap_or(index_text)
+    };
+    let image = if is_image && has_data && !dropped {
+        details.cloned()
+    } else {
+        None
+    };
+    Ev::ToolResult { id, text, image }
+}
+
 fn tool_log_texts(session_dir: &Path) -> HashMap<String, String> {
     let path = session_dir.join("tools.jsonl");
     let Ok(content) = fs::read_to_string(&path) else {
@@ -1070,6 +1167,12 @@ fn main() {
     // compaction summary is the projection boundary: every earlier
     // event is replaced by its summary (docs/auto-compact-plan.md
     // section 4.3).
+    // FT-030 image gate: the image payload of a tool result never
+    // crosses a compact boundary. The pre-scan runs on the raw log
+    // because the boundary marker lands after the image events it
+    // gates (docs/image-read-pi-study.md section 4).
+    let last_boundary_seq = last_boundary_marker_seq(&lines);
+
     let mut events: Vec<Ev> = Vec::new();
     let mut event_seqs: Vec<usize> = Vec::new();
     let mut seq: usize = 0;
@@ -1169,45 +1272,13 @@ fn main() {
                 event_seqs.push(seq);
             }
             "tool_result" => {
-                let id = event
-                    .get("id")
-                    .and_then(|i| i.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let index_text = event
-                    .get("value")
-                    .and_then(|v| v.get("text"))
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("")
-                    .to_string();
                 // The full body comes from the tool log when the
                 // session has one; the index text is the legacy
-                // inline body or the short preview.
-                let text = tool_texts.get(&id).cloned().unwrap_or(index_text);
-                // KISS: the image payload (base64 data + mime) lives in
-                // the event's value.details. Only carry it forward when
-                // it is actually an image result with non-empty data.
-                let image = {
-                    let details = event.get("value").and_then(|v| v.get("details"));
-                    let is_image = details
-                        .and_then(|d| d.get("type"))
-                        .and_then(|t| t.as_str())
-                        == Some("image");
-                    let has_data = details
-                        .and_then(|d| d.get("data"))
-                        .and_then(|d| d.as_str())
-                        .map_or(false, |s| !s.is_empty());
-                    if is_image && has_data {
-                        details.cloned()
-                    } else {
-                        None
-                    }
-                };
-                events.push(Ev::ToolResult {
-                    id,
-                    text,
-                    image,
-                });
+                // inline body or the short preview. The image result
+                // projects to the marker plus the image part, and a
+                // compact boundary drops the part (FT-030).
+                let tool_result = project_tool_result(&event, seq, &tool_texts, last_boundary_seq);
+                events.push(tool_result);
                 event_seqs.push(seq);
             }
             "compaction_summary" => {
@@ -3068,6 +3139,114 @@ not json at all
             "tokens_before": 0,
             "branch_of": branch_of
         })
+    }
+
+    fn image_result_event(id: &str, data: &str) -> serde_json::Value {
+        serde_json::json!({
+            "v": 1,
+            "type": "tool_result",
+            "id": id,
+            "ts": "t",
+            "is_error": false,
+            "value": {
+                "text": "preview",
+                "details": {
+                    "type": "image",
+                    "mime_type": "image/png",
+                    "data": data,
+                    "path": "/tmp/x.png",
+                    "note": "decoded 662x936; encoded image/png 344 KB"
+                }
+            }
+        })
+    }
+
+    /// FT-030: the model-facing text of an image result is the short
+    /// marker, never the tool-log payload. The base64 body belongs
+    /// to the image part, not the text channel.
+    #[test]
+    fn image_result_projects_marker_not_tool_log_payload() {
+        let ev = image_result_event("call_1", "BASE64DATA");
+        let mut tool_texts = HashMap::new();
+        tool_texts.insert("call_1".to_string(), "BIG-BASE64-JSON-PAYLOAD".to_string());
+        let projected = project_tool_result(&ev, 5, &tool_texts, None);
+        let Ev::ToolResult { text, image, .. } = &projected else {
+            panic!("expected a tool result projection");
+        };
+        assert!(text.starts_with("[image"), "the text channel is the marker: {text}");
+        assert!(!text.contains("BIG-BASE64-JSON-PAYLOAD"), "never the payload");
+        assert!(text.contains("/tmp/x.png"), "the marker names the file");
+        assert!(image.is_some(), "no boundary: the image part rides");
+    }
+
+    /// FT-030: a compact boundary drops the image part; the marker
+    /// stays so the model knows what the image was.
+    #[test]
+    fn compact_boundary_drops_the_image_part() {
+        let ev = image_result_event("call_1", "BASE64DATA");
+        let tool_texts = HashMap::new();
+        // The image at seq 5 predates the boundary at seq 9: drop.
+        let projected = project_tool_result(&ev, 5, &tool_texts, Some(9));
+        let Ev::ToolResult { text, image, .. } = &projected else {
+            panic!("expected a tool result projection");
+        };
+        assert!(image.is_none(), "the image part does not cross the boundary");
+        assert!(text.starts_with("[image"), "the marker stays");
+        // An image logged after the boundary survives the compact.
+        let after = project_tool_result(&ev, 12, &tool_texts, Some(9));
+        assert!(
+            matches!(&after, Ev::ToolResult { image: Some(_), .. }),
+            "post-boundary images keep their part"
+        );
+    }
+
+    /// FT-030 regression guard: a non-image result keeps the full
+    /// tool-log body, boundary or no boundary.
+    #[test]
+    fn non_image_result_keeps_the_tool_log_text() {
+        let ev = serde_json::json!({
+            "v": 1,
+            "type": "tool_result",
+            "id": "call_2",
+            "ts": "t",
+            "value": {
+                "text": "preview",
+                "details": { "type": "diff", "path": "a.rs" }
+            }
+        });
+        let mut tool_texts = HashMap::new();
+        tool_texts.insert("call_2".to_string(), "FULL-BODY".to_string());
+        let projected = project_tool_result(&ev, 5, &tool_texts, Some(9));
+        let Ev::ToolResult { text, image, .. } = &projected else {
+            panic!("expected a tool result projection");
+        };
+        assert_eq!(text, "FULL-BODY", "the full body still rides");
+        assert!(image.is_none());
+    }
+
+    /// FT-030: the gate is the last plain boundary on the active
+    /// path. Branch markers never gate. No marker: no gate.
+    #[test]
+    fn last_boundary_marker_seq_selects_the_last_plain_marker() {
+        let user = serde_json::json!({ "v": 1, "type": "user_message", "ts": "t", "content": "hi" }).to_string();
+        let plain = plain_summary_marker(1).to_string();
+        let branch = branch_marker(1, 4, "the ditched branch").to_string();
+        assert_eq!(last_boundary_marker_seq(&user), None, "no marker: no gate");
+        assert_eq!(
+            last_boundary_marker_seq(&format!("{user}\n{plain}")),
+            Some(2),
+            "the plain marker gates"
+        );
+        assert_eq!(
+            last_boundary_marker_seq(&format!("{user}\n{branch}")),
+            None,
+            "branch markers never gate"
+        );
+        assert_eq!(
+            last_boundary_marker_seq(&format!("{user}\n{branch}\n{plain}")),
+            Some(3),
+            "the later plain marker gates"
+        );
     }
 
     /// P8: a branch marker never becomes the projection boundary.

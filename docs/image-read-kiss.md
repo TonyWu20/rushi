@@ -102,7 +102,7 @@ models use.
 `project_event` adds a flat 4800-char estimate when a `tool_result`
 carries an image in `value.details`. This keeps the loop, the compact
 binary, and the assemble estimator consistent. It is the token-budget
-safeline on the compaction side.
+safeline on the compaction side. The consistency claim broke on a slim tool-log session (FT-030): the compact-side estimator reads the event preview, the assemble-side estimator reads the tool log. The payload never rides the text channel now (FT-030 fix).
 
 ### 4.5 `bin/rushi/src/step/tool.rs` — `tool.after` result rewrite
 

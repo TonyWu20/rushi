@@ -1301,3 +1301,88 @@ stop, tv-rushi, `rq`) are filed against those repos.
   `rushi-common` `loop_meta.rs`.
 - Replay: an absent record reads as `None`. Old sessions probe as
   today.
+
+
+## FT-030 — An image payload sent as text kills the context; the
+compact cannot recover
+
+**Symptom:** The `makefile-to-nix` session (the
+agent_researcher_job_interview repo, 2026-10-12) died with
+`context overflow: the last-resort compaction did not recover: The
+input (396520 tokens) is longer than the model's context length
+(262144 tokens)`. It is the first compact failure on an
+image-containing context. It landed days after the `img` ext tool
+shipped (rushi-image-read). The provider was
+`Qwen3.8-27B-NVFP4-RTX5090-v2` on SGLang at 127.0.0.1:30000.
+
+**Root cause:** Two projection-layer defects. The compact engine
+itself worked.
+
+1. **The payload rode the request twice.** The `img` tool prints
+   `{"type":"image","data":"<470,996 chars of base64>",...}` on
+   stdout. That is by design: `route` parses it into
+   `value.details`. In a slim tool-log session, the model-facing
+   tool text is the full tool-log stdout
+   (`bin/assemble` `tool_log_texts`). The 471,137-char base64 JSON
+   reached the request as `input_text` and as the `input_image`
+   data URL.
+2. **The estimator was blind to the text copy.**
+   `compact_math::project_event` reads `events.jsonl` only. There
+   the image event is a short preview plus a flat 4,800-char image
+   estimate. The pre-compact estimate read 156,959, below the
+   245,760 trigger. The proactive trigger never fired. The
+   post-compact estimate claimed 22,413. The sanity check passed.
+   The provider counted 396,520.
+
+Live provider measurements (2026-10-12, the same server the dead
+session used): the exact 471,137-char payload bills **361,128
+tokens** alone (1.30 chars/token against the 4-char estimator
+heuristic). The 662x936 image part bills 545.
+361,128 + 545 + ~34,800 for the remaining compacted context =
+396,520, the provider's own count.
+
+The compact cut walked back to seq 1206. The image event (seq
+1576) stayed inside the keep window, so no compaction could evict
+it. The last-resort compact nooped with `the old region is empty:
+the keep window covers the log`. The loop wrote the terminal
+error. A side effect: the 30,000 ms `hooks.timeout_ms` killed the
+first compact's hook chain mid-summary. An orphaned compact binary
+later appended a duplicate `compaction_summary` at the same
+boundary.
+
+**Fix:** Two changes in `bin/assemble` (user decision 2026-10-12:
+never send the base64 as text; drop the image on compact; the
+compact timeout stays as is for now).
+
+1. **The payload never rides the text channel.** An image tool
+   result projects to a short marker (`[image: <path>] <note>`)
+   plus the image part. The full tool-log stdout rides only for
+   non-image results. New: `project_tool_result` and
+   `image_marker`.
+2. **The compact drops the image.** An image event older than the
+   last plain compaction boundary projects to the marker only. The
+   pixel data does not re-cross a boundary (pi parity:
+   `docs/image-read-pi-study.md` section 4). New:
+   `last_boundary_marker_seq`, a rewind-aware pre-scan. The gate
+   drops the image part only. The marker stays in every wire form.
+
+Deferred by decision: the 30,000 ms `hooks.timeout_ms` default
+(the orphaned-binary side effect) and a calibrated chars-per-token
+for base64-heavy text. The flat 4,800-char image estimate stays
+the safeline.
+
+**Verification:**
+- New `assemble` unit tests: `image_result_projects_marker_not_
+  tool_log_payload`, `compact_boundary_drops_the_image_part`,
+  `non_image_result_keeps_the_tool_log_text`,
+  `last_boundary_marker_seq_selects_the_last_plain_marker`.
+- The workspace gate is green: `cargo build` and `cargo test`.
+- E2E replay: the new `assemble` on the dead session's dir emits
+  a 126,427-byte request. It holds zero base64 occurrences and
+  zero `input_image` parts. The image call's output is the marker
+  only. The estimated request is ~31,600 tokens against the
+  pre-fix provider count of 396,520. The session is revivable.
+- Provider probe: the payload alone returns `The input (361128
+  tokens) is longer than the model's context length (262144
+  tokens)` from `/v1/responses`. The image part alone bills 625
+  input tokens (80 for a 4x4 PNG).

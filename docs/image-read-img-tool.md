@@ -79,3 +79,36 @@ pinned). Bump with `nix flake update rushi-image-read`. The
 `imgFlake` row lands in the exts table (`config/exts.nix`
 extTools). `rushi-full` bundles `tools/img`, and the generated
 config carries the img store path in `extension_tool_paths`.
+
+
+## 5. Correction: the payload never rides the text channel
+(2026-10-12, FT-030)
+
+The 2026-10-12 `makefile-to-nix` compact failure traced to the
+stdout JSON reaching the model as text. In a slim tool-log
+session, `assemble` sends the full tool-log stdout as the
+model-facing tool text. The 471 KB base64 payload reached the
+request as `input_text` and as the `input_image` data URL. The
+live provider billed the text copy alone at 361,128 tokens, past
+the 262,144 window. The flat 4800-char estimate plus compaction
+safeline (section 2) had no headroom: the compact cut kept the
+image event inside the keep window, and the estimator counted it
+at ~1,200 tokens.
+
+Two kernel changes in `bin/assemble` close the hole:
+
+- An image tool result projects to a short marker
+  (`[image: <path>] <note>`) plus the image part. The full
+  stdout rides the text channel only for non-image results.
+- A compact boundary drops the image part: an image event older
+  than the last plain `compaction_summary` projects to the marker
+  only. The pixel data does not re-cross a boundary (pi parity,
+  `image-read-pi-study.md` section 4). The model can re-read the
+  file with `img` on demand.
+
+The `img` tool itself is unchanged. Its stdout JSON is the
+structured-output transport into `value.details`. The tool log
+keeps the full record for the TUI and the audit trail. Only the
+model-facing projection changed. A calibrated chars-per-token for
+base64-heavy text and the compact hook timeout stay deferred
+(FT-030).
