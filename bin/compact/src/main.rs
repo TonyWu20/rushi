@@ -1098,8 +1098,13 @@ fn fail_and_exit(
 /// model resolution is copied from bin/assemble (correction 4: no
 /// shared crate). The copy is noted in docs/itches.md.
 fn load_config(path: &Path) -> toml::Value {
-    let raw = std::fs::read_to_string(path).unwrap_or_default();
-    toml::from_str(&raw).unwrap_or(toml::Value::Table(toml::map::Map::new()))
+    // Layered load (docs/project-config-precedence.md): the Nix
+    // store config.toml is the base layer. The loader stays
+    // lenient: any read or parse error yields the empty table and
+    // the defaults apply.
+    rushi_common::config_layer::load_layered(path)
+        .map(|layers| layers.value)
+        .unwrap_or(toml::Value::Table(toml::map::Map::new()))
 }
 
 /// The raw context budget: the user knob `context_budget_tokens`, or

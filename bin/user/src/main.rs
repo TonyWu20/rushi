@@ -143,20 +143,13 @@ fn main() {
 /// directory set to the config file's parent (the repo root).
 fn run_turn(session: &str, config: &str) {
     let config_path = PathBuf::from(config);
-    let config_content = match fs::read_to_string(&config_path) {
-        Ok(c) => c,
+    // Layered load (docs/project-config-precedence.md): the Nix
+    // store config.toml is the base layer, the file the caller
+    // resolved is the top layer.
+    let config_val = match rushi_common::config_layer::load_layered(&config_path) {
+        Ok(layers) => layers.value,
         Err(e) => {
-            eprintln!("Error: cannot read config {}: {e}", config_path.display());
-            std::process::exit(1);
-        }
-    };
-    let config_val: toml::Value = match config_content.parse() {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!(
-                "Error: invalid TOML in {}: {e}",
-                config_path.display()
-            );
+            eprintln!("Error: {e}");
             std::process::exit(1);
         }
     };

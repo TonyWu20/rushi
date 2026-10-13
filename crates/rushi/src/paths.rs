@@ -43,6 +43,12 @@ pub fn resolved_exe() -> Option<PathBuf> {
 /// 3. Side-by-side `<exe_dir>/../config.toml` — Nix package layout
 ///    (`$out/bin/…` finds `$out/config.toml`)
 /// 4. `config.toml` in CWD — dev checkout fallback
+///
+/// The resolved file is the **top layer** of the layered config
+/// (`rushi_common::config_layer`): when the binary runs from a Nix
+/// package layout, the store `config.toml` is the base layer and the
+/// resolved file deep-merges over it. Resolution picks the top;
+/// layering happens at load (docs/project-config-precedence.md).
 pub fn resolve_config_path(cli_config: Option<&Path>) -> String {
     // 1. Explicit --config flag: the most specific input a program
     // gets. It must win even when $CONFIG is set in the environment

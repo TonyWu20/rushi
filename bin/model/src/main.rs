@@ -80,26 +80,20 @@ fn main() {
     let args = Args::parse();
 
     let config_path = &args.config;
-    let config_content = match fs::read_to_string(config_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Error: cannot read config: {e}");
+    // Read the config as the top layer: the Nix store config.toml
+    // (when present) deep-merges under it
+    // (docs/project-config-precedence.md).
+    let layers = rushi_common::config_layer::load_layered(config_path)
+        .unwrap_or_else(|e| {
+            eprintln!("Error: {e}");
             std::process::exit(1);
-        }
-    };
-
-    let config: toml::Value = match config_content.parse() {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Error: invalid config TOML: {e}");
-            std::process::exit(1);
-        }
-    };
+        });
+    let config: &toml::Value = &layers.value;
 
     // Resolve the active model and its settings via the shared module
     // (single source of truth, docs/itches.md).
-    let active_model = model_settings::resolve_active_model(&config);
-    let ms = model_settings::resolve_model_settings(&config, &active_model);
+    let active_model = model_settings::resolve_active_model(config);
+    let ms = model_settings::resolve_model_settings(config, &active_model);
 
     let base_url = ms.base_url;
     let model_name = ms.model_id;

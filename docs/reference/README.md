@@ -150,6 +150,18 @@ path (issue #36: the explicit flag outranks the ambient env var):
 3. `<exe_dir>/../config.toml` (Nix side-by-side layout)
 4. `./config.toml` in CWD (dev checkout)
 
+The resolved file is the **top layer**. When the running binary sits
+in a Nix package layout, the store `config.toml` is the **base layer**
+and the top layer deep-merges over it: table keys recurse, the top
+wins a conflict, base keys absent from the top survive, and a top
+array or scalar replaces. This is a layered config, not a file
+override. A project `config.toml` in the launch CWD carries only its
+diff; the machine model, tools, and hooks survive underneath it. The
+`rushi` loop and every stage binary apply the same layering, so a
+partial top layer is safe on a Nix machine. No base file (dev
+checkout, plain install) makes the merge a no-op. The decision record
+is `docs/project-config-precedence.md`.
+
 ### Dumping the active config
 
 `rushi config` prints the active config file to stdout. It resolves the
@@ -164,6 +176,10 @@ rushi --config my-config.toml run my-session
 stdout holds only the config text. This keeps pipes clean. Errors such
 as a missing file go to stderr with exit code 1. The dump adds a
 trailing newline if the source file lacks one.
+
+The dump is the top-layer file: the file you edit and git-track. The
+harness runs the value merged over the Nix base layer, and the merge
+is not printed. Store-specific paths never enter the tracked file.
 
 ### Targeting a session tree from any directory
 

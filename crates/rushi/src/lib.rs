@@ -15,6 +15,9 @@
 //!   (docs/itches.md: the "hard copies" itch).
 //! - `paths` — config-file discovery and `[paths]` tool-entry
 //!   resolution shared by the kernel and the front-ends.
+//! - `config_layer` — layered config loading: the Nix store
+//!   `config.toml` is the base layer, any other config file deep-
+//!   merges over it (docs/project-config-precedence.md).
 //! - `loop_meta` — the `loop.meta` session-identity record written by
 //!   the live loop, plus the reader and the name-or-dir match that
 //!   consumers use instead of cmdline re-derivation (issue #44).
@@ -28,5 +31,6 @@ pub mod hook_io;
 pub mod rewind;
 pub mod model_settings;
 pub mod config_check;
+pub mod config_layer;
 pub mod paths;
 pub mod loop_meta;

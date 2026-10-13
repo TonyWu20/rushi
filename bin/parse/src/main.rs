@@ -44,25 +44,21 @@ fn main() {
     let args = Args::parse();
 
     let config_path = &args.config;
-    let config_content = match fs::read_to_string(config_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Error: cannot read config: {e}");
+    // Read the config as the top layer: the Nix store config.toml
+    // (when present) deep-merges under it
+    // (docs/project-config-precedence.md).
+    let layers = rushi_common::config_layer::load_layered(config_path)
+        .unwrap_or_else(|e| {
+            eprintln!("Error: {e}");
             std::process::exit(1);
-        }
-    };
-
-    let config: toml::Value = match config_content.parse() {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Error: invalid config TOML: {e}");
-            std::process::exit(1);
-        }
-    };
+        });
+    let config: &toml::Value = &layers.value;
 
     // Hard-fail on legacy `[paths]` keys that the rename in 353424a
-    // made inert; they silently drop tool discovery.
-    let legacy = rushi_common::config_check::legacy_key_report(&config);
+    // made inert; they silently drop tool discovery. The check runs
+    // on the merged value: a legacy key in either layer is a load
+    // error.
+    let legacy = rushi_common::config_check::legacy_key_report(config);
     if !legacy.is_empty() {
         for msg in &legacy {
             eprintln!("Error: {msg}");

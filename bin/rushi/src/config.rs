@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use toml::Value;
 
 use rushi_common::config_check;
+use rushi_common::config_layer;
 use rushi_common::hooks::{HookDef, Window};
 use rushi_common::model_settings;
 
@@ -127,14 +128,17 @@ pub use rushi_common::paths::resolved_exe;
 ///
 /// - A pipeline step name with no matching `[hooks.defs.<name>]`
 ///   entry is a hard error (a typo must not silently drop a hook).
-/// - A def referenced by no pipeline is a warning (dead config),
-///   not an error: defs may be staged ahead of their pipeline entry.
+/// - A def referenced by no pipeline is dead config. The warning is
+///   computed by [`dead_def_warnings`], scoped to the top layer
+///   (docs/project-config-precedence.md P-L8).
+///
+/// Returns the errors plus the set of step names referenced by any
+/// pipeline (the `used` set the dead-def warning needs).
 pub fn validate_hook_pipelines(
     defs: &BTreeMap<String, HookDef>,
     pipelines: &BTreeMap<Window, Vec<String>>,
-) -> (Vec<String>, Vec<String>) {
+) -> (Vec<String>, BTreeMap<String, ()>) {
     let mut errors = Vec::new();
-    let mut warnings = Vec::new();
     let mut used = BTreeMap::<String, ()>::new();
     for (window, steps) in pipelines {
         for name in steps {
@@ -149,14 +153,34 @@ pub fn validate_hook_pipelines(
             used.insert(name.clone(), ());
         }
     }
-    for name in defs.keys() {
-        if !used.contains_key(name) {
-            warnings.push(format!(
+    (errors, used)
+}
+
+/// Dead-def warnings scoped to the top config layer
+/// (docs/project-config-precedence.md P-L8). A base-layer def
+/// displaced by a top pipeline rewrite never warns: the user cannot
+/// edit a store-path file. `used` is the set of step names
+/// referenced by the merged pipelines.
+pub fn dead_def_warnings(
+    defs: &BTreeMap<String, HookDef>,
+    used: &BTreeMap<String, ()>,
+    top: &Value,
+) -> Vec<String> {
+    let top_names: std::collections::BTreeSet<String> = top
+        .get("hooks")
+        .and_then(|h| h.get("defs"))
+        .and_then(|d| d.as_table())
+        .map(|t| t.keys().cloned().collect())
+        .unwrap_or_default();
+    defs.keys()
+        .filter(|name| top_names.contains(*name))
+        .filter(|name| !used.contains_key(name.as_str()))
+        .map(|name| {
+            format!(
                 "[hooks.defs.{name}] is not referenced by any [hooks.pipeline] and will never run"
-            ));
-        }
-    }
-    (errors, warnings)
+            )
+        })
+        .collect()
 }
 
 /// Resolve a CLI-provided directory override to an absolute path.
@@ -207,20 +231,24 @@ impl HarnessConfig {
     }
 
     /// Load and resolve the config from a TOML file.
+    ///
+    /// The file is the top layer. When the running binary sits in a
+    /// Nix package layout, the store `config.toml` is the base layer
+    /// and the file deep-merges over it
+    /// (docs/project-config-precedence.md).
     pub fn load(config_path: &Path) -> Self {
-        let raw = std::fs::read_to_string(config_path)
+        let layers = config_layer::load_layered(config_path)
             .unwrap_or_else(|e| {
-                eprintln!("Error: cannot read config: {e}");
+                eprintln!("Error: {e}");
                 std::process::exit(1);
             });
-        let cfg: Value = raw.parse().unwrap_or_else(|e| {
-            eprintln!("Error: invalid config TOML: {e}");
-            std::process::exit(1);
-        });
+        let cfg: &Value = &layers.value;
 
         // Hard-fail on legacy `[paths]` keys that the rename in
         // 353424a made inert; they silently drop tool discovery.
-        let legacy = config_check::legacy_key_report(&cfg);
+        // The check runs on the merged value: a legacy key in either
+        // layer is a load error.
+        let legacy = config_check::legacy_key_report(cfg);
         if !legacy.is_empty() {
             for msg in &legacy {
                 eprintln!("Error: {msg}");
@@ -293,11 +321,11 @@ impl HarnessConfig {
         // Active model (config-only resolution; the kernel is the
         // source of truth — stage binaries use resolve_active_model
         // which also honours the MODEL env var).
-        let active_model = model_settings::active_model_from_config(&cfg);
+        let active_model = model_settings::active_model_from_config(cfg);
 
         // Model section resolution via the shared module (single source
         // of truth for defaults — docs/itches.md).
-        let ms = model_settings::resolve_model_settings(&cfg, &active_model);
+        let ms = model_settings::resolve_model_settings(cfg, &active_model);
         let max_output_tokens = ms.max_output_tokens;
         let context_tokens = ms.context_tokens;
         let model_id = ms.model_id;
@@ -329,7 +357,7 @@ impl HarnessConfig {
         let compact_reserve_tokens = model_settings::val_int(limits, "compact_reserve_tokens").unwrap_or(16384) as u64;
         let compact_keep_tokens = model_settings::val_int(limits, "compact_keep_tokens").unwrap_or(20000) as u64;
         let compact_text_chars = model_settings::val_int(limits, "compact_text_chars").unwrap_or(200) as u64;
-        let estimate_chars_per_token = model_settings::resolve_model_settings(&cfg, &active_model)
+        let estimate_chars_per_token = model_settings::resolve_model_settings(cfg, &active_model)
             .estimate_chars_per_token;
 
         let approval_timeout_s = limits
@@ -437,8 +465,10 @@ impl HarnessConfig {
         }
 
         // Load-time validation: a step with no matching def is a hard
-        // error; a def used by no pipeline is a warning.
-        let (errors, warnings) =
+        // error on the merged defs (a top pipeline may reference a
+        // base def). The dead-def warning is scoped to the top layer
+        // (docs/project-config-precedence.md P-L8).
+        let (errors, used) =
             validate_hook_pipelines(&hook_defs, &hook_pipelines);
         if !errors.is_empty() {
             for msg in &errors {
@@ -446,6 +476,7 @@ impl HarnessConfig {
             }
             std::process::exit(1);
         }
+        let warnings = dead_def_warnings(&hook_defs, &used, &layers.top);
         for msg in &warnings {
             eprintln!("Warning: {msg}");
         }
@@ -737,11 +768,11 @@ compact_reserve_tokens = 16384
         let defs: BTreeMap<String, HookDef> = BTreeMap::new();
         let mut pipelines: BTreeMap<Window, Vec<String>> = BTreeMap::new();
         pipelines.insert(Window::ModelBefore, vec!["ghost".to_string()]);
-        let (errors, warnings) = validate_hook_pipelines(&defs, &pipelines);
+        let (errors, used) = validate_hook_pipelines(&defs, &pipelines);
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("ghost"));
         assert!(errors[0].contains("[hooks.defs.ghost]"));
-        assert!(warnings.is_empty());
+        assert!(used.contains_key("ghost"));
     }
 
     /// A def used by no pipeline warns; used defs do not.
@@ -765,8 +796,17 @@ compact_reserve_tokens = 16384
         .collect();
         let mut pipelines: BTreeMap<Window, Vec<String>> = BTreeMap::new();
         pipelines.insert(Window::ModelBefore, vec!["used".to_string()]);
-        let (errors, warnings) = validate_hook_pipelines(&defs, &pipelines);
+        let (errors, used) = validate_hook_pipelines(&defs, &pipelines);
         assert!(errors.is_empty());
+        assert!(used.contains_key("used"));
+        assert!(!used.contains_key("dead"));
+        // The warning needs the top layer table: both defs are in it.
+        let mut top_defs = toml::map::Map::<String, toml::Value>::new();
+        for name in defs.keys() {
+            top_defs.insert(name.clone(), toml::Value::String("x".into()));
+        }
+        let top_table = toml::Value::Table(toml_map_with_hooks_defs(top_defs));
+        let warnings = dead_def_warnings(&defs, &used, &top_table);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("dead"));
     }
@@ -776,9 +816,54 @@ compact_reserve_tokens = 16384
     fn empty_hook_config_is_clean() {
         let defs: BTreeMap<String, HookDef> = BTreeMap::new();
         let pipelines: BTreeMap<Window, Vec<String>> = BTreeMap::new();
-        let (errors, warnings) = validate_hook_pipelines(&defs, &pipelines);
+        let (errors, used) = validate_hook_pipelines(&defs, &pipelines);
         assert!(errors.is_empty());
-        assert!(warnings.is_empty());
+        assert!(used.is_empty());
+    }
+    /// Build a top-layer table with `[hooks.defs.<name>]` entries.
+    type TomlMap = toml::map::Map<String, toml::Value>;
+    fn toml_map_with_hooks_defs(defs: TomlMap) -> TomlMap {
+        let hooks = TomlMap::from_iter([(
+            "defs".to_string(),
+            toml::Value::Table(defs),
+        )]);
+        TomlMap::from_iter([("hooks".to_string(), toml::Value::Table(hooks))])
+    }
+
+    /// P-L8: a base-layer def displaced by a top pipeline rewrite
+    /// never warns; an unreferenced top-layer def warns.
+    #[test]
+    fn dead_def_warnings_scoped_to_top_layer() {
+        let defs: BTreeMap<String, HookDef> = [
+            ("base-def".to_string(), HookDef {
+                name: "base-def".into(),
+                command: "base-def".into(),
+                args: vec![],
+                timeout_ms: None,
+            }),
+            ("top-def".to_string(), HookDef {
+                name: "top-def".into(),
+                command: "top-def".into(),
+                args: vec![],
+                timeout_ms: None,
+            }),
+        ]
+        .into_iter()
+        .collect();
+        let mut pipelines: BTreeMap<Window, Vec<String>> = BTreeMap::new();
+        pipelines.insert(Window::ModelBefore, vec!["base-def".to_string()]);
+        let (_, used) = validate_hook_pipelines(&defs, &pipelines);
+        assert!(used.contains_key("base-def"));
+        assert!(!used.contains_key("top-def"));
+
+        // The top layer carries only top-def; base-def is not in it.
+        let mut top_defs = toml::map::Map::<String, toml::Value>::new();
+        top_defs.insert("top-def".to_string(), toml::Value::String("x".into()));
+        let top_table = toml::Value::Table(toml_map_with_hooks_defs(top_defs));
+        let warnings = dead_def_warnings(&defs, &used, &top_table);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("top-def"));
+        assert!(!warnings[0].contains("base-def"), "base def never warns");
     }
 
     /// The new surface loads: defs resolve bare commands, pipelines

@@ -78,7 +78,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "assemble"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bon",
  "chrono",
@@ -305,7 +305,7 @@ dependencies = [
 
 [[package]]
 name = "compact"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bon",
  "chrono",
@@ -1015,7 +1015,7 @@ dependencies = [
 
 [[package]]
 name = "model"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "reqwest",
@@ -1080,7 +1080,7 @@ dependencies = [
 
 [[package]]
 name = "parse"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "clap",
@@ -1352,7 +1352,7 @@ dependencies = [
 
 [[package]]
 name = "rushi"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "bon",
@@ -1967,7 +1967,7 @@ dependencies = [
 
 [[package]]
 name = "user"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "clap",

@@ -1041,26 +1041,21 @@ fn main() {
 
     let config_path = &args.config;
 
-    // Read config
-    let config_content = match fs::read_to_string(config_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Error: cannot read config: {e}");
+    // Read the config as the top layer: the Nix store config.toml
+    // (when present) deep-merges under it
+    // (docs/project-config-precedence.md).
+    let layers = rushi_common::config_layer::load_layered(config_path)
+        .unwrap_or_else(|e| {
+            eprintln!("Error: {e}");
             std::process::exit(1);
-        }
-    };
-
-    let config: toml::Value = match config_content.parse() {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Error: invalid config TOML: {e}");
-            std::process::exit(1);
-        }
-    };
+        });
+    let config: &toml::Value = &layers.value;
 
     // Hard-fail on legacy `[paths]` keys that the rename in 353424a
-    // made inert; they silently drop tool discovery.
-    let legacy = config_check::legacy_key_report(&config);
+    // made inert; they silently drop tool discovery. The check runs
+    // on the merged value: a legacy key in either layer is a load
+    // error.
+    let legacy = config_check::legacy_key_report(config);
     if !legacy.is_empty() {
         for msg in &legacy {
             eprintln!("Error: {msg}");
@@ -1138,8 +1133,8 @@ fn main() {
     // (correction 62): the user knob is `context_budget_tokens`.
     // No char mechanism. The default is the model window minus the
     // output reservation.
-    let active_model = resolve_active_model(&config);
-    let model_settings = resolve_model_settings(&config, &active_model);
+    let active_model = resolve_active_model(config);
+    let model_settings = resolve_model_settings(config, &active_model);
     let budget_tokens = resolve_budget_tokens(&limits, &model_settings);
     let chars_per_token = model_settings.estimate_chars_per_token.max(1);
 

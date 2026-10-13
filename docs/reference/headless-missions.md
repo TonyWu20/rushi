@@ -45,6 +45,15 @@ The worktree-issue pattern is the common provisioning step. One git
 worktree per issue, one session per worktree. Provision the
 worktree, then run `exec rushi run <session> <task>` inside it.
 
+## Project config
+
+The `config.toml` at the worktree root is the top layer for a
+launch from that directory
+(docs/project-config-precedence.md). On a Nix-installed machine it
+deep-merges over the store config. The mission script carries no
+`--config`. The project file holds the diff only; the machine
+model, tools, and hooks survive underneath it.
+
 ## Detach and record
 
 The agent's shell is non-interactive. `nohup &` alone is not the
