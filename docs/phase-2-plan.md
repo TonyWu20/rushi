@@ -194,6 +194,7 @@ files disturb no render.
 ```
 loop:
   step(session)                      # section 4.2
+  if step failed (it logged an `error` event): stop, exit 0   # FT-031
   claim = claim(session)
   if claim.state == idle and claim.pending_follow_ups is empty:
     fire run.idle window (4.9)
@@ -201,6 +202,14 @@ loop:
     else: stop, exit 0
   if claim.state == exhausted: stop, exit 0
 ```
+
+A step that failed and logged its `error` event stops the loop, but
+settles no claim state: the error records the failed attempt, and the
+owed work (the steer or tool result that triggered the call) stays in
+the log. A new loop (`rushi run`, a poke, or the TUI `Ctrl+R`) steps
+into the same owed state and retries the call. Legacy session logs
+with a bare trailing `error` event resume the same way: no log
+editing (docs/failure-tracking.md FT-031).
 
 Port of `turn.sh` including the follow-drain: a queued follow
 message runs as a new turn, one drain per boundary

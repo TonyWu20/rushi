@@ -85,8 +85,12 @@ pub fn publish_ext_status(
     append_event(cfg, session_dir, &event);
 }
 
-/// Append a terminal error event.
-pub fn append_terminal_error(cfg: &HarnessConfig, session_dir: &Path, message: &str) {
+/// Append an `error` event recording a failed attempt (a model API
+/// or transport failure, a provider-aborted turn, an unrecoverable
+/// compact stop). The event is informational: it settles no claim
+/// state and clears no pending work (FT-031). The run loop stops on
+/// the failed step, and a new loop retries the owed work.
+pub fn append_error(cfg: &HarnessConfig, session_dir: &Path, message: &str) {
     let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let event = serde_json::json!({
         "v": 1,
@@ -100,6 +104,16 @@ pub fn append_terminal_error(cfg: &HarnessConfig, session_dir: &Path, message: &
 // ---------------------------------------------------------------------------
 // Log scanning
 // ---------------------------------------------------------------------------
+
+/// Whether one raw JSONL line is an `error` event (the type-tag
+/// check; no full validation, these lines are appended through the
+/// validator moments earlier).
+pub fn line_is_error_event(line: &str) -> bool {
+    match serde_json::from_str::<Value>(line) {
+        Ok(v) => v.get("type").and_then(|t| t.as_str()) == Some("error"),
+        Err(_) => false,
+    }
+}
 
 /// The 1-based seq of the last `user_message` in the session log, 0
 /// when the log is absent or holds no user message. The count follows

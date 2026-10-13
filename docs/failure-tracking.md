@@ -1386,3 +1386,119 @@ the safeline.
   tokens) is longer than the model's context length (262144
   tokens)` from `/v1/responses`. The image part alone bills 625
   input tokens (80 for a 4x4 PNG).
+
+
+## FT-031 — A model error settles the session permanently; Ctrl+R
+cannot resume the loop
+
+**Symptom:** Once a session hits a model error like "cannot access
+the model API endpoint", the TUI `Ctrl+R` does not resume the loop
+even after the endpoint recovers. The session resumes only after the
+user manually removes the `error` entry from `events.jsonl`.
+
+**Reproduction (2026-10-13):** A session log ended with a bare
+`error` event after the model step exhausted its two in-process
+retries against a down endpoint. With the endpoint restored, `rushi
+run <session>` (the TUI `Ctrl+R` spawn form) exited immediately: the
+model saw zero requests and no new event was logged. Removing the
+`error` line from `events.jsonl` restored the pre-error
+`awaiting_model` state, and the same call ran the model and logged
+the `assistant_message`.
+
+**Root cause:** The `error` arm of the claim state machine
+(`bin/claim/src/main.rs`) treated every `error` event as terminal:
+it settled the state to `idle` and cleared the pending lists. The
+run loop stops on `idle` with no follow-ups
+(`bin/rushi/src/run_loop.rs`). The TUI `Ctrl+R` only re-spawns the
+`[loop]` command (`rushi run <session>`, rushi-tui `Action::RunLoop`);
+it appends nothing. A settled session owes nothing, so the
+re-spawned loop exits. The failure was expressible in the log only as
+a settle, so no resume was expressible. Deleting the `error` line
+re-exposed the `awaiting_model` state, which is why the manual
+workaround worked.
+
+**Fix (FT-031):** An `error` event settles no claim state. It
+records a failed attempt; the owed work (the steer or tool result
+that triggered the call) and every pending list survive in the log.
+The stop moves from the log to the process: the step reports how it
+ended, and the run loop stops on a failed step. A new loop
+(`rushi run`, a poke, or the TUI `Ctrl+R`) steps into the same owed
+state and retries the call. Legacy session logs with a bare trailing
+`error` event resume the same way: no log editing, no event-shape
+change, no marker. The protocol is unchanged; the claim machine is
+the thing that changes.
+
+1. `bin/claim/src/main.rs` — the `error` arm is removed; the event
+   type falls to the no-op arm. The state stands as it stood before
+   the error. Pending tool calls (the crash-recovery G2 set),
+   pending follow-ups, and an open approval wait all survive a
+   failed attempt.
+2. `bin/rushi/src/step.rs` — `do_step` returns a new
+   `StepOutcome` (`Completed` / `NoWork` / `Failed`).
+3. `bin/rushi/src/step/model.rs` — `run_awaiting_model` reports
+   `Failed` when the step ended with a logged `error` event: the
+   assemble error form, the exhausted-handling stops, the model
+   retry-loop stops (transport failure, spawn failure, the
+   last-resort-compaction stop, the empty-turn guard), and a
+   provider-aborted or unknown stop reason in the parse output.
+   `append_terminal_error` is renamed `append_error`: the events are
+   informational, not terminal.
+4. `bin/rushi/src/run_loop.rs` — the loop stops on a `Failed` step
+   (fire `session.end`, break). Without this arm the loop would
+   spin on a still-failing call. Each loop start gets one retry
+   budget; a resume gets the next.
+5. `bin/rushi/src/step/logio.rs` — `append_error` (renamed) and
+   `line_is_error_event`, the step-outcome check over the parsed
+   lines.
+
+**Verification:**
+
+- `bin/claim` tests pin the non-settling semantics:
+  `error_after_steer_keeps_awaiting_model`,
+  `error_keeps_the_pending_follow_ups`,
+  `error_after_unresolved_tool_call_keeps_awaiting_tool_result`,
+  `error_after_tool_result_keeps_awaiting_model`,
+  `error_after_the_handoff_marker_stays_exhausted`,
+  `error_after_request_keeps_the_wait`,
+  `request_after_error_awaits_approval`.
+- Manual replay (2026-10-13): down endpoint → a bare `error` event
+  and claim `awaiting_model`; endpoint up → the taskless `rushi run`
+  (the `Ctrl+R` form) runs the model and settles `idle`; a still-down
+  resume adds exactly one error event per loop start (bounded, no
+  spin); a hand-written legacy log (steer + marker + bare error, no
+  new-kernel involvement) claims `awaiting_model` and resumes
+  through the same call without any log editing.
+- `scripts/error-recovery-e2e.sh` (new) pins the same four
+  scenarios against the built binaries.
+- The workspace gate is green: `cargo build`, `cargo test
+  --workspace`, `scripts/e2e-rewind.sh`, `scripts/compact-e2e.sh`
+  (the `failed-retry` assertion updated to the new semantics),
+  `scripts/crash-e2e.sh`, `scripts/steer-inflight-e2e.sh`,
+  `scripts/run-lock-branch-e2e.sh`, `scripts/run-idle-log-message-e2e.sh`,
+  `scripts/model-before-transform-e2e.sh`,
+  `scripts/tool-after-transform-e2e.sh`,
+  `scripts/no-long-sleep-e2e.sh`.
+
+**Operator decision (2026-10-13):** The first fix candidate marked
+the new errors with an additive `kind` field and a `recoverable`
+claim state. It was rejected: it rescued no legacy session (the bare
+`error` lines already in the wild kept settling `idle`) and added
+protocol surface. The non-settling `error` semantics plus the
+step-outcome stop rescues every existing session with zero protocol
+change.
+
+**Consequences, accepted:**
+
+- A session whose failure is permanent (an unrecoverable context
+  overflow with compact disabled, a broken model binary) no longer
+  stops itself in one shot. Each loop start makes one bounded
+  attempt and stops; a `Ctrl+R` makes the next. The user controls
+  the retry cadence. The `context_exhausted` handoff path is
+  unchanged and still settles `exhausted`.
+- The `run.idle` window hooks do not fire on a model-failure stop
+  (the work is unfinished). They fire on a clean idle turn.
+- A provider-aborted turn (`parse` exit 2) now stops the loop the
+  same way and resumes on the next loop start.
+- The TUI needs no change for the resume: `Ctrl+R` already re-spawns
+  the loop command. A later display polish may hint "model error —
+  press `Ctrl+R` to retry" when the log tail is a bare `error`.

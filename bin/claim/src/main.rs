@@ -87,24 +87,30 @@ fn main() {
 /// (docs/phase-2-plan.md section 6).
 ///
 /// States:
-/// - `idle`: nothing owed (no log activity, or a terminal event).
+/// - `idle`: nothing owed (no log activity, or a completed turn
+///   boundary with no pending work).
 /// - `awaiting_model`: the loop owes a model call.
 /// - `awaiting_tool_result`: routed calls still lack results.
 /// - `exhausted`: a `context_exhausted` event closed the session
 ///   through the automatic handoff (correction 57). The TUI offers a
 ///   one-key resume in the seeded session.
 /// - `awaiting_approval`: an unanswered `approval_request` gates the
-///   loop. A matching `approval` event answers it. A later terminal
-///   event settles the session instead (docs/phase-2-plan.md
-///   section 4.8).
+///   loop. A matching `approval` event answers it. A later
+///   `context_exhausted` handoff settles the session instead
+///   (docs/phase-2-plan.md section 4.8). An `error` event keeps the
+///   wait: it settles no state (FT-031).
 ///
 /// The delivery queues (stage 2): a `user_message` in the `follow`
 /// queue wakes no state; it waits for the turn boundary and rides
 /// `pending_follow_ups`. A steer message (the missing field) sets
 /// `awaiting_model`, as before. A turn boundary (an assistant
-/// message with no tool calls, an error, or a closed handoff)
-/// consumes the pending follow-ups: they ran as new turns through
-/// the boundary.
+/// message with no tool calls, or a closed handoff) consumes the
+/// pending follow-ups: they ran as new turns through the boundary.
+///
+/// An `error` event settles no state and clears no pending list
+/// (FT-031): it records a failed attempt. The owed work survives in
+/// the log, and a new loop retries it. The loop itself stops on the
+/// failed step: the run loop watches the step outcome, not the log.
 ///
 /// Delivery-boundary guard (P7, steer during an in-flight call):
 /// each model call writes a `model_call_context` ext_status marker
@@ -226,14 +232,6 @@ fn derive_state(
                     }
                 }
             }
-            "error" => {
-                // The terminal error settles the session. An
-                // unanswered request is owed no longer.
-                state = "idle".to_string();
-                pending_tool_calls.clear();
-                pending_follow_ups.clear();
-                pending_approval_request = None;
-            }
             // The handoff closed the turn. The seeded session holds
             // the task; this one is done.
             "context_exhausted" => {
@@ -286,6 +284,12 @@ fn derive_state(
                     }
                 }
             }
+            // The rest, including `error` (FT-031): an `error`
+            // event settles no state. It records a failed attempt;
+            // the state stands as it stood before the error (the
+            // steer or the tool result that owed the failed call),
+            // and every pending list survives. A new loop retries
+            // the owed work.
             _ => {}
         }
     }
@@ -323,9 +327,9 @@ fn derive_state(
         }
     }
 
-    // A live request here means no terminal event followed it: the
-    // two terminal arms above clear the slot. The wait resumes on
-    // the next step (docs/phase-2-plan.md section 4.8).
+    // A live request here means no settling event followed it: the
+    // settling arms above clear the slot. The wait resumes on the
+    // next step (docs/phase-2-plan.md section 4.8).
     if pending_approval_request.is_some() {
         state = "awaiting_approval".to_string();
     }
@@ -646,9 +650,11 @@ mod tests {
         assert_eq!(state, "awaiting_approval");
     }
 
-    /// A terminal error after the request keeps the terminal state.
+    /// An error after the request keeps the wait: an error settles
+    /// no state (FT-031). Only a `context_exhausted` handoff
+    /// settles the session.
     #[test]
-    fn error_after_request_keeps_the_idle_state() {
+    fn error_after_request_keeps_the_wait() {
         let log = format!(
             "{}\n{}\n{}",
             user_msg(),
@@ -656,7 +662,7 @@ mod tests {
             error_event()
         );
         let (state, _, _, _) = derive_state(&log);
-        assert_eq!(state, "idle");
+        assert_eq!(state, "awaiting_approval");
     }
 
     /// A handoff after the request keeps the exhausted state.
@@ -672,12 +678,101 @@ mod tests {
         assert_eq!(state, "exhausted");
     }
 
-    /// A request after a terminal event re-opens the wait.
+    /// A request after an error keeps the wait: the error is
+    /// informational, and the request arms the wait in log order
+    /// (FT-031).
     #[test]
-    fn request_after_terminal_event_awaits_approval() {
+    fn request_after_error_awaits_approval() {
         let log = format!("{}\n{}", error_event(), approval_request("a1"));
         let (state, _, _, _) = derive_state(&log);
         assert_eq!(state, "awaiting_approval");
+    }
+
+    /// An error after a steer keeps the owed model call: the legacy
+    /// log shape (a bare error event, no marker) is what stuck
+    /// sessions carry, and it now resumes as-is (FT-031).
+    #[test]
+    fn error_after_steer_keeps_awaiting_model() {
+        let log = format!(
+            "{}\n{}",
+            user_msg(),
+            error_event()
+        );
+        let (state, seq, pending, follows) = derive_state(&log);
+        assert_eq!(state, "awaiting_model", "the failed call is still owed");
+        assert_eq!(seq, 1);
+        assert!(pending.is_empty());
+        assert!(follows.is_empty());
+    }
+
+    /// An error with queued follow-ups keeps the follow-ups: they
+    /// ride the resumed model call as a new turn (FT-031).
+    #[test]
+    fn error_keeps_the_pending_follow_ups() {
+        let follow =
+            line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"later","queue":"follow"}));
+        let log = format!(
+            "{}\n{}\n{}",
+            user_msg(),
+            follow,
+            error_event()
+        );
+        let (state, _, _, follows) = derive_state(&log);
+        assert_eq!(state, "awaiting_model");
+        assert_eq!(follows, vec![2], "the queued follow-up survives the failure");
+    }
+
+    /// An error after unresolved tool calls keeps the tool wait:
+    /// the crash-recovery semantics (G2) survive the failed model
+    /// attempt, and a resumed loop routes the calls (FT-031).
+    #[test]
+    fn error_after_unresolved_tool_call_keeps_awaiting_tool_result() {
+        let log = [
+            user_msg(),
+            assistant_with_call(),
+            tool_call(),
+            error_event(),
+        ]
+        .join("\n");
+        let (state, _, pending, _) = derive_state(&log);
+        assert_eq!(state, "awaiting_tool_result");
+        assert!(
+            pending
+                .iter()
+                .any(|tc| tc.get("id").and_then(|v| v.as_str()) == Some("tc1")),
+            "the unresolved call stays pending"
+        );
+    }
+
+    /// An error after a finished tool step keeps the model call owed:
+    /// the resume re-invokes the model with the results in context
+    /// (FT-031).
+    #[test]
+    fn error_after_tool_result_keeps_awaiting_model() {
+        let log = [
+            user_msg(),
+            assistant_with_call(),
+            tool_call(),
+            tool_result(),
+            error_event(),
+        ]
+        .join("\n");
+        let (state, _, _, _) = derive_state(&log);
+        assert_eq!(state, "awaiting_model");
+    }
+
+    /// An error after the handoff marker keeps the exhausted state:
+    /// the marker is the settling event, and the error settles
+    /// nothing after it (FT-031).
+    #[test]
+    fn error_after_the_handoff_marker_stays_exhausted() {
+        let log = format!(
+            "{}\n{}",
+            context_exhausted(),
+            error_event()
+        );
+        let (state, _, _, _) = derive_state(&log);
+        assert_eq!(state, "exhausted");
     }
 
     /// A tool result does not answer the request: the wait holds.

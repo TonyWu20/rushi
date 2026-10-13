@@ -21,11 +21,11 @@ use crate::step::hook::{
     fire_observation, fire_overflow_resolve, log_pipeline, resolve_strategy_window, run_window,
 };
 use crate::step::logio::{
-    append_event, append_line, append_terminal_error, last_user_message_seq, publish_ext_status,
+    append_error, append_event, append_line, last_user_message_seq, publish_ext_status,
     publish_loop_phase,
 };
 use crate::step::tool::route_and_append;
-use crate::step::{check_signal, StepMode};
+use crate::step::{check_signal, line_is_error_event, StepMode, StepOutcome};
 
 // ---------------------------------------------------------------------------
 // model_thinking marker
@@ -88,7 +88,7 @@ pub fn run_awaiting_model(
     inject_follow: bool,
     describe: &Describe,
     mode: StepMode,
-) {
+) -> StepOutcome {
     publish_loop_phase(cfg, &session.path, "wait");
 
     let guard_model = describe.model_id.clone();
@@ -117,29 +117,33 @@ pub fn run_awaiting_model(
     };
     log_and_strip_hard_trim(cfg, session, &mut request);
 
-    // Assemble error form: append and stop.
+    // Assemble error form: append and stop. The step failed; the
+    // run loop stops and a new loop retries (FT-031).
     if request.json.get("type").and_then(|t| t.as_str()) == Some("error") {
         append_event(cfg, &session.path, &request.json);
-        return;
+        return StepOutcome::Failed;
     }
 
     // context_exhausted form: fire exhausted.handle window.
     if request.json.get("type").and_then(|t| t.as_str()) == Some("context_exhausted") {
         let should_continue = fire_and_handle_exhausted(cfg, runner, session, describe);
         if !should_continue {
-            return;
+            // The handler logged its `error` event: the step
+            // failed. The run loop stops; a new loop retries the
+            // owed call (FT-031).
+            return StepOutcome::Failed;
         }
         // Reassemble after the in-session compact and fall through to the model retry loop.
         reassemble(cfg, runner, session, &mut request, false);
 
         // If the reassembled request is still a context_exhausted form the
         // compact did not shrink the context enough; do not feed a
-        // non-request JSON to the model binary.  Log a terminal error and
-        // stop the step.
+        // non-request JSON to the model binary.  Log an `error` event
+        // and stop the step (FT-031).
         if request.json.get("type").and_then(|t| t.as_str()) == Some("context_exhausted") {
             let msg = "context still exhausted after in-session compact; stopping";
-            append_terminal_error(cfg, &session.path, msg);
-            return;
+            append_error(cfg, &session.path, msg);
+            return StepOutcome::Failed;
         }
     }
 
@@ -152,19 +156,19 @@ pub fn run_awaiting_model(
     }
     crate::stream_channel::register(&stream_path);
 
-    let (output, terminal_logged) = model_retry_loop(
+    let (output, failure_logged) = model_retry_loop(
         cfg, runner, session, &mut request, &guard_model, describe, mode, Some(&stream_path),
     );
 
-    // The call returned (success or terminal error): close the channel.
+    // The call returned (success or a logged failure): close the channel.
     crate::stream_channel::unregister();
     let _ = std::fs::remove_file(&stream_path);
 
     check_signal(mode);
 
-    // If a terminal error was already appended, do not parse or route.
-    if terminal_logged {
-        return;
+    // If a failed attempt was already logged, do not parse or route.
+    if failure_logged {
+        return StepOutcome::Failed;
     }
 
     // Parse.
@@ -199,6 +203,15 @@ pub fn run_awaiting_model(
             })
             .collect();
         route_and_append(cfg, runner, session, &calls, mode);
+    }
+
+    // A provider-aborted turn or an unknown stop reason leaves an
+    // `error` event in the parsed lines (FT-031): the step failed,
+    // the run loop stops, and a new loop retries the owed work.
+    if parsed.lines.iter().any(|line| line_is_error_event(line)) {
+        StepOutcome::Failed
+    } else {
+        StepOutcome::Completed
     }
 }
 
@@ -270,8 +283,8 @@ fn estimate_context(cfg: &HarnessConfig, session_dir: &Path) -> u64 {
 /// Fire the `exhausted.handle` window and act on the decision.
 ///
 /// Returns `true` when the compact succeeded and the caller should
-/// reassemble and continue with the model call. Returns `false` when a
-/// terminal error was logged or the hook requested a stop.
+/// reassemble and continue with the model call. Returns `false` when
+/// an `error` event was logged or the hook requested a stop.
 fn fire_and_handle_exhausted(
     cfg: &HarnessConfig,
     runner: &SubprocessRunner,
@@ -298,7 +311,7 @@ fn fire_and_handle_exhausted(
                 post_compact_sanity(cfg, session, &status);
                 true
             } else {
-                append_terminal_error(
+                append_error(
                     cfg,
                     &session.path,
                     "the last-resort compaction did not recover the session",
@@ -307,7 +320,7 @@ fn fire_and_handle_exhausted(
             }
         }
         "stop" => {
-            append_terminal_error(cfg, &session.path, "exhausted.handle hook stopped the loop");
+            append_error(cfg, &session.path, "exhausted.handle hook stopped the loop");
             false
         }
         _ => {
@@ -462,9 +475,10 @@ fn apply_model_before_pipeline(
 // Model retry loop.
 // ---------------------------------------------------------------------------
 
-/// Model retry loop. Returns `(output, terminal_logged)` where
-/// `terminal_logged` is `true` when a terminal `error` event has
-/// already been appended to the log and the caller must skip parse.
+/// Model retry loop. Returns `(output, failure_logged)` where
+/// `failure_logged` is `true` when a failed-attempt `error` event
+/// has already been appended to the log and the caller must skip
+/// parse (FT-031).
 fn model_retry_loop(
     cfg: &HarnessConfig,
     runner: &SubprocessRunner,
@@ -480,7 +494,7 @@ fn model_retry_loop(
     let mut overflow_recovered = false;
     let mut last_resort = false;
     let mut last_output = ModelOutput { json: Value::Null };
-    let terminal_logged = false;
+    let failure_logged = false;
 
     'outer: loop {
         check_signal(mode);
@@ -519,7 +533,7 @@ fn model_retry_loop(
                     std::thread::sleep(std::time::Duration::from_secs(3));
                     continue;
                 }
-                append_terminal_error(cfg, &session.path, "model binary failed to run after retries");
+                append_error(cfg, &session.path, "model binary failed to run after retries");
                 return (last_output, true);
             }
         };
@@ -565,7 +579,7 @@ fn model_retry_loop(
                 !last_resort,
             );
             if ovf_decision == "stop" {
-                append_terminal_error(
+                append_error(
                     cfg,
                     &session.path,
                     "overflow.resolve hook stopped the strategy cycle",
@@ -577,7 +591,7 @@ fn model_retry_loop(
         if stop_reason == "error" {
             if is_overflow {
                 if last_resort {
-                    append_terminal_error(
+                    append_error(
                         cfg,
                         &session.path,
                         &format!(
@@ -676,7 +690,7 @@ fn model_retry_loop(
             // Transport-level model failure.
             model_err_retries += 1;
             if last_resort {
-                append_terminal_error(
+                append_error(
                     cfg,
                     &session.path,
                     &format!("model API call failed after the last-resort compaction: {detail}"),
@@ -746,7 +760,7 @@ fn model_retry_loop(
                     }
                 }
             }
-            append_terminal_error(
+            append_error(
                 cfg,
                 &session.path,
                 &format!("model API call failed after retries: {detail}"),
@@ -817,7 +831,7 @@ fn model_retry_loop(
             if empty_attempts < 3 {
                 continue;
             }
-            append_terminal_error(
+            append_error(
                 cfg,
                 &session.path,
                 "model returned an empty turn after retries",
@@ -828,7 +842,7 @@ fn model_retry_loop(
         break 'outer;
     }
 
-    (last_output, terminal_logged)
+    (last_output, failure_logged)
 }
 
 fn reassemble(

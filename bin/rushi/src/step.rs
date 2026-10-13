@@ -38,7 +38,7 @@ use crate::step::tool::run_awaiting_tool_result;
 // paths (`crate::step::append_line`, `crate::step::fire_step_start`,
 // …). `pub use` also binds the names locally for this file.
 pub use crate::step::hook::fire_step_start;
-pub use crate::step::logio::append_line;
+pub use crate::step::logio::{append_line, line_is_error_event};
 pub use crate::step::model::{
     describe_model, publish_model_thinking, run_awaiting_model,
 };
@@ -65,11 +65,32 @@ pub enum StepMode {
     Run,
 }
 
+/// The outcome of one step (docs/failure-tracking.md FT-031). An
+/// `error` event settles no claim state: the step reports how it
+/// ended, and the run loop stops on a failed step. A new loop
+/// (a `rushi run` poke or the TUI `Ctrl+R`) retries the owed work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepOutcome {
+    /// The step did its owed work (a turn advanced, tools routed,
+    /// an approval answered). The run loop continues.
+    Completed,
+    /// Nothing was owed (idle or exhausted). The run wrapper decides
+    /// the stop.
+    NoWork,
+    /// The step ended with a logged `error` event (a failed model
+    /// attempt or a provider-aborted turn). The run loop stops; the
+    /// owed work stays in the log for a new loop.
+    Failed,
+}
+
 /// One step. Exits 0 on any clean stop. Exits 1 on a hard failure.
+///
+/// Returns the [`StepOutcome`] (FT-031): the run loop stops on a
+/// `Failed` step; the `rushi step` one-shot ignores the outcome.
 ///
 /// `mode` picks the signal exit code: `Step` exits 1 on a caught signal,
 /// `Run` exits 143 (SIGTERM) or 130 (SIGINT).
-pub fn do_step(cfg: &HarnessConfig, session_dir: &Path, mode: StepMode) {
+pub fn do_step(cfg: &HarnessConfig, session_dir: &Path, mode: StepMode) -> StepOutcome {
     let runner = make_runner(cfg);
     let session = SessionDir {
         path: session_dir.to_path_buf(),
@@ -97,36 +118,39 @@ pub fn do_step(cfg: &HarnessConfig, session_dir: &Path, mode: StepMode) {
 
     check_signal(mode);
 
-    match claim.state.as_str() {
+    let outcome = match claim.state.as_str() {
         "idle" => {
             if claim.pending_follow_ups.is_empty() {
                 // No follow-up: the `run` wrapper decides whether to
                 // keep going via the `run.idle` window.
-                return;
+                StepOutcome::NoWork
+            } else {
+                // Idle with follow-ups: drain one batch as a new turn.
+                run_awaiting_model(cfg, &runner, &session, &claim, true, &describe, mode)
             }
-            // Idle with follow-ups: drain one batch as a new turn.
-            run_awaiting_model(cfg, &runner, &session, &claim, true, &describe, mode);
         }
         "exhausted" => {
             // Nothing owed. The handoff or in-session shadow compact
             // already closed this state.
+            StepOutcome::NoWork
         }
         "awaiting_tool_result" => {
             run_awaiting_tool_result(cfg, &runner, &session, &claim);
+            StepOutcome::Completed
         }
-        "awaiting_model" => {
-            run_awaiting_model(cfg, &runner, &session, &claim, false, &describe, mode);
-        }
+        "awaiting_model" => run_awaiting_model(cfg, &runner, &session, &claim, false, &describe, mode),
         "awaiting_approval" => {
             run_awaiting_approval(cfg, &runner, &session, &claim, mode);
+            StepOutcome::Completed
         }
         other => {
             eprintln!("rushi: unknown claim state `{other}`");
             std::process::exit(1);
         }
-    }
+    };
 
     check_signal(mode);
+    outcome
 }
 
 /// Check for a caught signal and exit with the mode-appropriate code.

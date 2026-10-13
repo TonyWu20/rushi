@@ -999,3 +999,52 @@ The closing claim of entry 65 that `non_length_malformed_args_still_fail` still 
 The shared helpers are pinned by two `rushi-common` tests:
 `resolve_tool_entry_keeps_absolute_and_joins_relative` and
 `tool_dirs_in_direct_manifest_and_root_layouts`.
+
+
+### 67. A model error settles no state; the loop stops on the failed step
+
+**Symptom (FT-031):** After a model API error, the TUI `Ctrl+R`
+cannot resume the loop even after the endpoint recovers. Only
+deleting the `error` line from `events.jsonl` un-sticks the
+session.
+
+**Root cause:** The `error` arm of the claim machine treated every
+`error` event as terminal: it settled `idle` and cleared the pending
+lists. The run loop stops on `idle` with no follow-ups, and the
+`Ctrl+R` poke re-spawns a taskless loop. A settled session owes
+nothing, so the re-spawned loop exits before a model call.
+
+**First candidate, rejected by the operator (2026-10-13):** mark
+new errors with an additive `kind: transient` field plus a
+`recoverable` claim state. It was rejected on two grounds: it
+rescued no legacy session (the bare `error` lines already in the
+wild kept settling `idle`), and it added protocol surface.
+
+**Decision (correction 67):** An `error` event settles no claim
+state. It records a failed attempt; the owed work (the steer or
+tool result that triggered the call) and every pending list
+survive in the log. The stop moves from the log to the process:
+`do_step` returns a `StepOutcome` (`Completed` / `NoWork` /
+`Failed`), and the run loop stops on a `Failed` step (fire
+`session.end`, break). A new loop (a `rushi run` poke or the TUI
+`Ctrl+R`) steps into the same owed state and retries the call.
+Legacy session logs with a bare trailing `error` event resume the
+same way: no log editing, no event-shape change, no marker.
+`append_terminal_error` is renamed `append_error`: the events are
+informational. `context_exhausted` stays the sole settling
+handoff.
+
+**Consequences, accepted:** a permanently broken session no longer
+stops itself in one shot; each loop start makes one bounded attempt
+and stops, and the operator controls the retry cadence. The
+`run.idle` hooks do not fire on a model-failure stop. The TUI
+needs no change for the resume.
+
+**Verification:** the `bin/claim` tests pin the non-settling
+semantics (seven error-shape tests plus `request_after_error_awaits_approval`).
+`scripts/error-recovery-e2e.sh` pins the four end-to-end
+scenarios: the down stop keeps `awaiting_model`, the still-down
+resume is bounded, the recovered resume runs the model and settles
+`idle`, and a hand-written legacy log resumes untouched. The
+workspace gate is green, including `scripts/compact-e2e.sh` with
+the `failed-retry` assertion updated to the new semantics.

@@ -210,7 +210,10 @@ fn main() {
             let cfg = config::HarnessConfig::load(&PathBuf::from(config_path));
             let session_dir = cfg.resolve_session(&session);
             signals::install();
-            step::do_step(&cfg, &session_dir, step::StepMode::Step);
+            // The one-shot ignores the outcome: a failed step is
+            // recorded in the session log, and the run loop (not the
+            // step) owns the stop-and-retry contract (FT-031).
+            let _outcome = step::do_step(&cfg, &session_dir, step::StepMode::Step);
         }
 
         Command::Docs { section, list } => {

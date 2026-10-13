@@ -629,8 +629,9 @@ scenario_failed_retry() {
   seed_session 2800 2900 3000 2000
   # Every normal call overflows. The recovery compact fails on its
   # two summary calls (the fail-2 counter), the last-resort forced
-  # compact succeeds, the retry overflows again, and the terminal
-  # error stops the loop in the original session.
+  # compact succeeds, the retry overflows again, and the last-resort
+  # stop logs its error and stops the loop. The failed attempt settles
+  # no claim state (FT-031): the session stays resumable.
   local OVFEVENT
   OVFEVENT='{"text":"","tool_calls":[],"reasoning":[],"stop_reason":"error","usage":null,"detail":"exceeds the context window"}'
   cat >"$WORK/plan" <<EOF
@@ -654,7 +655,7 @@ EOF
   last_err=$(jq -cs 'map(select(.type == "error")) | last' "$SLOG" 2>/dev/null)
   assert_contains "$last_err" "last-resort" "the terminal event names the last-resort failure"
   assert_no_context_exhausted
-  assert_eq "$(claim_state)" "idle" "the loop stops in the original session"
+  assert_eq "$(claim_state)" "awaiting_model" "the failed stop settles no state: the session stays resumable (FT-031)"
 }
 
 # The kill switch: compact_enabled off sends the overflow path to

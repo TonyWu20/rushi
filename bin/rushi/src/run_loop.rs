@@ -13,10 +13,15 @@
 //! single canonical poke of a session: the caller never branches on
 //! loop state (docs/reference/monitoring.md, "The poke").
 //!
+//! A step that ended with a logged `error` event stops the loop
+//! (docs/failure-tracking.md FT-031). The error settles no claim
+//! state: the owed work stays in the log, and a new loop (a `rushi
+//! run` poke or the TUI `Ctrl+R`) retries it.
+//!
 //! # Exit codes
-//! - `0` — clean stop (idle with no pending follow-ups, exhausted, or a
-//!   logged terminal error event), or a poke of a live session (the
-//!   task was appended, or there was no task to start)
+//! - `0` — clean stop (idle with no pending follow-ups, exhausted, a
+//!   step that failed and logged an `error` event, or a poke of a
+//!   live session where the task was appended or there was none)
 //! - `1` — hard failure (config unreadable, log append fails, or an
 //!   empty task)
 //! - `143` — SIGTERM
@@ -162,7 +167,7 @@ pub fn run(
 
     // The turn loop.
     loop {
-        crate::step::do_step(cfg, session_dir, StepMode::Run);
+        let outcome = crate::step::do_step(cfg, session_dir, StepMode::Run);
 
         // Fire step.end (observation, after the step completes).
         fire_observation(cfg, &session, Window::StepEnd, &serde_json::json!({
@@ -175,6 +180,15 @@ pub fn run(
             fire_session_end(cfg, &session, "signal");
             crate::stage_runner::cancel_live_child();
             std::process::exit(sig.run_exit_code());
+        }
+
+        // A failed step logged its `error` event and settled no claim
+        // state (FT-031). Stop the loop; the owed work stays in the
+        // log for a new loop to retry. Without this stop the loop
+        // would spin on a still-failing model call.
+        if outcome == crate::step::StepOutcome::Failed {
+            fire_session_end(cfg, &session, "model_failure");
+            break;
         }
 
         let claim: Claim = match runner.claim(&session) {
@@ -232,6 +246,8 @@ pub fn run(
         // awaiting_model / awaiting_tool_result / awaiting_approval:
         // the next iteration steps into the owed work.
     }
+    // A clean stop (idle, exhausted, or a failed step that logged
+    // its error). The log holds the record; a new loop resumes it.
 
     std::process::exit(0);
 }
