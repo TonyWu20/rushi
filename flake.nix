@@ -33,7 +33,7 @@
       ...
     }:
     let 
-      rushiVersion="0.1.5";
+      rushiVersion="0.1.6";
     in
     rec {
 
