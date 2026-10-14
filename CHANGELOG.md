@@ -6,6 +6,24 @@ versioned change for each kernel binary, newest first.
 Internal refactors without user-visible behavior do not get an
 entry.
 
+## rushi 0.1.3 (2026-10-14)
+
+The CWD config tier now beats the Nix side-by-side tier
+(docs/project-config-precedence.md, revision 2).
+
+- A Nix project CWD with a `config.toml` now resolves that file as
+  the top layer. The store config is the base layer under it.
+- Before the fix the store tier always won on a Nix install, so the
+  project config was dead and the top layer equalled the base layer.
+- No-flag launches (TUI, `rushi run`) pick up the project config.
+  The `--config` and `$CONFIG` tiers are unchanged.
+- Proof: `scripts/config-layer-e2e.sh` scenario 3.
+
+## rushi-common 0.1.7 (2026-10-14)
+
+`resolve_config_path` reorders the ambient tiers: CWD `config.toml`
+when present now outranks the Nix side-by-side config.
+
 ## rushi 0.1.2 (2026-10-14)
 
 Layered config (docs/project-config-precedence.md). The Nix store

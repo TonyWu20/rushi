@@ -40,9 +40,14 @@ pub fn resolved_exe() -> Option<PathBuf> {
 ///    everything, including an ambient `$CONFIG`
 /// 2. `$CONFIG` env var — ambient override, still above the package
 ///    layouts
-/// 3. Side-by-side `<exe_dir>/../config.toml` — Nix package layout
-///    (`$out/bin/…` finds `$out/config.toml`)
-/// 4. `config.toml` in CWD — dev checkout fallback
+/// 3. `config.toml` in CWD, when present — the project-local top
+///    layer. A Nix project checkout keeps its diff here; it must
+///    beat the store side-by-side config, or the top layer would
+///    equal the base layer and the project config would be dead
+///    (docs/project-config-precedence.md, 2026-10-14 fix)
+/// 4. Side-by-side `<exe_dir>/../config.toml` — Nix package layout
+///    (`$out/bin/…` finds `$out/config.toml`); the base layer when a
+///    CWD config wins
 ///
 /// The resolved file is the **top layer** of the layered config
 /// (`rushi_common::config_layer`): when the binary runs from a Nix
@@ -62,7 +67,17 @@ pub fn resolve_config_path(cli_config: Option<&Path>) -> String {
         return p;
     }
 
-    // 3. Side-by-side: <exe_dir>/../config.toml (Nix: $out/config.toml).
+    // 3. CWD config.toml, when present: the project-local top layer.
+    // It must be checked before the Nix side-by-side tier: in a Nix
+    // install the store config always exists, so a CWD check after it
+    // would never run and the project config would be dead
+    // (docs/project-config-precedence.md, 2026-10-14 fix).
+    let cwd_config = Path::new("config.toml");
+    if cwd_config.is_file() {
+        return cwd_config.to_string_lossy().into_owned();
+    }
+
+    // 4. Side-by-side: <exe_dir>/../config.toml (Nix: $out/config.toml).
     // Use the canonicalized exe (issue #25): on macOS current_exe() is
     // the launch path, so a profile symlink chain would miss the
     // store package's sibling config.toml.
@@ -76,7 +91,7 @@ pub fn resolve_config_path(cli_config: Option<&Path>) -> String {
         }
     }
 
-    // 4. CWD fallback (dev checkout).
+    // 5. CWD fallback (dev checkout, no existence check).
     "config.toml".into()
 }
 
@@ -128,6 +143,12 @@ mod tests {
     /// hold this lock so the parallel test harness cannot observe a
     /// half-updated environment (issue #36).
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    // P-L11 (the CWD tier beats the Nix side-by-side tier) is proven
+    // by `scripts/config-layer-e2e.sh` scenario 3, which runs a real
+    // binary from a project CWD. A process-level chdir unit test is
+    // deliberately not added: CWD is process-global and would race
+    // the parallel test harness.
 
     #[test]
     fn resolved_exe_is_canonicalized() {
