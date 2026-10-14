@@ -1502,3 +1502,62 @@ change.
 - The TUI needs no change for the resume: `Ctrl+R` already re-spawns
   the loop command. A later display polish may hint "model error —
   press `Ctrl+R` to retry" when the log tail is a bare `error`.
+
+## FT-032 — Cross-tree pokes misroute: a bare name creates a new
+session in the caller tree
+
+**Symptom:** The 2026-10-08 to 2026-10-14 `cpusolver-impl` episode.
+The session log lives at `chemrust-scf/sessions/cpusolver-impl/events.jsonl`.
+The orchestrator poked `ccastep-vdump` with a bare `rushi run` call
+from another project tree. The pokes never reached the real session.
+They filled a phantom store instead:
+`chemrust-scf/.pipeline-worktrees/missions/sessions/ccastep-vdump`.
+A phantom loop (pid 427948, per its `loop.meta`) processed those pokes.
+The same misroute hit the orchestrator's own pings:
+`missions/sessions/cpusolver-impl` (1549 events, phantom loop pid 826693).
+The user pushed sessions by hand and reported the self-notification
+failures (2026-10-14 08:20, "You keep on failing to notify yourself").
+
+**Root cause:** The default `sessions_root` is the relative value
+`sessions`. It resolves against the call CWD
+(`bin/rushi/src/config.rs`, `resolve_dir_override`). `run()` creates
+the session dir when it is missing (`create_dir_all`,
+`bin/rushi/src/run_loop.rs`). A bare name gets no existence check.
+When the caller tree lacks `<sessions_root>/<name>`, the call creates
+a new session there. It never errors on an unknown name. `pings.log`
+carried the line `model spawn/IO failed ... retry 1/2 in 3s`. That
+line belongs to the phantom loops, not to any lost message. The
+orchestrator read it as a `rushi run` reliability defect ("lost at
+the rushi layer", 2026-10-10 05:05:55). The messages were misrouted,
+not lost.
+
+**Fix:** The fix is tracked in issue #49. It is not landed yet.
+Issue #49 proposes three steps. One: a one-line stdout echo of the
+resolved session dir on both `rushi run` branches. Two: an opt-in
+`--sessions-strict` flag that errors on an unknown bare name. Three:
+the routing rule in `rushi docs monitoring` and `rushi docs
+headless-missions`. User decision 2026-10-14: the three related
+findings below solve together with issue #49, in one change set.
+Finding one: the `no-long-sleep` guard false positives. The
+`while`/`until` rule is a token co-occurrence test, not the
+documented containment test (`bin/hook-no-long-sleep/src/sleepcheck.rs`,
+`loop_block`). Two recorded false positives: 2026-10-09 10:53:41
+(the word "while" in heredoc prose plus a one-shot `sleep 10`) and
+2026-10-13 11:54:43 (the documented monitor skeleton `while IFS=
+read -r line` plus a one-shot `sleep 1`). Finding two: the missing
+`rushi run` fire-and-forget contract line in the docs. A successful
+poke prints nothing of value. No delivery-verification rule is
+stated. Finding three: the transient model spawn failures (2 × 3 s
+retries, `bin/rushi/src/step/model.rs`). The P7 trigger stands. The
+misroute above explains the user-visible losses.
+
+**Verification:** The misroute is reproducible on disk today. Two
+phantom stores exist under
+`chemrust-scf/.pipeline-worktrees/missions/sessions/` (`ccastep-vdump`,
+`cpusolver-impl`), with the pokes in their `events.jsonl`. The real
+stores hold none of the pokes (`CASTEP-6.11-nixos-dump/sessions/ccastep-vdump`,
+`chemrust-scf/sessions/cpusolver-impl`). Close criteria: the issue
+#49 tests. Strict mode blocks a phantom creation in a second tree.
+The stdout line carries the resolved dir. The guard containment check
+passes the documented monitor skeleton plus a one-shot `sleep 1`. The
+docs carry the fire-and-forget contract line.
