@@ -108,6 +108,7 @@ Store-alone and no-base runs behave exactly as today.
 | P-L8 a base-layer def referenced by no pipeline never warns; an unreferenced top-layer def warns | `dead_def_warnings_scoped_to_top_layer` (bin/rushi config) |
 | P-L9 a legacy key in either layer is a load error on the merged value | `legacy_key_in_base_layer_is_a_load_error` (config_layer) |
 | P-L10 a top file read/parse error propagates as `Err` | `load_layered_top_errors_are_err` (config_layer) |
+| P-L12 every config consumer resolves the top layer through the one shared ladder; an explicit `--config` stays tier 1 | `scripts/config-layer-e2e.sh` scenario 4b (the `assemble` stage binary from an empty CWD in a Nix layout resolves the store config) plus all seven consumers call `rushi_common::paths::resolve_config_path` |
 
 ## Consequence table (acceptance)
 
@@ -122,15 +123,14 @@ holds in `rushi-common` 0.1.7.
 | Dev checkout / plain install | no base file exists, the merge is a no-op, today's behavior unchanged | P-L4, `load_layered_no_base_is_verbatim` plus `find_base_layer_is_none_in_dev_layout` |
 | Top equals base (CWD is the store dir) | parses alone, never merges a file over itself | P-L5, unit test plus scenario 5 |
 
-The tier ladder runs in the `rushi` loop binary only
-(`rushi_common::paths::resolve_config_path`). The stage binaries
-(`assemble`, `model`, `parse`, `compact`) and the `user` binary keep
-the CWD-relative `--config` default: no flag means `config.toml` in
-the CWD, and a missing file is a load error. Layering still applies
-to them at load (P-L6, scenario 1): an explicit `--config` top
-layers over the side-by-side store base when one exists. Extending
-the tier ladder to the stage binaries is an open decision, not a
-silent change.
+All config consumers resolve the top layer through the one shared
+ladder (`rushi_common::paths::resolve_config_path`): the `rushi`
+loop, the stage binaries (`assemble`, `model`, `parse`,
+`compact`), the `user` binary, and the `harness-hook-compact` hook.
+An explicit `--config` is tier 1. When omitted, the ladder runs:
+$CONFIG, CWD config.toml when present, the Nix side-by-side
+config, CWD fallback. No CWD-only default survives anywhere: one
+codebase, one resolution (P-L12).
 
 ## Gate
 
@@ -138,7 +138,7 @@ silent change.
 cargo test -p rushi-common
 cargo test -p rushi -p assemble -p model -p parse -p compact -p user
 cargo build --release
-bash scripts/config-layer-e2e.sh          # scenarios 1-5 (P-L6, P-L7, P-L11, P-L7 no-flag, P-L5 CWD-is-store)
+bash scripts/config-layer-e2e.sh          # scenarios 1-5 (P-L6, P-L7, P-L11, P-L7 no-flag + P-L12, P-L5 CWD-is-store)
 ```
 
 A clean gate with zero open properties is the guarantee.

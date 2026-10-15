@@ -22,9 +22,10 @@ struct Args {
     #[arg(long)]
     session: String,
 
-    /// Path to config file
-    #[arg(long, default_value = "config.toml")]
-    config: String,
+    /// Path to config file (default: the tier ladder,
+    /// docs/project-config-precedence.md)
+    #[arg(long)]
+    config: Option<PathBuf>,
 
     /// Request-time exclusion of the last assistant step group (its
     /// message, calls, and results). Nothing is persisted (docs/
@@ -1039,12 +1040,13 @@ fn hard_trim_groups(
 fn main() {
     let args = Args::parse();
 
-    let config_path = &args.config;
+    let config_path =
+        rushi_common::paths::resolve_config_path(args.config.as_deref());
 
     // Read the config as the top layer: the Nix store config.toml
     // (when present) deep-merges under it
     // (docs/project-config-precedence.md).
-    let layers = rushi_common::config_layer::load_layered(config_path)
+    let layers = rushi_common::config_layer::load_layered(&config_path)
         .unwrap_or_else(|e| {
             eprintln!("Error: {e}");
             std::process::exit(1);
@@ -1097,7 +1099,7 @@ fn main() {
     // entries resolve against the config dir. The per-entry
     // resolution and dir enumeration are shared with the TUI via
     // `rushi_common::paths` (single source of truth).
-    let config_dir = PathBuf::from(&args.config)
+    let config_dir = PathBuf::from(&config_path)
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_default();

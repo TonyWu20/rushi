@@ -11,9 +11,10 @@ use std::io::{self, BufRead, Read, Write};
 #[derive(Parser)]
 #[command(name = "model", about = "Call the model API and output model response", version)]
 struct Args {
-    /// Path to config file
-    #[arg(long, default_value = "config.toml")]
-    config: String,
+    /// Path to config file (default: the tier ladder,
+    /// docs/project-config-precedence.md)
+    #[arg(long)]
+    config: Option<std::path::PathBuf>,
 
     /// Print the resolved call config as one JSON object and exit:
     /// the active model, the reasoning effort as sent in the
@@ -79,11 +80,12 @@ fn thinking_level_for(effort: &str) -> u32 {
 fn main() {
     let args = Args::parse();
 
-    let config_path = &args.config;
+    let config_path =
+        rushi_common::paths::resolve_config_path(args.config.as_deref());
     // Read the config as the top layer: the Nix store config.toml
     // (when present) deep-merges under it
     // (docs/project-config-precedence.md).
-    let layers = rushi_common::config_layer::load_layered(config_path)
+    let layers = rushi_common::config_layer::load_layered(&config_path)
         .unwrap_or_else(|e| {
             eprintln!("Error: {e}");
             std::process::exit(1);

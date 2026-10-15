@@ -27,9 +27,11 @@ struct Args {
     #[arg(long)]
     session: String,
 
-    /// Path to config file (used to resolve session names)
-    #[arg(long, default_value = "config.toml")]
-    config: String,
+    /// Path to config file. Omit to use the shared tier ladder
+    /// (docs/project-config-precedence.md). The resolved file also
+    /// resolves session names.
+    #[arg(long)]
+    config: Option<PathBuf>,
 
     /// Do not run the agent loop after appending
     #[arg(long)]
@@ -49,6 +51,10 @@ struct Args {
 
 fn main() {
     let args = Args::parse();
+
+    // Shared tier ladder (docs/project-config-precedence.md).
+    let config_path =
+        rushi_common::paths::resolve_config_path(args.config.as_deref());
 
     let content = match args.content {
         Some(c) => c,
@@ -89,7 +95,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    let session_dir = resolve_session_dir(&args.session, &args.config);
+    let session_dir = resolve_session_dir(&args.session, &config_path);
     let log_path = session_dir.join("events.jsonl");
 
     if !session_dir.exists() {
@@ -129,7 +135,7 @@ fn main() {
     }
 
     // Run the agent loop through the [loop] table.
-    run_turn(&args.session, &args.config);
+    run_turn(&args.session, &config_path);
 }
 
 /// Run the agent loop via the `[loop]` table of config.toml.

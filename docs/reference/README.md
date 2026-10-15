@@ -142,13 +142,19 @@ pair were retired 2026-09-17 (`docs/lean-driven-development.md` §8).
 
 ## 4. Configuration (`config.toml`)
 
-The loop binary reads a TOML config. Resolution order for the config
-path (issue #36: the explicit flag outranks the ambient env var):
+All config consumers (the loop, `assemble`, `model`, `parse`,
+`compact`, `user`, `harness-hook-compact`) read the TOML config
+through the shared resolver
+(`rushi_common::paths::resolve_config_path`). Resolution order
+(issue #36: the explicit flag outranks the ambient env var):
 
 1. `--config` CLI flag
 2. `$CONFIG` environment variable
-3. `<exe_dir>/../config.toml` (Nix side-by-side layout)
-4. `./config.toml` in CWD (dev checkout)
+3. `./config.toml` in CWD, when present (the project-local top
+   layer)
+4. `<exe_dir>/../config.toml` (Nix side-by-side layout; the base
+   layer when a CWD config wins)
+5. `./config.toml` in CWD (dev checkout fallback)
 
 The resolved file is the **top layer**. When the running binary sits
 in a Nix package layout, the store `config.toml` is the **base layer**

@@ -94,7 +94,10 @@ fn read_stdin_json() -> serde_json::Value {
 fn handle_compact_window(payload: &serde_json::Value) {
     let session = std::env::var("SESSION").unwrap_or_default();
     let sessions_root = std::env::var("SESSIONS_ROOT").unwrap_or_else(|_| "sessions".into());
-    let config = std::env::var("CONFIG").unwrap_or_else(|_| "config.toml".into());
+    // Shared tier ladder (docs/project-config-precedence.md): an
+    // ambient $CONFIG, then the CWD config.toml when present, then
+    // the Nix side-by-side config next to this hook binary.
+    let config = rushi_common::paths::resolve_config_path(None);
 
     let session_dir = if session.contains('/') || session.contains('\\') {
         std::path::PathBuf::from(&session)

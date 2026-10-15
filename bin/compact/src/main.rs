@@ -31,9 +31,10 @@ use serde_json::Value;
 struct Args {
     /// The session directory (events.jsonl lives inside).
     session: PathBuf,
-    /// The config.toml path.
-    #[arg(long, default_value = "config.toml")]
-    config: PathBuf,
+    /// The config.toml path (default: the tier ladder,
+    /// docs/project-config-precedence.md)
+    #[arg(long)]
+    config: Option<PathBuf>,
     /// The trigger reason: threshold or overflow. The default is the
     /// threshold check, where the cooldown and the trigger test
     /// apply.
@@ -326,6 +327,12 @@ fn append_event(
 
 fn main() {
     let args = Args::parse();
+    // Shared tier ladder (docs/project-config-precedence.md): the
+    // explicit --config flag, then $CONFIG, then the CWD config when
+    // present, then the Nix side-by-side config.
+    let config_path: PathBuf =
+        rushi_common::paths::resolve_config_path(args.config.as_deref())
+            .into();
     // `--up-to` is a 1-based log sequence (the same numbering `assemble
     // --up-to`, `first_kept_seq`, and `last_user_seq` use). Reject 0 up
     // front instead of writing a `compaction_failed` marker for a bad
@@ -412,7 +419,7 @@ fn main() {
     }
 
     // The config: the budget and the compact knobs.
-    let cfg = load_config(&args.config);
+    let cfg = load_config(&config_path);
     let empty = toml::Value::Table(toml::map::Map::new());
     let limits = cfg.get("limits").unwrap_or(&empty);
     let reserve = val_int(limits, "compact_reserve_tokens").unwrap_or(16_384) as u64;
@@ -539,7 +546,10 @@ fn run_compaction(
     parent_version: u64,
     diverge_seq: u64,
 ) -> ! {
-    let cfg = load_config(&args.config);
+    let config_path: PathBuf =
+        rushi_common::paths::resolve_config_path(args.config.as_deref())
+            .into();
+    let cfg = load_config(&config_path);
     let empty = toml::Value::Table(toml::map::Map::new());
     let limits = cfg.get("limits").unwrap_or(&empty);
     let keep_tokens: u64 = val_int(limits, "compact_keep_tokens").unwrap_or(20_000) as u64;
@@ -620,7 +630,7 @@ fn run_compaction(
     cmd.arg("--session")
         .arg(&args.session)
         .arg("--config")
-        .arg(&args.config)
+        .arg(&config_path)
         .arg("--summary-input")
         .arg("--up-to")
         .arg(&up_to_str);
@@ -661,7 +671,7 @@ fn run_compaction(
     // its own assistant_message, tool_result, and stop markers to
     // the session log.
     let model_bin = resolve_bin(&args.model, "MODEL_BIN", "model");
-    let (summary, summary_usage) = match run_summary_calls(&model_bin, &args.config, &request) {
+    let (summary, summary_usage) = match run_summary_calls(&model_bin, &config_path, &request) {
         Ok(r) => r,
         Err(last_err) => {
             fail_and_exit(args, overflow, last_user_seq, "both summary calls failed", &last_err);
@@ -853,6 +863,9 @@ fn run_summary_calls(
 /// handoff file is written (P3). A model failure appends
 /// `compaction_failed` and no branch marker (P4).
 fn run_branch_compaction(args: &Args, events: &[LogEvent]) -> ! {
+    let config_path: PathBuf =
+        rushi_common::paths::resolve_config_path(args.config.as_deref())
+            .into();
     // The last (top-level) rewind marker on the active path is the
     // most recent rewind event in log order (D1). Sub-branches are
     // not their own markers; they appear only as labels inside the
@@ -906,7 +919,7 @@ fn run_branch_compaction(args: &Args, events: &[LogEvent]) -> ! {
 
     // tokens_before: the full-form estimate of the ditched span at the
     // calibrated chars-per-token ratio.
-    let cfg = load_config(&args.config);
+    let cfg = load_config(&config_path);
     let active_model = resolve_active_model(&cfg);
     let cpts = resolve_model_settings(&cfg, &active_model).estimate_chars_per_token.max(1);
     let caps = Caps { text: None, chars_per_token: cpts };
@@ -923,7 +936,7 @@ fn run_branch_compaction(args: &Args, events: &[LogEvent]) -> ! {
     cmd.arg("--session")
         .arg(&args.session)
         .arg("--config")
-        .arg(&args.config)
+        .arg(&config_path)
         .arg("--summary-input")
         .arg("--branch-of")
         .arg(branch_of.to_string());
@@ -964,7 +977,7 @@ fn run_branch_compaction(args: &Args, events: &[LogEvent]) -> ! {
     // The summary call: two tries through the model binary.
     let model_bin = resolve_bin(&args.model, "MODEL_BIN", "model");
     let (summary, summary_usage) =
-        match run_summary_calls(&model_bin, &args.config, &request) {
+        match run_summary_calls(&model_bin, &config_path, &request) {
             Ok(r) => r,
             Err(last_err) => {
                 // P4: the failure appends only `compaction_failed`.

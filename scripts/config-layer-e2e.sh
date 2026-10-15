@@ -89,11 +89,11 @@ assert "basemodel" not in text, "P-L11: store config leaked into the dump"
 print("P-L11: no-flag launch from a project CWD resolves the CWD config as top layer")
 PYCHECK
 
-# ── scenario 4 (P-L7 no-flag): no flag, no CWD config, Nix layout ──
-# The loop's resolver walks past the CWD tier (no config.toml in CWD)
-# to the side-by-side tier. Top equals base: the store config parses
-# alone, today's behavior. The stage binaries resolve no tiers: their
-# --config flag keeps the CWD-relative default.
+# ── scenario 4 (P-L7 no-flag, P-L12): no flag, no CWD config ──
+# The resolver walks past the CWD tier (no config.toml in CWD) to
+# the side-by-side tier. Top equals base: the store config parses
+# alone, today's behavior. 4a is the loop binary, 4b is a stage
+# binary: both walk the one shared ladder (P-L12).
 mkdir -p "$WORK/empty"
 ( cd "$WORK/empty" && env -u CONFIG "$WORK/store/bin/rushi" config ) > "$WORK/dump4.txt"
 python3 - "$WORK/dump4.txt" <<'PYCHECK'
@@ -102,6 +102,16 @@ text = open(sys.argv[1]).read()
 assert "basemodel" in text, "P-L7nf store config not resolved alone"
 assert "top-layer prompt" not in text, "P-L7nf foreign prompt leaked"
 print("P-L7 no-flag: no CWD config on a Nix install resolves the store config alone")
+PYCHECK
+
+# 4b (P-L12): the stage binary walks the same shared ladder.
+( cd "$WORK/empty" && env -u CONFIG "$WORK/store/bin/assemble" --session "$WORK/session" ) > "$WORK/req4b.json"
+python3 - "$WORK/req4b.json" <<'PYCHECK'
+import json, sys
+req = json.load(open(sys.argv[1]))
+assert req["model"] == "base-model-id", "P-L12 stage model missing: %r" % req.get("model")
+assert "top-layer prompt" not in req["instructions"], "P-L12 foreign prompt leaked"
+print("P-L12: the assemble stage binary resolves the store config via the shared ladder")
 PYCHECK
 
 # ── scenario 5 (P-L5 CWD-is-store): CWD holds the store config ──

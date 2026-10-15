@@ -6,6 +6,39 @@ versioned change for each kernel binary, newest first.
 Internal refactors without user-visible behavior do not get an
 entry.
 
+## assemble 0.1.3 (2026-10-14)
+
+Config resolution now uses the shared tier ladder
+(docs/project-config-precedence.md, P-L12). Omitting `--config` no
+longer falls back to a CWD-only default. On a Nix install the store
+config is found side-by-side instead of erroring.
+
+## model 0.1.2 (2026-10-14)
+
+Adopts the shared tier ladder for config resolution (P-L12). Same
+behavior change as `assemble` 0.1.3.
+
+## parse 0.1.2 (2026-10-14)
+
+Adopts the shared tier ladder for config resolution (P-L12). Same
+behavior change as `assemble` 0.1.3.
+
+## compact 0.1.2 (2026-10-14)
+
+Adopts the shared tier ladder for config resolution (P-L12). The
+loader stays lenient. The resolved path is what the `assemble` and
+`model` children receive as `--config`.
+
+## user 0.1.2 (2026-10-14)
+
+Adopts the shared tier ladder for config resolution (P-L12). The
+resolved top layer is what the loop child receives as `CONFIG`.
+
+## hook-compact 0.1.1 (2026-10-14)
+
+The compact hook resolves config through the shared tier ladder
+(P-L12) instead of a `$CONFIG`-or-CWD default.
+
 ## rushi 0.1.3 (2026-10-14)
 
 The CWD config tier now beats the Nix side-by-side tier

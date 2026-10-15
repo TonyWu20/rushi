@@ -14,9 +14,10 @@ use std::path::PathBuf;
     version
 )]
 struct Args {
-    /// Path to config file
-    #[arg(long, default_value = "config.toml")]
-    config: String,
+    /// Path to config file (default: the tier ladder,
+    /// docs/project-config-precedence.md)
+    #[arg(long)]
+    config: Option<std::path::PathBuf>,
 }
 
 /// Collect tool names from a tool path (tool dir or root dir).
@@ -43,11 +44,12 @@ fn collect_tool_names(path: &PathBuf, names: &mut std::collections::HashSet<Stri
 fn main() {
     let args = Args::parse();
 
-    let config_path = &args.config;
+    let config_path =
+        rushi_common::paths::resolve_config_path(args.config.as_deref());
     // Read the config as the top layer: the Nix store config.toml
     // (when present) deep-merges under it
     // (docs/project-config-precedence.md).
-    let layers = rushi_common::config_layer::load_layered(config_path)
+    let layers = rushi_common::config_layer::load_layered(&config_path)
         .unwrap_or_else(|e| {
             eprintln!("Error: {e}");
             std::process::exit(1);
@@ -74,7 +76,7 @@ fn main() {
         .and_then(|p| p.get("native_tool_paths"))
         .and_then(|l| l.as_array())
         .map(|arr| {
-            let config_dir = std::path::Path::new(config_path)
+            let config_dir = std::path::Path::new(&config_path)
                 .parent()
                 .map(|p| p.to_path_buf())
                 .unwrap_or_default();
@@ -100,7 +102,7 @@ fn main() {
         .and_then(|p| p.get("extension_tool_paths"))
         .and_then(|l| l.as_array())
         .map(|arr| {
-            let config_dir = std::path::Path::new(config_path)
+            let config_dir = std::path::Path::new(&config_path)
                 .parent()
                 .map(|p| p.to_path_buf())
                 .unwrap_or_default();
