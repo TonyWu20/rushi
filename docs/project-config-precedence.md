@@ -102,12 +102,35 @@ Store-alone and no-base runs behave exactly as today.
 | P-L2 nested table keys recurse; base keys absent from top survive | `deep_merge_table_recurse` (config_layer) |
 | P-L3 a top scalar or array replaces the base value | `deep_merge_scalar_and_array_replace` (config_layer) |
 | P-L4 no base: value equals the top file verbatim, `base == None` | `load_layered_no_base_is_verbatim` (config_layer) |
-| P-L5 top is the base file itself: parses alone, no self-merge | `load_layered_same_file_parses_alone` (config_layer) |
+| P-L5 top is the base file itself: parses alone, no self-merge | `load_layered_same_file_parses_alone` (config_layer) plus `scripts/config-layer-e2e.sh` scenario 5 (the CWD tier path, the canonicalize branch of the same-file guard) |
 | P-L6 fake Nix layout + partial project config: request JSON carries the base model, the top prompt, the base tools | `scripts/config-layer-e2e.sh` scenario 1 |
-| P-L7 store config alone: request JSON equals today's behavior | `scripts/config-layer-e2e.sh` scenario 2 |
+| P-L7 store config alone: request JSON equals today's behavior | `scripts/config-layer-e2e.sh` scenario 2 (the flag path) and scenario 4 (the no-flag path: no CWD config, the side-by-side tier resolves the store config alone) |
 | P-L8 a base-layer def referenced by no pipeline never warns; an unreferenced top-layer def warns | `dead_def_warnings_scoped_to_top_layer` (bin/rushi config) |
 | P-L9 a legacy key in either layer is a load error on the merged value | `legacy_key_in_base_layer_is_a_load_error` (config_layer) |
 | P-L10 a top file read/parse error propagates as `Err` | `load_layered_top_errors_are_err` (config_layer) |
+
+## Consequence table (acceptance)
+
+The user's acceptance criteria for the layered config. Every row
+holds in `rushi-common` 0.1.7.
+
+| Situation | Behavior | Proof |
+|---|---|---|
+| Nix install, CWD has a project config | the project config layers over the store base | P-L11, scenario 3 |
+| Nix install, no CWD config | the store base alone, today's behavior | P-L7, scenario 4 |
+| `--config partial.toml` anywhere on a Nix machine | the partial top layers over the store base. No silent model downgrade, ever | P-L6, scenario 1 (asserts the base model and the base tools survive) |
+| Dev checkout / plain install | no base file exists, the merge is a no-op, today's behavior unchanged | P-L4, `load_layered_no_base_is_verbatim` plus `find_base_layer_is_none_in_dev_layout` |
+| Top equals base (CWD is the store dir) | parses alone, never merges a file over itself | P-L5, unit test plus scenario 5 |
+
+The tier ladder runs in the `rushi` loop binary only
+(`rushi_common::paths::resolve_config_path`). The stage binaries
+(`assemble`, `model`, `parse`, `compact`) and the `user` binary keep
+the CWD-relative `--config` default: no flag means `config.toml` in
+the CWD, and a missing file is a load error. Layering still applies
+to them at load (P-L6, scenario 1): an explicit `--config` top
+layers over the side-by-side store base when one exists. Extending
+the tier ladder to the stage binaries is an open decision, not a
+silent change.
 
 ## Gate
 
@@ -115,7 +138,7 @@ Store-alone and no-base runs behave exactly as today.
 cargo test -p rushi-common
 cargo test -p rushi -p assemble -p model -p parse -p compact -p user
 cargo build --release
-bash scripts/config-layer-e2e.sh          # scenarios 1-3 (P-L6, P-L7, P-L11)
+bash scripts/config-layer-e2e.sh          # scenarios 1-5 (P-L6, P-L7, P-L11, P-L7 no-flag, P-L5 CWD-is-store)
 ```
 
 A clean gate with zero open properties is the guarantee.

@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
-# Layered config e2e (docs/project-config-precedence.md, P-L6 / P-L7 / P-L11).
+# Layered config e2e (docs/project-config-precedence.md,
+# consequence table: P-L5 / P-L6 / P-L7 / P-L11).
 # A fake Nix layout proves:
-#   P-L6  a partial top config inherits the store base
-#   P-L7  the store config alone behaves as today
-#   P-L11 no-flag launch from a project CWD resolves the CWD config
-#         as the top layer (it beats the store side-by-side config)
+#   P-L6    a partial top config inherits the store base
+#   P-L7    the store config alone behaves as today
+#   P-L11   no-flag launch from a project CWD resolves the CWD config
+#           as the top layer (it beats the store side-by-side config)
+#   P-L7nf  no flag, no CWD config on a Nix install: the side-by-side
+#           tier resolves the store config alone (today's behavior)
+#   P-L5c   CWD is the store dir itself: top equals base, the
+#           same-file guard parses alone
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -82,6 +87,34 @@ text = open(sys.argv[1]).read()
 assert "top-layer prompt" in text, "P-L11: CWD config did not win the resolution"
 assert "basemodel" not in text, "P-L11: store config leaked into the dump"
 print("P-L11: no-flag launch from a project CWD resolves the CWD config as top layer")
+PYCHECK
+
+# ── scenario 4 (P-L7 no-flag): no flag, no CWD config, Nix layout ──
+# The loop's resolver walks past the CWD tier (no config.toml in CWD)
+# to the side-by-side tier. Top equals base: the store config parses
+# alone, today's behavior. The stage binaries resolve no tiers: their
+# --config flag keeps the CWD-relative default.
+mkdir -p "$WORK/empty"
+( cd "$WORK/empty" && env -u CONFIG "$WORK/store/bin/rushi" config ) > "$WORK/dump4.txt"
+python3 - "$WORK/dump4.txt" <<'PYCHECK'
+import sys
+text = open(sys.argv[1]).read()
+assert "basemodel" in text, "P-L7nf store config not resolved alone"
+assert "top-layer prompt" not in text, "P-L7nf foreign prompt leaked"
+print("P-L7 no-flag: no CWD config on a Nix install resolves the store config alone")
+PYCHECK
+
+# ── scenario 5 (P-L5 CWD-is-store): CWD holds the store config ──
+# The CWD tier returns the CWD config.toml, which is the side-by-side
+# base itself (relative vs absolute, the canonicalize branch of the
+# same-file guard). It parses alone: never a self-merge.
+( cd "$WORK/store" && env -u CONFIG "$WORK/store/bin/rushi" config ) > "$WORK/dump5.txt"
+python3 - "$WORK/dump5.txt" <<'PYCHECK'
+import sys
+text = open(sys.argv[1]).read()
+assert "basemodel" in text, "P-L5c store config not resolved alone"
+assert "top-layer prompt" not in text, "P-L5c foreign prompt leaked"
+print("P-L5: CWD is the store dir, top equals base, the config parses alone")
 PYCHECK
 
 echo "config-layer e2e: all scenarios pass"
