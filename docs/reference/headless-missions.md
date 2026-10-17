@@ -52,10 +52,12 @@ dead. No liveness check.
 
 ```bash
 # The poke plus && and || is the event trigger.
-rushi run <s> <task> </dev/null > log 2>&1 \
+# The result is in the session store and the worktree. rushi run
+# prints nothing on done. Do not redirect its output.
+rushi run <s> <task> </dev/null \
   && rushi run <main> "done" \
        --sessions-root /path/to/project/sessions --cwd /path/to/project \
-  || rushi run <main> "failed: $(tail -n 5 log)" \
+  || rushi run <main> "failed (rc=$?). Inspect the mission session dir and the worktree." \
        --sessions-root /path/to/project/sessions --cwd /path/to/project
 ```
 
@@ -66,10 +68,11 @@ caller blocks on `wait` and reads each exit state:
 
 ```bash
 # Launch N missions. Record each PID. Wait on each PID.
+# The result is in the session store, not the process output.
 for i in 1 2 3; do
   nohup rushi run "$s_$i" "$(cat task_$i)" \
     --sessions-root /path/to/project/sessions --cwd /path/to/project \
-    </dev/null > out_$i 2>&1 &
+    </dev/null &
   echo $! > pid_$i
 done
 for i in 1 2 3; do
@@ -80,7 +83,7 @@ done
 
 The `wait` form is for batches that finish inside the tool call
 cap. For longer missions, launch and let the ping-back signal.
-The agent reads `out_$i` when mission `i` ends.
+The agent reads the mission session dir and the worktree when mission `i` ends.
 
 ## Difference from monitoring
 
