@@ -1,114 +1,90 @@
 # Headless missions (agent-orchestrated rushi sessions)
 
-## What this is
+Use this for a task that does not depend on the current session
+context: implement, fix, review, or research work. The task text
+carries every piece of context the mission needs. The mission
+starts from zero context.
 
-A headless mission is a detached `rushi` session the agent starts from
-a step. It runs to completion and pings the main session when it
-ends.
-
-This is the async form of subagent mode. Any number of sessions run in
-parallel. Each is a plain `rushi` process.
-
-## When to use
-
-Use it when the task does not depend on the current session's
-context, such as a task to implement, fix, review or research
-something. The task text must carry every piece of context the
-mission needs. The mission session starts from zero context.
-Use it when the agent orchestrates multiple `rushi` sessions in one
-bash tool call. Or when it writes the orchestration to a script and
-runs it.
-
-Typical shapes:
-
-- One session per task. Fan out, then wait.
-- One session per issue, in a git worktree.
-- One session per review pass over the same tree.
+Typical shapes: one session per task. One session per issue in a
+git worktree. One session per review pass over the same tree.
 
 ## Mission shape
 
-A mission is a script that provisions the work, then execs the
-session:
+A mission script provisions the work, then execs the session. One
+mission is one process with one exit code.
 
 ```bash
 #!/usr/bin/env bash
+# mission: provision, exec the session. One mission, one process.
+# Flags: --sessions-root pins the store. --cwd pins the workdir.
 set -u
-cd /path/to/work
+cd /path/to/worktree
 # Provision: create the worktree, stage files, write the task.
-exec rushi run <session> <task>
+exec rushi run <session> <task> \
+  --sessions-root /path/to/project/sessions --cwd /path/to/worktree
 ```
 
-The `exec` replaces the script with the loop. One mission is one
-process. It has one exit code.
-
-The worktree-issue pattern is the common provisioning step. One git
-worktree per issue, one session per worktree. Provision the
-worktree, then run `exec rushi run <session> <task>` inside it.
-
-## Project config
+## Config
 
 The `config.toml` at the worktree root is the top layer for a
-launch from that directory
-(docs/project-config-precedence.md). On a Nix-installed machine it
-deep-merges over the store config. The mission script carries no
-`--config`. The project file holds the diff only; the machine
-model, tools, and hooks survive underneath it.
+launch from that directory. The mission script carries no
+`--config`. The machine model, tools, and hooks survive under the
+project diff.
 
-## Detach and record
-
-The agent's shell is non-interactive. `nohup &` alone is not the
-correct detach there. `setsid` starts the mission in a new session.
-It survives the tool call's process group ending.
+## Launch
 
 ```bash
-setsid nohup ./s.sh </dev/null > log 2>&1 & echo $!
+# The launch stands alone. It is milliseconds. It does not
+# outrun the cap.
+nohup ./s.sh </dev/null > log 2>&1 &
+echo $!
 ```
 
-Record the PID that `echo $!` prints. The agent checks it later.
-Redirect stdin from `/dev/null`. The loop never reads a terminal.
+Record the PID that `echo $!` prints. Redirect stdin from
+`/dev/null`. The loop never reads a terminal.
 
-## Ping-back contract
+## Ping-back
 
-On mission end, the orchestrator pings the main session:
+On mission end, the orchestrator pings the main session. The
+main session lives in the project tree. The flags route the
+poke there. The poke works whether the main loop is alive or
+dead. No liveness check.
 
 ```bash
-rushi run <s> <task> && rushi run <main> "done" || rushi run <main> "failed: $(tail -n 5 log)"
+# The poke plus && and || is the event trigger.
+rushi run <s> <task> </dev/null > log 2>&1 \
+  && rushi run <main> "done" \
+       --sessions-root /path/to/project/sessions --cwd /path/to/project \
+  || rushi run <main> "failed: $(tail -n 5 log)" \
+       --sessions-root /path/to/project/sessions --cwd /path/to/project
 ```
-
-The `rushi run` poke plus `&&` and `||` is the event trigger. The
-poke works whether the main loop is alive or dead. No liveness check
-in the script. The ping is the mission's terminal event. No daemon is
-needed.
-
-The main session is the one the agent is in. It wakes on the ping
-and reads the result. That is the same event-driven reattach that
-`rushi docs monitoring` teaches. The ping is the event.
 
 ## Fan-out
 
-Native parallel orchestration. One bash call starts N missions.
-Each mission records its own PID. The caller blocks on `wait`.
-Then it checks each exit state:
+One bash call starts N missions. Each records its own PID. The
+caller blocks on `wait` and reads each exit state:
 
 ```bash
+# Launch N missions. Record each PID. Wait on each PID.
 for i in 1 2 3; do
-  (setsid rushi run "$s_$i" "$(cat task_$i)" > out_$i 2>&1 & echo $! > pid_$i)
+  nohup rushi run "$s_$i" "$(cat task_$i)" \
+    --sessions-root /path/to/project/sessions --cwd /path/to/project \
+    </dev/null > out_$i 2>&1 &
+  echo $! > pid_$i
 done
-wait
-for p in pid_*; do
-  kill -0 "$(cat "$p")" || echo "mission $p ended"
+for i in 1 2 3; do
+  wait "$(cat pid_$i)"
+  echo "mission $i rc=$?"
 done
 ```
 
-That is native parallel orchestration with per-mission exit codes.
+The `wait` form is for batches that finish inside the tool call
+cap. For longer missions, launch and let the ping-back signal.
 The agent reads `out_$i` when mission `i` ends.
 
-## Difference with Monitoring
+## Difference from monitoring
 
-A headless mission is the monitor pattern applied to a blocking
-`rushi run` call. Its exit is the event. The orchestrator blocks
-on it directly. No separate monitor is needed.
-
-Watch long external commands: `rushi docs monitoring`. The monitor
-blocks on a task event and pokes the session with the same single
-`rushi run` form.
+A mission is the monitor pattern applied to a blocking
+`rushi run` call. Its exit is the event. The cap rule does not
+carry over: `timeout` never wraps `rushi run`. Watch long
+external commands instead: `rushi docs monitoring`.
