@@ -29,6 +29,17 @@ WORK="$ROOT/scratch/e2e-steer-inflight"
 rm -rf "$WORK"
 SESSIONS_DIR="$WORK/sessions/session"
 SLOG="$SESSIONS_DIR/events.jsonl"
+
+# sl: read the session log as text. The idle pass may have
+# consolidated the log into a zstd stream (P2, P5). Sniff the
+# zstd magic and decode; a legacy plain text log passes through.
+sl() {
+  if head -c 4 "$SLOG" 2>/dev/null | od -An -v -tx1 | head -1 | rg -q '28 b5 2f fd'; then
+    zstd -dc "$SLOG" 2>/dev/null
+  else
+    cat "$SLOG"
+  fi
+}
 STUB_REQLOG="$WORK/reqlog"
 mkdir -p "$SESSIONS_DIR"
 : >"$SLOG"
@@ -104,13 +115,13 @@ RUN_PID=$!
 
 # Wait for the first model_call_context marker (model call started).
 for _ in $(seq 1 100); do
-  if grep -q '"model_call_context"' "$SLOG" 2>/dev/null; then
+  if grep -q '"model_call_context"' <(sl <(sl "$SLOG")) 2>/dev/null; then
     break
   fi
   sleep 0.1
 done
 
-if ! grep -q '"model_call_context"' "$SLOG" 2>/dev/null; then
+if ! grep -q '"model_call_context"' <(sl <(sl "$SLOG")) 2>/dev/null; then
   ko "the model_call_context marker never appeared"
 fi
 
@@ -152,8 +163,8 @@ if [ "$REQS" -ge 2 ]; then
 fi
 
 # Two model_call_context markers, the second with a higher user_seq.
-M1=$(jq -c 'select(.type=="ext_status" and .id=="model_call_context") | .value.user_seq' "$SLOG" 2>/dev/null | sed -n '1p')
-M2=$(jq -c 'select(.type=="ext_status" and .id=="model_call_context") | .value.user_seq' "$SLOG" 2>/dev/null | sed -n '2p')
+M1=$(jq -c 'select(.type=="ext_status" and .id=="model_call_context") | .value.user_seq' <(sl <(sl "$SLOG")) 2>/dev/null | sed -n '1p')
+M2=$(jq -c 'select(.type=="ext_status" and .id=="model_call_context") | .value.user_seq' <(sl <(sl "$SLOG")) 2>/dev/null | sed -n '2p')
 if [ -n "$M1" ] && [ -n "$M2" ] && [ "$M2" -gt "$M1" ]; then
   ok "the second marker carries a higher user_seq ($M1 → $M2)"
 else

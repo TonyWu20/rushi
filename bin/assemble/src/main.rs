@@ -588,7 +588,7 @@ fn project_tool_result(
 
 fn tool_log_texts(session_dir: &Path) -> HashMap<String, String> {
     let path = session_dir.join("tools.jsonl");
-    let Ok(content) = fs::read_to_string(&path) else {
+    let Ok(content) = rushi_common::logstream::read_log_text(&path) else {
         return HashMap::new();
     };
     let mut map: HashMap<String, String> = HashMap::new();
@@ -1142,7 +1142,7 @@ fn main() {
 
     // Read events
     let log_path = PathBuf::from(&args.session).join("events.jsonl");
-    let lines = match fs::read_to_string(&log_path) {
+    let lines = match rushi_common::logstream::read_log_text(&log_path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Error: cannot read log: {e}");

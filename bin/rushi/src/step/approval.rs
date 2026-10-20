@@ -85,7 +85,7 @@ pub(crate) fn wait_for_approval(
 /// Read the matching `approval` event from the log.
 fn read_approval(session: &SessionDir, request_id: &str) -> Option<Value> {
     let path = session.path.join("events.jsonl");
-    let data = std::fs::read_to_string(&path).ok()?;
+    let data = rushi_common::logstream::read_log_text(&path).ok()?;
     let mut found: Option<Value> = None;
     for line in data.lines() {
         let line = line.trim();
@@ -118,7 +118,7 @@ pub fn run_awaiting_approval(
     mode: StepMode,
 ) {
     let path = session.path.join("events.jsonl");
-    let Ok(data) = std::fs::read_to_string(&path) else {
+    let Ok(data) = rushi_common::logstream::read_log_text(&path) else {
         return;
     };
 

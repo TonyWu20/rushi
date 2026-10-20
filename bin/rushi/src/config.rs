@@ -83,6 +83,9 @@ pub struct HarnessConfig {
     pub claim_bin: PathBuf,
     pub parse_bin: PathBuf,
     pub log_bin: PathBuf,
+    /// The `[log] consolidate_on_idle` gate (P7): the session-end
+    /// consolidation pass. Default on.
+    pub log_consolidate_on_idle: bool,
 }
 
 /// Resolve a hook command against the package layout.
@@ -365,6 +368,13 @@ impl HarnessConfig {
             .and_then(|v| v.as_integer())
             .map(|v| v as u64);
 
+        // The `[log]` table (P7): the idle consolidation gate.
+        let log_consolidate_on_idle = cfg
+            .get("log")
+            .and_then(|l| l.get("consolidate_on_idle"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
         // Binary paths: env overrides, then sibling of the running binary.
         // Computed before the hook loop so bare hook commands can resolve
         // against the sibling `bin/` dir and the package `hooks/` dir.
@@ -511,6 +521,7 @@ impl HarnessConfig {
             claim_bin: resolve_bin("CLAIM_BIN", "claim", &exe_dir),
             parse_bin: resolve_bin("PARSE_BIN", "parse", &exe_dir),
             log_bin: resolve_bin("LOG_BIN", "log", &exe_dir),
+            log_consolidate_on_idle,
         }
     }
 

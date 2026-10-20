@@ -6,7 +6,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let path_str = args.get(1).expect("usage: est_probe <events.jsonl> [cpts]");
     let cpts: u64 = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(4);
-    let data = std::fs::read_to_string(path_str).expect("read events.jsonl");
+    let data = rushi_common::logstream::read_log_text(std::path::Path::new(path_str)).expect("read events.jsonl");
     let events: Vec<serde_json::Value> = data
         .lines()
         .filter_map(|l| serde_json::from_str(l.trim()).ok())

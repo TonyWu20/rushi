@@ -221,12 +221,12 @@ last_req() {
 
 count_markers() {
   local n
-  n=$(jq -c "select(.type == \"ext_status\" and .id == \"$1\")" "$SLOG" 2>/dev/null | wc -l)
+  n=$(jq -c "select(.type == \"ext_status\" and .id == \"$1\")" <(sl <(sl "$SLOG")) 2>/dev/null | wc -l)
   echo "$n"
 }
 
 marker_values() {
-  jq -c "select(.type == \"ext_status\" and .id == \"$1\") | .value" "$SLOG" 2>/dev/null
+  jq -c "select(.type == \"ext_status\" and .id == \"$1\") | .value" <(sl <(sl "$SLOG")) 2>/dev/null
 }
 
 assert_eq() {
@@ -243,6 +243,17 @@ NEW_WORK() {
   rm -rf "$WORK"
   SESSIONS_DIR="$WORK/sessions/session"
   SLOG="$SESSIONS_DIR/events.jsonl"
+
+  # sl: read the session log as text. The idle pass may have
+  # consolidated the log into a zstd stream (P2, P5). Sniff the
+  # zstd magic and decode; a legacy plain text log passes through.
+  sl() {
+    if head -c 4 "$SLOG" 2>/dev/null | od -An -v -tx1 | head -1 | rg -q '28 b5 2f fd'; then
+      zstd -dc "$SLOG" 2>/dev/null
+    else
+      cat "$SLOG"
+    fi
+  }
   STUB_REQLOG="$WORK/reqlog"
   mkdir -p "$SESSIONS_DIR"
   echo "==== scenario: $1"
@@ -269,9 +280,9 @@ scenario_transform() {
   assert_eq "$(marker_values "hook.model.before" | head -1)" '"transform"' \
     "the resolution marker carries the outcome"
   assert_eq "$(count_markers "hook.model.before.chain")" 1 "one chain marker"
-  assert_eq "$(jq -r 'select(.id == "hook.model.before.chain") | .value.stop_kind' "$SLOG" 2>/dev/null)" \
+  assert_eq "$(jq -r 'select(.id == "hook.model.before.chain") | .value.stop_kind' <(sl <(sl "$SLOG")) 2>/dev/null)" \
     "complete" "the chain completed"
-  assert_eq "$(jq -c 'select(.id == "hook.model.before.chain") | .value.steps' "$SLOG" 2>/dev/null)" \
+  assert_eq "$(jq -c 'select(.id == "hook.model.before.chain") | .value.steps' <(sl <(sl "$SLOG")) 2>/dev/null)" \
     '["ok"]' "the chain marker records the step outcome"
   assert_eq "$(count_markers "hook_applied")" 1 "one hook_applied marker"
   assert_eq "$(marker_values "hook_applied" | head -1)" \
@@ -297,9 +308,9 @@ scenario_compose() {
     "B saw: A: first step prepends" \
     "step B saw step A's output (matrix-product composition)"
   assert_eq "$(count_markers "hook.model.before.chain")" 1 "one chain marker"
-  assert_eq "$(jq -r 'select(.id == "hook.model.before.chain") | .value.stop_kind' "$SLOG" 2>/dev/null)" \
+  assert_eq "$(jq -r 'select(.id == "hook.model.before.chain") | .value.stop_kind' <(sl <(sl "$SLOG")) 2>/dev/null)" \
     "complete" "the chain completed"
-  assert_eq "$(jq -c 'select(.id == "hook.model.before.chain") | .value.steps' "$SLOG" 2>/dev/null)" \
+  assert_eq "$(jq -c 'select(.id == "hook.model.before.chain") | .value.steps' <(sl <(sl "$SLOG")) 2>/dev/null)" \
     '["ok","ok"]' "the chain marker records every step's outcome"
   assert_eq "$(count_markers "hook_applied")" 2 "one marker per ok step"
   assert_eq "$(marker_values "hook_applied" | sed -n 1p)" "\"$WORK/hook-a\"" \
@@ -390,7 +401,7 @@ scenario_fail() {
   assert_eq "$(jq -r '.input[0].content' <<<"$req")" "do the task" \
     "the model receives the unmodified request"
   assert_eq "$(count_markers "hook.model.before.error")" 1 "one error marker"
-  assert_eq "$(jq -c 'select(.id == "hook.model.before.chain") | .value.stop_kind' "$SLOG" 2>/dev/null)" \
+  assert_eq "$(jq -c 'select(.id == "hook.model.before.chain") | .value.stop_kind' <(sl <(sl "$SLOG")) 2>/dev/null)" \
     '"fail"' "the chain marker records the fail stop"
   assert_eq "$(count_markers "hook_applied")" 0 "no cache-break marker"
 }

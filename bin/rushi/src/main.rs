@@ -28,6 +28,7 @@
 //! front-end binary in the rushi-tui repo; invoke `rushi-tui`
 //! directly, the kernel no longer launches it.
 
+mod archive;
 mod classifier;
 mod config;
 mod docs;
@@ -141,6 +142,18 @@ enum Command {
     /// prints its raw contents. Useful for dumping the active config to
     /// disk for tweaking, e.g. `rushi config > my-config.toml`.
     Config,
+    /// Consolidate the session logs into one zstd -19 frame each
+    /// (docs/session-log-compression.md, P5, P7).
+    ///
+    /// The pass runs under the log-line lock. It rewrites
+    /// `events.jsonl` and `tools.jsonl` (when present) in place:
+    /// one level-19 frame, verified by a decompress-and-compare
+    /// round trip before the rename. The next write of the session
+    /// appends its frames after the consolidated frame.
+    Archive {
+        /// Session name or directory
+        session: String,
+    },
 }
 
 fn main() {
@@ -212,6 +225,15 @@ fn main() {
                 task.as_deref(),
                 work_dir.as_deref(),
             );
+        }
+
+        Command::Archive { session } => {
+            let cfg = config::HarnessConfig::load(&PathBuf::from(config_path));
+            let session_dir = cfg.resolve_session(&session);
+            if let Err(e) = archive::consolidate_session(&session_dir) {
+                eprintln!("rushi archive: {e}");
+                std::process::exit(1);
+            }
         }
 
         Command::Step { session } => {

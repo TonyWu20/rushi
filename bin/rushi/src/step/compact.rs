@@ -72,8 +72,8 @@ pub fn try_compact_with_hooks(
             .or_else(|| replace.get("first_kept_seq").and_then(|v| v.as_u64()))
             .unwrap_or(1);
         // Compute version metadata for the DAG link.
-        let log_vals: Vec<serde_json::Value> = std::fs::read_to_string(
-            session.path.join("events.jsonl"),
+        let log_vals: Vec<serde_json::Value> = rushi_common::logstream::read_log_text(
+            &session.path.join("events.jsonl"),
         )
         .ok()
         .and_then(|raw| {

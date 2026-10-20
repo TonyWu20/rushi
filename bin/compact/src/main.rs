@@ -267,7 +267,7 @@ fn parse_boundary(e: &LogEvent) -> Option<Boundary> {
 /// append-only, and a corrupt line must not kill the loop.
 fn read_events(path: &Path) -> Vec<LogEvent> {
     let mut out = Vec::new();
-    let raw = match std::fs::read_to_string(path) {
+    let raw = match rushi_common::logstream::read_log_text(path) {
         Ok(r) => r,
         Err(_) => return out,
     };
