@@ -84,6 +84,13 @@ Consequences:
     with custom prompt` spawn `bin/compact --branch`. The kernel appends
     the P2 branch marker. The TUI tailer delivers it and the transcript
     renders it as an always-visible leaf line.
+  - Status 2026-10-19: the TUI summarize options are one-shot. The
+    TUI appends the `rewind` marker at the picked event (mode on),
+    then spawns `bin/compact --branch`. The kernel primitive is
+    unchanged: it still summarizes the open span of the most recent
+    `rewind` marker in log order. The TUI decision record lives in
+    the TUI repo `docs/tree-ui-design-from-human.md`
+    ("one-shot fork-and-summarize").
 - **Phase 2, user-pick, deferred.** The user selects the branch span and the
   handoff region in the tree. That is the user taking over `assemble`
   region-pick for one step. It is deferred because it opens the biggest

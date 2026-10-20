@@ -78,13 +78,21 @@ enum Command {
     /// installs do not ship (the subagent spawn contract,
     /// docs/subagent-design.md section 4).
     Run {
-        /// Session name or directory
+        /// Session name or directory. Hyphen-leading values are
+        /// allowed (session dirs are never flags).
+        #[arg(allow_hyphen_values = true)]
         session: String,
 
         /// Prompt, logged as a `user_message` (steer queue). Omit to
         /// continue from the log's current state. Against a live loop
         /// the prompt is appended and the call exits 0 without
         /// starting a loop; the live loop drains it at its next step.
+        /// Hyphen-leading prompts are allowed: a message may start
+        /// with `-` (a bullet list, a dash, a `--flag`-shaped word),
+        /// and clap would otherwise reject it as an unknown flag and
+        /// silently drop the whole poke (the detached TV send path
+        /// sends stderr to /dev/null).
+        #[arg(allow_hyphen_values = true)]
         task: Option<String>,
 
         /// Override `[paths] sessions_root` from the config for this
@@ -373,6 +381,74 @@ mod tests {
         match args.command.unwrap() {
             Command::Run { cwd, .. } => {
                 assert_eq!(cwd, Some(PathBuf::from("rel/w")));
+            }
+            _ => panic!("expected the Run subcommand"),
+        }
+    }
+
+    /// A hyphen-leading task parses as the task, not as an unknown
+    /// flag. This is the TV send_message regression: the detached
+    /// `rushi run` of a bullet-list message used to exit 2 with
+    /// `unexpected argument '- ...'` and the message was lost.
+    #[test]
+    fn run_accepts_hyphen_leading_task() {
+        let msg = "- line one\n  ```latex\n  code~\\cite{x}; they sample\n  ```\n- line two";
+        let args = Args::try_parse_from(["rushi", "run", "mysess", msg]).unwrap();
+        match args.command.unwrap() {
+            Command::Run { task, .. } => {
+                assert_eq!(task, Some(msg.to_string()));
+            }
+            _ => panic!("expected the Run subcommand"),
+        }
+    }
+
+    /// The `--` escape form stays valid next to the flag allowance
+    /// (callers may pass the task through `--`).
+    #[test]
+    fn run_accepts_task_after_escape_separator() {
+        let args = Args::try_parse_from(["rushi", "run", "mysess", "--", "-task"])
+            .unwrap();
+        match args.command.unwrap() {
+            Command::Run { task, .. } => {
+                assert_eq!(task, Some("-task".to_string()));
+            }
+            _ => panic!("expected the Run subcommand"),
+        }
+    }
+
+    /// A hyphen-leading session value parses as the session.
+    #[test]
+    fn run_accepts_hyphen_leading_session() {
+        let args = Args::try_parse_from(["rushi", "run", "-sess", "task"]).unwrap();
+        match args.command.unwrap() {
+            Command::Run { session, task, .. } => {
+                assert_eq!(session, "-sess");
+                assert_eq!(task, Some("task".to_string()));
+            }
+            _ => panic!("expected the Run subcommand"),
+        }
+    }
+
+    /// Flags keep parsing around hyphen-allowed positionals.
+    #[test]
+    fn run_hyphen_task_with_flags() {
+        let args = Args::try_parse_from([
+            "rushi",
+            "run",
+            "mysess",
+            "-task",
+            "--sessions-root",
+            "/x/sessions",
+        ])
+        .unwrap();
+        match args.command.unwrap() {
+            Command::Run {
+                task,
+                sessions_root,
+                ..
+            } => {
+                assert_eq!(task, Some("-task".to_string()));
+                assert_eq!(sessions_root, Some(PathBuf::from("/x/sessions")));
             }
             _ => panic!("expected the Run subcommand"),
         }
