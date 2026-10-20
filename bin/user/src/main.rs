@@ -37,7 +37,10 @@ struct Args {
     #[arg(long)]
     no_run: bool,
 
-    /// Message content. If omitted, read from stdin.
+    /// Message content. If omitted, read from stdin. Hyphen-leading
+    /// content is allowed (a message may start with `-`); without it
+    /// clap rejects the value as an unknown flag.
+    #[arg(allow_hyphen_values = true)]
     content: Option<String>,
 
     /// Delivery queue for the message (docs/tui-pending-user-

@@ -6,6 +6,22 @@ versioned change for each kernel binary, newest first.
 Internal refactors without user-visible behavior do not get an
 entry.
 
+## rushi 0.1.4 (2026-10-20)
+
+`rushi run` accepts a hyphen-leading `task` (and `session`) value.
+A message that starts with `-` (a bullet list, a dash) was rejected
+by clap as an unknown flag, so the detached TV `send_message` path
+lost the message silently (the detached call sends stderr to
+/dev/null and still prints `message queued`). `task` and `session`
+now carry `allow_hyphen_values`, and the `--` escape form stays
+valid (issue #52).
+
+## user 0.1.3 (2026-10-20)
+
+The `content` positional accepts hyphen-leading values (the same
+clap rejection as `rushi run` task). `content` now carries
+`allow_hyphen_values` (issue #52).
+
 ## assemble 0.1.3 (2026-10-14)
 
 Config resolution now uses the shared tier ladder
