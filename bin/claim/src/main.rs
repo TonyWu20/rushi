@@ -3,7 +3,6 @@
 use clap::Parser;
 use rushi_common::event;
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::path::PathBuf;
 
 /// Derive step state from the session log
@@ -44,7 +43,7 @@ fn main() {
         return;
     }
 
-    let lines = match fs::read_to_string(&log_path) {
+    let lines = match rushi_common::logstream::read_log_text(&log_path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Error: cannot read log: {e}");

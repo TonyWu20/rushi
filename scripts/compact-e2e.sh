@@ -165,13 +165,13 @@ claim_state() {
 # The marker counts.
 count_events() {
   local n
-  n=$(jq -c "select(.type == \"$1\")" "$SLOG" 2>/dev/null | wc -l)
+  n=$(jq -c "select(.type == \"$1\")" <(sl <(sl "$SLOG")) 2>/dev/null | wc -l)
   echo "$n"
 }
 
 # The last marker of a type.
 last_event() {
-  jq -cs "map(select(.type == \"$1\")) | last" "$SLOG" 2>/dev/null
+  jq -cs "map(select(.type == \"$1\")) | last" <(sl <(sl "$SLOG")) 2>/dev/null
 }
 
 # The assertion helpers.
@@ -202,6 +202,17 @@ NEW_WORK() {
   rm -rf "$WORK"
   SESSIONS_DIR="$WORK/sessions/session"
   SLOG="$SESSIONS_DIR/events.jsonl"
+
+  # sl: read the session log as text. The idle pass may have
+  # consolidated the log into a zstd stream (P2, P5). Sniff the
+  # zstd magic and decode; a legacy plain text log passes through.
+  sl() {
+    if head -c 4 "$SLOG" 2>/dev/null | od -An -v -tx1 | head -1 | rg -q '28 b5 2f fd'; then
+      zstd -dc "$SLOG" 2>/dev/null
+    else
+      cat "$SLOG"
+    fi
+  }
   mkdir -p "$SESSIONS_DIR" "$WORK/sessions"
   echo "==== scenario: $1"
 }
@@ -257,7 +268,7 @@ scenario_pi_parity() {
   assert_eq "$(count_events compaction_summary)" 1 "one compaction_summary"
   assert_contains "$(last_event compaction_summary)" '"reason":"threshold"' "the threshold reason rides the marker"
   local tb
-  tb=$(jq -cs 'map(select(.type == "compaction_summary")) | last' "$SLOG" | jq -r '.tokens_before')
+  tb=$(jq -cs 'map(select(.type == "compaction_summary")) | last' <(sl "$SLOG") | jq -r '.tokens_before')
   if [[ -n "$tb" && "$tb" -ge 7500 ]]; then
     ok
   else
@@ -298,7 +309,7 @@ EOF
   assert_eq "$(count_events compaction_summary)" 1 "only the seed boundary"
   assert_no_context_exhausted
   local n_err
-  n_err=$(jq -c 'select(.type == "error")' "$SLOG" | wc -l)
+  n_err=$(jq -c 'select(.type == "error")' <(sl "$SLOG") | wc -l)
   assert_eq "$n_err" 0 "no terminal error"
   assert_eq "$(claim_state)" "idle" "the loop runs to idle"
 }
@@ -404,10 +415,10 @@ EOF
   assert_contains "$(last_event compaction_summary)" '"reason":"overflow"' "the marker names the overflow trigger"
   # The truncated group landed in the log: the truncation notice
   # result is there.
-  assert_contains "$(cat "$SLOG")" "Arguments may be truncated" "the truncation notice result landed in the log"
+  assert_contains "$(sl <(sl "$SLOG"))" "Arguments may be truncated" "the truncation notice result landed in the log"
   assert_no_context_exhausted
   local n_err
-  n_err=$(jq -c 'select(.type == "error")' "$SLOG" | wc -l)
+  n_err=$(jq -c 'select(.type == "error")' <(sl "$SLOG") | wc -l)
   assert_eq "$n_err" 0 "no terminal error event"
   assert_eq "$(claim_state)" "idle" "the loop runs to idle"
   # Correction 64: the truncation notice reaches the model like every
@@ -443,7 +454,7 @@ scenario_compact_failure() {
   assert_eq "$(count_events compaction_failed)" 1 "one compaction_failed marker (threshold)"
   assert_eq "$(count_events compaction_summary)" 0 "no compaction_summary"
   local n_err
-  n_err=$(jq -c 'select(.type == "error")' "$SLOG" | wc -l)
+  n_err=$(jq -c 'select(.type == "error")' <(sl "$SLOG") | wc -l)
   assert_eq "$n_err" 0 "no terminal error (model call succeeded)"
   assert_eq "$(claim_state)" "idle" "the loop continues to idle"
 }
@@ -469,7 +480,7 @@ scenario_empty_summary() {
   assert_eq "$(count_events compaction_failed)" 1 "one compaction_failed marker (threshold)"
   assert_eq "$(count_events compaction_summary)" 0 "no compaction_summary"
   local n_err
-  n_err=$(jq -c 'select(.type == "error")' "$SLOG" | wc -l)
+  n_err=$(jq -c 'select(.type == "error")' <(sl "$SLOG") | wc -l)
   assert_eq "$n_err" 0 "no terminal error (model call succeeded)"
   assert_eq "$(claim_state)" "idle" "the loop continues to idle"
 }
@@ -565,11 +576,11 @@ EOF
   assert_eq "$(count_events compaction_summary)" 2 "seed boundary + threshold compact"
   assert_contains "$(last_event compaction_summary)" '"reason":"threshold"' "the new marker names the threshold trigger"
   local n_trim
-  n_trim=$(jq -c 'select(.type == "ext_status" and .id == "hard_trim")' "$SLOG" 2>/dev/null | wc -l)
+  n_trim=$(jq -c 'select(.type == "ext_status" and .id == "hard_trim")' <(sl <(sl "$SLOG")) 2>/dev/null | wc -l)
   assert_eq "$n_trim" 0 "no hard_trim marker (trim disabled)"
   assert_no_context_exhausted
   local n_err
-  n_err=$(jq -c 'select(.type == "error")' "$SLOG" | wc -l)
+  n_err=$(jq -c 'select(.type == "error")' <(sl "$SLOG") | wc -l)
   assert_eq "$n_err" 0 "no terminal error"
   assert_eq "$(claim_state)" "idle" "the loop runs to idle in the original session"
 }
@@ -613,10 +624,10 @@ EOF
   # the hard-trim backstop is disabled.
   assert_eq "$(count_events compaction_summary)" 2 "two compaction_summaries (seed + forced)"
   local n_trim
-  n_trim=$(jq -c 'select(.type == "ext_status" and .id == "hard_trim")' "$SLOG" 2>/dev/null | wc -l)
+  n_trim=$(jq -c 'select(.type == "ext_status" and .id == "hard_trim")' <(sl <(sl "$SLOG")) 2>/dev/null | wc -l)
   assert_eq "$n_trim" 0 "no hard_trim marker (trim disabled; framing too large for context_exhausted)"
   local n_err
-  n_err=$(jq -c 'select(.type == "error")' "$SLOG" | wc -l)
+  n_err=$(jq -c 'select(.type == "error")' <(sl "$SLOG") | wc -l)
   assert_eq "$n_err" 0 "no terminal error"
   assert_eq "$(claim_state)" "idle" "the loop recovers to idle after the forced compact"
 }
@@ -652,7 +663,7 @@ EOF
     ko "the failed retry: got $n_summary summaries and $n_failed failed markers, want at least one of each"
   fi
   local last_err
-  last_err=$(jq -cs 'map(select(.type == "error")) | last' "$SLOG" 2>/dev/null)
+  last_err=$(jq -cs 'map(select(.type == "error")) | last' <(sl <(sl "$SLOG")) 2>/dev/null)
   assert_contains "$last_err" "last-resort" "the terminal event names the last-resort failure"
   assert_no_context_exhausted
   assert_eq "$(claim_state)" "awaiting_model" "the failed stop settles no state: the session stays resumable (FT-031)"
@@ -705,7 +716,7 @@ EOF
   assert_eq "$(count_events compaction_summary)" 0 "no compact on the no-detail error"
   assert_eq "$(count_events compaction_failed)" 0 "no compaction_failed"
   local last_err
-  last_err=$(jq -cs 'map(select(.type == "error")) | last | .message // ""' "$SLOG" 2>/dev/null)
+  last_err=$(jq -cs 'map(select(.type == "error")) | last | .message // ""' <(sl <(sl "$SLOG")) 2>/dev/null)
   assert_contains "$last_err" "model API call failed" "the terminal event is the transport failure"
 }
 
@@ -827,11 +838,11 @@ scenario_real_fixture_pressure() {
     echo "SKIP: fixture not found at $fixture"
     return 0
   fi
-  cp "$fixture" "$SLOG"
+  cp "$fixture" <(sl "$SLOG")
   # The fixture ends with a user_message + cancel. Append a fresh
   # user message so the step has a pending user turn to process.
   local nlines
-  nlines=$(wc -l < "$SLOG")
+  nlines=$(sl "$SLOG" | wc -l)
   local next_seq=$((nlines + 1))
   echo "{\"v\":1,\"type\":\"user_message\",\"ts\":\"t_pressure\",\"seq\":$next_seq,\"content\":\"continue\"}" >> "$SLOG"
 
@@ -891,7 +902,7 @@ EOF
   fi
   assert_no_context_exhausted
   local n_err
-  n_err=$(jq -c 'select(.type == "error")' "$SLOG" | wc -l)
+  n_err=$(jq -c 'select(.type == "error")' <(sl "$SLOG") | wc -l)
   # The fixture already has 28 pre-existing error events; count only
   # new ones beyond the fixture baseline.
   local fixture_errors
@@ -945,7 +956,7 @@ scenario_up_to_prompt() {
   # The marker: first_kept_seq is the event right after the picked
   # seq 8, i.e. seq 9.
   local fk
-  fk=$(jq -cs 'map(select(.type == "compaction_summary")) | last | .first_kept_seq' "$SLOG")
+  fk=$(jq -cs 'map(select(.type == "compaction_summary")) | last | .first_kept_seq' <(sl "$SLOG"))
   assert_eq "$fk" 9 "first_kept_seq lands on the event after the picked seq"
 
   # The summary request carries the custom prompt in instructions and
@@ -987,7 +998,7 @@ scenario_up_to_prompt() {
   )
   assert_contains "$status2" '"compacted"' "the second up-to compact succeeded"
   local fk2
-  fk2=$(jq -cs 'map(select(.type == "compaction_summary")) | last | .first_kept_seq' "$SLOG")
+  fk2=$(jq -cs 'map(select(.type == "compaction_summary")) | last | .first_kept_seq' <(sl "$SLOG"))
   assert_eq "$fk2" 13 "the second boundary lands at seq 13"
   # The second request uses the default update instruction, not the
   # custom one: the second reqlog line names the update form.
@@ -1028,7 +1039,7 @@ EOF
   run_step
   # The unknown call was reported as a recoverable not-run tool_result.
   local unknown_text
-  unknown_text=$(jq -r 'select(.type=="tool_result") | .value.text' "$SLOG" 2>/dev/null)
+  unknown_text=$(jq -r 'select(.type=="tool_result") | .value.text' <(sl <(sl "$SLOG")) 2>/dev/null)
   assert_contains "$unknown_text" "Unknown tool no_such_tool" "the unknown call is a recoverable tool_result"
   assert_contains "$unknown_text" "Re-issue the call" "the not-run message teaches the resend"
   # No terminal error event: parse forwarded, it did not hard-fail.

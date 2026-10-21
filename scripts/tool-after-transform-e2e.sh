@@ -175,7 +175,7 @@ claim_state() {
 
 count_markers() {
   local n
-  n=$(jq -c "select(.type == \"ext_status\" and .id == \"$1\")" "$SLOG" 2>/dev/null | wc -l)
+  n=$(jq -c "select(.type == \"ext_status\" and .id == \"$1\")" <(sl <(sl "$SLOG")) 2>/dev/null | wc -l)
   echo "$n"
 }
 
@@ -193,6 +193,17 @@ NEW_WORK() {
   rm -rf "$WORK"
   SESSIONS_DIR="$WORK/sessions/session"
   SLOG="$SESSIONS_DIR/events.jsonl"
+
+  # sl: read the session log as text. The idle pass may have
+  # consolidated the log into a zstd stream (P2, P5). Sniff the
+  # zstd magic and decode; a legacy plain text log passes through.
+  sl() {
+    if head -c 4 "$SLOG" 2>/dev/null | od -An -v -tx1 | head -1 | rg -q '28 b5 2f fd'; then
+      zstd -dc "$SLOG" 2>/dev/null
+    else
+      cat "$SLOG"
+    fi
+  }
   STUB_REQLOG="$WORK/reqlog"
   mkdir -p "$SESSIONS_DIR"
   echo "==== scenario: $1"
@@ -211,7 +222,7 @@ scenario_transform() {
   assert_eq "$(claim_state)" "awaiting_model" "step lands at awaiting_model (tool result logged)"
   # The log should contain the replaced result, not the original error.
   local replaced
-  replaced=$(jq -c 'select(.type == "tool_result" and .id == "call-1")' "$SLOG" 2>/dev/null)
+  replaced=$(jq -c 'select(.type == "tool_result" and .id == "call-1")' <(sl <(sl "$SLOG")) 2>/dev/null)
   assert_eq "$(jq -r '.value.details.type' <<<"$replaced")" \
     "image" \
     "the tool_result in the log is the replaced image result"
@@ -223,9 +234,9 @@ scenario_transform() {
     "the replaced result is not an error"
   # The resolution marker is logged.
   assert_eq "$(count_markers "hook.tool.after")" 1 "one hook.tool.after marker"
-  assert_eq "$(jq -r "select(.type == \"ext_status\" and .id == \"hook.tool.after\") | .value" "$SLOG")" \
+  assert_eq "$(jq -r "select(.type == \"ext_status\" and .id == \"hook.tool.after\") | .value" <(sl "$SLOG"))" \
     "transform" "the resolution marker carries the outcome"
-  assert_eq "$(jq -c 'select(.id == "hook.tool.after.chain") | .value.steps' "$SLOG" 2>/dev/null)" \
+  assert_eq "$(jq -c 'select(.id == "hook.tool.after.chain") | .value.steps' <(sl <(sl "$SLOG")) 2>/dev/null)" \
     '["ok"]' "the chain marker records the step outcome"
 }
 
@@ -240,7 +251,7 @@ scenario_default() {
   run_step
   assert_eq "$(claim_state)" "awaiting_model" "step lands at awaiting_model (tool result logged)"
   local orig
-  orig=$(jq -c 'select(.type == "tool_result" and .id == "call-1")' "$SLOG" 2>/dev/null)
+  orig=$(jq -c 'select(.type == "tool_result" and .id == "call-1")' <(sl <(sl "$SLOG")) 2>/dev/null)
   assert_eq "$(jq -r '.is_error' <<<"$orig")" \
     "true" \
     "the original error result is in the log"
@@ -260,12 +271,12 @@ scenario_noop() {
   run_step
   assert_eq "$(claim_state)" "awaiting_model" "step lands at awaiting_model (tool result logged)"
   local orig
-  orig=$(jq -c 'select(.type == "tool_result" and .id == "call-1")' "$SLOG" 2>/dev/null)
+  orig=$(jq -c 'select(.type == "tool_result" and .id == "call-1")' <(sl <(sl "$SLOG")) 2>/dev/null)
   assert_eq "$(jq -r '.is_error' <<<"$orig")" \
     "true" \
     "the no-op step leaves the original result"
   assert_eq "$(count_markers "hook.tool.after")" 1 "one hook.tool.after marker"
-  assert_eq "$(jq -r "select(.type == \"ext_status\" and .id == \"hook.tool.after\") | .value" "$SLOG")" \
+  assert_eq "$(jq -r "select(.type == \"ext_status\" and .id == \"hook.tool.after\") | .value" <(sl "$SLOG"))" \
     "noop" "the resolution marker carries the noop outcome"
 }
 
@@ -281,12 +292,12 @@ scenario_fail() {
   run_step
   assert_eq "$(claim_state)" "awaiting_model" "step lands at awaiting_model (tool result logged)"
   local orig
-  orig=$(jq -c 'select(.type == "tool_result" and .id == "call-1")' "$SLOG" 2>/dev/null)
+  orig=$(jq -c 'select(.type == "tool_result" and .id == "call-1")' <(sl <(sl "$SLOG")) 2>/dev/null)
   assert_eq "$(jq -r '.is_error' <<<"$orig")" \
     "true" \
     "a failed step leaves the original result"
   assert_eq "$(count_markers "hook.tool.after.error")" 1 "one error marker"
-  assert_eq "$(jq -c 'select(.id == "hook.tool.after.chain") | .value.steps' "$SLOG" 2>/dev/null)" \
+  assert_eq "$(jq -c 'select(.id == "hook.tool.after.chain") | .value.steps' <(sl <(sl "$SLOG")) 2>/dev/null)" \
     '["fail(rewriter exploded)"]' \
     "the chain marker records the fail with its detail"
 }

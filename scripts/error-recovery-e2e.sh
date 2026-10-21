@@ -95,8 +95,20 @@ claim_state() {
   "$BIN_DIR/claim" --session "$WORK/sessions/$1" | jq -r .state
 }
 
+
+# slog: read one session log as text. The idle pass may have
+# consolidated the log into a zstd stream (P2, P5). Sniff the
+# zstd magic and decode; a legacy plain text log passes through.
+slog() {
+  local f=$1
+  if [ -f "$f" ] && head -c 4 "$f" 2>/dev/null | od -An -v -tx1 | head -1 | rg -q '28 b5 2f fd'; then
+    zstd -dc "$f" 2>/dev/null || true
+  else
+    [ -f "$f" ] && cat "$f"
+  fi
+}
 error_count() {
-  jq -csr 'map(select(.type == "error")) | length' "$WORK/sessions/$1/events.jsonl" 2>/dev/null || echo 0
+  jq -csr 'map(select(.type == "error")) | length' <(slog "$WORK/sessions/$1/events.jsonl") 2>/dev/null || echo 0
 }
 
 # ── Scenario 1: the endpoint is down ─────────────────────────────
@@ -128,7 +140,7 @@ n_calls=$(wc -l < "$WORK/up.log" 2>/dev/null || echo 0)
 [[ "$n_calls" -ge 1 ]] \
   && ok "the resumed loop called the model (${n_calls} request(s))" \
   || ko "the resumed loop made no model call (the bug)"
-n_asm=$(jq -csr 'map(select(.type == "assistant_message")) | length' "$WORK/sessions/sess/events.jsonl")
+n_asm=$(jq -csr 'map(select(.type == "assistant_message")) | length' <(slog "$WORK/sessions/sess/events.jsonl"))
 [[ "$n_asm" -ge 1 ]] \
   && ok "the resumed turn logged an assistant_message" \
   || ko "no assistant_message after the resume"

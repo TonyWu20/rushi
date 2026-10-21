@@ -242,6 +242,69 @@ Per-line frame ratio (sampled 400 lines, zstd -19 each):
 The scratch work area held the bench outputs (2026-10-21):
 `scratch/compress-bench/`.
 
+## 8. Spec (properties and build order)
+
+P1: one writer. `LogLine::commit` is the only append path. It
+compresses the line into one zstd frame, then writes the frame
+in one locked write. The lock serializes writers. The write is
+one frame. The lock holds on a gate descriptor. The commit
+reopens the current inode under the lock and writes there. The
+format peek reads four bytes from its own plain descriptor.
+Kernels 6.16 and later refuse to seek an `O_APPEND` descriptor,
+so the peek never seeks.
+
+P2: one stream. `events.jsonl` and `tools.jsonl` are one zstd
+stream, a concatenation of frames. Legacy logs stay plain text.
+The reader sniffs the four zstd magic bytes. The format is
+decided at creation and held for the file's life: a new file
+becomes a zstd stream. A legacy plain text file stays plain
+until an explicit archive migrates it. No file mixes both.
+
+P3: transparent reader. `logstream::read_log_text` returns JSONL
+text from either layout. Legacy sessions need no migration.
+
+P4: torn tail. A truncated final frame stops the read at the
+last complete frame. The partial line drops at parse time. A
+reader never fails on a torn tail.
+
+P5: consolidation is safe. The idle pass reads the stream,
+writes a temp file, verifies the round-trip by byte compare,
+then renames over the original. The whole pass runs under the
+log-line lock. No writer interleaves.
+
+P6: resume is free. After consolidation, the writer appends
+frames to the consolidated stream. No hydration step exists.
+
+P7: the trigger. The auto pass runs at the loop's session end,
+when the reason is `idle`. The `[log] consolidate_on_idle` flag
+gates it, default on. `rushi archive` runs the pass by hand.
+
+Build order:
+
+1. `rushi-common` gains the `zstd` dependency and the `logstream`
+   module (frame compress, `read_log_text`, `consolidate`).
+2. `LogLine::commit` writes frames instead of raw bytes.
+3. Every session-log read site moves to `logstream::read_log_text`.
+4. `rushi archive` subcommand, the `[log]` config flag, the
+   session-end auto pass.
+5. The flake adds `pkgs.zstd`.
+6. Unit tests for P1 to P7. The workspace `cargo test` stays
+   green. One e2e session proves the loop on compressed logs.
+7. Every e2e script that reads a session log decodes through
+   a magic-byte sniff. A plain legacy log passes through as
+   text. A zstd stream decodes with the `zstd` binary.
+
+## Consumers
+
+Downstream repos read session logs through the shared reader.
+`rushi-tui` and `tv-rushi` call
+`rushi_common::logstream::read_log_text`. That one implementation
+serves every consumer. A consumer does not copy the layout logic.
+
+The next release after this merge carries `logstream`. Main
+carries 0.1.7 at merge time. Consumers pin that release. They
+do not pin a version number in their docs.
+
 ## Related
 
 - `docs/reasoning-log-size.md` — the earlier log-size decision

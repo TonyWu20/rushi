@@ -26,6 +26,17 @@ WORK="$ROOT/scratch/e2e-no-long-sleep"
 rm -rf "$WORK"
 SESSIONS_DIR="$WORK/sessions/session"
 SLOG="$SESSIONS_DIR/events.jsonl"
+
+# sl: read the session log as text. The idle pass may have
+# consolidated the log into a zstd stream (P2, P5). Sniff the
+# zstd magic and decode; a legacy plain text log passes through.
+sl() {
+  if head -c 4 "$SLOG" 2>/dev/null | od -An -v -tx1 | head -1 | rg -q '28 b5 2f fd'; then
+    zstd -dc "$SLOG" 2>/dev/null
+  else
+    cat "$SLOG"
+  fi
+}
 mkdir -p "$SESSIONS_DIR"
 
 work_config() {
@@ -123,7 +134,7 @@ scenario_block_long_sleep() {
 
   # The blocked call produced a synthetic failed tool_result.
   local res
-  res=$(jq -c 'select(.type == "tool_result" and .id == "c-sleep")' "$SLOG" 2>/dev/null)
+  res=$(jq -c 'select(.type == "tool_result" and .id == "c-sleep")' <(sl <(sl "$SLOG")) 2>/dev/null)
   [[ -n "$res" ]] && ok || ko "a synthetic tool_result exists for the blocked call"
   echo "$res" | jq -e '.is_error == true' >/dev/null \
     && ok || ko "the synthetic result is is_error"
@@ -134,11 +145,11 @@ scenario_block_long_sleep() {
 
   # The window resolution marker is `block`.
   local marker
-  marker=$(jq -r 'select(.type == "ext_status" and .id == "hook.tool.before") | .value' "$SLOG" 2>/dev/null | head -1)
+  marker=$(jq -r 'select(.type == "ext_status" and .id == "hook.tool.before") | .value' <(sl <(sl "$SLOG")) 2>/dev/null | head -1)
   [[ "$marker" == "block" ]] && ok || ko "hook.tool.before resolution is block (got [$marker])"
 
   # The real bash tool never ran: no result carries a bash exit_code.
-  ! jq -e 'select(.type == "tool_result" and .id == "c-sleep") | .value | has("exit_code")' "$SLOG" >/dev/null \
+  ! jq -e 'select(.type == "tool_result" and .id == "c-sleep") | .value | has("exit_code")' <(sl "$SLOG") >/dev/null \
     && ok || ko "no real bash output reached the log"
 }
 
@@ -150,13 +161,13 @@ scenario_short_sleep_passes() {
   run_loop
 
   local res
-  res=$(jq -c 'select(.type == "tool_result" and .id == "c-short")' "$SLOG" 2>/dev/null)
+  res=$(jq -c 'select(.type == "tool_result" and .id == "c-short")' <(sl <(sl "$SLOG")) 2>/dev/null)
   [[ -n "$res" ]] && ok || ko "a tool_result exists for the short sleep"
   # A real bash result carries an exit_code (the call was not blocked).
   echo "$res" | jq -e '(.value.details // .value) | has("exit_code")' >/dev/null \
     && ok || ko "the short sleep ran (result carries an exit_code)"
   # No block marker for this window.
-  ! jq -e 'select(.type == "ext_status" and .id == "hook.tool.before" and .value == "block")' "$SLOG" >/dev/null \
+  ! jq -e 'select(.type == "ext_status" and .id == "hook.tool.before" and .value == "block")' <(sl "$SLOG") >/dev/null \
     && ok || ko "no block marker for a short sleep"
 }
 

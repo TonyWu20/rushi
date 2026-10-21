@@ -1134,7 +1134,8 @@ mod tests {
         let o = run_outcome();
         let ev = emit_result(&o, "t", "c9", &args);
         // The record landed in the tool log, keyed by the call id.
-        let record = std::fs::read_to_string(&log_path).unwrap();
+        // The log is a zstd stream of one frame per record (P1).
+        let record = rushi_common::logstream::read_log_text(&log_path).unwrap();
         let rec: serde_json::Value = serde_json::from_str(record.trim_end()).unwrap();
         assert_eq!(rec["id"], "c9");
         assert_eq!(rec["stdout"], "line one\nline two");

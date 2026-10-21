@@ -121,7 +121,9 @@
             cargoLock = {
               lockFile = ./Cargo.lock;
             };
-            nativeBuildInputs = [ rustToolchain ];
+            # libzstd for the `zstd` crate (docs/session-log-compression.md,
+            # P1: per-commit frames in the session log).
+            nativeBuildInputs = [ rustToolchain pkgs.zstd ];
             # Build all workspace members (loop stages, tools, hooks).
             # (The TUI + TUI-stream-drt moved to the rushi-tui repo at the
             # split; docs/tui-ext-repo-split.md section 4, item 6.)
@@ -219,7 +221,9 @@
             cargoLock = {
               lockFile = ./Cargo.lock;
             };
-            nativeBuildInputs = [ rustToolchain ];
+            # libzstd for the `zstd` crate (docs/session-log-compression.md,
+            # P1: per-commit frames in the session log).
+            nativeBuildInputs = [ rustToolchain pkgs.zstd ];
             cargoBuildFlags = [ "--workspace" ];
             doCheck = false;
             postInstall = ''

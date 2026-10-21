@@ -62,15 +62,15 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install ripgrep + jq
+      - name: Install ripgrep, jq, zstd
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y ripgrep jq
+          sudo apt-get install -y ripgrep jq zstd
 
-      - name: Install ripgrep + jq
+      - name: Install ripgrep, jq, zstd
         if: runner.os == 'macOS'
-        run: brew install ripgrep jq
+        run: brew install ripgrep jq zstd
 
       - name: cargo build + test
         run: |

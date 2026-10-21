@@ -24,6 +24,7 @@
 
 pub mod event;
 pub mod logline;
+pub mod logstream;
 pub mod compact_math;
 pub mod stage;
 pub mod hooks;

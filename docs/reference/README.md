@@ -255,6 +255,14 @@ the project. The config file stays unchanged.
 # approval_timeout_s = 300
 # compact_reasoning_effort = "low"
 
+# --- [log] ---
+# The `[log]` table governs the session log stream
+# (docs/session-log-compression.md).
+# consolidate_on_idle = true    # the session-end consolidation pass
+#                                # rewrites the log as one zstd -19 frame.
+#                                # The per-commit frame format is fixed;
+#                                # this flag only gates the idle pass.
+
 # --- [hooks] ---
 # timeout_ms = 30000
 

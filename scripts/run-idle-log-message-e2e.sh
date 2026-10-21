@@ -193,21 +193,21 @@ claim_state() {
 }
 
 user_message_count() {
-  jq -c 'select(.type == "user_message")' "$SLOG" 2>/dev/null | wc -l | tr -d ' '
+  jq -c 'select(.type == "user_message")' <(sl <(sl "$SLOG")) 2>/dev/null | wc -l | tr -d ' '
 }
 
 follow_user_message() {
-  jq -c 'select(.type == "user_message" and .queue == "follow")' "$SLOG" 2>/dev/null | head -1
+  jq -c 'select(.type == "user_message" and .queue == "follow")' <(sl <(sl "$SLOG")) 2>/dev/null | head -1
 }
 
 count_markers() {
   local n
-  n=$(jq -c "select(.type == \"ext_status\" and .id == \"$1\")" "$SLOG" 2>/dev/null | wc -l)
+  n=$(jq -c "select(.type == \"ext_status\" and .id == \"$1\")" <(sl <(sl "$SLOG")) 2>/dev/null | wc -l)
   echo "$n"
 }
 
 marker_values() {
-  jq -c "select(.type == \"ext_status\" and .id == \"$1\") | .value" "$SLOG" 2>/dev/null
+  jq -c "select(.type == \"ext_status\" and .id == \"$1\") | .value" <(sl <(sl "$SLOG")) 2>/dev/null
 }
 
 assert_eq() {
@@ -224,6 +224,17 @@ NEW_WORK() {
   rm -rf "$WORK"
   SESSIONS_DIR="$WORK/sessions/session"
   SLOG="$SESSIONS_DIR/events.jsonl"
+
+  # sl: read the session log as text. The idle pass may have
+  # consolidated the log into a zstd stream (P2, P5). Sniff the
+  # zstd magic and decode; a legacy plain text log passes through.
+  sl() {
+    if head -c 4 "$SLOG" 2>/dev/null | od -An -v -tx1 | head -1 | rg -q '28 b5 2f fd'; then
+      zstd -dc "$SLOG" 2>/dev/null
+    else
+      cat "$SLOG"
+    fi
+  }
   STUB_REQLOG="$WORK/reqlog"
   COUNT="$WORK/idle-count"
   mkdir -p "$SESSIONS_DIR"
@@ -257,7 +268,7 @@ scenario_plain() {
     "the first firing resolved to continue"
   assert_eq "$(marker_values "hook.run.idle" | sed -n 2p)" '"stop"' \
     "the second firing resolved to stop"
-  assert_eq "$(jq -c 'select(.id == "hook.run.idle.chain") | .value.steps' "$SLOG" 2>/dev/null | head -1)" \
+  assert_eq "$(jq -c 'select(.id == "hook.run.idle.chain") | .value.steps' <(sl <(sl "$SLOG")) 2>/dev/null | head -1)" \
     '["noop"]' "the step emitted no state (the effect is the LOG_BIN append)"
 }
 
@@ -282,10 +293,10 @@ scenario_veto() {
     "the hook fired twice, the veto kept the loop alive"
   assert_eq "$(count_markers "hook.run.idle.error")" "0" \
     "an abort is not a failure marker"
-  assert_eq "$(jq -c 'select(.id == "hook.run.idle.chain") | .value.steps' "$SLOG" 2>/dev/null | head -1)" \
+  assert_eq "$(jq -c 'select(.id == "hook.run.idle.chain") | .value.steps' <(sl <(sl "$SLOG")) 2>/dev/null | head -1)" \
     '["abort(goal still open)"]' \
     "the chain marker records the abort with its reason"
-  assert_eq "$(jq -r 'select(.id == "hook.run.idle.chain") | .value.stop_kind' "$SLOG" 2>/dev/null | head -1)" \
+  assert_eq "$(jq -r 'select(.id == "hook.run.idle.chain") | .value.stop_kind' <(sl <(sl "$SLOG")) 2>/dev/null | head -1)" \
     "abort" "the chain stopped on the veto"
 }
 
@@ -305,7 +316,7 @@ scenario_fail() {
     "one model turn only"
   assert_eq "$(count_markers "hook.run.idle.error")" "1" \
     "one error marker for the failed step"
-  assert_eq "$(jq -c 'select(.id == "hook.run.idle.chain") | .value.steps' "$SLOG" 2>/dev/null)" \
+  assert_eq "$(jq -c 'select(.id == "hook.run.idle.chain") | .value.steps' <(sl <(sl "$SLOG")) 2>/dev/null)" \
     '["fail(idle hook crashed)"]' \
     "the chain marker records the fail with its detail"
   assert_eq "$(marker_values "hook.run.idle")" '"stop"' \

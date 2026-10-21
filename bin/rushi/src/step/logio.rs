@@ -120,7 +120,7 @@ pub fn line_is_error_event(line: &str) -> bool {
 /// the claim convention: every non-empty line owns a seq, including
 /// lines that fail to parse (docs/tui-pending-user-messages.md P7).
 pub fn last_user_message_seq(session_dir: &Path) -> usize {
-    let Ok(data) = std::fs::read_to_string(session_dir.join("events.jsonl")) else {
+    let Ok(data) = rushi_common::logstream::read_log_text(&session_dir.join("events.jsonl")) else {
         return 0;
     };
     let mut last = 0usize;

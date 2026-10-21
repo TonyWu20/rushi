@@ -57,7 +57,7 @@ pub fn publish_model_thinking(cfg: &HarnessConfig, session_dir: &Path, describe:
 /// Read the last `model_thinking` value from the log tail.
 fn read_last_model_thinking(session_dir: &Path) -> Option<u64> {
     let path = session_dir.join("events.jsonl");
-    let data = std::fs::read_to_string(&path).ok()?;
+    let data = rushi_common::logstream::read_log_text(&path).ok()?;
     let lines: Vec<&str> = data.lines().rev().take(4096).collect();
     for line in lines {
         let line = line.trim();
@@ -265,7 +265,7 @@ pub fn describe_model(cfg: &HarnessConfig) -> Describe {
 /// compacted logs).
 fn estimate_context(cfg: &HarnessConfig, session_dir: &Path) -> u64 {
     let path = session_dir.join("events.jsonl");
-    let Ok(data) = std::fs::read_to_string(&path) else {
+    let Ok(data) = rushi_common::logstream::read_log_text(&path) else {
         return 0;
     };
     let events: Vec<Value> = data
@@ -974,6 +974,7 @@ mod tests {
             claim_bin: bin.join("claim"),
             parse_bin: bin.join("parse"),
             log_bin: bin.join("log"),
+            log_consolidate_on_idle: true,
         }
     }
 
@@ -1006,7 +1007,7 @@ mod tests {
 
     /// Read back the values of all `hook_applied` markers, in log order.
     fn hook_applied_values(session_dir: &Path) -> Vec<Value> {
-        let data = std::fs::read_to_string(session_dir.join("events.jsonl")).unwrap();
+        let data = rushi_common::logstream::read_log_text(&session_dir.join("events.jsonl")).unwrap();
         data.lines()
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
             .filter(|v| {
@@ -1147,7 +1148,7 @@ mod tests {
         // The applied request is back to the original.
         assert_eq!(request.json, original);
         // The `hook.model.before` resolution marker is still logged.
-        let data = std::fs::read_to_string(session_dir.join("events.jsonl")).unwrap();
+        let data = rushi_common::logstream::read_log_text(&session_dir.join("events.jsonl")).unwrap();
         let resolutions = data
             .lines()
             .filter(|l| l.contains("\"id\":\"hook.model.before\""))

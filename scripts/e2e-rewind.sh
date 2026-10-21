@@ -108,7 +108,19 @@ else
   ko "A: log rejected the valid rewind marker"
 fi
 # The marker landed as a line, behind the user message.
-if grep -q '"type":"rewind"' "$WORK/sA/events.jsonl"; then
+
+# slog: read one session log as text. The idle pass may have
+# consolidated the log into a zstd stream (P2, P5). Sniff the
+# zstd magic and decode; a legacy plain text log passes through.
+slog() {
+  local f=$1
+  if [ -f "$f" ] && head -c 4 "$f" 2>/dev/null | od -An -v -tx1 | head -1 | rg -q '28 b5 2f fd'; then
+    zstd -dc "$f" 2>/dev/null || true
+  else
+    [ -f "$f" ] && cat "$f"
+  fi
+}
+if slog "$WORK/sA/events.jsonl" | rg -q '"type":"rewind"'; then
   ok "A: the marker is in the log"
 else
   ko "A: the marker is missing from the log"

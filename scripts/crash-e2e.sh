@@ -34,14 +34,24 @@ native_tool_paths = [
 ]
 EOF
 
+
+# slog: read one session log as text. The idle pass may have
+# consolidated the log into a zstd stream (P2, P5). Sniff the
+# zstd magic and decode; a legacy plain text log passes through.
+slog() {
+  local f=$1
+  if [ -f "$f" ] && head -c 4 "$f" 2>/dev/null | od -An -v -tx1 | head -1 | rg -q '28 b5 2f fd'; then
+    zstd -dc "$f" 2>/dev/null || true
+  else
+    [ -f "$f" ] && cat "$f"
+  fi
+}
 check_lines() {
-  python3 - "$1/events.jsonl" <<'PY'
-import json, os, sys
-path = sys.argv[1]
-if not os.path.exists(path):
-    print("bad=0 last=whole")
-    sys.exit(0)
-lines = [l for l in open(path).read().split("\n") if l]
+  local f="$1/events.jsonl"
+  [ -f "$f" ] || { echo "bad=0 last=whole"; return 0; }
+  slog "$f" | python3 - <<'PY'
+import json, sys
+lines = [l for l in sys.stdin.read().split("\n") if l]
 bad = 0
 for l in lines[:-1]:
     try:
@@ -119,8 +129,8 @@ kill -9 "$RPID"
 wait "$RPID" 2>/dev/null
 sleep 3
 
-grep -q '"type":"tool_call"' "$S3/events.jsonl" || ko "B1: the tool_call is missing from the log"
-if grep -q '"type":"tool_result"' "$S3/events.jsonl"; then
+slog "$S3/events.jsonl" | rg -q '"type":"tool_call"' || ko "B1: the tool_call is missing from the log"
+if slog "$S3/events.jsonl" | rg -q '"type":"tool_result"'; then
   ko "B2: a tool_result survived the kill"
 else
   ok "B2: no tool_result after the kill"
@@ -134,7 +144,7 @@ fi
 
 "$ROUTE" --native-tool-path "$ROOT/tools/bash" --cwd "$WORK" < "$WORK/toolcalls.jsonl" > "$WORK/second_route.out"
 grep '"type":"tool_result"' "$WORK/second_route.out" | "$LOG" --session "$S3"
-N_RES=$(grep '"type":"tool_result"' "$S3/events.jsonl" | grep -c '"id":"tc-slow"' || true)
+N_RES=$(slog "$S3/events.jsonl" | rg '"type":"tool_result"' | rg -c '"id":"tc-slow"' || true)
 if [ "$N_RES" = "1" ]; then
   ok "B4: exactly one tool_result after recovery"
 else
@@ -175,10 +185,10 @@ case "$C_C" in
   *) ko "C2: claim state after the kill: $C_C" ;;
 esac
 
-python3 - "$S3/events.jsonl" <<'PY'
+slog "$S3/events.jsonl" | python3 - <<'PY'
 import json, sys
 calls, results, terminal = set(), set(), False
-for line in open(sys.argv[1]):
+for line in sys.stdin:
     try:
         ev = json.loads(line)
     except Exception:

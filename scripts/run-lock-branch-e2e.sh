@@ -37,6 +37,17 @@ WORK="$ROOT/scratch/e2e-run-lock-branch"
 rm -rf "$WORK"
 SESSIONS_DIR="$WORK/sessions/session"
 SLOG="$SESSIONS_DIR/events.jsonl"
+
+# sl: read the session log as text. The idle pass may have
+# consolidated the log into a zstd stream (P2, P5). Sniff the
+# zstd magic and decode; a legacy plain text log passes through.
+sl() {
+  if head -c 4 "$SLOG" 2>/dev/null | od -An -v -tx1 | head -1 | rg -q '28 b5 2f fd'; then
+    zstd -dc "$SLOG" 2>/dev/null
+  else
+    cat "$SLOG"
+  fi
+}
 REQLOG="$WORK/reqlog"
 mkdir -p "$SESSIONS_DIR"
 : > "$SLOG"
@@ -98,12 +109,12 @@ RUN_PID=$!
 
 # Wait for the first model call to be in flight (lock is held now).
 for _ in $(seq 1 100); do
-  if rg -q '"model_call_context"' "$SLOG" 2>/dev/null; then
+  if rg -q '"model_call_context"' <(sl <(sl "$SLOG")) 2>/dev/null; then
     break
   fi
   sleep 0.1
 done
-if ! rg -q '"model_call_context"' "$SLOG" 2>/dev/null; then
+if ! rg -q '"model_call_context"' <(sl <(sl "$SLOG")) 2>/dev/null; then
   echo "FAIL: the live loop never reached a model call"
   kill "$RUN_PID" 2>/dev/null
   exit 1
@@ -119,7 +130,7 @@ else
   ko "plain run against held lock: rc=$rc, output: $out"
 fi
 
-if rg -q '"content":"poke message"' "$SLOG"; then
+if rg -q '"content":"poke message"' <(sl "$SLOG"); then
   ok "the poke was appended to the live session log"
 else
   ko "the poke is missing from the live session log"
@@ -132,7 +143,7 @@ else
 fi
 
 # ── 2. Task-less run against a held lock: notice, nothing appended ──
-USERS_BEFORE=$(rg -c '"type":"user_message"' "$SLOG" || true)
+USERS_BEFORE=$(rg -c '"type":"user_message"' <(sl "$SLOG") || true)
 out="$("$BIN_DIR/rushi" run session 2>&1)"
 rc=$?
 if [ "$rc" -eq 0 ] && echo "$out" | rg -q 'nothing to start'; then
@@ -140,7 +151,7 @@ if [ "$rc" -eq 0 ] && echo "$out" | rg -q 'nothing to start'; then
 else
   ko "task-less run against held lock: rc=$rc, output: $out"
 fi
-USERS_AFTER=$(rg -c '"type":"user_message"' "$SLOG" || true)
+USERS_AFTER=$(rg -c '"type":"user_message"' <(sl "$SLOG") || true)
 if [ "$USERS_BEFORE" = "$USERS_AFTER" ]; then
   ok "the task-less run appended no message"
 else
@@ -211,7 +222,7 @@ fi
 REQS_BEFORE=$REQS
 out="$("$BIN_DIR/user" --session session --no-run "user poke" 2>&1)"
 rc=$?
-if [ "$rc" -eq 0 ] && rg -q '"content":"user poke"' "$SLOG"; then
+if [ "$rc" -eq 0 ] && rg -q '"content":"user poke"' <(sl "$SLOG"); then
   ok "user --no-run appends to the session log"
 else
   ko "user --no-run: rc=$rc, output: $out"

@@ -235,6 +235,10 @@ pub fn run(
             }
             // The window default (or a failed chain): stop the loop.
             fire_session_end(cfg, &session, "idle");
+            // P7: the idle consolidation pass. The lock is still held
+            // by this process; the pass takes the log-line lock, not
+            // the session lock, so it cannot wedge the exit.
+            crate::archive::run_auto_pass(cfg, &session.path, "idle");
             break;
         }
 
@@ -422,7 +426,7 @@ fn fire_session_end(cfg: &HarnessConfig, session: &SessionDir, reason: &str) {
 /// Read the id of the last `assistant_message` from the log.
 fn read_last_assistant_message_id(session_dir: &Path) -> Option<String> {
     let path = session_dir.join("events.jsonl");
-    let data = std::fs::read_to_string(&path).ok()?;
+    let data = rushi_common::logstream::read_log_text(&path).ok()?;
     for line in data.lines().rev() {
         let line = line.trim();
         if line.is_empty() {
@@ -476,6 +480,7 @@ mod tests {
             claim_bin: PathBuf::from("claim"),
             parse_bin: PathBuf::from("parse"),
             log_bin: PathBuf::from("log"),
+            log_consolidate_on_idle: true,
         }
     }
 
@@ -546,7 +551,7 @@ mod tests {
         // The typed validator (P8) accepts the seeded line.
         assert!(rushi_common::event::parse_event(&line).is_ok());
         // The event was committed to the session log.
-        let log = std::fs::read_to_string(sess.join("events.jsonl")).unwrap();
+        let log = rushi_common::logstream::read_log_text(&sess.join("events.jsonl")).unwrap();
         assert!(log.lines().any(|l| l == line));
     }
 
