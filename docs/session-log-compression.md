@@ -294,6 +294,17 @@ Build order:
    a magic-byte sniff. A plain legacy log passes through as
    text. A zstd stream decodes with the `zstd` binary.
 
+## Consumers
+
+Downstream repos read session logs through the shared reader.
+`rushi-tui` and `tv-rushi` call
+`rushi_common::logstream::read_log_text`. That one implementation
+serves every consumer. A consumer does not copy the layout logic.
+
+The next release after this merge carries `logstream`. Main
+carries 0.1.7 at merge time. Consumers pin that release. They
+do not pin a version number in their docs.
+
 ## Related
 
 - `docs/reasoning-log-size.md` — the earlier log-size decision
