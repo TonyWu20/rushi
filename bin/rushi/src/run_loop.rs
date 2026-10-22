@@ -424,10 +424,29 @@ fn fire_session_end(cfg: &HarnessConfig, session: &SessionDir, reason: &str) {
 }
 
 /// Read the id of the last `assistant_message` from the log.
+///
+/// The id sits near the tail: the read takes the last 4096 lines
+/// through the frame index (P8) and walks them in reverse. A miss
+/// in the window falls back to the full read for the deep history.
 fn read_last_assistant_message_id(session_dir: &Path) -> Option<String> {
     let path = session_dir.join("events.jsonl");
+    let stream = rushi_common::logstream::open_indexed(&path).ok()?;
+    let tail = stream.tail_lines(4096);
+    if let Some(id) = last_assistant_message_id_in(
+        tail.iter().rev().map(|l| l.as_str()),
+    ) {
+        return Some(id);
+    }
     let data = rushi_common::logstream::read_log_text(&path).ok()?;
-    for line in data.lines().rev() {
+    last_assistant_message_id_in(data.lines().rev())
+}
+
+/// Walk lines in reverse; the first `assistant_message` carries
+/// the last id.
+fn last_assistant_message_id_in<'a, I: Iterator<Item = &'a str>>(
+    lines: I,
+) -> Option<String> {
+    for line in lines {
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -553,6 +572,57 @@ mod tests {
         // The event was committed to the session log.
         let log = rushi_common::logstream::read_log_text(&sess.join("events.jsonl")).unwrap();
         assert!(log.lines().any(|l| l == line));
+    }
+
+    /// P8 (compression spec): the last `assistant_message` id is
+    /// read through the tail window first. The id sits near the
+    /// tail: the window read finds it.
+    #[test]
+    fn read_last_assistant_message_id_reads_the_tail_window() {
+        use rushi_common::logline::LogLine;
+        let dir = tempfile::tempdir().unwrap();
+        let sess = dir.path().join("sess");
+        std::fs::create_dir_all(&sess).unwrap();
+        let log = sess.join("events.jsonl");
+        LogLine::from_json(r#"{"v":1,"type":"assistant_message","ts":"t","id":"id-1","content":"a"}"#)
+            .commit(&log)
+            .unwrap();
+        LogLine::from_json(r#"{"v":1,"type":"assistant_message","ts":"t","id":"id-2","content":"b"}"#)
+            .commit(&log)
+            .unwrap();
+        LogLine::from_json(r#"{"v":1,"type":"ext_status","ts":"t","id":"loop_phase","value":"idle"}"#)
+            .commit(&log)
+            .unwrap();
+        assert_eq!(
+            read_last_assistant_message_id(&sess),
+            Some("id-2".to_string())
+        );
+    }
+
+    /// P8 (compression spec): an id past the 4096-line window is
+    /// found by the full-read fallback, as before the index.
+    #[test]
+    fn read_last_assistant_message_id_falls_back_past_the_window() {
+        use rushi_common::logline::LogLine;
+        let dir = tempfile::tempdir().unwrap();
+        let sess = dir.path().join("sess");
+        std::fs::create_dir_all(&sess).unwrap();
+        let log = sess.join("events.jsonl");
+        LogLine::from_json(r#"{"v":1,"type":"assistant_message","ts":"t","id":"deep","content":"a"}"#)
+            .commit(&log)
+            .unwrap();
+        for i in 0..4096 {
+            LogLine::from_json(&format!(
+                r#"{{"v":1,"type":"user_message","ts":"t","content":"filler {i}"}}"#
+            ))
+            .commit(&log)
+            .unwrap();
+        }
+        assert_eq!(
+            read_last_assistant_message_id(&sess),
+            Some("deep".to_string()),
+            "the window misses the deep id; the full read finds it"
+        );
     }
 
     #[test]

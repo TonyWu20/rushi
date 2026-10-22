@@ -55,11 +55,14 @@ pub fn publish_model_thinking(cfg: &HarnessConfig, session_dir: &Path, describe:
 }
 
 /// Read the last `model_thinking` value from the log tail.
+///
+/// The marker sits near the tail: the read takes the last 4096
+/// lines through the frame index (P8) and walks them in reverse. A
+/// miss in the window is a miss, as before.
 fn read_last_model_thinking(session_dir: &Path) -> Option<u64> {
     let path = session_dir.join("events.jsonl");
-    let data = rushi_common::logstream::read_log_text(&path).ok()?;
-    let lines: Vec<&str> = data.lines().rev().take(4096).collect();
-    for line in lines {
+    let stream = rushi_common::logstream::open_indexed(&path).ok()?;
+    for line in stream.tail_lines(4096).iter().rev() {
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -1188,6 +1191,37 @@ mod tests {
         assert!(
             values.is_empty(),
             "key-reordered no-op must not write hook_applied markers, got {values:?}"
+        );
+    }
+
+    /// P8: the `model_thinking` tail read takes its window through
+    /// the frame index. The marker sits in the last 4096 lines.
+    #[test]
+    fn read_last_model_thinking_reads_the_tail_window() {
+        use rushi_common::logline::LogLine;
+        let root = tempfile::tempdir().unwrap();
+        let session_dir = root.path().join("sessions").join("test");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let log = session_dir.join("events.jsonl");
+        LogLine::from_json(r#"{"v":1,"type":"user_message","ts":"t","content":"hi"}"#)
+            .commit(&log)
+            .unwrap();
+        LogLine::from_json(r#"{"v":1,"type":"ext_status","ts":"t","id":"model_thinking","value":3}"#)
+            .commit(&log)
+            .unwrap();
+        assert_eq!(read_last_model_thinking(&session_dir), Some(3));
+        // A marker past the 4096-line window is a miss, as before.
+        for i in 0..4096 {
+            LogLine::from_json(&format!(
+                r#"{{"v":1,"type":"user_message","ts":"t","content":"filler {i}"}}"#
+            ))
+            .commit(&log)
+            .unwrap();
+        }
+        assert_eq!(
+            read_last_model_thinking(&session_dir),
+            None,
+            "the read stays bounded to the tail window"
         );
     }
 

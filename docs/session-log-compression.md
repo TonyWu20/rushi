@@ -279,6 +279,56 @@ P7: the trigger. The auto pass runs at the loop's session end,
 when the reason is `idle`. The `[log] consolidate_on_idle` flag
 gates it, default on. `rushi archive` runs the pass by hand.
 
+P8: the frame index sidecar. The commit appends one index record
+to a sidecar file `<log>.idx`, in the same locked section as the
+frame. The record is `seq_start frame_offset frame_len
+text_len`: four little-endian u64s, 32 bytes per commit.
+`seq_start` is the 1-based line number of the first line in the
+record's byte range. The record is a derived fact. The log stays
+the authority. A torn index tail drops the last record, the P4
+rule. The stream outgrows the index only when a commit tears
+between the frame and the record. The next commit folds the
+un-indexed tail into its record. The readers fall back to the
+full text in the meantime.
+
+The record encoding is an implementation detail, like `loop.meta`
+in issue 44. A 1000-commit session carries 32 KB of index. The
+sidecar stays negligible against the 3.2x frame compression.
+
+The consolidation pass (P5) rewrites the stream and the index
+in one locked pass: one level-19 frame, one index record. The
+pass keeps its verify-then-rename shape. The index rename lands
+after the stream rename. A crash between the two renames leaves
+an index that fails its open-time validation. The read falls
+back and the next commit heals the pair. Resume (P6) appends
+frames and records after the consolidated pair. The `rushi
+archive` manual path (P7) runs the same pair. The index covers
+`tools.jsonl` as well as `events.jsonl`.
+
+The reader side sits in `rushi-common::logstream`.
+`open_indexed` opens the log with its index when the stream is
+zstd and the index validates against it. `tail_lines(n)` decodes
+only the record ranges that hold the last n lines of text.
+`line_at(seq)` and `lines_range(lo, hi)` serve the
+seq-numbered reads. `read_log_tail(path, byte_budget)` is the
+no-index fallback: it reads the last budget stream bytes, scans
+the window for the shared magic, and decodes from the first
+frame start inside the window. A window that holds no frame
+start takes the full read. The flag says whether the window
+covered the budget. That is the tv-rushi decision-84 algorithm,
+moved into the shared module. `read_log_text` stays as is (P3).
+
+A session without `<log>.idx` (a pre-P8 log, and every legacy
+plain log) takes the fallback chain: the `read_log_tail` window
+scan, then the full read. The magic-byte sniff (P3) is
+unchanged. Old readers ignore the sidecar. A consumer that
+predates the index keeps its full-read path. A broken index
+drops at open and never fails a read.
+
+The kernel tail scans (the last `assistant_message` id, the last
+`model_thinking` value) read their tail window through
+`tail_lines`. A miss in the window falls back to the full read.
+
 Build order:
 
 1. `rushi-common` gains the `zstd` dependency and the `logstream`
@@ -293,6 +343,11 @@ Build order:
 7. Every e2e script that reads a session log decodes through
    a magic-byte sniff. A plain legacy log passes through as
    text. A zstd stream decodes with the `zstd` binary.
+8. P8: the commit writes the index record, the consolidation
+   rewrites the pair, and the `logstream` reader gains the
+   index plus the tail window scan. The kernel tail scans move
+   to `tail_lines`. The consumer-side follow-ups file against
+   the consumer repos.
 
 ## Consumers
 
@@ -304,6 +359,19 @@ serves every consumer. A consumer does not copy the layout logic.
 The next release after this merge carries `logstream`. Main
 carries 0.1.7 at merge time. Consumers pin that release. They
 do not pin a version number in their docs.
+
+P8 lands in the next release after it (0.1.8). The consumer
+side follows the index:
+
+- `rushi-tui`: the live tailer (the byte-offset design) moves to
+  the indexed tail read. A plain-text legacy session falls back
+  to the no-index window scan. This closes the D6 follow-up.
+- `tv-rushi`: the phase probe and the events channel take
+  `tail_lines`. The numbered-event commands take `line_at`. The
+  decision-84 window probe and cache stay as the no-index
+  fallback, or retire with the fallback.
+
+The consumer repos file their issues when the release ships.
 
 ## Related
 

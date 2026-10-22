@@ -89,6 +89,20 @@ mod tests {
         n
     }
 
+    /// One index record for a consolidated log: seq from 1, the
+    /// whole stream, the whole decoded text (P8).
+    fn assert_consolidated_index(log: &Path, expected_text: &str) {
+        let raw = std::fs::read(log).unwrap();
+        let records =
+            logstream::read_index(&logstream::index_path(log)).unwrap();
+        assert_eq!(records.len(), 1, "the consolidated frame carries one record");
+        let r = &records[0];
+        assert_eq!(r.seq_start, 1);
+        assert_eq!(r.frame_offset, 0);
+        assert_eq!(r.frame_len, raw.len() as u64);
+        assert_eq!(r.text_len, expected_text.len() as u64);
+    }
+
     #[test]
     fn consolidate_session_rewrites_both_logs_under_lock() {
         // P5: two per-commit frames become one -19 frame, per log.
@@ -116,6 +130,10 @@ mod tests {
                 + r#"{"v":1,"type":"user_message","ts":"t","content":"two"}"#
                 + "\n";
         assert_eq!(logstream::read_log_text(&ev).unwrap(), expected);
+        // P8: the index pair rewrites with the stream.
+        assert_consolidated_index(&ev, &expected);
+        let tool_text = logstream::read_log_text(&tl).unwrap();
+        assert_consolidated_index(&tl, &tool_text);
     }
 
     #[test]

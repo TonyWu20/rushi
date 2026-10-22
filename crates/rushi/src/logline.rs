@@ -13,6 +13,14 @@
 //!   `impl Write`, so a line cannot be appended in pieces. Concurrent
 //!   appends from any number of processes serialize on the lock.
 //!
+//! P8 (docs/session-log-compression.md): in the same locked section
+//! the commit appends one 32-byte index record to the `<log>.idx`
+//! sidecar. The record is a derived fact; the log stays the
+//! authority. A commit that tears between the frame and the
+//! record leaves the stream grown past its index; the next commit
+//! folds the un-indexed tail into its record, and the readers fall
+//! back to the full text in the meantime.
+//!
 //! Migrated from four copies (`bin/log`, `bin/user`, `bin/route`,
 //! `bin/tui`) into the shared crate (docs/phase-2-plan.md section 6).
 
@@ -52,7 +60,9 @@ impl LogLine {
     /// The format is decided at creation and held for the file's
     /// life. A legacy plain-text log keeps plain lines: the peek
     /// runs under the lock, so an archiver cannot swap the format
-    /// mid-commit. A new or zstd log carries frames.
+    /// mid-commit. A new or zstd log carries frames, and each frame
+    /// lands with its index record in the same locked section
+    /// (P8).
     pub fn commit(&self, path: &Path) -> io::Result<()> {
         let frame = crate::logstream::compress_frame(&self.bytes)
             .map_err(|e| io::Error::other(format!("zstd compress: {e}")))?;
@@ -74,9 +84,22 @@ impl LogLine {
         let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
         let legacy = Self::peek_plain_text(path)?;
         let res = if legacy {
+            // A legacy plain log stays plain for its life (P2).
+            // The sidecar is a zstd-stream fact; no record.
             file.write_all(&self.bytes)
         } else {
-            file.write_all(&frame)
+            let w = file.write_all(&frame);
+            if w.is_ok() {
+                // P8: the index record lands in the same locked
+                // section as the frame. A record failure warns and
+                // continues: the frame is the fact, the record is
+                // derived, and the next commit folds the un-indexed
+                // tail into its record.
+                if let Err(e) = self.append_index_record(path, &frame) {
+                    eprintln!("logline: index record for {}: {e}", path.display());
+                }
+            }
+            w
         };
         // The close releases the lock too. The explicit unlock keeps
         // the lock from spanning the close.
@@ -84,6 +107,82 @@ impl LogLine {
             // The close still releases it. Nothing to report.
         }
         res
+    }
+
+    /// P8: append this commit's index record to the `<log>.idx`
+    /// sidecar. The caller holds the log-line lock.
+    ///
+    /// The record carries the seq start, the frame position, the
+    /// frame length, and the decoded line length. The seq start
+    /// counts the lines the index has not covered yet: the last
+    /// record's own range, and, after a torn commit, the un-indexed
+    /// stream tail. A missing or broken index bootstraps: one
+    /// record covering the whole existing stream plus this frame,
+    /// its seq count from one full decode.
+    fn append_index_record(&self, path: &Path, frame: &[u8]) -> io::Result<()> {
+        let new_len = path.metadata()?.len();
+        let old_len = new_len - frame.len() as u64;
+        let idx_path = crate::logstream::index_path(path);
+        let records = crate::logstream::read_index(&idx_path)?;
+        let record = if records.is_empty() || !crate::logstream::validate_index(&records, old_len) {
+            // No valid index against this stream: bootstrap. The
+            // record covers the whole existing stream plus this
+            // frame.
+            let (_, text_bytes) = Self::count_stream_lines(path, 0, old_len)?;
+            crate::logstream::IndexRecord {
+                seq_start: 1,
+                frame_offset: 0,
+                frame_len: new_len,
+                text_len: text_bytes + self.bytes.len() as u64,
+            }
+        } else {
+            let last = records.last().unwrap();
+            let rec_start = last.frame_offset;
+            let rec_end = last.frame_offset + last.frame_len;
+            // The lines the index has not covered yet: the last
+            // record's own range, and the un-indexed tail when a
+            // torn commit left the stream grown past the index.
+            let (rec_lines, _rec_bytes) =
+                Self::count_stream_lines(path, rec_start, last.frame_len)?;
+            let mut tail_bytes = 0u64;
+            if rec_end < old_len {
+                let (_, b) = Self::count_stream_lines(path, rec_end, old_len - rec_end)?;
+                tail_bytes = b;
+            }
+            crate::logstream::IndexRecord {
+                seq_start: last.seq_start + rec_lines,
+                frame_offset: rec_end,
+                frame_len: (old_len - rec_end) + frame.len() as u64,
+                text_len: tail_bytes + self.bytes.len() as u64,
+            }
+        };
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&idx_path)?;
+        f.write_all(&crate::logstream::index_record_bytes(&record))?;
+        f.flush()?;
+        Ok(())
+    }
+
+    /// Count the complete lines and the decoded bytes of one
+    /// stream range. P4: a torn range tail keeps the complete
+    /// frames; the partial line drops.
+    fn count_stream_lines(path: &Path, off: u64, len: u64) -> io::Result<(u64, u64)> {
+        if len == 0 {
+            return Ok((0, 0));
+        }
+        use std::io::{Read, Seek, SeekFrom};
+        let mut f = std::fs::File::open(path)?;
+        f.seek(SeekFrom::Start(off))?;
+        let mut buf = Vec::with_capacity(len as usize);
+        std::io::copy(&mut f.take(len), &mut buf)?;
+        if !crate::logstream::is_zstd_stream(&buf) {
+            // The plain range: newline-terminated lines. The plain
+            // path never indexes, so this arm is a safety net.
+            let lines = buf.iter().filter(|b| **b == b'\n').count() as u64;
+            return Ok((lines, buf.len() as u64));
+        }
+        let out = crate::logstream::decode_stream_bytes(&buf);
+        let lines = out.iter().filter(|b| **b == b'\n').count() as u64;
+        Ok((lines, out.len() as u64))
     }
 
     /// True when the current log is a legacy plain-text log: it
@@ -115,6 +214,7 @@ impl LogLine {
 #[cfg(test)]
 mod tests {
     use super::LogLine;
+    use std::io::Write;
 
     #[test]
     fn commit_appends_one_complete_line_per_event() {
@@ -158,6 +258,19 @@ mod tests {
     }
 
     #[test]
+    fn commit_on_a_plain_text_log_writes_no_index_record() {
+        // P8: the sidecar is a zstd-stream fact. A legacy plain
+        // log gets plain lines and no `<log>.idx`.
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("events.jsonl");
+        std::fs::write(&log, "seed\n").unwrap();
+        LogLine::from_json(r#"{"v":1,"type":"user_message","ts":"t","content":"two"}"#)
+            .commit(&log)
+            .unwrap();
+        assert!(!crate::logstream::index_path(&log).exists());
+    }
+
+    #[test]
     fn concurrent_commits_stay_line_granular() {
         // FT-005 regression. Two writers, multi-KB lines. Without the
         // per-commit lock, two concurrent `O_APPEND` writes can
@@ -197,5 +310,167 @@ mod tests {
                 .unwrap_or_else(|e| panic!("a line is not valid JSON: {e}"));
             assert!(v.as_object().is_some());
         }
+    }
+
+    // ------------------------------------------------------------------
+    // P8: the frame index sidecar
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn commit_appends_the_frame_and_its_record_under_one_lock() {
+        // P8: the frame and its index record land in one locked
+        // section. The record carries the seq start, the frame
+        // position, the frame length, and the decoded line length.
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("events.jsonl");
+        let mut expected = Vec::new();
+        for c in ["one", "two", "three"] {
+            let json = format!(
+                r#"{{"v":1,"type":"user_message","ts":"t","content":"{c}"}}"#
+            );
+            expected.push(json.len() as u64 + 1);
+            LogLine::from_json(&json).commit(&log).unwrap();
+        }
+        let raw = std::fs::read(&log).unwrap();
+        let records =
+            crate::logstream::read_index(&crate::logstream::index_path(&log)).unwrap();
+        assert_eq!(records.len(), 3, "one record per commit");
+        for (i, r) in records.iter().enumerate() {
+            assert_eq!(r.seq_start, (i + 1) as u64, "seq is the 1-based line number");
+            assert_eq!(
+                r.text_len,
+                expected[i],
+                "text_len is the decoded line length"
+            );
+        }
+        for pair in records.windows(2) {
+            assert_eq!(
+                pair[1].frame_offset,
+                pair[0].frame_offset + pair[0].frame_len,
+                "the frames are contiguous in the stream"
+            );
+        }
+        let last = records.last().unwrap();
+        assert_eq!(
+            last.frame_offset + last.frame_len,
+            raw.len() as u64,
+            "the index covers the stream"
+        );
+    }
+
+    #[test]
+    fn commit_bootstraps_the_index_on_a_pre_p8_stream() {
+        // A pre-P8 zstd stream holds frames with no sidecar. The
+        // first P8 commit opens the index with one record covering
+        // the old stream plus the new frame.
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("events.jsonl");
+        let a = crate::logstream::compress_frame(b"old-a\n").unwrap();
+        let b = crate::logstream::compress_frame(b"old-b\n").unwrap();
+        let mut buf = a;
+        buf.extend_from_slice(&b);
+        std::fs::write(&log, &buf).unwrap();
+        let json = r#"{"v":1,"type":"user_message","ts":"t","content":"new"}"#;
+        LogLine::from_json(json).commit(&log).unwrap();
+        let raw = std::fs::read(&log).unwrap();
+        let records =
+            crate::logstream::read_index(&crate::logstream::index_path(&log)).unwrap();
+        assert_eq!(records.len(), 1, "the bootstrap is one record");
+        let r = &records[0];
+        assert_eq!(r.seq_start, 1);
+        assert_eq!(r.frame_offset, 0);
+        assert_eq!(r.frame_len, raw.len() as u64);
+        assert_eq!(
+            r.text_len,
+            "old-a\nold-b\n".len() as u64 + json.len() as u64 + 1
+        );
+        // The next commit extends the index; the seq continues
+        // past the bootstrapped three lines.
+        LogLine::from_json(r#"{"v":1,"type":"user_message","ts":"t","content":"newer"}"#)
+            .commit(&log)
+            .unwrap();
+        let records =
+            crate::logstream::read_index(&crate::logstream::index_path(&log)).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].seq_start, 4, "the fourth line is seq 4");
+    }
+
+    #[test]
+    fn commit_heals_a_stream_grown_past_its_index() {
+        // A torn commit: the frame landed, the record did not. The
+        // next commit folds the un-indexed tail into its record.
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("events.jsonl");
+        LogLine::from_json(r#"{"v":1,"type":"user_message","ts":"t","content":"one"}"#)
+            .commit(&log)
+            .unwrap();
+        LogLine::from_json(r#"{"v":1,"type":"user_message","ts":"t","content":"two"}"#)
+            .commit(&log)
+            .unwrap();
+        // Simulate the tear: a frame with no record.
+        let extra = crate::logstream::compress_frame(b"three\n").unwrap();
+        let mut f = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+        f.write_all(&extra).unwrap();
+        let idx = crate::logstream::index_path(&log);
+        let records = crate::logstream::read_index(&idx).unwrap();
+        assert_eq!(
+            records.last().unwrap().frame_offset + records.last().unwrap().frame_len,
+            std::fs::read(&log).unwrap().len() as u64 - extra.len() as u64,
+            "the index lags the stream by one frame"
+        );
+        LogLine::from_json(r#"{"v":1,"type":"user_message","ts":"t","content":"four"}"#)
+            .commit(&log)
+            .unwrap();
+        let records = crate::logstream::read_index(&idx).unwrap();
+        assert_eq!(records.len(), 3, "the heal appended one record");
+        assert_eq!(
+            records[2].seq_start,
+            3,
+            "the record covers the torn line and the new one"
+        );
+        let raw = std::fs::read(&log).unwrap();
+        assert_eq!(
+            records[2].frame_offset + records[2].frame_len,
+            raw.len() as u64,
+            "the healed index covers the stream"
+        );
+    }
+
+    #[test]
+    fn concurrent_commits_keep_the_index_contiguous() {
+        // P8 under the FT-005 lock: concurrent commits serialize on
+        // the log-line lock. The sidecar stays one contiguous
+        // record chain, with no torn record at the tail.
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("events.jsonl");
+        let json = r#"{"v":1,"type":"user_message","ts":"t","content":"m"}"#;
+        let n = 25;
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let log = log.clone();
+            let json = json.to_string();
+            handles.push(std::thread::spawn(move || {
+                let line = LogLine::from_json(&json);
+                for _ in 0..n {
+                    line.commit(&log).unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        let raw = std::fs::read(&log).unwrap();
+        let records =
+            crate::logstream::read_index(&crate::logstream::index_path(&log)).unwrap();
+        assert_eq!(records.len(), 2 * n, "every commit carries its record");
+        for (i, r) in records.iter().enumerate() {
+            assert_eq!(r.seq_start, (i + 1) as u64, "the seq runs unbroken");
+        }
+        let last = records.last().unwrap();
+        assert_eq!(
+            last.frame_offset + last.frame_len,
+            raw.len() as u64,
+            "the index covers the stream"
+        );
     }
 }
