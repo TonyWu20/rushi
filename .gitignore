@@ -8,7 +8,7 @@ target
 tools/*/bin/
 
 ## Runtime data (created by the harness)
-sessions/
+sessions
 
 ## Scratch test file
 test.txt
