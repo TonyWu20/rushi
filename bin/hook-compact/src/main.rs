@@ -81,11 +81,7 @@ fn main() {
 
 fn read_stdin_json() -> serde_json::Value {
     let mut buf = String::new();
-    if io::stdin()
-        .read_to_string(&mut buf)
-        .is_err()
-        || buf.trim().is_empty()
-    {
+    if io::stdin().read_to_string(&mut buf).is_err() || buf.trim().is_empty() {
         return serde_json::json!({});
     }
     serde_json::from_str(&buf).unwrap_or(serde_json::json!({}))
@@ -136,11 +132,7 @@ fn handle_compact_window(payload: &serde_json::Value) {
         cmd.arg("--force");
     }
 
-    let output = match cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-    {
+    let output = match cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).output() {
         Ok(o) => o,
         Err(e) => {
             // Spawn failure: a step-level failure. The kernel logs
@@ -153,7 +145,10 @@ fn handle_compact_window(payload: &serde_json::Value) {
     let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
     let status: serde_json::Value =
         serde_json::from_str(&stdout_str).unwrap_or(serde_json::Value::Null);
-    let status_str = status.get("status").and_then(|s| s.as_str()).unwrap_or("failed");
+    let status_str = status
+        .get("status")
+        .and_then(|s| s.as_str())
+        .unwrap_or("failed");
 
     match status_str {
         "compacted" | "noop" => {
@@ -184,4 +179,3 @@ fn fail(reason: String) -> ! {
     println!("{}", serde_json::json!({ "reason": reason }));
     std::process::exit(3);
 }
-

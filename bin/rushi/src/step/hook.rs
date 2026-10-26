@@ -187,9 +187,7 @@ pub fn log_pipeline(
 /// the window default (`stay_compact`) — so it also stops.
 /// A failed chain falls back to the default (`stay_compact`, P4).
 pub fn resolve_strategy_window(run: &PipelineRun) -> &'static str {
-    if !run.failed
-        && (run.aborted
-            || run.state.get("stop").map(|v| !v.is_null()).unwrap_or(false))
+    if !run.failed && (run.aborted || run.state.get("stop").map(|v| !v.is_null()).unwrap_or(false))
     {
         "stop"
     } else {

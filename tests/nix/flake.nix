@@ -301,6 +301,16 @@
            }) ];
          };
 
+      # issue #57 regression: nixpkgs buildEnv drops any file named
+      # `log` (pkgs/build-support/buildenv/builder.pl, `findFiles`
+      # reserved names), so a `bin/log` entry never reached a merged
+      # devshell `bin/`. The log-appender stage ships as `rushi-log`;
+      # this merge must keep it (and every other kernel `bin/` entry).
+      issue57Merge = pkgs.buildEnv {
+        name = "rushi-issue57-merge";
+        paths = [ caseMeta.package ];
+      };
+
 
       # ── Eval-time values (nix eval tests/nix#evals.<case>.<field>) ──
       evals = {
@@ -341,6 +351,7 @@
         case-meta-mismatch = caseMetaMismatch.package;
         case-tui-new = caseTuiNew.package;
         case-tui-old = caseTuiOld.package;
+        case-issue57-merge = issue57Merge;
       };
     };
 }

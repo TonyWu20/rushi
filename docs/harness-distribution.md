@@ -359,8 +359,12 @@ What does **not** get renamed:
 
 - `bin/tui` stays `tui`. It is a front-end, not the totem.
 - Stage binaries (`claim`, `assemble`, `model`, `parse`, `route`,
-  `log`, `compact`) keep their names. They are one-shot CLIs whose
-  names describe the stage, not the distribution.
+  `rushi-log`, `compact`) keep their stage names. Each name
+  describes the stage, not the distribution. The exception is
+  `rushi-log`: nixpkgs buildEnv reserves the name `log` and drops
+  it from merged devshells, so the log-appender stage ships under
+  the `rushi-` prefix (issue #57, docs/reference/nix/
+  nix-flake-module.md "Reserved names").
 - `tools/`, `ui_extensions/`, and the `tool.toml` manifest format
   are unchanged.
 - The repo directory (`rust-unix-harness`) is a separate, optional

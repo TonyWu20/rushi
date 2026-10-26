@@ -523,8 +523,7 @@ mod tests {
 
     #[test]
     fn missing_field_fails() {
-        let err =
-            parse_event(r#"{"v":1,"type":"user_message","ts":"t"}"#).unwrap_err();
+        let err = parse_event(r#"{"v":1,"type":"user_message","ts":"t"}"#).unwrap_err();
         assert!(
             err.to_string().contains("content"),
             "expected 'content' in error, got: {err}"
@@ -554,7 +553,7 @@ mod tests {
             "user_message",
             "user_message_retract",
         ];
-        let mut got: Vec<&str> = EVENT_TYPES.iter().copied().collect();
+        let mut got: Vec<&str> = EVENT_TYPES.to_vec();
         let mut want: Vec<&str> = expected.to_vec();
         got.sort();
         want.sort();

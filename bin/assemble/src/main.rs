@@ -1,10 +1,12 @@
 #![deny(clippy::todo, clippy::unimplemented, clippy::unreachable)]
 
-use clap::Parser;
 use bon::builder;
-use rushi_common::config_check;
+use clap::Parser;
 use rushi_common::compact_math::trigger_level_for;
-use rushi_common::model_settings::{ModelSettings, resolve_active_model, resolve_model_settings, val_int, val_str};
+use rushi_common::config_check;
+use rushi_common::model_settings::{
+    resolve_active_model, resolve_model_settings, val_int, val_str, ModelSettings,
+};
 use rushi_common::rewind;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -101,9 +103,9 @@ enum Ev {
         calls: Vec<Call>,
         reasoning: Vec<serde_json::Value>,
         #[allow(dead_code)]
-    usage_input: Option<usize>,
+        usage_input: Option<usize>,
         #[allow(dead_code)]
-    usage_output: Option<usize>,
+        usage_output: Option<usize>,
     },
     ToolResult {
         id: String,
@@ -196,7 +198,11 @@ fn parse_boundary(event: &serde_json::Value, seq: usize) -> Option<Boundary> {
         event
             .get(key)
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default()
     };
     let version = event.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -336,7 +342,10 @@ fn file_list_lines(list: &[String]) -> String {
     if list.is_empty() {
         "(none)".to_string()
     } else {
-        list.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n")
+        list.iter()
+            .map(|f| format!("- {f}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
@@ -344,10 +353,7 @@ fn file_list_lines(list: &[String]) -> String {
 /// file-op lists carried in.
 fn compact_update_instructions(b: &Boundary) -> String {
     COMPACT_INSTRUCTIONS_UPDATE
-        .replace(
-            "{summary}",
-            &b.summary,
-        )
+        .replace("{summary}", &b.summary)
         .replace("{read_files}", &file_list_lines(&b.read_files))
         .replace("{modified_files}", &file_list_lines(&b.modified_files))
 }
@@ -373,7 +379,11 @@ fn drop_oldest_groups<'a>(
 /// excludes no orphan function_call.
 fn drop_last_assistant_group<'a>(events: &[&'a Ev]) -> Vec<&'a Ev> {
     let groups = step_groups(events);
-    match groups.iter().rev().find(|&&(start, _)| matches!(events[start], Ev::Assistant { .. })) {
+    match groups
+        .iter()
+        .rev()
+        .find(|&&(start, _)| matches!(events[start], Ev::Assistant { .. }))
+    {
         Some(&(start, end)) => {
             let mut out: Vec<&'a Ev> = events[..start].to_vec();
             out.extend(events[end..].iter());
@@ -382,8 +392,6 @@ fn drop_last_assistant_group<'a>(events: &[&'a Ev]) -> Vec<&'a Ev> {
         None => events.to_vec(),
     }
 }
-
-
 
 /// The context budget: the user knob `context_budget_tokens` or the
 /// model window, clamped to the window.
@@ -412,7 +420,14 @@ fn head_tail_cut(s: &str, limit: usize) -> (String, String, usize, usize, usize,
     let chars: Vec<char> = s.chars().collect();
     let head: String = chars[..head_n].iter().collect();
     let tail: String = chars[total - tail_n..].iter().collect();
-    (head, tail, total, total - head_n - tail_n, head_n, total - tail_n)
+    (
+        head,
+        tail,
+        total,
+        total - head_n - tail_n,
+        head_n,
+        total - tail_n,
+    )
 }
 
 /// Cut a string to at most `limit` chars, keeping the head and the
@@ -464,10 +479,7 @@ impl LogPointers {
 /// tool working directory: the session dir relative to the cwd when
 /// the session dir is absolute and rooted in the cwd, else the path
 /// as given (a relative session dir is already relative to the cwd).
-fn log_pointers(
-    session_dir: &str,
-    cwd: Option<&str>,
-) -> LogPointers {
+fn log_pointers(session_dir: &str, cwd: Option<&str>) -> LogPointers {
     let base = if Path::new(session_dir).is_absolute() {
         cwd.filter(|c| Path::new(c).is_absolute())
             .and_then(|c| Path::new(session_dir).strip_prefix(c).ok())
@@ -514,9 +526,7 @@ fn last_boundary_marker_seq(lines: &str) -> Option<usize> {
     parsed
         .iter()
         .rev()
-        .find(|(s, v)| {
-            rewind::seq_in_ranges(*s, &active) && parse_boundary(v, *s).is_some()
-        })
+        .find(|(s, v)| rewind::seq_in_ranges(*s, &active) && parse_boundary(v, *s).is_some())
         .map(|(s, _)| *s)
 }
 
@@ -564,15 +574,12 @@ fn project_tool_result(
         .unwrap_or("")
         .to_string();
     let details = event.get("value").and_then(|v| v.get("details"));
-    let is_image = details
-        .and_then(|d| d.get("type"))
-        .and_then(|t| t.as_str())
-        == Some("image");
+    let is_image = details.and_then(|d| d.get("type")).and_then(|t| t.as_str()) == Some("image");
     let has_data = details
         .and_then(|d| d.get("data"))
         .and_then(|d| d.as_str())
-        .map_or(false, |s| !s.is_empty());
-    let dropped = is_image && has_data && last_boundary_seq.map_or(false, |b| seq < b);
+        .is_some_and(|s| !s.is_empty());
+    let dropped = is_image && has_data && last_boundary_seq.is_some_and(|b| seq < b);
     let text = if is_image && has_data {
         image_marker(details.expect("is_image implies details"))
     } else {
@@ -667,9 +674,7 @@ fn context_strands_pairs(events: &[&Ev]) -> bool {
         .map(|c| c.id.as_str())
         .collect();
     events.iter().any(|ev| match ev {
-        Ev::Assistant { calls, .. } => {
-            calls.iter().any(|c| !result_ids.contains(c.id.as_str()))
-        }
+        Ev::Assistant { calls, .. } => calls.iter().any(|c| !result_ids.contains(c.id.as_str())),
         // An orphan result: the output sits in the context but its
         // call is masked (or absent). The pair is stranded either
         // way.
@@ -748,9 +753,14 @@ fn full_items(ev: &Ev, vision: bool) -> Vec<serde_json::Value> {
             }
             items
         }
-        Ev::ToolResult { id, text, image, .. } => {
+        Ev::ToolResult {
+            id, text, image, ..
+        } => {
             if let Some(img) = image {
-                let mime = img.get("mime_type").and_then(|m| m.as_str()).unwrap_or("image/png");
+                let mime = img
+                    .get("mime_type")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("image/png");
                 let data = img.get("data").and_then(|d| d.as_str()).unwrap_or("");
                 if vision {
                     // Responses API: array output with input_text + input_image.
@@ -797,11 +807,7 @@ fn with_reasoning_type(item: serde_json::Value) -> serde_json::Value {
 /// Reasoning items do not shrink: a half-trimmed thinking item is
 /// worse than none. The compact form drops them. A summary call
 /// folds the old thinking back in later (handoff work item B).
-fn compact_items(
-    ev: &Ev,
-    caps: &Caps,
-    ptrs: &LogPointers,
-) -> Vec<serde_json::Value> {
+fn compact_items(ev: &Ev, caps: &Caps, ptrs: &LogPointers) -> Vec<serde_json::Value> {
     match ev {
         Ev::User { .. } => full_items(ev, false),
         Ev::Assistant { text, calls, .. } => {
@@ -877,10 +883,7 @@ fn build_items(
 /// the model input, `None` when it stays out. `follow` messages
 /// ride only on a turn restart (`inject_follow`); the missing field
 /// means steer, and steer always rides.
-fn user_event_rides(
-    event: &serde_json::Value,
-    inject_follow: bool,
-) -> Option<String> {
+fn user_event_rides(event: &serde_json::Value, inject_follow: bool) -> Option<String> {
     let follow = event
         .get("queue")
         .and_then(|q| q.as_str())
@@ -906,7 +909,10 @@ fn estimate_ev_tokens(ev: &Ev, chars_per_token: u64) -> u64 {
     let chars = match ev {
         Ev::User { text } => text.chars().count() as u64,
         Ev::Assistant {
-            text, calls, reasoning, ..
+            text,
+            calls,
+            reasoning,
+            ..
         } => {
             let t = text.chars().count() as u64;
             let c: u64 = calls
@@ -957,7 +963,13 @@ fn estimate_request_tokens(
         None
     } else {
         kept_events.iter().rposition(|ev| {
-            matches!(ev, Ev::Assistant { usage_input: Some(_), .. })
+            matches!(
+                ev,
+                Ev::Assistant {
+                    usage_input: Some(_),
+                    ..
+                }
+            )
         })
     };
 
@@ -967,9 +979,15 @@ fn estimate_request_tokens(
     let (anchor, trailing_start) = match last_meas_idx {
         Some(idx) => {
             let (input, output) = match kept_events[idx] {
-                Ev::Assistant { usage_input: Some(i), usage_output: Some(o), .. } =>
-                    (*i as u64, *o as u64),
-                Ev::Assistant { usage_input: Some(i), .. } => (*i as u64, 0),
+                Ev::Assistant {
+                    usage_input: Some(i),
+                    usage_output: Some(o),
+                    ..
+                } => (*i as u64, *o as u64),
+                Ev::Assistant {
+                    usage_input: Some(i),
+                    ..
+                } => (*i as u64, 0),
                 _ => (0, 0),
             };
             (input + output, idx + 1)
@@ -1028,8 +1046,12 @@ fn hard_trim_groups(
         } else {
             events.len()
         };
-        if estimate_request_tokens(&events[start..], framing, extra_framing_chars, chars_per_token)
-            <= target
+        if estimate_request_tokens(
+            &events[start..],
+            framing,
+            extra_framing_chars,
+            chars_per_token,
+        ) <= target
         {
             return Some(drop);
         }
@@ -1040,17 +1062,15 @@ fn hard_trim_groups(
 fn main() {
     let args = Args::parse();
 
-    let config_path =
-        rushi_common::paths::resolve_config_path(args.config.as_deref());
+    let config_path = rushi_common::paths::resolve_config_path(args.config.as_deref());
 
     // Read the config as the top layer: the Nix store config.toml
     // (when present) deep-merges under it
     // (docs/project-config-precedence.md).
-    let layers = rushi_common::config_layer::load_layered(&config_path)
-        .unwrap_or_else(|e| {
-            eprintln!("Error: {e}");
-            std::process::exit(1);
-        });
+    let layers = rushi_common::config_layer::load_layered(&config_path).unwrap_or_else(|e| {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    });
     let config: &toml::Value = &layers.value;
 
     // Hard-fail on legacy `[paths]` keys that the rename in 353424a
@@ -1091,8 +1111,7 @@ fn main() {
     let compact_text_chars: usize = val_int(&limits, "compact_text_chars").unwrap_or(200) as usize;
     // A cheaper effort for the summary call on a local GPU. The
     // session reasoning_effort is the default when unset.
-    let compact_reasoning_effort: Option<String> =
-        val_str(&limits, "compact_reasoning_effort");
+    let compact_reasoning_effort: Option<String> = val_str(&limits, "compact_reasoning_effort");
 
     // Native tool paths (each entry is a tool dir containing a
     // tool.toml, or a root dir holding tool sub-dirs). Relative
@@ -1289,14 +1308,8 @@ fn main() {
                 if event.get("branch_of").is_some() {
                     branch_markers.push(BranchMarker {
                         seq,
-                        branch_of: event
-                            .get("branch_of")
-                            .and_then(|b| b.as_u64())
-                            .unwrap_or(0),
-                        version: event
-                            .get("version")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0),
+                        branch_of: event.get("branch_of").and_then(|b| b.as_u64()).unwrap_or(0),
+                        version: event.get("version").and_then(|v| v.as_u64()).unwrap_or(0),
                         summary: event
                             .get("summary")
                             .and_then(|s| s.as_str())
@@ -1404,10 +1417,7 @@ fn main() {
             .filter_map(|s| s.get("name").and_then(|n| n.as_str()).map(str::to_string))
             .collect();
         for tool_dir in rushi_common::paths::tool_dirs_in(path) {
-            let name = tool_dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
+            let name = tool_dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if name.is_empty() || known.contains(name) {
                 continue;
             }
@@ -1467,9 +1477,7 @@ fn main() {
     // after the cwd line. When the argument is absent, this is a
     // no-op.
     if let Some(fragments_json) = &args.fragments {
-        if let Ok(fragments) =
-            serde_json::from_str::<Vec<Vec<serde_json::Value>>>(fragments_json)
-        {
+        if let Ok(fragments) = serde_json::from_str::<Vec<Vec<serde_json::Value>>>(fragments_json) {
             for pair in &fragments {
                 if pair.len() >= 2 {
                     if let Some(text) = pair[1].as_str() {
@@ -1539,12 +1547,16 @@ fn main() {
         let old_region: Vec<&Ev> = if args.branch_of.is_some() {
             // The branch region was pre-computed above, while
             // `rewinds` and `event_seqs` were still valid.
-            branch_region.clone().expect("computed above for --branch-of")
+            branch_region
+                .clone()
+                .expect("computed above for --branch-of")
         } else {
             let up_to = match args.up_to {
                 Some(u) if u >= 1 => u,
                 _ => {
-                    eprintln!("Error: --summary-input requires --up-to <seq>, a 1-based log sequence");
+                    eprintln!(
+                        "Error: --summary-input requires --up-to <seq>, a 1-based log sequence"
+                    );
                     std::process::exit(1);
                 }
             };
@@ -1596,10 +1608,7 @@ fn main() {
         // default prompt wholesale; the optional request-level effort
         // stands when the config leaves it unset. Both are optional
         // builder fields, so the four combinations all end in `.call()`.
-        let request = match (
-            args.prompt.as_deref(),
-            compact_reasoning_effort.as_deref(),
-        ) {
+        let request = match (args.prompt.as_deref(), compact_reasoning_effort.as_deref()) {
             (Some(p), Some(e)) => builder.custom_instructions(p).effort(e).call(),
             (Some(p), None) => builder.custom_instructions(p).call(),
             (None, Some(e)) => builder.effort(e).call(),
@@ -1638,7 +1647,9 @@ fn main() {
     let session_dir = Path::new(&args.session);
     let handoff_doc: Option<String> = if let Some(b) = &boundary {
         if b.version > 0 {
-            let vpath = session_dir.join("handoff").join(format!("v{}.md", b.version));
+            let vpath = session_dir
+                .join("handoff")
+                .join(format!("v{}.md", b.version));
             std::fs::read_to_string(&vpath)
                 .ok()
                 .or_else(|| std::fs::read_to_string(session_dir.join("handoff.md")).ok())
@@ -1909,33 +1920,34 @@ context_budget_tokens = 999999
     /// (1000 tokens), an assistant group of a call and its result
     /// (1000 + 1000), user B (1000). Total 4000 tokens.
     fn hard_trim_events() -> Vec<Ev> {
-        let mut evs: Vec<Ev> = Vec::new();
-        evs.push(Ev::User {
-            text: "a".repeat(4000),
-        });
-        evs.push(Ev::Assistant {
-            text: String::new(),
-            calls: vec![Call {
+        let evs: Vec<Ev> = vec![
+            Ev::User {
+                text: "a".repeat(4000),
+            },
+            Ev::Assistant {
+                text: String::new(),
+                calls: vec![Call {
+                    id: "c1".to_string(),
+                    name: "bash".to_string(),
+                    args_str: "b".repeat(4000),
+                }],
+                reasoning: Vec::new(),
+                usage_input: None,
+                usage_output: None,
+            },
+            Ev::ToolResult {
                 id: "c1".to_string(),
-                name: "bash".to_string(),
-                args_str: "b".repeat(4000),
-            }],
-            reasoning: Vec::new(),
-            usage_input: None,
-            usage_output: None,
-        });
-        evs.push(Ev::ToolResult {
-            id: "c1".to_string(),
-            text: "c".repeat(4000),
-            image: None,
-        });
-        evs.push(Ev::User {
-            text: "d".repeat(4000),
-        });
+                text: "c".repeat(4000),
+                image: None,
+            },
+            Ev::User {
+                text: "d".repeat(4000),
+            },
+        ];
         evs
     }
 
-    fn hard_trim_refs<'a>(evs: &'a [Ev]) -> Vec<&'a Ev> {
+    fn hard_trim_refs(evs: &[Ev]) -> Vec<&Ev> {
         evs.iter().collect()
     }
 
@@ -1974,7 +1986,10 @@ context_budget_tokens = 999999
         // the group whole.
         let drop = hard_trim_groups(&refs, &framing, 0, 2000, 4).expect("trims to one group");
         let start = step_groups(&refs)[drop].0;
-        assert!(matches!(refs[start], Ev::Assistant { .. } | Ev::User { .. }));
+        assert!(matches!(
+            refs[start],
+            Ev::Assistant { .. } | Ev::User { .. }
+        ));
     }
 
     #[test]
@@ -2170,13 +2185,14 @@ not json at all
             s.contains("\"call_id\":\"f1\""),
             "the failed pair stays in the full form: the callout must reach the model"
         );
-        assert!(s.contains("failed schema validation"), "the callout text is delivered");
+        assert!(
+            s.contains("failed schema validation"),
+            "the callout text is delivered"
+        );
     }
 
     fn caps() -> Caps {
-        Caps {
-            text: 20,
-        }
+        Caps { text: 20 }
     }
 
     #[test]
@@ -2216,20 +2232,18 @@ not json at all
             events.push(ev_res(&format!("id{i}"), &"R".repeat(400)));
         }
         let refs: Vec<&Ev> = events.iter().collect();
-        let items = build_items(
-            &refs,
-            4,
-            &Caps {
-                text: 20,
-            },
-            &test_ptrs(),
-            false,
-        );
+        let items = build_items(&refs, 4, &Caps { text: 20 }, &test_ptrs(), false);
         // Old tool results are no longer compacted; full body passes through.
         let first = &items[0];
         let s = first.to_string();
-        assert!(!s.contains("compacted"), "no compacted marker on tool results: {s}");
-        assert!(s.contains(&"R".repeat(400)), "the full 400-char body must be present");
+        assert!(
+            !s.contains("compacted"),
+            "no compacted marker on tool results: {s}"
+        );
+        assert!(
+            s.contains(&"R".repeat(400)),
+            "the full 400-char body must be present"
+        );
         assert_eq!(items.len(), 30);
     }
 
@@ -2244,7 +2258,10 @@ not json at all
         let refs: Vec<&Ev> = events.iter().collect();
         let items = build_items(&refs, 0, &caps(), &test_ptrs(), false);
         assert!(items[0].to_string().contains("do the task"));
-        assert!(!items[1].to_string().contains("compacted"), "tool results are no longer compacted");
+        assert!(
+            !items[1].to_string().contains("compacted"),
+            "tool results are no longer compacted"
+        );
     }
 
     /// The compact form still trims assistant text and call args
@@ -2262,13 +2279,7 @@ not json at all
             usage_input: None,
             usage_output: None,
         };
-        let items = compact_items(
-            &ev,
-            &Caps {
-                text: 20,
-            },
-            &test_ptrs(),
-        );
+        let items = compact_items(&ev, &Caps { text: 20 }, &test_ptrs());
         let s = items.iter().map(|i| i.to_string()).collect::<String>();
         assert!(
             s.contains("[compacted: 300 chars total; head 10 + tail 10 kept, 280 elided (chars 10-290). Full text: sessions/s/events.jsonl (assistant_message event)]"),
@@ -2301,7 +2312,7 @@ not json at all
                     "encrypted_content": "enc-9"
                 })],
                 usage_input: None,
-            usage_output: None,
+                usage_output: None,
             },
             false,
         );
@@ -2349,11 +2360,9 @@ not json at all
                     "encrypted_content": null
                 })],
                 usage_input: None,
-            usage_output: None,
+                usage_output: None,
             },
-            &Caps {
-                text: 20,
-            },
+            &Caps { text: 20 },
             &test_ptrs(),
         );
         assert_eq!(items.len(), 2, "compact form keeps message and call only");
@@ -2404,20 +2413,12 @@ not json at all
                     "id": "rs_1"
                 })],
                 usage_input: None,
-            usage_output: None,
+                usage_output: None,
             },
             ev_res("1", "r"),
         ];
         let refs: Vec<&Ev> = events.iter().collect();
-        let (items, offsets) = build_items_off(
-            &refs,
-            10,
-            &Caps {
-                text: 20,
-            },
-            &test_ptrs(),
-            false,
-        );
+        let (items, offsets) = build_items_off(&refs, 10, &Caps { text: 20 }, &test_ptrs(), false);
         assert_eq!(offsets.len(), 4, "one offset per event plus the end");
         assert_eq!(items.len(), offsets[3]);
         // The assistant event projects to three items: reasoning,
@@ -2438,9 +2439,8 @@ not json at all
     #[test]
     fn exhausted_signal_carries_the_request_not_a_handoff() {
         // The signal the main loop prints on the Exhausted form.
-        let items = vec![
-            serde_json::json!({"type": "message", "role": "user", "content": "the task"}),
-        ];
+        let items =
+            vec![serde_json::json!({"type": "message", "role": "user", "content": "the task"})];
         let request = serde_json::json!({
             "model": "m",
             "instructions": "sys",
@@ -2468,20 +2468,20 @@ not json at all
     /// auto-compact-plan.md section 4.2).
     #[test]
     fn summary_input_request_carries_the_compaction_prompt() {
-        let events = [Ev::User {
+        let events = [
+            Ev::User {
                 text: "the task".to_string(),
             },
             ev_asst("step one"),
-            ev_res("1", "ok")];
+            ev_res("1", "ok"),
+        ];
         let refs: Vec<&Ev> = events.iter().collect();
         let req: serde_json::Value = summary_input_request()
             .old(&refs)
             .prev(&None)
             .model("m")
             .max_out_cap(2048)
-            .caps(&Caps {
-                text: 100,
-            })
+            .caps(&Caps { text: 100 })
             .input_budget(1_000_000)
             .ptrs(&test_ptrs())
             .chars_per_token(4)
@@ -2489,11 +2489,14 @@ not json at all
         assert_eq!(req["model"], "m");
         assert_eq!(req["tools"], serde_json::json!([]));
         assert_eq!(req["max_output_tokens"], 2048);
+        assert!(
+            req["instructions"].as_str().unwrap().contains("## Goal"),
+            "the first-time structured prompt"
+        );
         assert!(req["instructions"]
             .as_str()
             .unwrap()
-            .contains("## Goal"), "the first-time structured prompt");
-        assert!(req["instructions"].as_str().unwrap().contains("Critical Context"));
+            .contains("Critical Context"));
         let input = req["input"].as_array().unwrap();
         assert_eq!(input.last().unwrap()["content"], COMPACT_ASK_FIRST);
         // The request carries the task statement and the old events.
@@ -2510,18 +2513,20 @@ not json at all
     /// (docs/tree-ui-design-from-human.md in the TUI repo).
     #[test]
     fn summary_input_custom_prompt_replaces_the_default() {
-        let events = [Ev::User {
-            text: "the task".to_string(),
-        }, ev_asst("step one"), ev_res("1", "ok")];
+        let events = [
+            Ev::User {
+                text: "the task".to_string(),
+            },
+            ev_asst("step one"),
+            ev_res("1", "ok"),
+        ];
         let refs: Vec<&Ev> = events.iter().collect();
         let req: serde_json::Value = summary_input_request()
             .old(&refs)
             .prev(&None)
             .model("m")
             .max_out_cap(2048)
-            .caps(&Caps {
-                text: 100,
-            })
+            .caps(&Caps { text: 100 })
             .input_budget(1_000_000)
             .ptrs(&test_ptrs())
             .chars_per_token(4)
@@ -2572,9 +2577,7 @@ not json at all
             .prev(&Some(boundary))
             .model("m")
             .max_out_cap(2048)
-            .caps(&Caps {
-                text: 100,
-            })
+            .caps(&Caps { text: 100 })
             .input_budget(1_000_000)
             .ptrs(&test_ptrs())
             .chars_per_token(4)
@@ -2613,17 +2616,21 @@ not json at all
             .model("m")
             .max_out_cap(2048)
             .effort("low")
-            .caps(&Caps {
-                text: 100,
-            })
+            .caps(&Caps { text: 100 })
             .input_budget(1_000_000)
             .ptrs(&test_ptrs())
             .chars_per_token(4)
             .call();
         let inst = req["instructions"].as_str().unwrap();
-        assert!(inst.contains("the previous summary"), "the previous summary rides in");
+        assert!(
+            inst.contains("the previous summary"),
+            "the previous summary rides in"
+        );
         assert!(inst.contains("- a.txt"), "the previous read list rides in");
-        assert!(inst.contains("- b.rs"), "the previous modified list rides in");
+        assert!(
+            inst.contains("- b.rs"),
+            "the previous modified list rides in"
+        );
         let input = req["input"].as_array().unwrap();
         assert_eq!(input.last().unwrap()["content"], COMPACT_ASK_UPDATE);
         // The optional request-level effort is carried for bin/model.
@@ -2645,14 +2652,11 @@ not json at all
                 calls: vec![Call {
                     id: format!("c{i}"),
                     name: "bash".to_string(),
-                    args_str: format!(
-                        "{{\"command\": \"{}\"}}",
-                        big
-                    ),
+                    args_str: format!("{{\"command\": \"{}\"}}", big),
                 }],
                 reasoning: vec![],
                 usage_input: None,
-            usage_output: None,
+                usage_output: None,
             });
             events.push(ev_res(&format!("r{i}"), &big));
         }
@@ -2663,9 +2667,7 @@ not json at all
             .prev(&None)
             .model("m")
             .max_out_cap(2048)
-            .caps(&Caps {
-                text: 100,
-            })
+            .caps(&Caps { text: 100 })
             .input_budget(6000)
             .ptrs(&test_ptrs())
             .chars_per_token(4)
@@ -2696,9 +2698,7 @@ not json at all
             .prev(&None)
             .model("m")
             .max_out_cap(2048)
-            .caps(&Caps {
-                text: 100,
-            })
+            .caps(&Caps { text: 100 })
             .input_budget(1_000_000)
             .ptrs(&test_ptrs())
             .chars_per_token(4)
@@ -2758,7 +2758,10 @@ not json at all
             s.contains("\"call_id\":\"t1\""),
             "the truncated pair stays in the full form"
         );
-        assert!(s.contains("Arguments may be truncated"), "the notice is delivered");
+        assert!(
+            s.contains("Arguments may be truncated"),
+            "the notice is delivered"
+        );
     }
 
     /// `drop_last_assistant_group` excludes the last assistant group
@@ -2776,15 +2779,13 @@ not json at all
         ];
         let refs: Vec<&Ev> = events.iter().collect();
         let out = drop_last_assistant_group(&refs);
-        let flat = serde_json::to_string(
-            &build_items(
-                &out,
-                out.len(),
-                &Caps { text: 0 },
-                &test_ptrs(),
-                false,
-            ),
-        )
+        let flat = serde_json::to_string(&build_items(
+            &out,
+            out.len(),
+            &Caps { text: 0 },
+            &test_ptrs(),
+            false,
+        ))
         .unwrap();
         assert!(flat.contains("step one"), "the older group stays");
         assert!(!flat.contains("step two"), "the last group is out");
@@ -2826,7 +2827,10 @@ not json at all
             "reason": "threshold",
             "tokens_before": 0
         });
-        assert!(parse_boundary(&zero, 7).is_none(), "a zero seq is out of range");
+        assert!(
+            parse_boundary(&zero, 7).is_none(),
+            "a zero seq is out of range"
+        );
 
         // A missing summary is rejected: the projection has no text.
         let no_summary: serde_json::Value = serde_json::json!({
@@ -2837,7 +2841,10 @@ not json at all
             "reason": "threshold",
             "tokens_before": 0
         });
-        assert!(parse_boundary(&no_summary, 7).is_none(), "a missing summary is rejected");
+        assert!(
+            parse_boundary(&no_summary, 7).is_none(),
+            "a missing summary is rejected"
+        );
 
         // A non-integer first_kept_seq is rejected.
         let bad: serde_json::Value = serde_json::json!({
@@ -2849,7 +2856,10 @@ not json at all
             "reason": "threshold",
             "tokens_before": 0
         });
-        assert!(parse_boundary(&bad, 7).is_none(), "a string seq is rejected");
+        assert!(
+            parse_boundary(&bad, 7).is_none(),
+            "a string seq is rejected"
+        );
     }
 
     /// The delivery-queue gate (docs/tui-pending-user-messages.md
@@ -2862,8 +2872,7 @@ not json at all
         let steer_explicit =
             serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"a","queue":"steer"});
         assert!(user_event_rides(&steer_explicit, false).is_some());
-        let follow =
-            serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"b","queue":"follow"});
+        let follow = serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"b","queue":"follow"});
         assert!(user_event_rides(&follow, false).is_none(), "follow waits");
         assert_eq!(
             user_event_rides(&follow, true),
@@ -2903,11 +2912,11 @@ not json at all
     #[test]
     fn mask_masks_the_abandoned_branch() {
         let events: Vec<Ev> = vec![
-            ev_user("task"),              // 1
-            ev_call("c1"),               // 2
-            ev_res("c1", "A result"),    // 3
-            ev_call("c2"),               // 4
-            ev_res("c2", "B result"),    // 5
+            ev_user("task"),          // 1
+            ev_call("c1"),            // 2
+            ev_res("c1", "A result"), // 3
+            ev_call("c2"),            // 4
+            ev_res("c2", "B result"), // 5
         ];
         let (refs, seqs) = refs_of(&events);
         // Rewind at log seq 6 to seq 3 (on): the span 4..5 is the
@@ -2938,24 +2947,36 @@ not json at all
         // 1..3 = A, rewind(4,3) forks B (5..6), rewind(7,3) forks
         // A' (8..9), rewind(10,9) continues A'.
         let events: Vec<Ev> = vec![
-            ev_user("task"),              // 1
-            ev_call("ca"),                // 2
-            ev_res("ca", "A result"),     // 3
-            ev_call("cb"),                // 5 (4 is the rewind)
-            ev_res("cb", "B result"),     // 6
-            ev_call("ca2"),               // 8 (7 is the rewind)
-            ev_res("ca2", "A' result"),   // 9
-            ev_call("ca3"),               // 11 (10 is the rewind)
-            ev_res("ca3", "A' done"),     // 12
+            ev_user("task"),            // 1
+            ev_call("ca"),              // 2
+            ev_res("ca", "A result"),   // 3
+            ev_call("cb"),              // 5 (4 is the rewind)
+            ev_res("cb", "B result"),   // 6
+            ev_call("ca2"),             // 8 (7 is the rewind)
+            ev_res("ca2", "A' result"), // 9
+            ev_call("ca3"),             // 11 (10 is the rewind)
+            ev_res("ca3", "A' done"),   // 12
         ];
         // Log seqs: the rewinds sit at 4, 7, 10, so the events above
         // occupy 1,2,3,5,6,8,9,11,12.
         let refs: Vec<&Ev> = events.iter().collect();
         let seqs: Vec<usize> = vec![1, 2, 3, 5, 6, 8, 9, 11, 12];
         let rewinds = vec![
-            rushi_common::rewind::RewindRef { seq: 4, target: 3, before: false },
-            rushi_common::rewind::RewindRef { seq: 7, target: 3, before: false },
-            rushi_common::rewind::RewindRef { seq: 10, target: 9, before: false },
+            rushi_common::rewind::RewindRef {
+                seq: 4,
+                target: 3,
+                before: false,
+            },
+            rushi_common::rewind::RewindRef {
+                seq: 7,
+                target: 3,
+                before: false,
+            },
+            rushi_common::rewind::RewindRef {
+                seq: 10,
+                target: 9,
+                before: false,
+            },
         ];
         let (kept, _, ignored) = mask_active_path(&refs, &seqs, 12, rewinds);
         let texts: Vec<&str> = kept
@@ -2980,22 +3001,34 @@ not json at all
         // 1..3 = A, rewind(4,3) forks B (5..6), rewind(7,3) forks
         // A' (8..9), rewind(10,6) re-enters B at its tail.
         let events: Vec<Ev> = vec![
-            ev_user("task"),              // 1
-            ev_call("ca"),                // 2
-            ev_res("ca", "A result"),     // 3
-            ev_call("cb"),                // 5
-            ev_res("cb", "B result"),     // 6
-            ev_call("ca2"),               // 8
-            ev_res("ca2", "A' result"),   // 9
-            ev_call("cb2"),               // 11
-            ev_res("cb2", "B' result"),   // 12
+            ev_user("task"),            // 1
+            ev_call("ca"),              // 2
+            ev_res("ca", "A result"),   // 3
+            ev_call("cb"),              // 5
+            ev_res("cb", "B result"),   // 6
+            ev_call("ca2"),             // 8
+            ev_res("ca2", "A' result"), // 9
+            ev_call("cb2"),             // 11
+            ev_res("cb2", "B' result"), // 12
         ];
         let refs: Vec<&Ev> = events.iter().collect();
         let seqs: Vec<usize> = vec![1, 2, 3, 5, 6, 8, 9, 11, 12];
         let rewinds = vec![
-            rushi_common::rewind::RewindRef { seq: 4, target: 3, before: false },
-            rushi_common::rewind::RewindRef { seq: 7, target: 3, before: false },
-            rushi_common::rewind::RewindRef { seq: 10, target: 6, before: false },
+            rushi_common::rewind::RewindRef {
+                seq: 4,
+                target: 3,
+                before: false,
+            },
+            rushi_common::rewind::RewindRef {
+                seq: 7,
+                target: 3,
+                before: false,
+            },
+            rushi_common::rewind::RewindRef {
+                seq: 10,
+                target: 6,
+                before: false,
+            },
         ];
         let (kept, _, ignored) = mask_active_path(&refs, &seqs, 12, rewinds);
         let texts: Vec<&str> = kept
@@ -3021,10 +3054,10 @@ not json at all
         // The target branch ends mid-step: assistant c5 with no
         // result. A rewind to it strands c5 in the context.
         let events: Vec<Ev> = vec![
-            ev_user("task"),              // 1
-            ev_call("c5"),                // 2 (no result follows)
-            ev_call("c6"),                // 4 (3 is the rewind)
-            ev_res("c6", "C result"),     // 5
+            ev_user("task"),          // 1
+            ev_call("c5"),            // 2 (no result follows)
+            ev_call("c6"),            // 4 (3 is the rewind)
+            ev_res("c6", "C result"), // 5
         ];
         let refs: Vec<&Ev> = events.iter().collect();
         let seqs: Vec<usize> = vec![1, 2, 4, 5];
@@ -3070,7 +3103,9 @@ not json at all
     #[test]
     fn estimate_anchor_includes_output_tokens() {
         let evs: Vec<Ev> = vec![
-            Ev::User { text: "go".to_string() },
+            Ev::User {
+                text: "go".to_string(),
+            },
             Ev::Assistant {
                 text: "thinking".to_string(),
                 calls: vec![],
@@ -3090,7 +3125,9 @@ not json at all
     #[test]
     fn estimate_anchor_falls_back_without_output() {
         let evs: Vec<Ev> = vec![
-            Ev::User { text: "go".to_string() },
+            Ev::User {
+                text: "go".to_string(),
+            },
             Ev::Assistant {
                 text: String::new(),
                 calls: vec![],
@@ -3170,8 +3207,14 @@ not json at all
         let Ev::ToolResult { text, image, .. } = &projected else {
             panic!("expected a tool result projection");
         };
-        assert!(text.starts_with("[image"), "the text channel is the marker: {text}");
-        assert!(!text.contains("BIG-BASE64-JSON-PAYLOAD"), "never the payload");
+        assert!(
+            text.starts_with("[image"),
+            "the text channel is the marker: {text}"
+        );
+        assert!(
+            !text.contains("BIG-BASE64-JSON-PAYLOAD"),
+            "never the payload"
+        );
         assert!(text.contains("/tmp/x.png"), "the marker names the file");
         assert!(image.is_some(), "no boundary: the image part rides");
     }
@@ -3187,7 +3230,10 @@ not json at all
         let Ev::ToolResult { text, image, .. } = &projected else {
             panic!("expected a tool result projection");
         };
-        assert!(image.is_none(), "the image part does not cross the boundary");
+        assert!(
+            image.is_none(),
+            "the image part does not cross the boundary"
+        );
         assert!(text.starts_with("[image"), "the marker stays");
         // An image logged after the boundary survives the compact.
         let after = project_tool_result(&ev, 12, &tool_texts, Some(9));
@@ -3225,7 +3271,9 @@ not json at all
     /// path. Branch markers never gate. No marker: no gate.
     #[test]
     fn last_boundary_marker_seq_selects_the_last_plain_marker() {
-        let user = serde_json::json!({ "v": 1, "type": "user_message", "ts": "t", "content": "hi" }).to_string();
+        let user =
+            serde_json::json!({ "v": 1, "type": "user_message", "ts": "t", "content": "hi" })
+                .to_string();
         let plain = plain_summary_marker(1).to_string();
         let branch = branch_marker(1, 4, "the ditched branch").to_string();
         assert_eq!(last_boundary_marker_seq(&user), None, "no marker: no gate");
@@ -3254,7 +3302,10 @@ not json at all
         let plain = plain_summary_marker(8);
         let branch = branch_marker(2, 9, "the ditched branch");
         // The branch marker is rejected outright.
-        assert!(parse_boundary(&branch, 9).is_none(), "branch markers are rejected");
+        assert!(
+            parse_boundary(&branch, 9).is_none(),
+            "branch markers are rejected"
+        );
         // Selection keeps the plain marker even when the branch
         // marker is later in the log.
         let mut boundary: Option<Boundary> = None;
@@ -3330,10 +3381,8 @@ not json at all
             "role": "user",
             "content": "H"
         }));
-        let branch1 =
-            serde_json::json!({ "type": "message", "role": "user", "content": "B1" });
-        let branch2 =
-            serde_json::json!({ "type": "message", "role": "user", "content": "B2" });
+        let branch1 = serde_json::json!({ "type": "message", "role": "user", "content": "B1" });
+        let branch2 = serde_json::json!({ "type": "message", "role": "user", "content": "B2" });
         let read =
             serde_json::json!({ "type": "function_call_output", "call_id": "c1", "output": "R" });
         let user = serde_json::json!({ "type": "message", "role": "user", "content": "U" });
@@ -3391,11 +3440,16 @@ not json at all
 
         // The estimate with zero extra framing chars is the legacy
         // estimate: an anchored region with no trailing events.
-        let evs: Vec<Ev> = vec![Ev::User { text: "go".to_string() }];
+        let evs: Vec<Ev> = vec![Ev::User {
+            text: "go".to_string(),
+        }];
         let refs: Vec<&Ev> = evs.iter().collect();
         let est_legacy = estimate_request_tokens(&refs, &None, 0, 4);
         let est_reference = estimate_request_tokens(&refs, &None, 0, 4);
-        assert_eq!(est_legacy, est_reference, "branch-free estimates are unchanged");
+        assert_eq!(
+            est_legacy, est_reference,
+            "branch-free estimates are unchanged"
+        );
 
         // A plain boundary parses as before.
         let b = parse_boundary(&plain_summary_marker(8), 5).expect("plain marker parses");

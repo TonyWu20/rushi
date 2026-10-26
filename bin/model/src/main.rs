@@ -9,7 +9,11 @@ use std::io::{self, BufRead, Read, Write};
 
 /// Call the model API via Responses format
 #[derive(Parser)]
-#[command(name = "model", about = "Call the model API and output model response", version)]
+#[command(
+    name = "model",
+    about = "Call the model API and output model response",
+    version
+)]
 struct Args {
     /// Path to config file (default: the tier ladder,
     /// docs/project-config-precedence.md)
@@ -80,16 +84,14 @@ fn thinking_level_for(effort: &str) -> u32 {
 fn main() {
     let args = Args::parse();
 
-    let config_path =
-        rushi_common::paths::resolve_config_path(args.config.as_deref());
+    let config_path = rushi_common::paths::resolve_config_path(args.config.as_deref());
     // Read the config as the top layer: the Nix store config.toml
     // (when present) deep-merges under it
     // (docs/project-config-precedence.md).
-    let layers = rushi_common::config_layer::load_layered(&config_path)
-        .unwrap_or_else(|e| {
-            eprintln!("Error: {e}");
-            std::process::exit(1);
-        });
+    let layers = rushi_common::config_layer::load_layered(&config_path).unwrap_or_else(|e| {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    });
     let config: &toml::Value = &layers.value;
 
     // Resolve the active model and its settings via the shared module
@@ -190,7 +192,12 @@ fn main() {
 
     // Try responses API first
     let result = call_responses_api(
-        &url, &api_key, &api_request, &model_name, model_timeout_s, &mut stream,
+        &url,
+        &api_key,
+        &api_request,
+        &model_name,
+        model_timeout_s,
+        &mut stream,
     );
 
     match result {
@@ -455,10 +462,7 @@ fn convert_to_chat_format(request: &serde_json::Value) -> serde_json::Value {
                     // KISS: handle both string output (plain text) and array output
                     // (input_text + input_image parts) from the Responses wire format.
                     let output = item.get("output");
-                    let text = output
-                        .and_then(|o| o.as_str())
-                        .unwrap_or("")
-                        .to_string();
+                    let text = output.and_then(|o| o.as_str()).unwrap_or("").to_string();
 
                     messages.push(serde_json::json!({
                         "role": "tool",
@@ -490,11 +494,10 @@ fn convert_to_chat_format(request: &serde_json::Value) -> serde_json::Value {
                             }
                         }
                         if !image_parts.is_empty() {
-                            let mut content: Vec<serde_json::Value> =
-                                vec![serde_json::json!({
-                                    "type": "text",
-                                    "text": "Attached image(s) from tool result:"
-                                })];
+                            let mut content: Vec<serde_json::Value> = vec![serde_json::json!({
+                                "type": "text",
+                                "text": "Attached image(s) from tool result:"
+                            })];
                             content.extend(image_parts);
                             messages.push(serde_json::json!({
                                 "role": "user",
@@ -789,18 +792,12 @@ impl SseParser {
                 // terminal response.failed event. When the provider populates
                 // response.error, capture it for the overflow classifier.
                 if event_type == "response.failed" {
-                    if let Some(err) = event
-                        .get("response")
-                        .and_then(|r| r.get("error"))
-                    {
-                        let msg = err
-                            .as_str()
-                            .map(str::to_string)
-                            .or_else(|| {
-                                err.get("message")
-                                    .and_then(|m| m.as_str())
-                                    .map(str::to_string)
-                            });
+                    if let Some(err) = event.get("response").and_then(|r| r.get("error")) {
+                        let msg = err.as_str().map(str::to_string).or_else(|| {
+                            err.get("message")
+                                .and_then(|m| m.as_str())
+                                .map(str::to_string)
+                        });
                         if let Some(m) = msg {
                             if !m.is_empty() {
                                 self.error_detail = Some(m);
@@ -993,7 +990,7 @@ impl SseParser {
             && output
                 .get("detail")
                 .and_then(|d| d.as_str())
-                .map_or(true, str::is_empty)
+                .is_none_or(str::is_empty)
         {
             if let Some(msg) = self.error_detail.take() {
                 output["detail"] = serde_json::json!(msg);
@@ -1577,7 +1574,11 @@ mod tests {
         assert_eq!(json["text"], "Hello");
         let settled_str = String::from_utf8(out).unwrap();
         let settled: Vec<&str> = settled_str.lines().collect();
-        assert_eq!(settled.len(), 3, "two deltas plus the close marker: {settled:?}");
+        assert_eq!(
+            settled.len(),
+            3,
+            "two deltas plus the close marker: {settled:?}"
+        );
         assert_eq!(settled[2], r#"{"kind":"done","stop_reason":"stop"}"#);
     }
 

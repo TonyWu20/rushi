@@ -11,7 +11,7 @@
 //! - [`hook`]    — hook window firing, `HARNESS_*` env pairs, result logging
 //! - [`compact`] — compaction with hooks, post-compact sanity, handoff writes
 //! - [`model`]   — model description, context estimate, the awaiting-model
-//!                 pipeline (assemble, retry loop, overflow/length recovery)
+//!   pipeline (assemble, retry loop, overflow/length recovery)
 //! - [`tool`]    — tool routing with tool.before/tool.after windows
 //! - [`approval`]: approval round-trip and awaiting_approval resume
 //!
@@ -39,9 +39,7 @@ use crate::step::tool::run_awaiting_tool_result;
 // …). `pub use` also binds the names locally for this file.
 pub use crate::step::hook::fire_step_start;
 pub use crate::step::logio::{append_line, line_is_error_event};
-pub use crate::step::model::{
-    describe_model, publish_model_thinking, run_awaiting_model,
-};
+pub use crate::step::model::{describe_model, publish_model_thinking, run_awaiting_model};
 
 /// Create a `SubprocessRunner` from the resolved config.
 pub fn make_runner(cfg: &HarnessConfig) -> SubprocessRunner {
@@ -138,7 +136,9 @@ pub fn do_step(cfg: &HarnessConfig, session_dir: &Path, mode: StepMode) -> StepO
             run_awaiting_tool_result(cfg, &runner, &session, &claim);
             StepOutcome::Completed
         }
-        "awaiting_model" => run_awaiting_model(cfg, &runner, &session, &claim, false, &describe, mode),
+        "awaiting_model" => {
+            run_awaiting_model(cfg, &runner, &session, &claim, false, &describe, mode)
+        }
         "awaiting_approval" => {
             run_awaiting_approval(cfg, &runner, &session, &claim, mode);
             StepOutcome::Completed

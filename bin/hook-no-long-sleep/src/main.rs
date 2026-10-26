@@ -184,13 +184,8 @@ fn truncate(s: &str, max_chars: usize) -> String {
 
 fn read_stdin_json() -> Value {
     let mut buf = String::new();
-    if std::io::stdin()
-        .read_to_string(&mut buf)
-        .is_err()
-        || buf.trim().is_empty()
-    {
+    if std::io::stdin().read_to_string(&mut buf).is_err() || buf.trim().is_empty() {
         return json!({});
     }
     serde_json::from_str(&buf).unwrap_or(json!({}))
 }
-

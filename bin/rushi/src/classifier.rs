@@ -140,7 +140,9 @@ mod tests {
     fn exclusion_wins_over_overflow_pattern() {
         // "ThrottlingException: Too many tokens" matches "too many tokens"
         // (overflow) but is excluded by "throttl".
-        assert!(!is_overflow("ThrottlingException: Too many tokens, please wait"));
+        assert!(!is_overflow(
+            "ThrottlingException: Too many tokens, please wait"
+        ));
     }
 
     #[test]

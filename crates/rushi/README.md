@@ -133,7 +133,7 @@ The main consumer map, from the actual `use` statements:
 | `bin/model` | `model_settings`, `stage::ModelDelta` |
 | `bin/parse` | `config_check` (legacy-key check) |
 | `bin/route` | `logline::LogLine` |
-| `bin/log` | `event`, `logline::LogLine` |
+| `bin/rushi-log` | `event`, `logline::LogLine` |
 | `bin/compact` | `compact_math`, `model_settings`, `rewind` |
 | `bin/user` | `event`, `logline::LogLine` |
 | `bin/rushi` | `hooks`, `stage`, `model_settings`, `config_check`, `compact_math` |

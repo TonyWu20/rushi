@@ -7,7 +7,7 @@ members = [
     "bin/model",
     "bin/parse",
     "bin/route",
-    "bin/log",
+    "bin/rushi-log",
     "bin/user",
     "bin/rushi",
     "bin/hook-compact",

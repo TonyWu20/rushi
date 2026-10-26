@@ -10,7 +10,11 @@ use std::path::PathBuf;
 
 /// Append events to the session log
 #[derive(Parser)]
-#[command(name = "log", about = "Append events to the session log", version)]
+#[command(
+    name = "rushi-log",
+    about = "Append events to the session log",
+    version
+)]
 struct Args {
     /// Session directory path
     #[arg(long)]

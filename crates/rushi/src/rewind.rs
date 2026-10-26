@@ -65,7 +65,11 @@ pub fn parse_rewind_event(event: &Value, seq: usize) -> Option<RewindRef> {
         Some("on") => false,
         _ => return None,
     };
-    Some(RewindRef { seq, target, before })
+    Some(RewindRef {
+        seq,
+        target,
+        before,
+    })
 }
 
 /// The active path of the log prefix ending at seq `end`, as
@@ -112,7 +116,11 @@ mod tests {
     use super::*;
 
     fn r(seq: usize, target: usize, before: bool) -> RewindRef {
-        RewindRef { seq, target, before }
+        RewindRef {
+            seq,
+            target,
+            before,
+        }
     }
 
     #[test]
@@ -214,11 +222,7 @@ mod tests {
         // Log layout (seq = line number):
         //   1,2 = A; rewind(3,2) forks B at 4;
         //   rewind(6,4) forks C at 7; rewind(9,7) forks D at 10.
-        let rewinds = vec![
-            r(3, 2, false),
-            r(6, 4, false),
-            r(9, 7, false),
-        ];
+        let rewinds = vec![r(3, 2, false), r(6, 4, false), r(9, 7, false)];
         // Chain at 10: 10 -> 7 (rewind 9) -> 4 (rewind 6) -> 2
         // (rewind 3) -> base [1..2].
         let ranges = active_ranges(10, &rewinds);
@@ -239,11 +243,18 @@ mod tests {
         });
         assert_eq!(
             parse_rewind_event(&ok, 5).unwrap(),
-            RewindRef { seq: 5, target: 3, before: false }
+            RewindRef {
+                seq: 5,
+                target: 3,
+                before: false
+            }
         );
         // A target at or after the event's own seq is rejected.
         assert!(parse_rewind_event(&ok, 3).is_none(), "self-target rejected");
-        assert!(parse_rewind_event(&ok, 2).is_none(), "future-target rejected");
+        assert!(
+            parse_rewind_event(&ok, 2).is_none(),
+            "future-target rejected"
+        );
         // A missing mode is rejected.
         let no_mode: Value = serde_json::json!({
             "v": 1, "type": "rewind", "ts": "t", "target_seq": 3

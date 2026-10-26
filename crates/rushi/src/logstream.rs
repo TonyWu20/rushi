@@ -55,10 +55,7 @@ pub fn read_log_text(path: &Path) -> io::Result<String> {
     let buf = std::fs::read(path)?;
     if !is_zstd_stream(&buf) {
         return String::from_utf8(buf).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "session log is not valid UTF-8",
-            )
+            io::Error::new(io::ErrorKind::InvalidData, "session log is not valid UTF-8")
         });
     }
     decompress_stream(path, &buf)
@@ -70,9 +67,8 @@ fn decode_strict(buf: &[u8]) -> io::Result<Vec<u8>> {
     let mut dec = zstd::stream::read::Decoder::new(buf)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
     let mut out = Vec::with_capacity(buf.len() * 8);
-    dec.read_to_end(&mut out).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("zstd: {e}"))
-    })?;
+    dec.read_to_end(&mut out)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("zstd: {e}")))?;
     Ok(out)
 }
 
@@ -94,7 +90,10 @@ fn decompress_stream(path: &Path, buf: &[u8]) -> io::Result<String> {
         );
     }
     String::from_utf8(out).map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidData, "zstd log stream is not valid UTF-8")
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "zstd log stream is not valid UTF-8",
+        )
     })
 }
 
@@ -114,8 +113,14 @@ fn decompress_stream(path: &Path, buf: &[u8]) -> io::Result<String> {
 pub fn consolidate(path: &Path) -> io::Result<()> {
     let text = read_log_text(path)?;
     let idx = index_path(path);
-    let tmp = path.with_file_name(format!("{}.consolidate", path.file_name().unwrap().to_string_lossy()));
-    let tmp_idx = idx.with_file_name(format!("{}.consolidate", idx.file_name().unwrap().to_string_lossy()));
+    let tmp = path.with_file_name(format!(
+        "{}.consolidate",
+        path.file_name().unwrap().to_string_lossy()
+    ));
+    let tmp_idx = idx.with_file_name(format!(
+        "{}.consolidate",
+        idx.file_name().unwrap().to_string_lossy()
+    ));
     let res = (|| -> io::Result<()> {
         use std::io::Write;
         let mut out = std::fs::File::create(&tmp)?;
@@ -440,12 +445,12 @@ impl LogStream {
             return complete_lines(&all).into_iter().map(String::from).collect();
         }
         let target_first = total - n as u64 + 1; // 1-based
-        let i = recs.iter().rposition(|r| r.seq_start <= target_first).unwrap();
+        let i = recs
+            .iter()
+            .rposition(|r| r.seq_start <= target_first)
+            .unwrap();
         let from = &recs[i];
-        let dec = self.decode_range(
-            from.frame_offset,
-            self.raw.len() as u64 - from.frame_offset,
-        );
+        let dec = self.decode_range(from.frame_offset, self.raw.len() as u64 - from.frame_offset);
         let lines = complete_lines(&dec);
         let skip = (target_first - from.seq_start) as usize;
         lines.into_iter().skip(skip).map(String::from).collect()
@@ -479,10 +484,7 @@ impl LogStream {
     fn full_text(&self) -> io::Result<String> {
         if !self.is_zstd {
             return String::from_utf8(self.raw.clone()).map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "session log is not valid UTF-8",
-                )
+                io::Error::new(io::ErrorKind::InvalidData, "session log is not valid UTF-8")
             });
         }
         decompress_stream(&self.path, &self.raw)
@@ -556,10 +558,7 @@ pub fn read_log_tail(path: &Path, byte_budget: u64) -> io::Result<(String, bool)
         // window covers the budget only when the file fits it.
         let start = len.saturating_sub(byte_budget as usize);
         let text = String::from_utf8(raw[start..].to_vec()).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "session log is not valid UTF-8",
-            )
+            io::Error::new(io::ErrorKind::InvalidData, "session log is not valid UTF-8")
         })?;
         return Ok((text, len <= byte_budget as usize));
     }
@@ -599,9 +598,7 @@ mod tests {
     fn commit_lines(dir: &Path, name: &str, contents: &[&str]) -> PathBuf {
         let p = dir.join(name);
         for c in contents {
-            let json = format!(
-                r#"{{"v":1,"type":"user_message","ts":"t","content":"{c}"}}"#
-            );
+            let json = format!(r#"{{"v":1,"type":"user_message","ts":"t","content":"{c}"}}"#);
             LogLine::from_json(&json).commit(&p).unwrap();
         }
         p
@@ -613,9 +610,7 @@ mod tests {
         contents
             .iter()
             .map(|c| {
-                format!(
-                    "{{\"v\":1,\"type\":\"user_message\",\"ts\":\"t\",\"content\":\"{c}\"}}\n",
-                )
+                format!("{{\"v\":1,\"type\":\"user_message\",\"ts\":\"t\",\"content\":\"{c}\"}}\n",)
             })
             .collect()
     }
@@ -624,7 +619,10 @@ mod tests {
     fn frame_round_trip_is_one_complete_frame() {
         let line = r#"{"v":1,"type":"user_message","ts":"t","content":"one"}"#;
         let frame = compress_frame(format!("{line}\n").as_bytes()).unwrap();
-        assert!(is_zstd_stream(&frame), "a frame starts with the magic bytes");
+        assert!(
+            is_zstd_stream(&frame),
+            "a frame starts with the magic bytes"
+        );
         let back = decode_strict(&frame).unwrap();
         assert_eq!(back, format!("{line}\n").as_bytes());
     }
@@ -715,7 +713,11 @@ mod tests {
         let records = read_index(&index_path(&p)).unwrap();
         assert_eq!(records.len(), 3, "one record per commit");
         for (i, r) in records.iter().enumerate() {
-            assert_eq!(r.seq_start, (i + 1) as u64, "seq is the 1-based line number");
+            assert_eq!(
+                r.seq_start,
+                (i + 1) as u64,
+                "seq is the 1-based line number"
+            );
         }
         for pair in records.windows(2) {
             assert_eq!(
@@ -742,7 +744,11 @@ mod tests {
         let raw = std::fs::read(&p).unwrap();
         assert_eq!(read_log_text(&p).unwrap(), expected);
         let records = read_index(&index_path(&p)).unwrap();
-        assert_eq!(records.len(), 1, "the consolidated frame carries one record");
+        assert_eq!(
+            records.len(),
+            1,
+            "the consolidated frame carries one record"
+        );
         let r = &records[0];
         assert_eq!(r.seq_start, 1);
         assert_eq!(r.frame_offset, 0);
@@ -754,7 +760,10 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert_eq!(records[1].seq_start, 4, "the resume line is seq 4");
         let stream = open_indexed(&p).unwrap();
-        assert_eq!(stream.line_at(4), Some(text_of(&["four"]).trim_end().to_string()));
+        assert_eq!(
+            stream.line_at(4),
+            Some(text_of(&["four"]).trim_end().to_string())
+        );
     }
 
     #[test]
@@ -772,7 +781,10 @@ mod tests {
             r#"{"v":1,"type":"user_message","ts":"t","content":"four"}"#,
             r#"{"v":1,"type":"user_message","ts":"t","content":"five"}"#,
         ];
-        assert_eq!(stream.tail_lines(3), expected.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            stream.tail_lines(3),
+            expected.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+        );
         // n past the total returns every line.
         assert_eq!(stream.tail_lines(99).len(), 5);
         assert!(stream.tail_lines(0).is_empty());
@@ -787,9 +799,7 @@ mod tests {
         let p = commit_lines(dir.path(), "events.jsonl", &["one", "two", "three"]);
         let stream = open_indexed(&p).unwrap();
         for (i, c) in ["one", "two", "three"].iter().enumerate() {
-            let want = format!(
-                r#"{{"v":1,"type":"user_message","ts":"t","content":"{c}"}}"#
-            );
+            let want = format!(r#"{{"v":1,"type":"user_message","ts":"t","content":"{c}"}}"#);
             assert_eq!(stream.line_at((i + 1) as u64), Some(want));
         }
         assert_eq!(stream.line_at(0), None, "seq is 1-based");
@@ -815,9 +825,21 @@ mod tests {
             .collect();
         assert_eq!(stream.lines_range(2, 5), &lines[1..5]);
         assert_eq!(stream.lines_range(4, 4), &lines[3..4]);
-        assert_eq!(stream.lines_range(5, 2), Vec::<String>::new(), "lo past hi is empty");
-        assert_eq!(stream.lines_range(0, 2), Vec::<String>::new(), "seq is 1-based");
-        assert_eq!(stream.lines_range(6, 9), Vec::<String>::new(), "past the end is empty");
+        assert_eq!(
+            stream.lines_range(5, 2),
+            Vec::<String>::new(),
+            "lo past hi is empty"
+        );
+        assert_eq!(
+            stream.lines_range(0, 2),
+            Vec::<String>::new(),
+            "seq is 1-based"
+        );
+        assert_eq!(
+            stream.lines_range(6, 9),
+            Vec::<String>::new(),
+            "past the end is empty"
+        );
     }
 
     #[test]
@@ -832,7 +854,10 @@ mod tests {
         let stream = open_indexed(&p).unwrap();
         assert_eq!(stream.tail_lines(2).len(), 2);
         assert_eq!(stream.line_at(1), Some(stream.tail_lines(5)[0].clone()));
-        assert_eq!(stream.tail_lines(5), last_n_lines(&read_log_text(&p).unwrap(), 5));
+        assert_eq!(
+            stream.tail_lines(5),
+            last_n_lines(&read_log_text(&p).unwrap(), 5)
+        );
     }
 
     #[test]
@@ -929,7 +954,10 @@ mod tests {
         assert!(!stream.has_index(), "no sidecar, no records");
         assert_eq!(stream.tail_lines(1), vec!["old-b".to_string()]);
         assert_eq!(stream.line_at(1), Some("old-a".to_string()));
-        assert_eq!(stream.lines_range(1, 2), vec!["old-a".to_string(), "old-b".to_string()]);
+        assert_eq!(
+            stream.lines_range(1, 2),
+            vec!["old-a".to_string(), "old-b".to_string()]
+        );
     }
 
     #[test]
@@ -941,7 +969,10 @@ mod tests {
         assert!(!stream.has_index());
         assert_eq!(stream.tail_lines(2), vec!["b".to_string(), "c".to_string()]);
         assert_eq!(stream.line_at(2), Some("b".to_string()));
-        assert_eq!(stream.lines_range(1, 3), vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert_eq!(
+            stream.lines_range(1, 3),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
     }
 
     // ------------------------------------------------------------------

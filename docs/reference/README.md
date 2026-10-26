@@ -50,7 +50,7 @@ rushi run <session> [task]
 | `model` | `bin/model` | Call the LLM (Responses API or Chat Completions fallback). Stream the response. |
 | `parse` | `bin/parse` | Parse the model response into structured tool-call actions. Detect length-stop, empty turns. |
 | `route` | `bin/route` | Supervise and execute tool calls in parallel. Apply timeout, output cap, caps. |
-| `log` | `bin/log` | Append events to `events.jsonl` (the append-only session log). |
+| `rushi-log` | `bin/rushi-log` | Append events to `events.jsonl` (the append-only session log). |
 | `compact` | `bin/compact` | Run a summary call, write handoff document, record a `compaction_summary` boundary event. |
 | `user` | `bin/user` | Human I/O: read a user message from stdin or file, emit a `user_message` event. |
 

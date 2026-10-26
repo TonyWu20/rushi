@@ -554,7 +554,7 @@ let
       # ── All kernel binaries (rushi, tools, hooks, stage CLIs) ──
       # The kernel build's bin/ contains:
       #   rushi, read, write, edit, harness-bash, harness-hook-compact,
-      #   claim, assemble, compact, model, parse, route, log, user,
+      #   claim, assemble, compact, model, parse, route, rushi-log, user,
       #   rewind-drt
       # Tool resolution at runtime uses the `command` field from
       # tool.toml (e.g. "harness-bash" for the bash tool), so all

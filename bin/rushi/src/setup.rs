@@ -286,9 +286,7 @@ pub fn render_config(manifest: &RushiManifest, version: &str, kernel_commit: &st
         ],
         extension_tool_paths: Vec::new(),
     };
-    let hooks = THooks {
-        timeout_ms: 30000,
-    };
+    let hooks = THooks { timeout_ms: 30000 };
 
     /// Prefix `# ` on every `key = value` line whose key the manifest
     /// did not override.
@@ -316,11 +314,17 @@ pub fn render_config(manifest: &RushiManifest, version: &str, kernel_commit: &st
     ));
 
     out.push_str("[active]\n");
-    out.push_str(&comment_defaults(&toml::to_string(&active).unwrap(), &active_keys));
+    out.push_str(&comment_defaults(
+        &toml::to_string(&active).unwrap(),
+        &active_keys,
+    ));
     out.push_str("\n\n");
 
     out.push_str("[model]\n");
-    out.push_str(&comment_defaults(&toml::to_string(&model).unwrap(), &active_keys));
+    out.push_str(&comment_defaults(
+        &toml::to_string(&model).unwrap(),
+        &active_keys,
+    ));
     out.push('\n');
     out.push_str(
         "# EXAMPLE ONLY, not activated by default — copy and edit to add per-model overrides:\n\
@@ -335,11 +339,17 @@ pub fn render_config(manifest: &RushiManifest, version: &str, kernel_commit: &st
     out.push('\n');
 
     out.push_str("[paths]\n");
-    out.push_str(&comment_defaults(&toml::to_string(&paths).unwrap(), &active_keys));
+    out.push_str(&comment_defaults(
+        &toml::to_string(&paths).unwrap(),
+        &active_keys,
+    ));
     out.push_str("\n\n");
 
     out.push_str("[limits]\n");
-    out.push_str(&comment_defaults(&toml::to_string(&limits).unwrap(), &active_keys));
+    out.push_str(&comment_defaults(
+        &toml::to_string(&limits).unwrap(),
+        &active_keys,
+    ));
     out.push('\n');
     out.push_str(
         "# EXAMPLE ONLY, not activated by default — uncomment to override:\n\
@@ -350,7 +360,10 @@ pub fn render_config(manifest: &RushiManifest, version: &str, kernel_commit: &st
     out.push('\n');
 
     out.push_str("[hooks]\n");
-    out.push_str(&comment_defaults(&toml::to_string(&hooks).unwrap(), &active_keys));
+    out.push_str(&comment_defaults(
+        &toml::to_string(&hooks).unwrap(),
+        &active_keys,
+    ));
     out.push('\n');
     out.push_str(
         "# EXAMPLE ONLY, not activated by default — one named def per hook,\n\
@@ -469,10 +482,7 @@ pub fn do_setup(locked: bool, project_dir: &Path, kernel_tools_dir: &Path) -> Re
             );
         }
         let lock = RushiLock::from_path(&lock_path)?;
-        let expected_commit = if kernel_tools_dir
-            .join(".rushi_commit")
-            .exists()
-        {
+        let expected_commit = if kernel_tools_dir.join(".rushi_commit").exists() {
             std::fs::read_to_string(kernel_tools_dir.join(".rushi_commit"))
                 .map(|s| s.trim().to_string())
                 .unwrap_or_default()
@@ -483,7 +493,8 @@ pub fn do_setup(locked: bool, project_dir: &Path, kernel_tools_dir: &Path) -> Re
             anyhow::bail!(
                 "--locked: rushi.lock pins kernel_commit {} but the installed kernel is {}. \
                  Run `rushi setup` to refresh the lock.",
-                lock.lock.kernel_commit, expected_commit
+                lock.lock.kernel_commit,
+                expected_commit
             );
         }
         // In locked mode, verify external entries match the lock.
@@ -825,8 +836,7 @@ mod tests {
         for t in tools {
             let td = kdir.join(t);
             std::fs::create_dir_all(&td).unwrap();
-            std::fs::write(td.join("tool.toml"), "[tool]\ndescription = \"test\"\n")
-                .unwrap();
+            std::fs::write(td.join("tool.toml"), "[tool]\ndescription = \"test\"\n").unwrap();
             std::fs::write(td.join(t), "fn main() {}\n").unwrap();
         }
         kdir
@@ -880,10 +890,7 @@ mod tests {
         );
         assert!(pdir.join("rushi.lock").exists(), "lock file written");
         assert!(pdir.join(".envrc").exists(), ".envrc written");
-        assert!(
-            pdir.join("config.toml").exists(),
-            "config.toml generated"
-        );
+        assert!(pdir.join("config.toml").exists(), "config.toml generated");
     }
 
     #[test]
@@ -897,8 +904,11 @@ mod tests {
         // User adds a project-local tool between runs.
         let local_tool = pdir.join("tools").join("mytool");
         std::fs::create_dir_all(&local_tool).unwrap();
-        std::fs::write(local_tool.join("tool.toml"), "[tool]\ndescription = \"mine\"\n")
-            .unwrap();
+        std::fs::write(
+            local_tool.join("tool.toml"),
+            "[tool]\ndescription = \"mine\"\n",
+        )
+        .unwrap();
 
         let before = std::fs::read_to_string(pdir.join("tools").join("read").join("read")).unwrap();
 
@@ -924,8 +934,11 @@ mod tests {
         // Pre-create a local `read` with different content (a project override).
         let local_read = pdir.join("tools").join("read");
         std::fs::create_dir_all(&local_read).unwrap();
-        std::fs::write(local_read.join("tool.toml"), "[tool]\ndescription = \"local override\"\n")
-            .unwrap();
+        std::fs::write(
+            local_read.join("tool.toml"),
+            "[tool]\ndescription = \"local override\"\n",
+        )
+        .unwrap();
         std::fs::write(local_read.join("read"), "// local read\n").unwrap();
 
         do_setup(false, &pdir, &kdir).unwrap();
@@ -949,8 +962,7 @@ mod tests {
         );
         // No partial tools/ dir: the bail happens before any copy.
         assert!(
-            !pdir.join("tools").exists()
-                || tool_names_in(&pdir.join("tools")).is_empty(),
+            !pdir.join("tools").exists() || tool_names_in(&pdir.join("tools")).is_empty(),
             "no partial tools/ dir on failure"
         );
         assert!(

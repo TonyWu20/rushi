@@ -353,6 +353,23 @@ $out/
   tools.manifest       # rushi.toml-equivalent (for rushi setup --locked)
 ```
 
+### Reserved names (nixpkgs buildEnv, issue #57)
+
+`buildEnv` merges the `bin/` dirs of all input packages into one
+devshell `bin/`. The builder (`pkgs/build-support/buildenv/
+builder.pl`, `findFiles`) skips any file named `log` or
+`perllocal.pod`. It treats such files as stray build output. A
+package that ships `bin/log` loses that entry in every `mkShell` /
+`buildEnv` merge. The kernel's log-appender stage ships as
+`bin/rushi-log` for this reason (issue #57).
+
+**Tool-name policy.** Do not name an executable in a package
+`bin/` after a buildEnv-reserved name (`log`, `perllocal.pod`).
+This covers kernel stage binaries and ext producer packages.
+The `rushi-` prefix is the kernel's reserved namespace
+(`rushi-log`, `rushi-tui`). A `bin/log` alias does not help:
+the builder drops the alias too.
+
 ### config.toml generation
 
 `mkRushi` serializes the merged `rushi.config` attrset into TOML.

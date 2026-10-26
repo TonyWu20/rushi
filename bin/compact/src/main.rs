@@ -19,7 +19,9 @@ use std::process::Command;
 
 use clap::Parser;
 use rushi_common::compact_math::{self, Caps, Ev};
-use rushi_common::model_settings::{resolve_active_model, resolve_model_settings, val_bool, val_int};
+use rushi_common::model_settings::{
+    resolve_active_model, resolve_model_settings, val_bool, val_int,
+};
 use rushi_common::rewind;
 use serde_json::Value;
 
@@ -169,9 +171,7 @@ enum Decision {
     /// No compact: the reason rides with the status.
     Noop(String),
     /// Fire: the compact call carries the predicted reading.
-    Fire {
-        predicted: u64,
-    },
+    Fire { predicted: u64 },
 }
 
 /// The trigger test (pi-style, stateless): the last measured reading
@@ -192,20 +192,12 @@ fn decide_trigger(inp: &TriggerInput) -> Decision {
         }
     }
     if inp.force || inp.overflow {
-        let last = inp
-            .trigger_readings
-            .last()
-            .map(|r| r.1)
-            .unwrap_or(0);
-        return Decision::Fire {
-            predicted: last,
-        };
+        let last = inp.trigger_readings.last().map(|r| r.1).unwrap_or(0);
+        return Decision::Fire { predicted: last };
     }
     // Pi-style stateless check: last measured reading vs trigger level.
     match inp.trigger_readings.last() {
-        Some((_, tokens)) if *tokens >= inp.trigger_level => Decision::Fire {
-            predicted: *tokens,
-        },
+        Some((_, tokens)) if *tokens >= inp.trigger_level => Decision::Fire { predicted: *tokens },
         Some(_) => Decision::Noop("the trigger is cold".to_string()),
         None => Decision::Noop("no trigger-form reading yet".to_string()),
     }
@@ -297,28 +289,20 @@ fn ts_now() -> String {
 
 /// Append one event line through the `log` binary: the event JSON
 /// goes to the log's stdin, and the log assigns the ts and seq.
-fn append_event(
-    log_bin: &Path,
-    session: &Path,
-    event: &Value,
-) -> Result<(), String> {
+fn append_event(log_bin: &Path, session: &Path, event: &Value) -> Result<(), String> {
     let body = serde_json::to_string(event).map_err(|e| e.to_string())?;
     let mut child = Command::new(log_bin)
         .arg("--session")
         .arg(session)
         .stdin(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| format!("spawn log: {e}"))?
-        ;
+        .map_err(|e| format!("spawn log: {e}"))?;
     if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(body.as_bytes())
             .map_err(|e| format!("write log stdin: {e}"))?;
     }
-    let status = child
-        .wait()
-        .map_err(|e| format!("wait log: {e}"))?
-        ;
+    let status = child.wait().map_err(|e| format!("wait log: {e}"))?;
     if !status.success() {
         return Err(format!("log exited {status}"));
     }
@@ -331,8 +315,7 @@ fn main() {
     // explicit --config flag, then $CONFIG, then the CWD config when
     // present, then the Nix side-by-side config.
     let config_path: PathBuf =
-        rushi_common::paths::resolve_config_path(args.config.as_deref())
-            .into();
+        rushi_common::paths::resolve_config_path(args.config.as_deref()).into();
     // `--up-to` is a 1-based log sequence (the same numbering `assemble
     // --up-to`, `first_kept_seq`, and `last_user_seq` use). Reject 0 up
     // front instead of writing a `compaction_failed` marker for a bad
@@ -356,29 +339,27 @@ fn main() {
     }
 
     // The boundary: the last parseable `compaction_summary`.
-    let boundary: Option<Boundary> = events
-        .iter()
-        .filter_map(parse_boundary)
-        .next_back();
+    let boundary: Option<Boundary> = events.iter().filter_map(parse_boundary).next_back();
 
     // Handoff versioning metadata (docs/handoff-versioning-design.md).
     // The version is a session-global monotonic counter; parent_version
     // is the version of the most recent boundary on the active path; the
     // diverge_seq is that parent's first_kept_seq (0 when no parent).
     let value_refs: Vec<Value> = events.iter().map(|e| e.value.clone()).collect();
-    let (version, parent_version, diverge_seq) =
-        compact_math::handoff_version_meta(&value_refs);
+    let (version, parent_version, diverge_seq) = compact_math::handoff_version_meta(&value_refs);
 
     // The cooldown anchor: the `last_user_seq` of the last
     // `compaction_failed` marker.
     let failed_user_seq: Option<usize> = events
-        .iter().rfind(|e| e.value.get("type").and_then(|t| t.as_str()) == Some("compaction_failed"))
+        .iter()
+        .rfind(|e| e.value.get("type").and_then(|t| t.as_str()) == Some("compaction_failed"))
         .and_then(|e| e.value.get("last_user_seq").and_then(|s| s.as_u64()))
         .map(|s| s as usize);
 
     // The user messages: the last one anchors the cooldown.
     let last_user_seq: usize = events
-        .iter().rfind(|e| e.value.get("type").and_then(|t| t.as_str()) == Some("user_message"))
+        .iter()
+        .rfind(|e| e.value.get("type").and_then(|t| t.as_str()) == Some("user_message"))
         .map(|e| e.seq)
         .unwrap_or(0);
 
@@ -388,9 +369,7 @@ fn main() {
     let first_kept = boundary.as_ref().map(|b| b.first_kept_seq).unwrap_or(0);
     let rewinds: Vec<rewind::RewindRef> = events
         .iter()
-        .filter_map(|e| {
-            rewind::parse_rewind_event(&e.value, e.seq)
-        })
+        .filter_map(|e| rewind::parse_rewind_event(&e.value, e.seq))
         .collect();
     let active = rewind::active_ranges(events.len(), &rewinds);
     let kept_events: Vec<LogEvent> = events
@@ -482,9 +461,7 @@ fn main() {
             println!("{}", serde_json::to_string(&status).unwrap());
             std::process::exit(0);
         }
-        Decision::Fire {
-            predicted,
-        } => {
+        Decision::Fire { predicted } => {
             let _ = predicted;
             run_compaction()
                 .args(&args)
@@ -547,15 +524,16 @@ fn run_compaction(
     diverge_seq: u64,
 ) -> ! {
     let config_path: PathBuf =
-        rushi_common::paths::resolve_config_path(args.config.as_deref())
-            .into();
+        rushi_common::paths::resolve_config_path(args.config.as_deref()).into();
     let cfg = load_config(&config_path);
     let empty = toml::Value::Table(toml::map::Map::new());
     let limits = cfg.get("limits").unwrap_or(&empty);
     let keep_tokens: u64 = val_int(limits, "compact_keep_tokens").unwrap_or(20_000) as u64;
     let cpts = {
         let active = resolve_active_model(&cfg);
-        resolve_model_settings(&cfg, &active).estimate_chars_per_token.max(1)
+        resolve_model_settings(&cfg, &active)
+            .estimate_chars_per_token
+            .max(1)
     };
 
     // The projected kept events, for the estimator. The marker
@@ -565,7 +543,10 @@ fn run_compaction(
         .map(|e| compact_math::project_event(&e.value))
         .collect();
 
-    let est_caps: Caps = Caps { text: None, chars_per_token: cpts };
+    let est_caps: Caps = Caps {
+        text: None,
+        chars_per_token: cpts,
+    };
     let cut = cut_index(kept_events, args.up_to, &projected, keep_tokens, &est_caps);
     if cut == 0 {
         let detail = if args.up_to.is_some() {
@@ -617,7 +598,7 @@ fn run_compaction(
         "reason": reason_str,
         "tokens_before": tokens_before,
     });
-    let log_bin = resolve_bin(&args.log, "LOG_BIN", "log");
+    let log_bin = resolve_bin(&args.log, "LOG_BIN", "rushi-log");
     if let Err(e) = append_event(&log_bin, &args.session, &started) {
         eprintln!("compact: append compaction_started failed: {e}");
     }
@@ -644,7 +625,13 @@ fn run_compaction(
         cmd.arg("--prompt").arg(p);
     }
     let out = cmd.output().unwrap_or_else(|e| {
-        fail_and_exit(args, overflow, last_user_seq, "the assemble call failed", &e.to_string());
+        fail_and_exit(
+            args,
+            overflow,
+            last_user_seq,
+            "the assemble call failed",
+            &e.to_string(),
+        );
     });
     if !out.status.success() {
         fail_and_exit(
@@ -674,7 +661,13 @@ fn run_compaction(
     let (summary, summary_usage) = match run_summary_calls(&model_bin, &config_path, &request) {
         Ok(r) => r,
         Err(last_err) => {
-            fail_and_exit(args, overflow, last_user_seq, "both summary calls failed", &last_err);
+            fail_and_exit(
+                args,
+                overflow,
+                last_user_seq,
+                "both summary calls failed",
+                &last_err,
+            );
         }
     };
 
@@ -729,8 +722,12 @@ fn run_compaction(
     // The tokens after: the full-form estimate of the kept region
     // plus the summary framing.
     let kept_projected: Vec<Ev> = projected[cut..].to_vec();
-    let cpts_caps = Caps { text: None, chars_per_token: cpts };
-    let tokens_after = compact_math::est_tokens_after_with_caps(&kept_projected, &summary, &cpts_caps);
+    let cpts_caps = Caps {
+        text: None,
+        chars_per_token: cpts,
+    };
+    let tokens_after =
+        compact_math::est_tokens_after_with_caps(&kept_projected, &summary, &cpts_caps);
 
     let mut done = serde_json::json!({
         "v": 1,
@@ -821,14 +818,14 @@ fn run_summary_calls(
         let resp: Value = match serde_json::from_slice(&out.stdout) {
             Ok(v) => v,
             Err(e) => {
-                last_err = format!(
-                    "try {}: the model output is not JSON: {e}",
-                    try_no + 1
-                );
+                last_err = format!("try {}: the model output is not JSON: {e}", try_no + 1);
                 break;
             }
         };
-        let stop = resp.get("stop_reason").and_then(|s| s.as_str()).unwrap_or("");
+        let stop = resp
+            .get("stop_reason")
+            .and_then(|s| s.as_str())
+            .unwrap_or("");
         if stop == "error" {
             let detail = resp
                 .get("detail")
@@ -864,8 +861,7 @@ fn run_summary_calls(
 /// `compaction_failed` and no branch marker (P4).
 fn run_branch_compaction(args: &Args, events: &[LogEvent]) -> ! {
     let config_path: PathBuf =
-        rushi_common::paths::resolve_config_path(args.config.as_deref())
-            .into();
+        rushi_common::paths::resolve_config_path(args.config.as_deref()).into();
     // The last (top-level) rewind marker on the active path is the
     // most recent rewind event in log order (D1). Sub-branches are
     // not their own markers; they appear only as labels inside the
@@ -873,7 +869,7 @@ fn run_branch_compaction(args: &Args, events: &[LogEvent]) -> ! {
     let branch_ref = events
         .iter()
         .filter_map(|e| rewind::parse_rewind_event(&e.value, e.seq))
-        .last();
+        .next_back();
     let Some(r) = branch_ref else {
         eprintln!("compact: --branch requires a rewind marker in the log; none found");
         std::process::exit(1);
@@ -921,8 +917,13 @@ fn run_branch_compaction(args: &Args, events: &[LogEvent]) -> ! {
     // calibrated chars-per-token ratio.
     let cfg = load_config(&config_path);
     let active_model = resolve_active_model(&cfg);
-    let cpts = resolve_model_settings(&cfg, &active_model).estimate_chars_per_token.max(1);
-    let caps = Caps { text: None, chars_per_token: cpts };
+    let cpts = resolve_model_settings(&cfg, &active_model)
+        .estimate_chars_per_token
+        .max(1);
+    let caps = Caps {
+        text: None,
+        chars_per_token: cpts,
+    };
     let span_projected: Vec<Ev> = span_events
         .iter()
         .map(|e| compact_math::project_event(&e.value))
@@ -976,21 +977,20 @@ fn run_branch_compaction(args: &Args, events: &[LogEvent]) -> ! {
 
     // The summary call: two tries through the model binary.
     let model_bin = resolve_bin(&args.model, "MODEL_BIN", "model");
-    let (summary, summary_usage) =
-        match run_summary_calls(&model_bin, &config_path, &request) {
-            Ok(r) => r,
-            Err(last_err) => {
-                // P4: the failure appends only `compaction_failed`.
-                // No rewind or branch marker is written.
-                fail_and_exit(
-                    args,
-                    false,
-                    last_user_seq,
-                    "the branch summary failed",
-                    &last_err,
-                );
-            }
-        };
+    let (summary, summary_usage) = match run_summary_calls(&model_bin, &config_path, &request) {
+        Ok(r) => r,
+        Err(last_err) => {
+            // P4: the failure appends only `compaction_failed`.
+            // No rewind or branch marker is written.
+            fail_and_exit(
+                args,
+                false,
+                last_user_seq,
+                "the branch summary failed",
+                &last_err,
+            );
+        }
+    };
 
     // The branch marker (P2, P7) and the versioned branch file (P3).
     let marker = build_branch_marker(
@@ -1001,7 +1001,7 @@ fn run_branch_compaction(args: &Args, events: &[LogEvent]) -> ! {
         tokens_before,
         summary_usage,
     );
-    let log_bin = resolve_bin(&args.log, "LOG_BIN", "log");
+    let log_bin = resolve_bin(&args.log, "LOG_BIN", "rushi-log");
     if let Err(e) = append_event(&log_bin, &args.session, &marker) {
         eprintln!("compact: append branch compaction_summary failed: {e}");
     }
@@ -1092,7 +1092,7 @@ fn fail_and_exit(
         "attempts": 2,
         "detail": detail,
     });
-    let log_bin = resolve_bin(&args.log, "LOG_BIN", "log");
+    let log_bin = resolve_bin(&args.log, "LOG_BIN", "rushi-log");
     if let Err(e) = append_event(&log_bin, &args.session, &failed) {
         eprintln!("compact: append compaction_failed failed: {e}");
     }
@@ -1127,12 +1127,14 @@ fn resolve_context_budget(config: &toml::Value) -> u64 {
     let ms = resolve_model_settings(config, &active);
     let window = ms.context_tokens;
     let empty = toml::Value::Table(toml::map::Map::new());
-    val_int(config.get("limits").unwrap_or(&empty), "context_budget_tokens")
-        .map(|v| (v.max(1)) as u64)
-        .unwrap_or(window)
-        .max(1)
+    val_int(
+        config.get("limits").unwrap_or(&empty),
+        "context_budget_tokens",
+    )
+    .map(|v| (v.max(1)) as u64)
+    .unwrap_or(window)
+    .max(1)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1223,10 +1225,7 @@ mod tests {
             Decision::Fire { .. } => panic!("the disabled feature must not fire"),
         }
         // The force and the overflow skip the switch.
-        let forced = TriggerInput {
-            force: true,
-            ..inp
-        };
+        let forced = TriggerInput { force: true, ..inp };
         match decide_trigger(&forced) {
             Decision::Noop(d) => panic!("the force skips the switch: {d}"),
             Decision::Fire { .. } => {}
@@ -1301,10 +1300,7 @@ mod tests {
         );
         let base = resolve_context_budget(&cfg);
         assert_eq!(base, 262144);
-        assert_eq!(
-            compact_math::trigger_level_for(base, 16384),
-            245760,
-        );
+        assert_eq!(compact_math::trigger_level_for(base, 16384), 245760,);
     }
 
     // ── cut_index: the `--up-to` boundary vs the auto keep-window walk ──
@@ -1339,7 +1335,10 @@ mod tests {
     fn cut_index_explicit_up_to_places_the_boundary() {
         let kept = log_events_up_to(5); // seqs 1..=5
         let projected = projected_from(&kept);
-        let caps = Caps { text: None, chars_per_token: 4 };
+        let caps = Caps {
+            text: None,
+            chars_per_token: 4,
+        };
 
         // up_to = 3: the first kept event past seq 3 is seq 4 (index 3).
         assert_eq!(cut_index(&kept, Some(3), &projected, 100, &caps), 3);
@@ -1360,7 +1359,10 @@ mod tests {
         // A post-boundary region: head at seq 9.
         let kept = log_events_range(9, 13);
         let projected = projected_from(&kept);
-        let caps = Caps { text: None, chars_per_token: 4 };
+        let caps = Caps {
+            text: None,
+            chars_per_token: 4,
+        };
 
         // Before the region head: degrades to the head. The cut lands
         // on the event after the head (seq 10, index 1). The old
@@ -1377,7 +1379,10 @@ mod tests {
     fn cut_index_without_up_to_delegates_to_find_cut() {
         let kept = log_events_up_to(5);
         let projected = projected_from(&kept);
-        let caps = Caps { text: None, chars_per_token: 4 };
+        let caps = Caps {
+            text: None,
+            chars_per_token: 4,
+        };
         // Five 1-char user events: 5 chars total, far below a large
         // keep budget, so find_cut returns 0 (keep everything).
         assert_eq!(cut_index(&kept, None, &projected, 100_000, &caps), 0);
@@ -1405,7 +1410,10 @@ mod tests {
     #[test]
     fn compact_branch_parent_version_zero() {
         let m = build_branch_marker("s", 9, 3, "threshold", 0, None);
-        assert_eq!(m["parent_version"], 0, "a branch marker has no handoff parent");
+        assert_eq!(
+            m["parent_version"], 0,
+            "a branch marker has no handoff parent"
+        );
         assert_eq!(m["diverge_seq"], 9, "diverge_seq equals branch_of");
     }
 
@@ -1483,7 +1491,7 @@ mod tests {
         assert!(parse_boundary(&branch).is_none());
         // Selection over the log keeps the plain marker: the later
         // handoff first_kept is not reset to 1.
-        let events = vec![plain.clone(), branch.clone()];
+        let events = [plain.clone(), branch.clone()];
         let boundary = events.iter().filter_map(parse_boundary).next_back();
         let b = boundary.expect("the plain marker must be the boundary");
         assert_eq!(b.seq, 5);

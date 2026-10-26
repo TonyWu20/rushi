@@ -333,10 +333,8 @@ fn main() {
             break;
         }
         let now = t0.elapsed().as_millis() as u64;
-        let out_quiet =
-            out || now.saturating_sub(out_act.load(Ordering::Relaxed)) >= DRAIN_IDLE_MS;
-        let err_quiet =
-            err || now.saturating_sub(err_act.load(Ordering::Relaxed)) >= DRAIN_IDLE_MS;
+        let out_quiet = out || now.saturating_sub(out_act.load(Ordering::Relaxed)) >= DRAIN_IDLE_MS;
+        let err_quiet = err || now.saturating_sub(err_act.load(Ordering::Relaxed)) >= DRAIN_IDLE_MS;
         if out_quiet && err_quiet {
             break;
         }

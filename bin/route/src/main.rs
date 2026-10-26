@@ -11,7 +11,11 @@ use std::process::{Child, Command, Stdio};
 
 /// Dispatch tool calls to subprocesses
 #[derive(Parser)]
-#[command(name = "route", about = "Dispatch tool calls to tool subprocesses", version)]
+#[command(
+    name = "route",
+    about = "Dispatch tool calls to tool subprocesses",
+    version
+)]
 struct Args {
     /// Native tool dir (a dir containing a `tool.toml` manifest, or
     /// a root dir holding several tool sub-dirs). Repeated; each is
@@ -524,10 +528,7 @@ enum ArgsIssue {
     Unknown(Vec<String>),
 }
 
-fn validate_args(
-    args: &serde_json::Value,
-    schema: &serde_json::Value,
-) -> Option<ArgsIssue> {
+fn validate_args(args: &serde_json::Value, schema: &serde_json::Value) -> Option<ArgsIssue> {
     let obj = match args.as_object() {
         Some(o) => o,
         None => return Some(ArgsIssue::NotObject),
@@ -878,10 +879,19 @@ mod tests {
         // available tools, and teaches the resend.
         let available = vec!["bash".to_string(), "edit".to_string()];
         let msg = unknown_tool_message("nope", &available);
-        assert!(msg.starts_with("Unknown tool nope."), "stable prefix names the tool: {msg}");
+        assert!(
+            msg.starts_with("Unknown tool nope."),
+            "stable prefix names the tool: {msg}"
+        );
         assert!(msg.contains("No tool ran"), "states no tool ran: {msg}");
-        assert!(msg.contains("bash, edit"), "lists the available tools: {msg}");
-        assert!(msg.contains("Re-issue the call"), "teaches the resend: {msg}");
+        assert!(
+            msg.contains("bash, edit"),
+            "lists the available tools: {msg}"
+        );
+        assert!(
+            msg.contains("Re-issue the call"),
+            "teaches the resend: {msg}"
+        );
     }
 
     #[test]
@@ -890,16 +900,28 @@ mod tests {
         // knows the `name` field itself was empty.
         let available = vec!["bash".to_string()];
         let msg = unknown_tool_message("", &available);
-        assert!(msg.starts_with("Unknown tool (empty name)."), "the blank case keeps the prefix: {msg}");
-        assert!(msg.contains("The model emitted a tool call with an empty name"), "names the blank defect: {msg}");
+        assert!(
+            msg.starts_with("Unknown tool (empty name)."),
+            "the blank case keeps the prefix: {msg}"
+        );
+        assert!(
+            msg.contains("The model emitted a tool call with an empty name"),
+            "names the blank defect: {msg}"
+        );
         assert!(msg.contains("No tool ran"), "states no tool ran: {msg}");
     }
 
     #[test]
     fn unknown_tool_message_handles_an_empty_registry() {
         let msg = unknown_tool_message("nope", &[]);
-        assert!(msg.contains("(none)"), "an empty registry lists nothing: {msg}");
-        assert!(msg.starts_with("Unknown tool nope."), "the prefix still names the tool: {msg}");
+        assert!(
+            msg.contains("(none)"),
+            "an empty registry lists nothing: {msg}"
+        );
+        assert!(
+            msg.starts_with("Unknown tool nope."),
+            "the prefix still names the tool: {msg}"
+        );
     }
 
     #[test]
@@ -948,7 +970,10 @@ mod tests {
             }
         });
         assert_eq!(
-            validate_args(&serde_json::json!({"command": "pwd", "timeout": "300"}), &schema),
+            validate_args(
+                &serde_json::json!({"command": "pwd", "timeout": "300"}),
+                &schema
+            ),
             Some(ArgsIssue::Unknown(vec!["timeout".to_string()]))
         );
         // Multiple unknown keys are all reported (JSON map order:
@@ -958,11 +983,17 @@ mod tests {
                 &serde_json::json!({"command": "pwd", "timeout": 300, "cwd": "/tmp"}),
                 &schema
             ),
-            Some(ArgsIssue::Unknown(vec!["cwd".to_string(), "timeout".to_string()]))
+            Some(ArgsIssue::Unknown(vec![
+                "cwd".to_string(),
+                "timeout".to_string()
+            ]))
         );
         // Every key defined in the schema → valid, the call runs.
         assert_eq!(
-            validate_args(&serde_json::json!({"command": "pwd", "timeout_secs": 300}), &schema),
+            validate_args(
+                &serde_json::json!({"command": "pwd", "timeout_secs": 300}),
+                &schema
+            ),
             None
         );
         // A schema without a `properties` table cannot define the valid
@@ -1169,8 +1200,9 @@ mod tests {
         let mut manifests: HashMap<String, (String, serde_json::Value)> = HashMap::new();
         scan_tool_path(root, &mut manifests);
 
-        let (command, _meta) =
-            manifests.get("goal_complete").expect("goal_complete must be registered");
+        let (command, _meta) = manifests
+            .get("goal_complete")
+            .expect("goal_complete must be registered");
         let resolved = PathBuf::from(command);
         // The in-tree cargo build output wins over a bare PATH lookup.
         assert!(
@@ -1196,8 +1228,9 @@ mod tests {
         let mut manifests: HashMap<String, (String, serde_json::Value)> = HashMap::new();
         scan_tool_path(dir.path(), &mut manifests);
 
-        let (command, _meta) =
-            manifests.get("nope_tool").expect("nope_tool must be registered");
+        let (command, _meta) = manifests
+            .get("nope_tool")
+            .expect("nope_tool must be registered");
         // No bin/, no target build: keep the bare name so it resolves on PATH.
         assert_eq!(command, "nope_tool");
     }

@@ -98,6 +98,12 @@ standard Nix `meta`: `meta.rushi.entry` (tool), `meta.rushi.ext` (UI ext),
 the consumer's `extension_tool_paths` / `[ui_extensions] enabled` list
 without a second hand-typed copy. See §4.5 for the full contract.
 
+When a package merges into a devshell, nixpkgs `buildEnv` drops
+any `bin/` entry named `log` or `perllocal.pod` (issue #57).
+Name executable `bin/` entries accordingly. See the
+reserved-name policy in `docs/reference/nix/nix-flake-module.md`
+("Reserved names").
+
 ---
 
 ## 3. The ext flake skeleton

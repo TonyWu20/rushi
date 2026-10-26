@@ -48,14 +48,13 @@ mod tests {
 
     #[test]
     fn flags_both_legacy_keys() {
-        let cfg: toml::Value =
-            r#"
+        let cfg: toml::Value = r#"
 [paths]
 tools_root = "tools"
 extra_tools_roots = ["ext/goal-tools"]
 "#
-            .parse()
-            .unwrap();
+        .parse()
+        .unwrap();
         let errs = legacy_key_report(&cfg);
         assert_eq!(errs.len(), 2);
         assert!(errs[0].contains("tools_root"));
@@ -64,14 +63,13 @@ extra_tools_roots = ["ext/goal-tools"]
 
     #[test]
     fn clean_config_has_no_errors() {
-        let cfg: toml::Value =
-            r#"
+        let cfg: toml::Value = r#"
 [paths]
 native_tool_paths = ["tools/bash"]
 extension_tool_paths = ["ext/goal-tools"]
 "#
-            .parse()
-            .unwrap();
+        .parse()
+        .unwrap();
         assert!(legacy_key_report(&cfg).is_empty());
     }
 
@@ -83,13 +81,12 @@ extension_tool_paths = ["ext/goal-tools"]
 
     #[test]
     fn only_tools_root_flagged() {
-        let cfg: toml::Value =
-            r#"
+        let cfg: toml::Value = r#"
 [paths]
 tools_root = "tools"
 "#
-            .parse()
-            .unwrap();
+        .parse()
+        .unwrap();
         let errs = legacy_key_report(&cfg);
         assert_eq!(errs.len(), 1);
         assert!(errs[0].contains("tools_root"));

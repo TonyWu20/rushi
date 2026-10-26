@@ -6,6 +6,15 @@ versioned change for each kernel binary, newest first.
 Internal refactors without user-visible behavior do not get an
 entry.
 
+## rushi-log 0.2.0 (2026-10-26)
+
+Renamed the log-appender stage binary from `log` to `rushi-log`
+(issue #57). nixpkgs `buildEnv` drops any file named `log` when
+it merges packages into a devshell, so a `bin/log` entry never
+reached the devshell `PATH`. No `bin/log` alias: the builder
+drops the alias too. The `LOG_BIN` env override and the
+`compact --log` flag are unchanged.
+
 ## rushi 0.1.4 (2026-10-20)
 
 `rushi run` accepts a hyphen-leading `task` (and `session`) value.

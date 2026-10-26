@@ -3,7 +3,7 @@
 
 use rushi_common::hooks::Window;
 use rushi_common::stage::{
-    CompactOutcome, CompactOpts, CompactReason, CompactStatus, SessionDir, StageRunner,
+    CompactOpts, CompactOutcome, CompactReason, CompactStatus, SessionDir, StageRunner,
 };
 
 use crate::config::HarnessConfig;
@@ -48,7 +48,14 @@ pub fn try_compact_with_hooks(
     } else {
         "proceed"
     };
-    log_pipeline(cfg, session, Window::CompactBefore, &run, Some(outcome), Some(&payload));
+    log_pipeline(
+        cfg,
+        session,
+        Window::CompactBefore,
+        &run,
+        Some(outcome),
+        Some(&payload),
+    );
 
     if outcome == "cancel" {
         eprintln!("rushi: compact.before pipeline cancelled the compaction");
@@ -57,7 +64,10 @@ pub fn try_compact_with_hooks(
 
     if outcome == "replace" {
         // The hook supplies its own summary and boundary.
-        let replace = state.get("replace").cloned().unwrap_or(serde_json::Value::Null);
+        let replace = state
+            .get("replace")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
         let summary = replace
             .get("summary")
             .and_then(|s| s.as_str())
@@ -72,17 +82,16 @@ pub fn try_compact_with_hooks(
             .or_else(|| replace.get("first_kept_seq").and_then(|v| v.as_u64()))
             .unwrap_or(1);
         // Compute version metadata for the DAG link.
-        let log_vals: Vec<serde_json::Value> = rushi_common::logstream::read_log_text(
-            &session.path.join("events.jsonl"),
-        )
-        .ok()
-        .and_then(|raw| {
-            raw.lines()
-                .filter(|l| !l.trim().is_empty())
-                .filter_map(|l| serde_json::from_str(l).ok())
-                .collect()
-        })
-        .unwrap_or_default();
+        let log_vals: Vec<serde_json::Value> =
+            rushi_common::logstream::read_log_text(&session.path.join("events.jsonl"))
+                .ok()
+                .and_then(|raw| {
+                    raw.lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .filter_map(|l| serde_json::from_str(l).ok())
+                        .collect()
+                })
+                .unwrap_or_default();
         let (version, parent_version, diverge_seq) =
             rushi_common::compact_math::handoff_version_meta(&log_vals);
         write_handoff(session, &summary, version);
@@ -163,11 +172,7 @@ pub fn try_compact_with_hooks(
 
 /// Post-compact sanity: if the projected post-compact size still
 /// exceeds the trigger level, log a warning marker.
-pub fn post_compact_sanity(
-    cfg: &HarnessConfig,
-    session: &SessionDir,
-    status: &CompactStatus,
-) {
+pub fn post_compact_sanity(cfg: &HarnessConfig, session: &SessionDir, status: &CompactStatus) {
     if status.outcome != CompactOutcome::Compacted {
         return;
     }
@@ -190,11 +195,7 @@ pub fn post_compact_sanity(
 /// Save the handoff document to `sessions/<n>/handoff/v<version>.md`.
 /// Also maintains `handoff.md` as a copy of the latest version for
 /// backward compatibility (docs/handoff-versioning-design.md).
-fn write_handoff(
-    session: &SessionDir,
-    summary: &str,
-    version: u64,
-) {
+fn write_handoff(session: &SessionDir, summary: &str, version: u64) {
     let vdir = session.path.join("handoff");
     let vpath = vdir.join(format!("v{}.md", version));
     if let Err(e) = std::fs::create_dir_all(&vdir) {
@@ -212,6 +213,9 @@ fn write_handoff(
 /// Append the `compaction_summary` boundary marker. Used only on the
 /// `replace` path, where a hook supplied its own summary and boundary
 /// and the `compact` binary did not run (docs/phase-2-plan.md 4.3).
+// The step context is passed flat, as every other step helper in
+// this module (one caller each).
+#[allow(clippy::too_many_arguments)]
 fn append_compaction_summary(
     cfg: &HarnessConfig,
     session: &SessionDir,
