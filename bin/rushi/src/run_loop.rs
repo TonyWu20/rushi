@@ -498,7 +498,7 @@ mod tests {
             route_bin: PathBuf::from("route"),
             claim_bin: PathBuf::from("claim"),
             parse_bin: PathBuf::from("parse"),
-            log_bin: PathBuf::from("log"),
+            log_bin: PathBuf::from("rushi-log"),
             log_consolidate_on_idle: true,
         }
     }

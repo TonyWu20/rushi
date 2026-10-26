@@ -976,7 +976,7 @@ mod tests {
             route_bin: bin.join("route"),
             claim_bin: bin.join("claim"),
             parse_bin: bin.join("parse"),
-            log_bin: bin.join("log"),
+            log_bin: bin.join("rushi-log"),
             log_consolidate_on_idle: true,
         }
     }

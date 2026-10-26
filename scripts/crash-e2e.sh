@@ -10,7 +10,7 @@ BIN="$ROOT/target/debug"
 
 cargo build --quiet || { echo "FAIL: cargo build"; exit 1; }
 
-LOG="$BIN/log"
+LOG="$BIN/rushi-log"
 CLAIM="$BIN/claim"
 PARSE="$BIN/parse"
 ROUTE="$BIN/route"

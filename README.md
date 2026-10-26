@@ -41,20 +41,20 @@ of one-shot stage binaries:
 ```
 rushi run <session>
   ┌─────────────────────────────────────────────────────────┐
-  │  claim → assemble → model → parse → route → log        │
+  │  claim → assemble → model → parse → route → rushi-log  │
   └─────────────────────────────────────────────────────────┘
 ```
 
-| Stage      | Binary         | Responsibility                                                  |
-| ---------- | -------------- | --------------------------------------------------------------- |
-| `claim`    | `bin/claim`    | Acquire session lock, select next user message (or idle claim). |
-| `assemble` | `bin/assemble` | Project the session log into a `ModelRequest` JSON.             |
-| `model`    | `bin/model`    | Call the LLM. Stream the response.                              |
-| `parse`    | `bin/parse`    | Parse the model response into tool-call actions.                |
-| `route`    | `bin/route`    | Execute tool calls in parallel. Apply caps.                     |
-| `log`      | `bin/log`      | Append events to `events.jsonl`.                                |
-| `compact`  | `bin/compact`  | Run a summary call. Write handoff doc.                          |
-| `user`     | `bin/user`     | Read user message. Emit `user_message` event.                   |
+| Stage       | Binary          | Responsibility                                                  |
+| ----------- | --------------- | --------------------------------------------------------------- |
+| `claim`     | `bin/claim`     | Acquire session lock, select next user message (or idle claim). |
+| `assemble`  | `bin/assemble`  | Project the session log into a `ModelRequest` JSON.             |
+| `model`     | `bin/model`     | Call the LLM. Stream the response.                              |
+| `parse`     | `bin/parse`     | Parse the model response into tool-call actions.                |
+| `route`     | `bin/route`     | Execute tool calls in parallel. Apply caps.                     |
+| `rushi-log` | `bin/rushi-log` | Append events to `events.jsonl`.                                |
+| `compact`   | `bin/compact`   | Run a summary call. Write handoff doc.                          |
+| `user`      | `bin/user`      | Read user message. Emit `user_message` event.                   |
 
 The `rushi` binary (`bin/rushi`) orchestrates these stages.
 It handles cancellation,

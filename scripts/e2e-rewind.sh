@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # The rewind/fork e2e suite (docs/rewind-fork-design.md section 9).
-# It drives the real `log`, `claim`, and `assemble` binaries over
+# It drives the real `rushi-log`, `claim`, and `assemble` binaries over
 # synthetic forked sessions and asserts:
-#   A. schema acceptance of the `rewind` marker through `bin/log`,
+#   A. schema acceptance of the `rewind` marker through `bin/rushi-log`,
 #      and the append-only discipline (P7: the prefix bytes are
 #      untouched by the append)
 #   B. the nested-fork mask (P1/P2: branch B is out of the A'
@@ -26,7 +26,7 @@ cargo build --quiet || { echo "FAIL: cargo build"; exit 1; }
 
 cd "$ROOT"
 
-LOG_BIN="$BIN_DIR/log"
+LOG_BIN="$BIN_DIR/rushi-log"
 CLAIM_BIN="$BIN_DIR/claim"
 ASSEMBLE_BIN="$BIN_DIR/assemble"
 PASS=0

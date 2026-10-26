@@ -6,7 +6,7 @@
 //! the state machine. Phase 4 adds in-process and wasm runners.
 //!
 //! Appends are not a stage: the loop appends in-process through the
-//! shared `LogLine` and validator. The `log` binary stays available
+//! shared `LogLine` and validator. The `rushi-log` binary stays available
 //! to humans and e2e.
 
 use serde_json::Value;

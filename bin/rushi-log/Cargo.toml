@@ -1,11 +1,11 @@
 [package]
-name = "log"
-version = "0.1.0"
+name = "rushi-log"
+version = "0.2.0"
 publish = false
 edition = "2021"
 
 [[bin]]
-name = "log"
+name = "rushi-log"
 path = "src/main.rs"
 
 [dependencies]

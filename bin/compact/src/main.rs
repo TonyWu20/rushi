@@ -617,7 +617,7 @@ fn run_compaction(
         "reason": reason_str,
         "tokens_before": tokens_before,
     });
-    let log_bin = resolve_bin(&args.log, "LOG_BIN", "log");
+    let log_bin = resolve_bin(&args.log, "LOG_BIN", "rushi-log");
     if let Err(e) = append_event(&log_bin, &args.session, &started) {
         eprintln!("compact: append compaction_started failed: {e}");
     }
@@ -1001,7 +1001,7 @@ fn run_branch_compaction(args: &Args, events: &[LogEvent]) -> ! {
         tokens_before,
         summary_usage,
     );
-    let log_bin = resolve_bin(&args.log, "LOG_BIN", "log");
+    let log_bin = resolve_bin(&args.log, "LOG_BIN", "rushi-log");
     if let Err(e) = append_event(&log_bin, &args.session, &marker) {
         eprintln!("compact: append branch compaction_summary failed: {e}");
     }
@@ -1092,7 +1092,7 @@ fn fail_and_exit(
         "attempts": 2,
         "detail": detail,
     });
-    let log_bin = resolve_bin(&args.log, "LOG_BIN", "log");
+    let log_bin = resolve_bin(&args.log, "LOG_BIN", "rushi-log");
     if let Err(e) = append_event(&log_bin, &args.session, &failed) {
         eprintln!("compact: append compaction_failed failed: {e}");
     }

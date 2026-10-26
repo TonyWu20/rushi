@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# tests/nix/run.sh — nix gate: meta.rushi eval-time derivation (issue #13)
-# and the TUI binary-name cut-over (issue #31).
+# tests/nix/run.sh — nix gate: meta.rushi eval-time derivation (issue #13),
+# the TUI binary-name cut-over (issue #31), and the buildEnv merge
+# survival of the kernel bin/ entries (issue #57).
 #
 # Usage: bash tests/nix/run.sh
 #
@@ -216,6 +217,28 @@ if [ -n "$out" ] && [ -d "$out" ]; then
   [ ! -e "$out/bin/rushi-tui" ] && ok "case-tui-old: no bin/rushi-tui fallback" || bad "case-tui-old: unexpected bin/rushi-tui"
   log=$(nix log "$out" 2>/dev/null)
   contains "case-tui-old: old-name warning emitted" "$log" "has no bin/rushi-tui; TUI unavailable"
+fi
+
+# 2i. case-issue57-merge (issue #57): a buildEnv merge of the
+# configured package keeps every kernel `bin/` entry. nixpkgs
+# buildEnv drops any file named `log` (builder.pl reserved names).
+# The renamed `rushi-log` must survive, and no other entry may be
+# lost by the merge.
+meta_out=$(nix build "$FL#packages.x86_64-linux.case-meta" --print-out-paths 2>/dev/null)
+out=$(nix build "$FL#packages.x86_64-linux.case-issue57-merge" --print-out-paths 2>/dev/null)
+[ -n "$out" ] && [ -d "$out" ] && ok "case-issue57-merge: buildEnv merge succeeded" || bad "case-issue57-merge: buildEnv merge failed"
+if [ -n "$out" ] && [ -d "$out" ] && [ -n "$meta_out" ] && [ -d "$meta_out" ]; then
+  [ -x "$out/bin/rushi-log" ] && ok "case-issue57-merge: bin/rushi-log present" || bad "case-issue57-merge: bin/rushi-log missing from the merged devshell"
+  lost=""
+  for f in "$meta_out"/bin/*; do
+    b=$(basename "$f")
+    [ -e "$out/bin/$b" ] || lost="$lost $b"
+  done
+  if [ -z "$lost" ]; then
+    ok "case-issue57-merge: every package bin/ entry survives the merge"
+  else
+    bad "case-issue57-merge: bin/ entries lost in the merge:$lost"
+  fi
 fi
 
 # ── Summary ───────────────────────────────────────────────────────

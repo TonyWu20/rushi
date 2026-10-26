@@ -183,7 +183,7 @@ mod tests {
             route_bin: std::path::PathBuf::from("route"),
             claim_bin: std::path::PathBuf::from("claim"),
             parse_bin: std::path::PathBuf::from("parse"),
-            log_bin: std::path::PathBuf::from("log"),
+            log_bin: std::path::PathBuf::from("rushi-log"),
             log_consolidate_on_idle: true,
         };
         // The signal reason skips the pass: the stream keeps its frame.

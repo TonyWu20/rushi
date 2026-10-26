@@ -520,7 +520,7 @@ impl HarnessConfig {
             route_bin: resolve_bin("ROUTE_BIN", "route", &exe_dir),
             claim_bin: resolve_bin("CLAIM_BIN", "claim", &exe_dir),
             parse_bin: resolve_bin("PARSE_BIN", "parse", &exe_dir),
-            log_bin: resolve_bin("LOG_BIN", "log", &exe_dir),
+            log_bin: resolve_bin("LOG_BIN", "rushi-log", &exe_dir),
             log_consolidate_on_idle,
         }
     }
