@@ -29,6 +29,7 @@ scratch/
 ## never part of the distribution, so they must never be swept in by
 ## `git add -A`)
 scratch/refs/pi-vim
+.envrc
 .direnv/
 
 ## Nix build artifact

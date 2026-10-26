@@ -7,21 +7,6 @@
       url = "github:nix-community/fenix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    # The TUI front-end repo (docs/tui-ext-repo-split.md lives there).
-    # GitHub input — not a local path, since this flake is git-tracked
-    # and hostable: a git tree respects rushi-tui's .gitignore (no
-    # target/, sessions/, or .git copies into the store) and works on
-    # any machine. Since PR #35 the kernel no longer carries a `tui`
-    # subcommand, so the devShell below puts the Nix-built
-    # `rushi-tui` binary on PATH next to the Nix-built `rushi`.
-    # `follows` keeps its nixpkgs/fenix pinned with the top level.
-    # The input name is `rushiTui` because hyphenated input names are
-    # not legal Nix identifiers in the outputs destructuring.
-    rushiTui = {
-      url = "github:TonyWu20/rushi-tui";
-      inputs.nixpkgs.follows = "nixpkgs";
-      inputs.fenix.follows = "fenix";
-    };
   };
 
   outputs =
@@ -29,11 +14,10 @@
       self,
       nixpkgs,
       fenix,
-      rushiTui,
       ...
     }:
-    let 
-      rushiVersion="0.1.8";
+    let
+      rushiVersion = "0.1.8";
     in
     rec {
 
@@ -123,7 +107,10 @@
             };
             # libzstd for the `zstd` crate (docs/session-log-compression.md,
             # P1: per-commit frames in the session log).
-            nativeBuildInputs = [ rustToolchain pkgs.zstd ];
+            nativeBuildInputs = [
+              rustToolchain
+              pkgs.zstd
+            ];
             # Build all workspace members (loop stages, tools, hooks).
             # (The TUI + TUI-stream-drt moved to the rushi-tui repo at the
             # split; docs/tui-ext-repo-split.md section 4, item 6.)
@@ -214,29 +201,6 @@
             ]
           );
 
-          rushi = pkgs.rustPlatform.buildRustPackage {
-            pname = "rushi";
-            version = rushiVersion;
-            src = self;
-            cargoLock = {
-              lockFile = ./Cargo.lock;
-            };
-            # libzstd for the `zstd` crate (docs/session-log-compression.md,
-            # P1: per-commit frames in the session log).
-            nativeBuildInputs = [ rustToolchain pkgs.zstd ];
-            cargoBuildFlags = [ "--workspace" ];
-            doCheck = false;
-            postInstall = ''
-              mkdir -p $out/tools
-              cp -r $src/tools/. $out/tools/
-            '';
-            meta = with pkgLib; {
-              description = "rushi — Unix-philosophy agent harness (kernel + distribution)";
-              homepage = "https://github.com/TonyWu20/rushi";
-              license = licenses.mit;
-              mainProgram = "rushi";
-            };
-          };
         in
         {
           default = pkgs.mkShell {
@@ -245,17 +209,6 @@
               pkgs.jq
               pkgs.python3
               pkgs.file
-              # The Nix-built `rushi` binary on PATH (this flake's
-              # packages.default). Since PR #35 the kernel no longer
-              # carries a `tui` subcommand, so the TUI front-end comes
-              # from the rushi-tui repo (the `rushiTui` input) instead.
-              rushi
-              # The Nix-built `rushi-tui` binary on PATH (the
-              # rushi-tui flake's packages.default, imported above as
-              # `rushiTui`). The kernel's side-by-side check
-              # (<exe_dir>/rushi-tui) misses across store paths, but
-              # its PATH fallback finds the binary here.
-              rushiTui.packages.${system}.default
             ];
           };
         }
