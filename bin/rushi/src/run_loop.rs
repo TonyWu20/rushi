@@ -160,20 +160,30 @@ pub fn run(
     };
 
     // Fire the session.start window (observation only).
-    fire_observation(cfg, &session, Window::SessionStart, &serde_json::json!({
-        "window": "session.start",
-        "session": session.path.to_string_lossy(),
-    }));
+    fire_observation(
+        cfg,
+        &session,
+        Window::SessionStart,
+        &serde_json::json!({
+            "window": "session.start",
+            "session": session.path.to_string_lossy(),
+        }),
+    );
 
     // The turn loop.
     loop {
         let outcome = crate::step::do_step(cfg, session_dir, StepMode::Run);
 
         // Fire step.end (observation, after the step completes).
-        fire_observation(cfg, &session, Window::StepEnd, &serde_json::json!({
-            "window": "step.end",
-            "session": session.path.to_string_lossy(),
-        }));
+        fire_observation(
+            cfg,
+            &session,
+            Window::StepEnd,
+            &serde_json::json!({
+                "window": "step.end",
+                "session": session.path.to_string_lossy(),
+            }),
+        );
 
         // Check for a caught signal between steps.
         if let Some(sig) = signals::poll() {
@@ -229,7 +239,14 @@ pub fn run(
                 false
             };
             let resolution = if keep_alive { "continue" } else { "stop" };
-            log_pipeline(cfg, &session, Window::RunIdle, &run, Some(resolution), Some(&payload));
+            log_pipeline(
+                cfg,
+                &session,
+                Window::RunIdle,
+                &run,
+                Some(resolution),
+                Some(&payload),
+            );
             if keep_alive {
                 continue;
             }
@@ -370,11 +387,10 @@ fn seed_initial_message(
         queue: None,
         id: None,
     });
-    let line = serde_json::to_string(&event)
-        .unwrap_or_else(|e| {
-            eprintln!("rushi: cannot serialize user_message: {e}");
-            std::process::exit(1);
-        });
+    let line = serde_json::to_string(&event).unwrap_or_else(|e| {
+        eprintln!("rushi: cannot serialize user_message: {e}");
+        std::process::exit(1);
+    });
     append_line(cfg, session_dir, &line);
     line
 }
@@ -432,9 +448,7 @@ fn read_last_assistant_message_id(session_dir: &Path) -> Option<String> {
     let path = session_dir.join("events.jsonl");
     let stream = rushi_common::logstream::open_indexed(&path).ok()?;
     let tail = stream.tail_lines(4096);
-    if let Some(id) = last_assistant_message_id_in(
-        tail.iter().rev().map(|l| l.as_str()),
-    ) {
+    if let Some(id) = last_assistant_message_id_in(tail.iter().rev().map(|l| l.as_str())) {
         return Some(id);
     }
     let data = rushi_common::logstream::read_log_text(&path).ok()?;
@@ -443,9 +457,7 @@ fn read_last_assistant_message_id(session_dir: &Path) -> Option<String> {
 
 /// Walk lines in reverse; the first `assistant_message` carries
 /// the last id.
-fn last_assistant_message_id_in<'a, I: Iterator<Item = &'a str>>(
-    lines: I,
-) -> Option<String> {
+fn last_assistant_message_id_in<'a, I: Iterator<Item = &'a str>>(lines: I) -> Option<String> {
     for line in lines {
         let line = line.trim();
         if line.is_empty() {
@@ -566,7 +578,10 @@ mod tests {
         assert_eq!(v["type"], "user_message");
         assert_eq!(v["content"], "do the thing");
         assert_eq!(v["v"], 1);
-        assert!(v.get("queue").is_none(), "steer queue leaves the field absent");
+        assert!(
+            v.get("queue").is_none(),
+            "steer queue leaves the field absent"
+        );
         // The typed validator (P8) accepts the seeded line.
         assert!(rushi_common::event::parse_event(&line).is_ok());
         // The event was committed to the session log.
@@ -584,15 +599,21 @@ mod tests {
         let sess = dir.path().join("sess");
         std::fs::create_dir_all(&sess).unwrap();
         let log = sess.join("events.jsonl");
-        LogLine::from_json(r#"{"v":1,"type":"assistant_message","ts":"t","id":"id-1","content":"a"}"#)
-            .commit(&log)
-            .unwrap();
-        LogLine::from_json(r#"{"v":1,"type":"assistant_message","ts":"t","id":"id-2","content":"b"}"#)
-            .commit(&log)
-            .unwrap();
-        LogLine::from_json(r#"{"v":1,"type":"ext_status","ts":"t","id":"loop_phase","value":"idle"}"#)
-            .commit(&log)
-            .unwrap();
+        LogLine::from_json(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"id-1","content":"a"}"#,
+        )
+        .commit(&log)
+        .unwrap();
+        LogLine::from_json(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"id-2","content":"b"}"#,
+        )
+        .commit(&log)
+        .unwrap();
+        LogLine::from_json(
+            r#"{"v":1,"type":"ext_status","ts":"t","id":"loop_phase","value":"idle"}"#,
+        )
+        .commit(&log)
+        .unwrap();
         assert_eq!(
             read_last_assistant_message_id(&sess),
             Some("id-2".to_string())
@@ -608,9 +629,11 @@ mod tests {
         let sess = dir.path().join("sess");
         std::fs::create_dir_all(&sess).unwrap();
         let log = sess.join("events.jsonl");
-        LogLine::from_json(r#"{"v":1,"type":"assistant_message","ts":"t","id":"deep","content":"a"}"#)
-            .commit(&log)
-            .unwrap();
+        LogLine::from_json(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"deep","content":"a"}"#,
+        )
+        .commit(&log)
+        .unwrap();
         for i in 0..4096 {
             LogLine::from_json(&format!(
                 r#"{{"v":1,"type":"user_message","ts":"t","content":"filler {i}"}}"#

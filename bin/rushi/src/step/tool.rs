@@ -145,7 +145,14 @@ pub fn route_and_append(
         if let Some(call) = blocked_call {
             wait_for_approval(cfg, runner, session, &req_id, &call, &prompt, mode);
         }
-        log_pipeline(cfg, session, Window::ToolBefore, &run, Some(outcome), Some(&payload));
+        log_pipeline(
+            cfg,
+            session,
+            Window::ToolBefore,
+            &run,
+            Some(outcome),
+            Some(&payload),
+        );
         return;
     } else if let Some(blocked) = state
         .get("blocked_calls")
@@ -180,7 +187,14 @@ pub fn route_and_append(
         }
     }
 
-    log_pipeline(cfg, session, Window::ToolBefore, &run, Some(outcome), Some(&payload));
+    log_pipeline(
+        cfg,
+        session,
+        Window::ToolBefore,
+        &run,
+        Some(outcome),
+        Some(&payload),
+    );
 
     // Route the remaining calls.
     let routed = route_batch(cfg, runner, &to_route, session);
@@ -230,8 +244,7 @@ fn fire_tool_after(
             })
         })
         .collect();
-    let results_json: Vec<Value> =
-        results.iter().map(|r| r.value.clone()).collect();
+    let results_json: Vec<Value> = results.iter().map(|r| r.value.clone()).collect();
     let after_payload = serde_json::json!({
         "window": "tool.after",
         "session": session.path.to_string_lossy(),
@@ -240,8 +253,7 @@ fn fire_tool_after(
     });
     let run = run_window(cfg, session, Window::ToolAfter, &after_payload, "step");
 
-    let mut final_values: Vec<Value> =
-        results.iter().map(|r| r.value.clone()).collect();
+    let mut final_values: Vec<Value> = results.iter().map(|r| r.value.clone()).collect();
 
     // The `results` state field (docs/loop-lifecycle-hooks.md 12.5)
     // splices per-call result rewrites by call id. It replaces the old

@@ -21,7 +21,11 @@ use std::path::PathBuf;
 /// the same seed `user_message` (steer queue) and then runs the loop
 /// in-process (docs/subagent-design.md section 4).
 #[derive(Parser)]
-#[command(name = "user", about = "Append a user message and run the agent loop", version)]
+#[command(
+    name = "user",
+    about = "Append a user message and run the agent loop",
+    version
+)]
 struct Args {
     /// Session name or directory
     #[arg(long)]
@@ -56,8 +60,7 @@ fn main() {
     let args = Args::parse();
 
     // Shared tier ladder (docs/project-config-precedence.md).
-    let config_path =
-        rushi_common::paths::resolve_config_path(args.config.as_deref());
+    let config_path = rushi_common::paths::resolve_config_path(args.config.as_deref());
 
     let content = match args.content {
         Some(c) => c,
@@ -167,10 +170,7 @@ fn run_turn(session: &str, config: &str) {
     let loop_table = match config_val.get("loop") {
         Some(v) => v,
         None => {
-            eprintln!(
-                "Error: missing [loop] table in {}",
-                config_path.display()
-            );
+            eprintln!("Error: missing [loop] table in {}", config_path.display());
             std::process::exit(1);
         }
     };
@@ -259,10 +259,7 @@ fn run_turn(session: &str, config: &str) {
     {
         Ok(s) => s,
         Err(e) => {
-            eprintln!(
-                "Error: cannot execute loop command \"{}\": {e}",
-                command
-            );
+            eprintln!("Error: cannot execute loop command \"{}\": {e}", command);
             std::process::exit(1);
         }
     };

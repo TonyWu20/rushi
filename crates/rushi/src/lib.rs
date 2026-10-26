@@ -22,16 +22,16 @@
 //!   the live loop, plus the reader and the name-or-dir match that
 //!   consumers use instead of cmdline re-derivation (issue #44).
 
-pub mod event;
-pub mod logline;
-pub mod logstream;
 pub mod compact_math;
-pub mod stage;
-pub mod hooks;
-pub mod hook_io;
-pub mod rewind;
-pub mod model_settings;
 pub mod config_check;
 pub mod config_layer;
-pub mod paths;
+pub mod event;
+pub mod hook_io;
+pub mod hooks;
+pub mod logline;
+pub mod logstream;
 pub mod loop_meta;
+pub mod model_settings;
+pub mod paths;
+pub mod rewind;
+pub mod stage;

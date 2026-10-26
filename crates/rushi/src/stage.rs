@@ -68,10 +68,7 @@ pub enum ModelDelta {
     /// A chunk of one reasoning item's text. `item_id` matches the
     /// id the final `assistant_message` carries in its `reasoning`
     /// array.
-    Reasoning {
-        item_id: String,
-        delta: String,
-    },
+    Reasoning { item_id: String, delta: String },
     /// A chunk of one tool call's JSON arguments. `name` is the tool
     /// name once the item event names it; empty until then.
     ToolCallDelta {
@@ -80,9 +77,7 @@ pub enum ModelDelta {
         args_delta: String,
     },
     /// The model call's stream is complete. No further lines follow.
-    Done {
-        stop_reason: String,
-    },
+    Done { stop_reason: String },
 }
 
 impl ModelDelta {
@@ -93,14 +88,12 @@ impl ModelDelta {
             ModelDelta::Text(delta) => {
                 serde_json::json!({ "kind": "text", "delta": delta }).to_string()
             }
-            ModelDelta::Reasoning { item_id, delta } => {
-                serde_json::json!({
-                    "kind": "reasoning",
-                    "item_id": item_id,
-                    "delta": delta,
-                })
-                .to_string()
-            }
+            ModelDelta::Reasoning { item_id, delta } => serde_json::json!({
+                "kind": "reasoning",
+                "item_id": item_id,
+                "delta": delta,
+            })
+            .to_string(),
             ModelDelta::ToolCallDelta {
                 call_id,
                 name,
@@ -314,11 +307,9 @@ pub enum StageError {
 impl std::fmt::Display for StageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            StageError::StageFailed {
-                name,
-                code,
-                detail,
-            } => write!(f, "stage '{name}' failed with exit {code}: {detail}"),
+            StageError::StageFailed { name, code, detail } => {
+                write!(f, "stage '{name}' failed with exit {code}: {detail}")
+            }
             StageError::Io { name, source } => write!(f, "IO error in stage '{name}': {source}"),
             StageError::Other { name, msg } => write!(f, "stage '{name}': {msg}"),
         }
@@ -398,7 +389,9 @@ mod tests {
         // parse failure: the channel never fails the TUI on a bad line.
         assert_eq!(
             ModelDelta::from_json_line(r#"{"kind":"done"}"#),
-            Some(ModelDelta::Done { stop_reason: String::new() })
+            Some(ModelDelta::Done {
+                stop_reason: String::new()
+            })
         );
         assert_eq!(
             ModelDelta::from_json_line(r#"{"kind":"text"}"#),

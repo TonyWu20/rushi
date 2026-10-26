@@ -156,7 +156,10 @@ impl LogLine {
                 text_len: tail_bytes + self.bytes.len() as u64,
             }
         };
-        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&idx_path)?;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&idx_path)?;
         f.write_all(&crate::logstream::index_record_bytes(&record))?;
         f.flush()?;
         Ok(())
@@ -244,12 +247,19 @@ mod tests {
         // text log stays plain for its life. No mixed streams.
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("events.jsonl");
-        std::fs::write(&log, "{\"v\":1,\"type\":\"user_message\",\"ts\":\"t0\",\"content\":\"seed\"}\n").unwrap();
+        std::fs::write(
+            &log,
+            "{\"v\":1,\"type\":\"user_message\",\"ts\":\"t0\",\"content\":\"seed\"}\n",
+        )
+        .unwrap();
         LogLine::from_json(r#"{"v":1,"type":"user_message","ts":"t","content":"two"}"#)
             .commit(&log)
             .unwrap();
         let raw = std::fs::read(&log).unwrap();
-        assert!(!crate::logstream::is_zstd_stream(&raw), "a legacy log stays plain");
+        assert!(
+            !crate::logstream::is_zstd_stream(&raw),
+            "a legacy log stays plain"
+        );
         let text = crate::logstream::read_log_text(&log).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2, "{text:?}");
@@ -325,21 +335,21 @@ mod tests {
         let log = dir.path().join("events.jsonl");
         let mut expected = Vec::new();
         for c in ["one", "two", "three"] {
-            let json = format!(
-                r#"{{"v":1,"type":"user_message","ts":"t","content":"{c}"}}"#
-            );
+            let json = format!(r#"{{"v":1,"type":"user_message","ts":"t","content":"{c}"}}"#);
             expected.push(json.len() as u64 + 1);
             LogLine::from_json(&json).commit(&log).unwrap();
         }
         let raw = std::fs::read(&log).unwrap();
-        let records =
-            crate::logstream::read_index(&crate::logstream::index_path(&log)).unwrap();
+        let records = crate::logstream::read_index(&crate::logstream::index_path(&log)).unwrap();
         assert_eq!(records.len(), 3, "one record per commit");
         for (i, r) in records.iter().enumerate() {
-            assert_eq!(r.seq_start, (i + 1) as u64, "seq is the 1-based line number");
             assert_eq!(
-                r.text_len,
-                expected[i],
+                r.seq_start,
+                (i + 1) as u64,
+                "seq is the 1-based line number"
+            );
+            assert_eq!(
+                r.text_len, expected[i],
                 "text_len is the decoded line length"
             );
         }
@@ -373,8 +383,7 @@ mod tests {
         let json = r#"{"v":1,"type":"user_message","ts":"t","content":"new"}"#;
         LogLine::from_json(json).commit(&log).unwrap();
         let raw = std::fs::read(&log).unwrap();
-        let records =
-            crate::logstream::read_index(&crate::logstream::index_path(&log)).unwrap();
+        let records = crate::logstream::read_index(&crate::logstream::index_path(&log)).unwrap();
         assert_eq!(records.len(), 1, "the bootstrap is one record");
         let r = &records[0];
         assert_eq!(r.seq_start, 1);
@@ -389,8 +398,7 @@ mod tests {
         LogLine::from_json(r#"{"v":1,"type":"user_message","ts":"t","content":"newer"}"#)
             .commit(&log)
             .unwrap();
-        let records =
-            crate::logstream::read_index(&crate::logstream::index_path(&log)).unwrap();
+        let records = crate::logstream::read_index(&crate::logstream::index_path(&log)).unwrap();
         assert_eq!(records.len(), 2);
         assert_eq!(records[1].seq_start, 4, "the fourth line is seq 4");
     }
@@ -424,8 +432,7 @@ mod tests {
         let records = crate::logstream::read_index(&idx).unwrap();
         assert_eq!(records.len(), 3, "the heal appended one record");
         assert_eq!(
-            records[2].seq_start,
-            3,
+            records[2].seq_start, 3,
             "the record covers the torn line and the new one"
         );
         let raw = std::fs::read(&log).unwrap();
@@ -460,8 +467,7 @@ mod tests {
             h.join().unwrap();
         }
         let raw = std::fs::read(&log).unwrap();
-        let records =
-            crate::logstream::read_index(&crate::logstream::index_path(&log)).unwrap();
+        let records = crate::logstream::read_index(&crate::logstream::index_path(&log)).unwrap();
         assert_eq!(records.len(), 2 * n, "every commit carries its record");
         for (i, r) in records.iter().enumerate() {
             assert_eq!(r.seq_start, (i + 1) as u64, "the seq runs unbroken");

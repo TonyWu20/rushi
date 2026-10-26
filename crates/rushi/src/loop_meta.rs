@@ -140,8 +140,7 @@ pub fn binary_name() -> String {
 /// temp file in the same dir, then is renamed over `loop.meta`, so a
 /// reader never observes a torn record.
 pub fn write_loop_meta(dir: &Path, meta: &LoopMeta) -> std::io::Result<()> {
-    let text = toml::to_string(meta)
-        .map_err(std::io::Error::other)?;
+    let text = toml::to_string(meta).map_err(std::io::Error::other)?;
     let final_path = LoopMeta::path_in(dir);
     let tmp = dir.join(format!(".{LOOP_META}.tmp.{}", std::process::id()));
     std::fs::write(&tmp, text)?;
@@ -219,9 +218,15 @@ mod tests {
     fn matches_the_recorded_name_and_dir() {
         let meta = sample();
         assert!(meta.matches_name_or_dir("issue-29"), "the bare name");
-        assert!(meta.matches_name_or_dir("/abs/sessions/issue-29"), "the dir");
+        assert!(
+            meta.matches_name_or_dir("/abs/sessions/issue-29"),
+            "the dir"
+        );
         assert!(!meta.matches_name_or_dir("other-1"), "a different name");
-        assert!(!meta.matches_name_or_dir("/abs/sessions/other-1"), "a different dir");
+        assert!(
+            !meta.matches_name_or_dir("/abs/sessions/other-1"),
+            "a different dir"
+        );
     }
 
     #[test]
@@ -235,7 +240,7 @@ mod tests {
         let canonical = sess.canonicalize().unwrap();
         let meta = LoopMeta {
             pid: 1,
-            session: session_name_for(canonical.to_str().unwrap()).into(),
+            session: session_name_for(canonical.to_str().unwrap()),
             dir: canonical_dir(&sess),
             binary: "rushi".into(),
             started: 1758790200,

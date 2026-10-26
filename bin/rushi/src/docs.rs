@@ -19,12 +19,9 @@ const REFERENCE: &str = include_str!("../../../docs/reference/README.md");
 /// Bundled sub-documents under `docs/reference/` (and `docs/reference/nix/`),
 /// selectable by name from `rushi docs <name>`. Each is a whole document;
 /// per-section filtering is reserved for the default reference.
-const MONITORING: &str =
-    include_str!("../../../docs/reference/monitoring.md");
-const HEADLESS_MISSIONS: &str =
-    include_str!("../../../docs/reference/headless-missions.md");
-const NIX_FLAKE_MODULE: &str =
-    include_str!("../../../docs/reference/nix/nix-flake-module.md");
+const MONITORING: &str = include_str!("../../../docs/reference/monitoring.md");
+const HEADLESS_MISSIONS: &str = include_str!("../../../docs/reference/headless-missions.md");
+const NIX_FLAKE_MODULE: &str = include_str!("../../../docs/reference/nix/nix-flake-module.md");
 const EXT_FLAKE_AUTHORING: &str =
     include_str!("../../../docs/reference/nix/ext-flake-authoring.md");
 
@@ -79,7 +76,7 @@ fn find_bundled(name: &str) -> Option<&'static BundledDoc> {
 /// If nothing matches, the available sections and bundled docs are listed
 /// on stderr and the exit code is 1.
 pub fn print_docs(section: Option<&str>) {
-    if section.is_none() || section.map_or(false, |s| s.is_empty()) {
+    if section.is_none() || section.is_some_and(|s| s.is_empty()) {
         print!("{REFERENCE}");
         return;
     }

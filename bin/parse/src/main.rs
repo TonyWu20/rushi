@@ -44,16 +44,14 @@ fn collect_tool_names(path: &PathBuf, names: &mut std::collections::HashSet<Stri
 fn main() {
     let args = Args::parse();
 
-    let config_path =
-        rushi_common::paths::resolve_config_path(args.config.as_deref());
+    let config_path = rushi_common::paths::resolve_config_path(args.config.as_deref());
     // Read the config as the top layer: the Nix store config.toml
     // (when present) deep-merges under it
     // (docs/project-config-precedence.md).
-    let layers = rushi_common::config_layer::load_layered(&config_path)
-        .unwrap_or_else(|e| {
-            eprintln!("Error: {e}");
-            std::process::exit(1);
-        });
+    let layers = rushi_common::config_layer::load_layered(&config_path).unwrap_or_else(|e| {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    });
     let config: &toml::Value = &layers.value;
 
     // Hard-fail on legacy `[paths]` keys that the rename in 353424a
@@ -375,14 +373,12 @@ fn process(
 
 /// One error event as a single JSON line.
 fn error_event(message: &str) -> String {
-    serde_json::to_string(
-        &serde_json::json!({
-            "v": 1,
-            "type": "error",
-            "ts": chrono_utc_now(),
-            "message": message
-        }),
-    )
+    serde_json::to_string(&serde_json::json!({
+        "v": 1,
+        "type": "error",
+        "ts": chrono_utc_now(),
+        "message": message
+    }))
     .unwrap()
 }
 
@@ -796,10 +792,7 @@ fn parse_param_value(v: &str) -> serde_json::Value {
 /// text output instead of using the structured `reasoning` or
 /// `tool_calls` fields.  Extend this list when a new model family
 /// introduces a new marker.
-const SANITIZE_TAGS: &[&str] = &[
-    "think",
-    "tool_call",
-];
+const SANITIZE_TAGS: &[&str] = &["think", "tool_call"];
 
 /// Remove every `tag … /tag` block (and any unterminated trailing
 /// block) from `text` for the tag names in [`SANITIZE_TAGS`].
@@ -815,13 +808,15 @@ const SANITIZE_TAGS: &[&str] = &[
 fn sanitize_text(text: &str) -> String {
     let mut result = text.to_string();
     for tag in SANITIZE_TAGS {
-        let terminated =
-            Regex::new(&format!(r"(?m)^[ \t]*{}[ \t]*\n[\s\S]*?\n[ \t]*/{}[ \t]*$", tag, tag))
-                .expect("hardcoded sanitize pattern");
+        let terminated = Regex::new(&format!(
+            r"(?m)^[ \t]*{}[ \t]*\n[\s\S]*?\n[ \t]*/{}[ \t]*$",
+            tag, tag
+        ))
+        .expect("hardcoded sanitize pattern");
         result = terminated.replace_all(&result, "").to_string();
 
-        let unterminated =
-            Regex::new(&format!(r"(?m)^[ \t]*{}[ \t]*\n[\s\S]*$", tag)).expect("hardcoded sanitize pattern");
+        let unterminated = Regex::new(&format!(r"(?m)^[ \t]*{}[ \t]*\n[\s\S]*$", tag))
+            .expect("hardcoded sanitize pattern");
         result = unterminated.replace_all(&result, "").to_string();
     }
     result = Regex::new(r"\n{3,}")
@@ -932,11 +927,16 @@ mod tests {
             !joined.contains("malformed tool arguments"),
             "truncation must not be reported as malformed args: {joined}"
         );
-        assert!(joined.contains("assistant_message"), "records the assistant turn");
-        assert!(joined.contains("Arguments may be truncated"), "prompts a re-issue");
+        assert!(
+            joined.contains("assistant_message"),
+            "records the assistant turn"
+        );
+        assert!(
+            joined.contains("Arguments may be truncated"),
+            "prompts a re-issue"
+        );
     }
 
-    #[test]
     #[test]
     fn malformed_args_single_call_recover_not_terminal() {
         // Correction 66: a non-length stop with malformed arguments no longer
@@ -1028,7 +1028,10 @@ mod tests {
         let (code, lines) = process(&model_output, &valid_tools);
         let joined = lines.join("\n");
         assert_eq!(code, 1);
-        assert!(joined.contains("\"type\":\"tool_call\""), "both calls route: {joined}");
+        assert!(
+            joined.contains("\"type\":\"tool_call\""),
+            "both calls route: {joined}"
+        );
         assert!(
             !joined.contains("is_error"),
             "healthy calls must not error-report: {joined}"
@@ -1097,7 +1100,10 @@ mod tests {
             std::iter::once("bash".to_string()).collect();
         let (code, lines) = process(&model_output, &valid_tools);
         let joined = lines.join("\n");
-        assert_eq!(code, 1, "an unknown name on a non-length stop forwards to route");
+        assert_eq!(
+            code, 1,
+            "an unknown name on a non-length stop forwards to route"
+        );
         assert!(
             !joined.contains("\"type\":\"error\""),
             "no terminal error event: {joined}"
@@ -1130,7 +1136,10 @@ mod tests {
         let valid_tools: std::collections::HashSet<String> =
             std::iter::once("bash".to_string()).collect();
         let (code, lines) = process(&model_output, &valid_tools);
-        assert_eq!(code, 1, "a blank name on a non-length stop forwards to route");
+        assert_eq!(
+            code, 1,
+            "a blank name on a non-length stop forwards to route"
+        );
         let joined = lines.join("\n");
         assert!(
             !joined.contains("\"type\":\"error\""),
@@ -1141,7 +1150,11 @@ mod tests {
             .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
             .find(|v| v.get("type").and_then(|t| t.as_str()) == Some("tool_call"))
             .expect("a tool_call event is emitted for the blank call");
-        assert_eq!(tc["name"], serde_json::Value::String(String::new()), "the blank name is forwarded verbatim");
+        assert_eq!(
+            tc["name"],
+            serde_json::Value::String(String::new()),
+            "the blank name is forwarded verbatim"
+        );
     }
 
     // ── sanitize_text tests ────────────────────────────────────────

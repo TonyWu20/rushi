@@ -212,10 +212,7 @@ pub fn resolve_dir_override(raw: &Path) -> PathBuf {
 /// `--sessions-root` override (the project dir in the standard
 /// `<project>/sessions` layout). Else `None`, which means the live
 /// process CWD is used (the pre-flag behavior).
-pub fn working_dir_for(
-    cwd_raw: Option<&Path>,
-    resolved_root: Option<&Path>,
-) -> Option<PathBuf> {
+pub fn working_dir_for(cwd_raw: Option<&Path>, resolved_root: Option<&Path>) -> Option<PathBuf> {
     if let Some(c) = cwd_raw {
         return Some(resolve_dir_override(c));
     }
@@ -230,7 +227,10 @@ impl HarnessConfig {
     /// the window has no pipeline entry: zero steps, the window
     /// default applies and nothing is logged for it).
     pub fn pipeline_for(&self, window: Window) -> &[String] {
-        self.hook_pipelines.get(&window).map(|s| s.as_slice()).unwrap_or(&[])
+        self.hook_pipelines
+            .get(&window)
+            .map(|s| s.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Load and resolve the config from a TOML file.
@@ -240,11 +240,10 @@ impl HarnessConfig {
     /// and the file deep-merges over it
     /// (docs/project-config-precedence.md).
     pub fn load(config_path: &Path) -> Self {
-        let layers = config_layer::load_layered(config_path)
-            .unwrap_or_else(|e| {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
-            });
+        let layers = config_layer::load_layered(config_path).unwrap_or_else(|e| {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        });
         let cfg: &Value = &layers.value;
 
         // Hard-fail on legacy `[paths]` keys that the rename in
@@ -357,11 +356,14 @@ impl HarnessConfig {
             .and_then(|v| v.as_str())
             .unwrap_or("compact")
             .to_string();
-        let compact_reserve_tokens = model_settings::val_int(limits, "compact_reserve_tokens").unwrap_or(16384) as u64;
-        let compact_keep_tokens = model_settings::val_int(limits, "compact_keep_tokens").unwrap_or(20000) as u64;
-        let compact_text_chars = model_settings::val_int(limits, "compact_text_chars").unwrap_or(200) as u64;
-        let estimate_chars_per_token = model_settings::resolve_model_settings(cfg, &active_model)
-            .estimate_chars_per_token;
+        let compact_reserve_tokens =
+            model_settings::val_int(limits, "compact_reserve_tokens").unwrap_or(16384) as u64;
+        let compact_keep_tokens =
+            model_settings::val_int(limits, "compact_keep_tokens").unwrap_or(20000) as u64;
+        let compact_text_chars =
+            model_settings::val_int(limits, "compact_text_chars").unwrap_or(200) as u64;
+        let estimate_chars_per_token =
+            model_settings::resolve_model_settings(cfg, &active_model).estimate_chars_per_token;
 
         let approval_timeout_s = limits
             .get("approval_timeout_s")
@@ -478,8 +480,7 @@ impl HarnessConfig {
         // error on the merged defs (a top pipeline may reference a
         // base def). The dead-def warning is scoped to the top layer
         // (docs/project-config-precedence.md P-L8).
-        let (errors, used) =
-            validate_hook_pipelines(&hook_defs, &hook_pipelines);
+        let (errors, used) = validate_hook_pipelines(&hook_defs, &hook_pipelines);
         if !errors.is_empty() {
             for msg in &errors {
                 eprintln!("Error: {msg}");
@@ -626,10 +627,7 @@ compact_reserve_tokens = 16384
     /// `--cwd` wins over a `--sessions-root` parent.
     #[test]
     fn working_dir_cwd_wins_over_root_parent() {
-        let got = working_dir_for(
-            Some(Path::new("/w")),
-            Some(Path::new("/proj/sessions")),
-        );
+        let got = working_dir_for(Some(Path::new("/w")), Some(Path::new("/proj/sessions")));
         assert_eq!(got, Some(PathBuf::from("/w")));
     }
 
@@ -637,10 +635,7 @@ compact_reserve_tokens = 16384
     /// resolved sessions root.
     #[test]
     fn working_dir_falls_back_to_root_parent() {
-        let got = working_dir_for(
-            None,
-            Some(Path::new("/proj/sessions")),
-        );
+        let got = working_dir_for(None, Some(Path::new("/proj/sessions")));
         assert_eq!(got, Some(PathBuf::from("/proj")));
     }
 
@@ -790,18 +785,24 @@ compact_reserve_tokens = 16384
     #[test]
     fn unused_def_is_a_warning() {
         let defs: BTreeMap<String, HookDef> = [
-            ("used".to_string(), HookDef {
-                name: "used".into(),
-                command: "used".into(),
-                args: vec![],
-                timeout_ms: None,
-            }),
-            ("dead".to_string(), HookDef {
-                name: "dead".into(),
-                command: "dead".into(),
-                args: vec![],
-                timeout_ms: None,
-            }),
+            (
+                "used".to_string(),
+                HookDef {
+                    name: "used".into(),
+                    command: "used".into(),
+                    args: vec![],
+                    timeout_ms: None,
+                },
+            ),
+            (
+                "dead".to_string(),
+                HookDef {
+                    name: "dead".into(),
+                    command: "dead".into(),
+                    args: vec![],
+                    timeout_ms: None,
+                },
+            ),
         ]
         .into_iter()
         .collect();
@@ -834,10 +835,7 @@ compact_reserve_tokens = 16384
     /// Build a top-layer table with `[hooks.defs.<name>]` entries.
     type TomlMap = toml::map::Map<String, toml::Value>;
     fn toml_map_with_hooks_defs(defs: TomlMap) -> TomlMap {
-        let hooks = TomlMap::from_iter([(
-            "defs".to_string(),
-            toml::Value::Table(defs),
-        )]);
+        let hooks = TomlMap::from_iter([("defs".to_string(), toml::Value::Table(defs))]);
         TomlMap::from_iter([("hooks".to_string(), toml::Value::Table(hooks))])
     }
 
@@ -846,18 +844,24 @@ compact_reserve_tokens = 16384
     #[test]
     fn dead_def_warnings_scoped_to_top_layer() {
         let defs: BTreeMap<String, HookDef> = [
-            ("base-def".to_string(), HookDef {
-                name: "base-def".into(),
-                command: "base-def".into(),
-                args: vec![],
-                timeout_ms: None,
-            }),
-            ("top-def".to_string(), HookDef {
-                name: "top-def".into(),
-                command: "top-def".into(),
-                args: vec![],
-                timeout_ms: None,
-            }),
+            (
+                "base-def".to_string(),
+                HookDef {
+                    name: "base-def".into(),
+                    command: "base-def".into(),
+                    args: vec![],
+                    timeout_ms: None,
+                },
+            ),
+            (
+                "top-def".to_string(),
+                HookDef {
+                    name: "top-def".into(),
+                    command: "top-def".into(),
+                    args: vec![],
+                    timeout_ms: None,
+                },
+            ),
         ]
         .into_iter()
         .collect();

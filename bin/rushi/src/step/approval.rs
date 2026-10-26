@@ -33,14 +33,16 @@ pub(crate) fn wait_for_approval(
         check_signal(mode);
 
         if let Some(ans) = read_approval(session, request_id) {
-            let decision = ans.get("decision").and_then(|d| d.as_str()).unwrap_or("deny");
+            let decision = ans
+                .get("decision")
+                .and_then(|d| d.as_str())
+                .unwrap_or("deny");
             if decision == "allow" {
                 let mut edited = call.clone();
                 if let Some(args) = ans.get("arguments") {
                     edited.arguments = args.clone();
                 }
-                let results =
-                    route_batch(cfg, runner, std::slice::from_ref(&edited), session);
+                let results = route_batch(cfg, runner, std::slice::from_ref(&edited), session);
                 for r in &results {
                     append_line(
                         cfg,
@@ -166,7 +168,11 @@ pub fn run_awaiting_approval(
     let Some(req) = pending_req else {
         return;
     };
-    let req_id = req.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+    let req_id = req
+        .get("id")
+        .and_then(|i| i.as_str())
+        .unwrap_or("")
+        .to_string();
     let call_id = req
         .get("tool_call_id")
         .and_then(|i| i.as_str())

@@ -22,13 +22,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use serde_json::Value;
 use bon::builder;
+use serde_json::Value;
 
 use rushi_common::stage::{
-    AssembleOpts, Claim, CompactOutcome, CompactOpts, CompactReason, CompactStatus,
-    ModelOutput, ParsedEvents, RequestFile, RouteEnv, SessionDir, StageError,
-    StageRunner, ToolCallEvent, ToolResultEvent,
+    AssembleOpts, Claim, CompactOpts, CompactOutcome, CompactReason, CompactStatus, ModelOutput,
+    ParsedEvents, RequestFile, RouteEnv, SessionDir, StageError, StageRunner, ToolCallEvent,
+    ToolResultEvent,
 };
 
 /// The pid of the in-flight stage child, 0 when none runs.
@@ -85,19 +85,14 @@ pub fn new_subprocess_runner(
 
 /// Spawn a command with all three stdios piped. The pid is tracked in
 /// `LIVE_CHILD` until `finish` clears it.
-fn spawn_tracked(
-    cmd: &mut Command,
-    name: &'static str,
-) -> Result<std::process::Child, StageError> {
+fn spawn_tracked(cmd: &mut Command, name: &'static str) -> Result<std::process::Child, StageError> {
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    let child = cmd
-        .spawn()
-        .map_err(|e| StageError::Other {
-            name,
-            msg: format!("spawn: {e}"),
-        })?;
+    let child = cmd.spawn().map_err(|e| StageError::Other {
+        name,
+        msg: format!("spawn: {e}"),
+    })?;
     LIVE_CHILD.store(i64::from(child.id()), Ordering::SeqCst);
     Ok(child)
 }
@@ -126,10 +121,7 @@ fn feed_stdin(
         }
         return Err(StageError::Io {
             name,
-            source: std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "no stdin pipe",
-            ),
+            source: std::io::Error::new(std::io::ErrorKind::BrokenPipe, "no stdin pipe"),
         });
     };
     if !stdin_text.is_empty() {
@@ -142,11 +134,7 @@ fn feed_stdin(
 
 /// Run a stage whose stdout is one JSON object. A non-zero exit is a
 /// stage failure.
-fn run_json(
-    cmd: &mut Command,
-    stdin_text: &str,
-    name: &'static str,
-) -> Result<Value, StageError> {
+fn run_json(cmd: &mut Command, stdin_text: &str, name: &'static str) -> Result<Value, StageError> {
     let mut child = spawn_tracked(cmd, name)?;
     feed_stdin(&mut child, stdin_text, name)?;
     let out = finish(child, name)?;
@@ -171,7 +159,11 @@ impl StageRunner for SubprocessRunner {
         cmd.arg("--session").arg(&session.path);
         let v = run_json(&mut cmd, "", "claim")?;
         Ok(Claim {
-            state: v.get("state").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+            state: v
+                .get("state")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string(),
             last_user_message_seq: v
                 .get("last_user_message_seq")
                 .and_then(|s| s.as_u64())
@@ -213,11 +205,10 @@ impl StageRunner for SubprocessRunner {
         request: &RequestFile,
         delta_file: Option<&Path>,
     ) -> Result<ModelOutput, StageError> {
-        let stdin_text = serde_json::to_string(&request.json)
-            .map_err(|e| StageError::Other {
-                name: "model",
-                msg: format!("serialize request: {e}"),
-            })?;
+        let stdin_text = serde_json::to_string(&request.json).map_err(|e| StageError::Other {
+            name: "model",
+            msg: format!("serialize request: {e}"),
+        })?;
         let mut cmd = Command::new(&self.model_bin);
         cmd.arg("--config").arg(&self.config_path);
         // The stream channel (docs/tui-streaming-response.md section 5.2):
@@ -231,8 +222,8 @@ impl StageRunner for SubprocessRunner {
     }
 
     fn parse(&self, model_output: &ModelOutput) -> Result<ParsedEvents, StageError> {
-        let stdin_text = serde_json::to_string(&model_output.json)
-            .map_err(|e| StageError::Other {
+        let stdin_text =
+            serde_json::to_string(&model_output.json).map_err(|e| StageError::Other {
                 name: "parse",
                 msg: format!("serialize model output: {e}"),
             })?;
@@ -330,8 +321,16 @@ impl StageRunner for SubprocessRunner {
             .filter_map(|l| {
                 let v: Value = serde_json::from_str(l.trim()).ok()?;
                 let is_error = v.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false);
-                let id = v.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
-                Some(ToolResultEvent { value: v, id, is_error })
+                let id = v
+                    .get("id")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                Some(ToolResultEvent {
+                    value: v,
+                    id,
+                    is_error,
+                })
             })
             .collect();
 
@@ -393,14 +392,15 @@ impl StageRunner for SubprocessRunner {
 
         Ok(CompactStatus {
             outcome,
-            first_kept_seq: v
-                .get("first_kept_seq")
-                .and_then(|s| s.as_u64()),
+            first_kept_seq: v.get("first_kept_seq").and_then(|s| s.as_u64()),
             tokens_before: v.get("tokens_before").and_then(|t| t.as_u64()),
             tokens_after: v.get("tokens_after").and_then(|t| t.as_u64()),
             summary: v.get("summary").and_then(|s| s.as_str()).map(String::from),
             version: v.get("version").and_then(|x| x.as_u64()),
-            parent_version: v.get("parent_version").and_then(|x| x.as_u64()).unwrap_or(0),
+            parent_version: v
+                .get("parent_version")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0),
             diverge_seq: v.get("diverge_seq").and_then(|x| x.as_u64()).unwrap_or(0),
         })
     }

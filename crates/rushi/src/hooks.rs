@@ -305,17 +305,18 @@ fn fire_step(
     let (mut stop_tx, watchdog) = if timeout_ms > 0 {
         let flag = Arc::clone(&timed_out);
         let (tx, rx) = std::sync::mpsc::channel();
-        let handle = std::thread::spawn(move || {
-            match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
-                Ok(()) => {}
-                Err(_) => {
-                    let killed = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
-                    if killed == 0 {
-                        flag.store(true, Ordering::SeqCst);
+        let handle =
+            std::thread::spawn(
+                move || match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
+                    Ok(()) => {}
+                    Err(_) => {
+                        let killed = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+                        if killed == 0 {
+                            flag.store(true, Ordering::SeqCst);
+                        }
                     }
-                }
-            }
-        });
+                },
+            );
         (Some(tx), Some(handle))
     } else {
         (None, None)
@@ -595,8 +596,16 @@ mod tests {
     #[test]
     fn two_ok_steps_compose_the_state() {
         let dir = tempfile::tempdir().unwrap();
-        let h1 = echo_hook(dir.path(), "h1", r#"{"request":{"input":[{"type":"message","role":"user","content":"first"}]}}"#);
-        let h2 = echo_hook(dir.path(), "h2", r#"{"request":{"input":[{"type":"message","role":"user","content":"second"}]}}"#);
+        let h1 = echo_hook(
+            dir.path(),
+            "h1",
+            r#"{"request":{"input":[{"type":"message","role":"user","content":"first"}]}}"#,
+        );
+        let h2 = echo_hook(
+            dir.path(),
+            "h2",
+            r#"{"request":{"input":[{"type":"message","role":"user","content":"second"}]}}"#,
+        );
         let defs = defs_from(&[("h1", &h1), ("h2", &h2)]);
         let initial = serde_json::json!({"request": {"model": "m"}});
         let run = run_pipeline(
@@ -616,8 +625,14 @@ mod tests {
         assert_eq!(run.state["request"]["input"][0]["content"], "second");
         // Each ok step's output is recorded for post-processing.
         assert_eq!(run.step_outputs.len(), 2);
-        assert_eq!(run.step_outputs[0]["request"]["input"][0]["content"], "first");
-        assert_eq!(run.step_outputs[1]["request"]["input"][0]["content"], "second");
+        assert_eq!(
+            run.step_outputs[0]["request"]["input"][0]["content"],
+            "first"
+        );
+        assert_eq!(
+            run.step_outputs[1]["request"]["input"][0]["content"],
+            "second"
+        );
         assert!(run.stop.is_none());
     }
 
@@ -645,12 +660,7 @@ mod tests {
     #[test]
     fn the_first_abort_stops_the_chain_and_is_sticky() {
         let dir = tempfile::tempdir().unwrap();
-        let abort = exit_hook(
-            dir.path(),
-            "abort",
-            r#"{"reason":"goal not complete"}"#,
-            2,
-        );
+        let abort = exit_hook(dir.path(), "abort", r#"{"reason":"goal not complete"}"#, 2);
         let h2 = echo_hook(dir.path(), "h2", r#"{"request":{"model":"m2"}}"#);
         let defs = defs_from(&[("abort", &abort), ("h2", &h2)]);
         let initial = serde_json::json!({"request": {"model": "m"}});
@@ -682,11 +692,7 @@ mod tests {
     fn the_first_fail_stops_the_chain_and_the_default_applies() {
         let dir = tempfile::tempdir().unwrap();
         let fail = dir.path().join("fail");
-        std::fs::write(
-            &fail,
-            "#!/bin/sh\ncat > /dev/null\nexit 3\n",
-        )
-        .unwrap();
+        std::fs::write(&fail, "#!/bin/sh\ncat > /dev/null\nexit 3\n").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -760,11 +766,7 @@ mod tests {
             300,
         );
         assert!(run.failed, "{:#?}", run);
-        assert!(
-            run.steps[0].detail.contains("timed out"),
-            "{:#?}",
-            run
-        );
+        assert!(run.steps[0].detail.contains("timed out"), "{:#?}", run);
     }
 
     #[test]

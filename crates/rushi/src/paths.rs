@@ -208,7 +208,10 @@ mod tests {
         let abs = resolve_tool_entry(&base, "/nix/store/tool-pkg/tools/bash");
         assert_eq!(abs, std::path::Path::new("/nix/store/tool-pkg/tools/bash"));
         let rel = resolve_tool_entry(&base, "tools/bash");
-        assert_eq!(rel, std::path::Path::new("/nix/store/abc-config/tools/bash"));
+        assert_eq!(
+            rel,
+            std::path::Path::new("/nix/store/abc-config/tools/bash")
+        );
     }
 
     #[test]
@@ -230,7 +233,10 @@ mod tests {
         let root_dirs = tool_dirs_in(&root.join("root"));
         let mut sorted: Vec<_> = root_dirs.clone();
         sorted.sort();
-        assert_eq!(sorted, vec![root.join("root").join("b"), root.join("root").join("c")]);
+        assert_eq!(
+            sorted,
+            vec![root.join("root").join("b"), root.join("root").join("c")]
+        );
         assert!(tool_dirs_in(&root.join("empty")).is_empty());
         assert!(tool_dirs_in(&root.join("no-such-dir")).is_empty());
     }

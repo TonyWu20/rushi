@@ -47,8 +47,7 @@ pub fn install() {
     unsafe {
         // `sighandler_t` is a size_t in this libc build; the handler
         // address is passed as its numeric value.
-        let term: libc::sighandler_t =
-            term_handler as *const () as _;
+        let term: libc::sighandler_t = term_handler as *const () as _;
         let int: libc::sighandler_t = int_handler as *const () as _;
         libc::signal(libc::SIGTERM, term);
         libc::signal(libc::SIGINT, int);

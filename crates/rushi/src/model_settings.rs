@@ -117,10 +117,8 @@ pub fn resolve_model_settings(config: &Value, name: &str) -> ModelSettings {
         base_url: val_str(mdl, "base_url").unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
         max_output_tokens: val_int(mdl, "max_output_tokens")
             .or_else(|| val_int(model_root, "max_output_tokens"))
-            .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS as i64)
-            as u64,
-        context_tokens: val_int(mdl, "context_tokens")
-            .unwrap_or(DEFAULT_CONTEXT_TOKENS as i64)
+            .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS as i64) as u64,
+        context_tokens: val_int(mdl, "context_tokens").unwrap_or(DEFAULT_CONTEXT_TOKENS as i64)
             as u64,
         reasoning_effort: val_str(mdl, "reasoning_effort")
             .or_else(|| val_str(model_root, "reasoning_effort"))
@@ -129,12 +127,10 @@ pub fn resolve_model_settings(config: &Value, name: &str) -> ModelSettings {
             .or_else(|| val_int(model_root, "estimate_chars_per_token"))
             .unwrap_or(DEFAULT_ESTIMATE_CHARS_PER_TOKEN as i64)
             .max(1) as u64,
-        api_key_env: val_str(mdl, "api_key_env")
-            .unwrap_or_else(|| DEFAULT_API_KEY_ENV.to_string()),
+        api_key_env: val_str(mdl, "api_key_env").unwrap_or_else(|| DEFAULT_API_KEY_ENV.to_string()),
         timeout_s: val_int(mdl, "timeout_s")
             .or_else(|| val_int(model_root, "model_timeout_s"))
-            .unwrap_or(DEFAULT_MODEL_TIMEOUT_S as i64)
-            as u64,
+            .unwrap_or(DEFAULT_MODEL_TIMEOUT_S as i64) as u64,
         vision: val_bool(mdl, "vision")
             .or_else(|| val_bool(model_root, "vision"))
             .unwrap_or(false),

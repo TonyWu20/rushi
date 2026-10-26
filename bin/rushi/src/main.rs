@@ -33,17 +33,21 @@ mod classifier;
 mod config;
 mod docs;
 mod run_loop;
+mod setup;
 mod signals;
 mod stage_runner;
 mod step;
 mod stream_channel;
-mod setup;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "rushi", about = "The rushi distribution: loop engine, tools, and project setup", version)]
+#[command(
+    name = "rushi",
+    about = "The rushi distribution: loop engine, tools, and project setup",
+    version
+)]
 struct Args {
     /// Path to config file (for the loop and `config` subcommands).
     /// Outranks the `$CONFIG` env var; when omitted, falls back to
@@ -213,8 +217,7 @@ fn main() {
             // the --cwd flag, else the parent of a --sessions-root
             // override, else the live process CWD (handled inside
             // run).
-            let work_dir =
-                config::working_dir_for(cwd.as_deref(), flag_sessions_root.as_deref());
+            let work_dir = config::working_dir_for(cwd.as_deref(), flag_sessions_root.as_deref());
 
             let session_dir = cfg.resolve_session(&session);
             signals::install();
@@ -254,16 +257,14 @@ fn main() {
             }
         }
 
-        Command::Config => {
-            match config::config_dump(&config_path) {
-                Ok(text) => print!("{text}"),
-                Err(e) => {
-                    eprintln!("rushi config: cannot read config {config_path:?}: {e}");
-                    eprintln!("hint: pass an explicit path with --config <file> or set CONFIG=<file>");
-                    std::process::exit(1);
-                }
+        Command::Config => match config::config_dump(&config_path) {
+            Ok(text) => print!("{text}"),
+            Err(e) => {
+                eprintln!("rushi config: cannot read config {config_path:?}: {e}");
+                eprintln!("hint: pass an explicit path with --config <file> or set CONFIG=<file>");
+                std::process::exit(1);
             }
-        }
+        },
     }
 }
 
@@ -275,14 +276,9 @@ mod tests {
     /// The `--sessions-root` flag parses and lands on the Run variant.
     #[test]
     fn run_accepts_sessions_root_flag() {
-        let args = Args::try_parse_from([
-            "rushi",
-            "run",
-            "mysess",
-            "--sessions-root",
-            "/x/sessions",
-        ])
-        .unwrap();
+        let args =
+            Args::try_parse_from(["rushi", "run", "mysess", "--sessions-root", "/x/sessions"])
+                .unwrap();
         match args.command.unwrap() {
             Command::Run {
                 session,
@@ -364,14 +360,7 @@ mod tests {
     /// The `--cwd` flag parses and is kept verbatim.
     #[test]
     fn run_accepts_cwd_flag() {
-        let args = Args::try_parse_from([
-            "rushi",
-            "run",
-            "mysess",
-            "--cwd",
-            "/w",
-        ])
-        .unwrap();
+        let args = Args::try_parse_from(["rushi", "run", "mysess", "--cwd", "/w"]).unwrap();
         match args.command.unwrap() {
             Command::Run {
                 session,
@@ -392,14 +381,7 @@ mod tests {
     /// later, in `resolve_dir_override`).
     #[test]
     fn run_cwd_accepts_relative_path() {
-        let args = Args::try_parse_from([
-            "rushi",
-            "run",
-            "mysess",
-            "--cwd",
-            "rel/w",
-        ])
-        .unwrap();
+        let args = Args::try_parse_from(["rushi", "run", "mysess", "--cwd", "rel/w"]).unwrap();
         match args.command.unwrap() {
             Command::Run { cwd, .. } => {
                 assert_eq!(cwd, Some(PathBuf::from("rel/w")));
@@ -428,8 +410,7 @@ mod tests {
     /// (callers may pass the task through `--`).
     #[test]
     fn run_accepts_task_after_escape_separator() {
-        let args = Args::try_parse_from(["rushi", "run", "mysess", "--", "-task"])
-            .unwrap();
+        let args = Args::try_parse_from(["rushi", "run", "mysess", "--", "-task"]).unwrap();
         match args.command.unwrap() {
             Command::Run { task, .. } => {
                 assert_eq!(task, Some("-task".to_string()));

@@ -9,7 +9,7 @@
 //! plain install) makes the merge a no-op.
 
 use std::path::PathBuf;
-use toml::{Value, map::Map};
+use toml::{map::Map, Value};
 
 use crate::paths::resolved_exe;
 
@@ -143,17 +143,28 @@ model_id = "top-id"
         .unwrap();
         let merged = deep_merge(&base, &top);
         assert_eq!(
-            merged.get("model").and_then(|m| m.get("x")).and_then(|x| x.get("model_id")).and_then(|v| v.as_str()),
+            merged
+                .get("model")
+                .and_then(|m| m.get("x"))
+                .and_then(|x| x.get("model_id"))
+                .and_then(|v| v.as_str()),
             Some("top-id"),
             "top scalar wins"
         );
         assert_eq!(
-            merged.get("model").and_then(|m| m.get("x")).and_then(|x| x.get("base_url")).and_then(|v| v.as_str()),
+            merged
+                .get("model")
+                .and_then(|m| m.get("x"))
+                .and_then(|x| x.get("base_url"))
+                .and_then(|v| v.as_str()),
             Some("http://base"),
             "base keys absent from top survive"
         );
         assert_eq!(
-            merged.get("limits").and_then(|l| l.get("compact_keep_tokens")).and_then(|v| v.as_integer()),
+            merged
+                .get("limits")
+                .and_then(|l| l.get("compact_keep_tokens"))
+                .and_then(|v| v.as_integer()),
             Some(20000),
             "unrelated base tables survive"
         );
@@ -187,7 +198,10 @@ compact_enabled = false
             .unwrap();
         assert_eq!(arr.len(), 1, "array replaces, never concats");
         assert_eq!(
-            merged.get("limits").and_then(|l| l.get("compact_enabled")).and_then(|v| v.as_bool()),
+            merged
+                .get("limits")
+                .and_then(|l| l.get("compact_enabled"))
+                .and_then(|v| v.as_bool()),
             Some(false),
             "top scalar wins"
         );
@@ -195,10 +209,8 @@ compact_enabled = false
 
     #[test]
     fn load_layered_with_base_merges_and_records() {
-        let dir = std::env::temp_dir().join(format!(
-            "rushi-config-layer-l1-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("rushi-config-layer-l1-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let top = dir.join("top.toml");
         let base = dir.join("base.toml");
@@ -209,18 +221,30 @@ compact_enabled = false
         )
         .unwrap();
         let layers = load_layered_with_base(&top, Some(&base)).unwrap();
-        assert_eq!(layers.value.get("system_prompt").and_then(|s| s.get("text")).and_then(|t| t.as_str()), Some("top prompt"));
-        assert_eq!(layers.value.get("active").and_then(|a| a.get("model")).and_then(|m| m.as_str()), Some("basemodel"));
+        assert_eq!(
+            layers
+                .value
+                .get("system_prompt")
+                .and_then(|s| s.get("text"))
+                .and_then(|t| t.as_str()),
+            Some("top prompt")
+        );
+        assert_eq!(
+            layers
+                .value
+                .get("active")
+                .and_then(|a| a.get("model"))
+                .and_then(|m| m.as_str()),
+            Some("basemodel")
+        );
         assert_eq!(layers.base.as_deref(), Some(base.as_path()));
         assert_eq!(layers.top.get("active"), None, "top stays unmerged");
     }
 
     #[test]
     fn load_layered_no_base_is_verbatim() {
-        let dir = std::env::temp_dir().join(format!(
-            "rushi-config-layer-l4-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("rushi-config-layer-l4-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let top = dir.join("top.toml");
         std::fs::write(&top, "[active]\nmodel = \"only\"\n").unwrap();
@@ -231,10 +255,8 @@ compact_enabled = false
 
     #[test]
     fn load_layered_same_file_parses_alone() {
-        let dir = std::env::temp_dir().join(format!(
-            "rushi-config-layer-l5-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("rushi-config-layer-l5-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("cfg.toml");
         std::fs::write(&file, "[active]\nmodel = \"solo\"\n").unwrap();
@@ -245,10 +267,8 @@ compact_enabled = false
 
     #[test]
     fn legacy_key_in_base_layer_is_a_load_error() {
-        let dir = std::env::temp_dir().join(format!(
-            "rushi-config-layer-l9-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("rushi-config-layer-l9-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let top = dir.join("top.toml");
         let base = dir.join("base.toml");
@@ -261,10 +281,8 @@ compact_enabled = false
 
     #[test]
     fn load_layered_top_errors_are_err() {
-        let dir = std::env::temp_dir().join(format!(
-            "rushi-config-layer-l10-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("rushi-config-layer-l10-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let missing = dir.join("missing.toml");
         assert!(load_layered_with_base(&missing, None::<&std::path::Path>).is_err());

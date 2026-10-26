@@ -101,8 +101,7 @@ pub fn run_awaiting_model(
         let estimated = estimate_context(cfg, &session.path);
         if cfg.trigger_level() > 0 && estimated > cfg.trigger_level() {
             let reason = CompactReason::Threshold;
-            let status =
-                try_compact_with_hooks(cfg, runner, session, reason, false, false);
+            let status = try_compact_with_hooks(cfg, runner, session, reason, false, false);
             post_compact_sanity(cfg, session, &status);
         }
     }
@@ -160,7 +159,14 @@ pub fn run_awaiting_model(
     crate::stream_channel::register(&stream_path);
 
     let (output, failure_logged) = model_retry_loop(
-        cfg, runner, session, &mut request, &guard_model, describe, mode, Some(&stream_path),
+        cfg,
+        runner,
+        session,
+        &mut request,
+        &guard_model,
+        describe,
+        mode,
+        Some(&stream_path),
     );
 
     // The call returned (success or a logged failure): close the channel.
@@ -199,8 +205,16 @@ pub fn run_awaiting_model(
                     return None;
                 }
                 Some(ToolCallEvent {
-                    id: v.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string(),
-                    name: v.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
+                    id: v
+                        .get("id")
+                        .and_then(|i| i.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    name: v
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                     arguments: v.get("arguments").cloned().unwrap_or(Value::Null),
                 })
             })
@@ -303,12 +317,25 @@ fn fire_and_handle_exhausted(
     });
     let run = run_window(cfg, session, Window::ExhaustedHandle, &payload, "step");
     let decision = resolve_strategy_window(&run).to_string();
-    log_pipeline(cfg, session, Window::ExhaustedHandle, &run, Some(&decision), Some(&payload));
+    log_pipeline(
+        cfg,
+        session,
+        Window::ExhaustedHandle,
+        &run,
+        Some(&decision),
+        Some(&payload),
+    );
 
     match decision.as_str() {
         "stay_compact" => {
-            let status =
-                try_compact_with_hooks(cfg, runner, session, CompactReason::LastResort, true, false);
+            let status = try_compact_with_hooks(
+                cfg,
+                runner,
+                session,
+                CompactReason::LastResort,
+                true,
+                false,
+            );
             if status.outcome == CompactOutcome::Compacted {
                 eprintln!("rushi: in-session shadow compact ran");
                 post_compact_sanity(cfg, session, &status);
@@ -328,7 +355,12 @@ fn fire_and_handle_exhausted(
         }
         _ => {
             let _ = try_compact_with_hooks(
-                cfg, runner, session, CompactReason::LastResort, true, false,
+                cfg,
+                runner,
+                session,
+                CompactReason::LastResort,
+                true,
+                false,
             );
             true
         }
@@ -374,7 +406,11 @@ fn apply_model_before_pipeline(
     // A state that is not a request object fails the window
     // non-blocking (P4): log the error, keep the original request.
     let is_request = run.state.is_object()
-        && run.state.get("input").map(|v| !v.is_null()).unwrap_or(false);
+        && run
+            .state
+            .get("input")
+            .map(|v| !v.is_null())
+            .unwrap_or(false);
     if !is_request {
         publish_ext_status(
             cfg,
@@ -399,8 +435,7 @@ fn apply_model_before_pipeline(
     // same-id collision. The key list is logged (keys only, never
     // the values: cache + privacy discipline).
     let mut order: Vec<String> = Vec::new();
-    let mut texts: std::collections::BTreeMap<String, String> =
-        std::collections::BTreeMap::new();
+    let mut texts: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     for src in std::iter::once(&original).chain(run.step_outputs.iter()) {
         if let Some(arr) = src.get("prompt_fragments").and_then(|f| f.as_array()) {
             for pair in arr {
@@ -444,8 +479,7 @@ fn apply_model_before_pipeline(
         if let Some(obj) = request.json.as_object_mut() {
             obj.remove("prompt_fragments");
         }
-        let ts =
-            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let marker = serde_json::json!({
             "v": 1,
             "type": "ext_status",
@@ -469,7 +503,12 @@ fn apply_model_before_pipeline(
         // One `hook_applied` marker per step that ran ok (issue #19,
         // step order). The value is the step's command (docs 4.5).
         for s in run.steps.iter().filter(|s| s.status == StepStatus::Ok) {
-            publish_ext_status(cfg, &session.path, "hook_applied", &Value::String(s.command.clone()));
+            publish_ext_status(
+                cfg,
+                &session.path,
+                "hook_applied",
+                &Value::String(s.command.clone()),
+            );
         }
     }
 }
@@ -482,6 +521,9 @@ fn apply_model_before_pipeline(
 /// `failure_logged` is `true` when a failed-attempt `error` event
 /// has already been appended to the log and the caller must skip
 /// parse (FT-031).
+// The step context is passed flat, as every other step helper in
+// this module (one caller).
+#[allow(clippy::too_many_arguments)]
 fn model_retry_loop(
     cfg: &HarnessConfig,
     runner: &SubprocessRunner,
@@ -536,7 +578,11 @@ fn model_retry_loop(
                     std::thread::sleep(std::time::Duration::from_secs(3));
                     continue;
                 }
-                append_error(cfg, &session.path, "model binary failed to run after retries");
+                append_error(
+                    cfg,
+                    &session.path,
+                    "model binary failed to run after retries",
+                );
                 return (last_output, true);
             }
         };
@@ -562,16 +608,22 @@ fn model_retry_loop(
             .get("detail")
             .and_then(|d| d.as_str())
             .unwrap_or("");
-        let req_model = request.json.get("model").and_then(|m| m.as_str()).unwrap_or("");
+        let req_model = request
+            .json
+            .get("model")
+            .and_then(|m| m.as_str())
+            .unwrap_or("");
 
         // Fire overflow.resolve on overflow classification. The
         // decision (`stay_compact` or `stop`) decides whether the
         // strategy cycle continues (docs/loop-lifecycle-hooks.md 3.4).
-        let is_overflow = !req_model.is_empty()
-            && req_model == guard_model
-            && is_overflow(detail);
+        let is_overflow = !req_model.is_empty() && req_model == guard_model && is_overflow(detail);
         if stop_reason == "error" && is_overflow {
-            let usage_val = last_output.json.get("usage").cloned().unwrap_or(Value::Null);
+            let usage_val = last_output
+                .json
+                .get("usage")
+                .cloned()
+                .unwrap_or(Value::Null);
             let ovf_decision = fire_overflow_resolve(
                 cfg,
                 session,
@@ -605,12 +657,23 @@ fn model_retry_loop(
                 }
                 if cfg.compact_enabled && !overflow_recovered {
                     overflow_recovered = true;
-                    let status =
-                        try_compact_with_hooks(cfg, runner, session, CompactReason::Overflow, false, false);
+                    let status = try_compact_with_hooks(
+                        cfg,
+                        runner,
+                        session,
+                        CompactReason::Overflow,
+                        false,
+                        false,
+                    );
                     if status.outcome != CompactOutcome::Compacted {
                         last_resort = true;
                         let _ = try_compact_with_hooks(
-                            cfg, runner, session, CompactReason::LastResort, true, false,
+                            cfg,
+                            runner,
+                            session,
+                            CompactReason::LastResort,
+                            true,
+                            false,
                         );
                         reassemble(cfg, runner, session, request, false);
                         continue;
@@ -620,7 +683,12 @@ fn model_retry_loop(
                 }
                 last_resort = true;
                 let _ = try_compact_with_hooks(
-                    cfg, runner, session, CompactReason::LastResort, true, false,
+                    cfg,
+                    runner,
+                    session,
+                    CompactReason::LastResort,
+                    true,
+                    false,
                 );
                 reassemble(cfg, runner, session, request, false);
                 continue;
@@ -645,7 +713,12 @@ fn model_retry_loop(
                     );
                     overflow_recovered = true;
                     let status = try_compact_with_hooks(
-                        cfg, runner, session, CompactReason::Overflow, false, false,
+                        cfg,
+                        runner,
+                        session,
+                        CompactReason::Overflow,
+                        false,
+                        false,
                     );
                     match status.outcome {
                         // The compact shrank the context: re-include the
@@ -681,7 +754,12 @@ fn model_retry_loop(
                         CompactOutcome::Failed => {
                             last_resort = true;
                             let _ = try_compact_with_hooks(
-                                cfg, runner, session, CompactReason::LastResort, true, false,
+                                cfg,
+                                runner,
+                                session,
+                                CompactReason::LastResort,
+                                true,
+                                false,
                             );
                             reassemble(cfg, runner, session, request, false);
                             model_err_retries = 0;
@@ -701,9 +779,7 @@ fn model_retry_loop(
                 return (last_output, true);
             }
             if model_err_retries <= 2 {
-                eprintln!(
-                    "rushi: model API error ({detail}); retry {model_err_retries}/2 in 3s"
-                );
+                eprintln!("rushi: model API error ({detail}); retry {model_err_retries}/2 in 3s");
                 std::thread::sleep(std::time::Duration::from_secs(3));
                 continue;
             }
@@ -720,7 +796,12 @@ fn model_retry_loop(
                     );
                     overflow_recovered = true;
                     let status = try_compact_with_hooks(
-                        cfg, runner, session, CompactReason::Overflow, false, false,
+                        cfg,
+                        runner,
+                        session,
+                        CompactReason::Overflow,
+                        false,
+                        false,
                     );
                     match status.outcome {
                         // The compact shrank the context: re-include the
@@ -754,7 +835,12 @@ fn model_retry_loop(
                         CompactOutcome::Failed => {
                             last_resort = true;
                             let _ = try_compact_with_hooks(
-                                cfg, runner, session, CompactReason::LastResort, true, false,
+                                cfg,
+                                runner,
+                                session,
+                                CompactReason::LastResort,
+                                true,
+                                false,
                             );
                             reassemble(cfg, runner, session, request, false);
                             model_err_retries = 0;
@@ -785,11 +871,21 @@ fn model_retry_loop(
                 {
                     if cfg.compact_enabled {
                         let _ = try_compact_with_hooks(
-                            cfg, runner, session, CompactReason::Overflow, false, false,
+                            cfg,
+                            runner,
+                            session,
+                            CompactReason::Overflow,
+                            false,
+                            false,
                         );
                     } else {
                         let _ = try_compact_with_hooks(
-                            cfg, runner, session, CompactReason::LastResort, true, false,
+                            cfg,
+                            runner,
+                            session,
+                            CompactReason::LastResort,
+                            true,
+                            false,
                         );
                     }
                 }
@@ -821,7 +917,12 @@ fn model_retry_loop(
                 }
                 last_resort = true;
                 let _ = try_compact_with_hooks(
-                    cfg, runner, session, CompactReason::LastResort, true, true,
+                    cfg,
+                    runner,
+                    session,
+                    CompactReason::LastResort,
+                    true,
+                    true,
                 );
                 reassemble(cfg, runner, session, request, false);
                 continue;
@@ -872,11 +973,7 @@ fn reassemble(
 /// section 9.8) as a `hard_trim` ext_status event and strip it from
 /// the request: the marker is a log record only. The wire form the
 /// provider sees must not carry it.
-fn log_and_strip_hard_trim(
-    cfg: &HarnessConfig,
-    session: &SessionDir,
-    request: &mut RequestFile,
-) {
+fn log_and_strip_hard_trim(cfg: &HarnessConfig, session: &SessionDir, request: &mut RequestFile) {
     let Some(marker) = request.json.get("hard_trim").cloned() else {
         return;
     };
@@ -925,7 +1022,11 @@ fn log_truncated_group(cfg: &HarnessConfig, session: &SessionDir, output: &Value
     });
     append_event(cfg, &session.path, &assistant);
     for call in &calls {
-        let id = call.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+        let id = call
+            .get("id")
+            .and_then(|i| i.as_str())
+            .unwrap_or("")
+            .to_string();
         let result = serde_json::json!({
             "v": 1,
             "type": "tool_result",
@@ -1010,7 +1111,8 @@ mod tests {
 
     /// Read back the values of all `hook_applied` markers, in log order.
     fn hook_applied_values(session_dir: &Path) -> Vec<Value> {
-        let data = rushi_common::logstream::read_log_text(&session_dir.join("events.jsonl")).unwrap();
+        let data =
+            rushi_common::logstream::read_log_text(&session_dir.join("events.jsonl")).unwrap();
         data.lines()
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
             .filter(|v| {
@@ -1036,9 +1138,13 @@ mod tests {
 
         let original = serde_json::json!({ "model": "m1", "instructions": "base", "input": [] });
         let step1_out = serde_json::json!({ "model": "m1", "instructions": "base", "input": [] });
-        let final_state = serde_json::json!({ "model": "m2", "instructions": "base instructions", "input": [] });
+        let final_state =
+            serde_json::json!({ "model": "m2", "instructions": "base instructions", "input": [] });
         let run = model_before_run(
-            &[(StepStatus::Ok, "harness-hook-goal-arm"), (StepStatus::Ok, "harness-simple-english")],
+            &[
+                (StepStatus::Ok, "harness-hook-goal-arm"),
+                (StepStatus::Ok, "harness-simple-english"),
+            ],
             final_state,
             vec![step1_out],
         );
@@ -1059,7 +1165,10 @@ mod tests {
             "markers must be in step order"
         );
         // The transform itself must have landed.
-        assert_eq!(request.json.get("model").and_then(|m| m.as_str()), Some("m2"));
+        assert_eq!(
+            request.json.get("model").and_then(|m| m.as_str()),
+            Some("m2")
+        );
     }
 
     /// A mixed chain (noop, ok, ok) emits one marker per step that
@@ -1088,9 +1197,7 @@ mod tests {
             vec![step1_out, step2_out],
         );
 
-        let mut request = RequestFile {
-            json: original,
-        };
+        let mut request = RequestFile { json: original };
         apply_model_before_pipeline(&cfg, &session, &run, &mut request);
 
         let values = hook_applied_values(&session_dir);
@@ -1133,7 +1240,10 @@ mod tests {
             "prompt_fragments": [["goal", "goal-fragment"]]
         });
         let run = model_before_run(
-            &[(StepStatus::Ok, "harness-hook-goal-arm"), (StepStatus::Ok, "harness-simple-english")],
+            &[
+                (StepStatus::Ok, "harness-hook-goal-arm"),
+                (StepStatus::Ok, "harness-simple-english"),
+            ],
             step_out.clone(),
             vec![step_out],
         );
@@ -1151,12 +1261,16 @@ mod tests {
         // The applied request is back to the original.
         assert_eq!(request.json, original);
         // The `hook.model.before` resolution marker is still logged.
-        let data = rushi_common::logstream::read_log_text(&session_dir.join("events.jsonl")).unwrap();
+        let data =
+            rushi_common::logstream::read_log_text(&session_dir.join("events.jsonl")).unwrap();
         let resolutions = data
             .lines()
             .filter(|l| l.contains("\"id\":\"hook.model.before\""))
             .count();
-        assert_eq!(resolutions, 1, "the resolution marker stays logged on a no-op chain");
+        assert_eq!(
+            resolutions, 1,
+            "the resolution marker stays logged on a no-op chain"
+        );
     }
 
     /// issue #24 (pipeline form): key order is irrelevant to the
@@ -1206,9 +1320,11 @@ mod tests {
         LogLine::from_json(r#"{"v":1,"type":"user_message","ts":"t","content":"hi"}"#)
             .commit(&log)
             .unwrap();
-        LogLine::from_json(r#"{"v":1,"type":"ext_status","ts":"t","id":"model_thinking","value":3}"#)
-            .commit(&log)
-            .unwrap();
+        LogLine::from_json(
+            r#"{"v":1,"type":"ext_status","ts":"t","id":"model_thinking","value":3}"#,
+        )
+        .commit(&log)
+        .unwrap();
         assert_eq!(read_last_model_thinking(&session_dir), Some(3));
         // A marker past the 4096-line window is a miss, as before.
         for i in 0..4096 {
@@ -1254,9 +1370,7 @@ mod tests {
             vec![final_state],
         );
 
-        let mut request = RequestFile {
-            json: original,
-        };
+        let mut request = RequestFile { json: original };
         apply_model_before_pipeline(&cfg, &session, &run, &mut request);
 
         let values = hook_applied_values(&session_dir);

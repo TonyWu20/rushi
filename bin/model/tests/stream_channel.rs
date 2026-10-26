@@ -66,6 +66,10 @@ fn delta_file_grows_while_response_streams() {
     std::fs::File::create(&stream_path).unwrap();
 
     let request = r#"{"messages":[]}"#;
+    // The sampling loop below polls `try_wait`; its final `Ok(status)`
+    // reaps the child, so no path leaks a zombie. The lint cannot see
+    // through the poll loop.
+    #[allow(clippy::zombie_processes)]
     let mut child = Command::new(env!("CARGO_BIN_EXE_model"))
         .arg("--config")
         .arg(&cfg_path)
@@ -90,7 +94,11 @@ fn delta_file_grows_while_response_streams() {
     while status.is_none() {
         match child.try_wait() {
             Ok(None) => {
-                samples.push(std::fs::metadata(&stream_path).map(|m| m.len()).unwrap_or(0));
+                samples.push(
+                    std::fs::metadata(&stream_path)
+                        .map(|m| m.len())
+                        .unwrap_or(0),
+                );
                 thread::sleep(Duration::from_millis(50));
             }
             Ok(s) => status = s,
@@ -105,8 +113,7 @@ fn delta_file_grows_while_response_streams() {
     let mut err_pipe = child.stderr.take().unwrap();
     let mut err_buf = String::new();
     err_pipe.read_to_string(&mut err_buf).unwrap();
-    let stdout: serde_json::Value =
-        serde_json::from_str(&stdout_buf).unwrap_or(Value::Null);
+    let stdout: serde_json::Value = serde_json::from_str(&stdout_buf).unwrap_or(Value::Null);
 
     // The channel grew while the call was in flight: empty at first,
     // strictly partial in the middle, complete only at the end.
@@ -115,15 +122,12 @@ fn delta_file_grows_while_response_streams() {
         final_size > 0,
         "the channel must carry the stream (stdout: {stdout_buf}; stderr: {err_buf})"
     );
-    let first_grow = samples
-        .iter()
-        .position(|&s| s > 0)
-        .unwrap_or_else(|| {
-            panic!(
-                "the channel fills during the call, not after (samples {samples:?}; \
+    let first_grow = samples.iter().position(|&s| s > 0).unwrap_or_else(|| {
+        panic!(
+            "the channel fills during the call, not after (samples {samples:?}; \
                  stdout: {stdout_buf}; stderr: {err_buf})"
-            )
-        });
+        )
+    });
     assert!(
         first_grow > 0,
         "the channel is empty before the first delta lands: {samples:?}"
@@ -137,7 +141,11 @@ fn delta_file_grows_while_response_streams() {
     // marker; the stdout JSON carries the settled full text.
     let stream_text = std::fs::read_to_string(&stream_path).unwrap();
     let lines = stream_text.lines().collect::<Vec<_>>();
-    assert_eq!(lines.len(), 4, "three deltas plus the close marker: {lines:?}");
+    assert_eq!(
+        lines.len(),
+        4,
+        "three deltas plus the close marker: {lines:?}"
+    );
     let mut acc = String::new();
     for l in &lines[..3] {
         let v: serde_json::Value = serde_json::from_str(l).unwrap();

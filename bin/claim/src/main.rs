@@ -16,7 +16,6 @@ struct Args {
     /// Session directory path
     #[arg(long)]
     session: String,
-
 }
 
 fn main() {
@@ -118,9 +117,7 @@ fn main() {
 /// arrived after the call's context was assembled, so that call
 /// did not see it; the turn boundary must not idle the loop in
 /// that case.
-fn derive_state(
-    lines: &str,
-) -> (String, usize, Vec<serde_json::Value>, Vec<usize>) {
+fn derive_state(lines: &str) -> (String, usize, Vec<serde_json::Value>, Vec<usize>) {
     let mut last_user_message_seq: usize = 0;
     let mut state = "idle".to_string();
     let mut pending_tool_calls: Vec<serde_json::Value> = Vec::new();
@@ -260,27 +257,26 @@ fn derive_state(
                     .and_then(|t| t.as_u64())
                     .map(|t| t as usize)
                     .unwrap_or(0);
-                let before = event
-                    .get("mode")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("")
-                    == "before";
-                let owed = !before
-                    && seq_types.get(&target).is_some_and(|t| t == "tool_result");
-                state = if owed { "awaiting_model".to_string() } else { "idle".to_string() };
+                let before = event.get("mode").and_then(|m| m.as_str()).unwrap_or("") == "before";
+                let owed = !before && seq_types.get(&target).is_some_and(|t| t == "tool_result");
+                state = if owed {
+                    "awaiting_model".to_string()
+                } else {
+                    "idle".to_string()
+                };
             }
-            "ext_status" => {
+            "ext_status"
+                if event.get("id").and_then(|s| s.as_str()) == Some("model_call_context") =>
+            {
                 // P7 delivery-boundary marker (docs/tui-pending-user-
                 // messages.md): `value.user_seq` is the last user
                 // message seq the just-started model call saw.
-                if event.get("id").and_then(|s| s.as_str()) == Some("model_call_context") {
-                    if let Some(n) = event
-                        .get("value")
-                        .and_then(|v| v.get("user_seq"))
-                        .and_then(|n| n.as_u64())
-                    {
-                        delivered_user_seq = Some(n as usize);
-                    }
+                if let Some(n) = event
+                    .get("value")
+                    .and_then(|v| v.get("user_seq"))
+                    .and_then(|n| n.as_u64())
+                {
+                    delivered_user_seq = Some(n as usize);
                 }
             }
             // The rest, including `error` (FT-031): an `error`
@@ -333,7 +329,12 @@ fn derive_state(
         state = "awaiting_approval".to_string();
     }
 
-    (state, last_user_message_seq, pending_tool_calls, pending_follow_ups)
+    (
+        state,
+        last_user_message_seq,
+        pending_tool_calls,
+        pending_follow_ups,
+    )
 }
 
 #[cfg(test)]
@@ -421,11 +422,9 @@ mod tests {
     /// compacts in place stays idle, with no pending work.
     #[test]
     fn compaction_markers_leave_idle_unchanged() {
-        let done = line(
-            &serde_json::json!({
-                "v":1,"type":"assistant_message","ts":"t","content":"done","tool_calls":[],"stop_reason":"stop"
-            }),
-        );
+        let done = line(&serde_json::json!({
+            "v":1,"type":"assistant_message","ts":"t","content":"done","tool_calls":[],"stop_reason":"stop"
+        }));
         for m in [
             r#"{"v":1,"type":"compaction_started","ts":"t","reason":"overflow","tokens_before":0}"#,
             r#"{"v":1,"type":"compaction_failed","ts":"t","reason":"threshold","detail":"d","last_user_seq":0}"#,
@@ -462,7 +461,9 @@ mod tests {
     /// and the message rides `pending_follow_ups`.
     #[test]
     fn follow_message_keeps_idle_and_counts() {
-        let log = line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"later","queue":"follow"}));
+        let log = line(
+            &serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"later","queue":"follow"}),
+        );
         let (state, seq, pending, follows) = derive_state(&log);
         assert_eq!(state, "idle", "follow wakes no work");
         assert_eq!(seq, 1);
@@ -484,7 +485,9 @@ mod tests {
     /// An explicit steer queue value behaves like the missing field.
     #[test]
     fn explicit_steer_wakes_the_model() {
-        let log = line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"now","queue":"steer"}));
+        let log = line(
+            &serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"now","queue":"steer"}),
+        );
         let (state, _, _, follows) = derive_state(&log);
         assert_eq!(state, "awaiting_model");
         assert!(follows.is_empty());
@@ -497,8 +500,12 @@ mod tests {
         let log = format!(
             "{}\n{}\n{}",
             line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"go"})),
-            line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"later","queue":"follow"})),
-            line(&serde_json::json!({"v":1,"type":"assistant_message","ts":"t","content":"done","tool_calls":[],"stop_reason":"stop"}))
+            line(
+                &serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"later","queue":"follow"})
+            ),
+            line(
+                &serde_json::json!({"v":1,"type":"assistant_message","ts":"t","content":"done","tool_calls":[],"stop_reason":"stop"})
+            )
         );
         let (state, _, _, follows) = derive_state(&log);
         assert_eq!(state, "idle");
@@ -511,7 +518,9 @@ mod tests {
     fn steer_and_follow_coexist() {
         let log = format!(
             "{}\n{}",
-            line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"later","queue":"follow"})),
+            line(
+                &serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"later","queue":"follow"})
+            ),
             line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"now"}))
         );
         let (state, _, _, follows) = derive_state(&log);
@@ -527,27 +536,25 @@ mod tests {
     }
 
     fn assistant_with_call() -> String {
-        line(
-            &serde_json::json!({
-                "v":1,"type":"assistant_message","ts":"t","content":"",
-                "tool_calls":[{"id":"tc1","name":"bash","arguments":{"cmd":"x"}}],
-                "stop_reason":"tool_calls"
-            }),
-        )
+        line(&serde_json::json!({
+            "v":1,"type":"assistant_message","ts":"t","content":"",
+            "tool_calls":[{"id":"tc1","name":"bash","arguments":{"cmd":"x"}}],
+            "stop_reason":"tool_calls"
+        }))
     }
 
     fn assistant_no_call() -> String {
-        line(
-            &serde_json::json!({
-                "v":1,"type":"assistant_message","ts":"t","content":"done",
-                "tool_calls":[],
-                "stop_reason":"stop"
-            }),
-        )
+        line(&serde_json::json!({
+            "v":1,"type":"assistant_message","ts":"t","content":"done",
+            "tool_calls":[],
+            "stop_reason":"stop"
+        }))
     }
 
     fn tool_call() -> String {
-        line(&serde_json::json!({"v":1,"type":"tool_call","ts":"t","id":"tc1","name":"bash","arguments":{"cmd":"x"}}))
+        line(
+            &serde_json::json!({"v":1,"type":"tool_call","ts":"t","id":"tc1","name":"bash","arguments":{"cmd":"x"}}),
+        )
     }
 
     fn approval_request(id: &str) -> String {
@@ -562,7 +569,9 @@ mod tests {
     }
 
     fn tool_result() -> String {
-        line(&serde_json::json!({"v":1,"type":"tool_result","ts":"t","id":"tc1","value":{},"is_error":false}))
+        line(
+            &serde_json::json!({"v":1,"type":"tool_result","ts":"t","id":"tc1","value":{},"is_error":false}),
+        )
     }
 
     fn error_event() -> String {
@@ -570,7 +579,9 @@ mod tests {
     }
 
     fn context_exhausted() -> String {
-        line(&serde_json::json!({"v":1,"type":"context_exhausted","ts":"t","message":"m","new_session":""}))
+        line(
+            &serde_json::json!({"v":1,"type":"context_exhausted","ts":"t","message":"m","new_session":""}),
+        )
     }
 
     /// An unanswered request puts the session in the wait.
@@ -692,11 +703,7 @@ mod tests {
     /// sessions carry, and it now resumes as-is (FT-031).
     #[test]
     fn error_after_steer_keeps_awaiting_model() {
-        let log = format!(
-            "{}\n{}",
-            user_msg(),
-            error_event()
-        );
+        let log = format!("{}\n{}", user_msg(), error_event());
         let (state, seq, pending, follows) = derive_state(&log);
         assert_eq!(state, "awaiting_model", "the failed call is still owed");
         assert_eq!(seq, 1);
@@ -708,17 +715,17 @@ mod tests {
     /// ride the resumed model call as a new turn (FT-031).
     #[test]
     fn error_keeps_the_pending_follow_ups() {
-        let follow =
-            line(&serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"later","queue":"follow"}));
-        let log = format!(
-            "{}\n{}\n{}",
-            user_msg(),
-            follow,
-            error_event()
+        let follow = line(
+            &serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"later","queue":"follow"}),
         );
+        let log = format!("{}\n{}\n{}", user_msg(), follow, error_event());
         let (state, _, _, follows) = derive_state(&log);
         assert_eq!(state, "awaiting_model");
-        assert_eq!(follows, vec![2], "the queued follow-up survives the failure");
+        assert_eq!(
+            follows,
+            vec![2],
+            "the queued follow-up survives the failure"
+        );
     }
 
     /// An error after unresolved tool calls keeps the tool wait:
@@ -765,11 +772,7 @@ mod tests {
     /// nothing after it (FT-031).
     #[test]
     fn error_after_the_handoff_marker_stays_exhausted() {
-        let log = format!(
-            "{}\n{}",
-            context_exhausted(),
-            error_event()
-        );
+        let log = format!("{}\n{}", context_exhausted(), error_event());
         let (state, _, _, _) = derive_state(&log);
         assert_eq!(state, "exhausted");
     }
@@ -847,7 +850,10 @@ mod tests {
         ]
         .join("\n");
         let (state, _, pending, _) = derive_state(&log);
-        assert_eq!(state, "awaiting_model", "the finished step owes its model call");
+        assert_eq!(
+            state, "awaiting_model",
+            "the finished step owes its model call"
+        );
         assert!(pending.is_empty());
     }
 
@@ -932,10 +938,10 @@ mod tests {
     #[test]
     fn steer_logged_during_inflight_call_keeps_awaiting_model() {
         let log = [
-            user_msg(),                      // seq 1: in the call context
-            marker(1),                       // call saw user msgs up to seq 1
-            user_msg(),                      // seq 3: typed while call runs
-            assistant_no_call(),             // seq 4: that call's turn boundary
+            user_msg(),          // seq 1: in the call context
+            marker(1),           // call saw user msgs up to seq 1
+            user_msg(),          // seq 3: typed while call runs
+            assistant_no_call(), // seq 4: that call's turn boundary
         ]
         .join("\n");
         let (state, _, pending, follows) = derive_state(&log);
@@ -948,12 +954,7 @@ mod tests {
     /// steer message, the turn boundary idles the session as before.
     #[test]
     fn delivered_steer_message_turn_boundary_stays_idle() {
-        let log = [
-            user_msg(),
-            marker(1),
-            assistant_no_call(),
-        ]
-        .join("\n");
+        let log = [user_msg(), marker(1), assistant_no_call()].join("\n");
         let (state, _, pending, _) = derive_state(&log);
         assert_eq!(state, "idle", "nothing owed after a fully delivered turn");
         assert!(pending.is_empty());
@@ -964,11 +965,7 @@ mod tests {
     /// regression for pre-P7 sessions.
     #[test]
     fn legacy_log_without_markers_stays_idle() {
-        let log = [
-            user_msg(),
-            assistant_no_call(),
-        ]
-        .join("\n");
+        let log = [user_msg(), assistant_no_call()].join("\n");
         let (state, _, _, _) = derive_state(&log);
         assert_eq!(state, "idle");
     }

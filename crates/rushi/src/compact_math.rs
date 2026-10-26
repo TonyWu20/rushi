@@ -101,11 +101,7 @@ pub fn est_tokens(ev: &Ev, caps: &Caps) -> u64 {
 ///
 /// This mirrors pi's `estimateContextTokens`: the measured value is
 /// authoritative, the trailing estimate fills the gap.
-pub fn estimate_context(
-    measured_input: u64,
-    trailing_events: &[Ev],
-    caps: &Caps,
-) -> u64 {
+pub fn estimate_context(measured_input: u64, trailing_events: &[Ev], caps: &Caps) -> u64 {
     let trailing: u64 = trailing_events.iter().map(|e| est_tokens(e, caps)).sum();
     measured_input + trailing
 }
@@ -155,7 +151,10 @@ pub fn full_form_estimate(evs: &[Ev], caps: &Caps) -> u64 {
 /// path (nothing to anchor on).
 pub fn estimate_from_events(events: &[Value], cpts: u64) -> u64 {
     let cpts = cpts.max(1);
-    let caps = Caps { text: None, chars_per_token: cpts };
+    let caps = Caps {
+        text: None,
+        chars_per_token: cpts,
+    };
 
     let rewinds: Vec<crate::rewind::RewindRef> = events
         .iter()
@@ -179,8 +178,7 @@ pub fn estimate_from_events(events: &[Value], cpts: u64) -> u64 {
     // P11) sits on the active path as an add-on, its sentinel
     // `first_kept_seq` of 1 must never reset the keep region.
     let boundary = active_events.iter().rposition(|(_, v)| {
-        v.get("type").and_then(|t| t.as_str()) == Some("compaction_summary")
-            && !is_branch_marker(v)
+        v.get("type").and_then(|t| t.as_str()) == Some("compaction_summary") && !is_branch_marker(v)
     });
 
     if let Some(b) = boundary {
@@ -327,8 +325,7 @@ pub fn est_tokens_after_with_caps(kept: &[Ev], handoff_doc: &str, caps: &Caps) -
         text: None,
         chars_per_token: caps.chars_per_token,
     };
-    let framing: u64 =
-        handoff_doc.chars().count() as u64 / full_caps.chars_per_token.max(1) + 64;
+    let framing: u64 = handoff_doc.chars().count() as u64 / full_caps.chars_per_token.max(1) + 64;
     let mut total = framing;
     for ev in kept.iter() {
         total += est_tokens(ev, &full_caps);
@@ -339,11 +336,7 @@ pub fn est_tokens_after_with_caps(kept: &[Ev], handoff_doc: &str, caps: &Caps) -
 /// The post-compact sanity check: compare the projected post-compact
 /// size to the trigger level. If it still meets or exceeds the trigger,
 /// the compact is not helping and a warning is returned.
-pub fn post_compact_sanity(
-    kept: &[Ev],
-    handoff_doc: &str,
-    trigger_level: u64,
-) -> bool {
+pub fn post_compact_sanity(kept: &[Ev], handoff_doc: &str, trigger_level: u64) -> bool {
     est_tokens_after(kept, handoff_doc) > trigger_level
 }
 
@@ -354,13 +347,15 @@ pub fn project_event(v: &Value) -> Ev {
     let t = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
     match t {
         "user_message" => Ev::User {
-            text: v.get("content")
+            text: v
+                .get("content")
                 .and_then(|c| c.as_str())
                 .unwrap_or("")
                 .to_string(),
         },
         "assistant_message" => {
-            let text = v.get("content")
+            let text = v
+                .get("content")
                 .and_then(|x| x.as_str())
                 .unwrap_or("")
                 .to_string();
@@ -393,7 +388,8 @@ pub fn project_event(v: &Value) -> Ev {
             }
         }
         "tool_result" => {
-            let base_chars: u64 = v.get("value")
+            let base_chars: u64 = v
+                .get("value")
                 .and_then(|o| o.get("text"))
                 .and_then(|s| s.as_str())
                 .map(|s| s.chars().count() as u64)
@@ -407,7 +403,8 @@ pub fn project_event(v: &Value) -> Ev {
                 .eq(&Some("image")) as u64
                 * 4800;
             Ev::Result {
-                call_id: v.get("id")
+                call_id: v
+                    .get("id")
                     .and_then(|c| c.as_str())
                     .unwrap_or("")
                     .to_string(),
@@ -500,10 +497,7 @@ pub fn handoff_version_meta(events: &[Value]) -> (u64, u64, u64) {
         }
         count += 1;
         // Track the most recent boundary's first_kept_seq.
-        if let Some(fk) = v
-            .get("first_kept_seq")
-            .and_then(|f| f.as_u64())
-        {
+        if let Some(fk) = v.get("first_kept_seq").and_then(|f| f.as_u64()) {
             parent_first_kept = fk;
         }
     }
@@ -518,10 +512,7 @@ pub fn handoff_version_meta(events: &[Value]) -> (u64, u64, u64) {
 /// per `branch_of` value: the version of the next branch marker is the
 /// count of every existing `branch_of` marker plus one.
 pub fn branch_version_meta(events: &[Value]) -> u64 {
-    let n = events
-        .iter()
-        .filter(|v| is_branch_marker(v))
-        .count() as u64;
+    let n = events.iter().filter(|v| is_branch_marker(v)).count() as u64;
     n + 1
 }
 
@@ -700,15 +691,10 @@ mod tests {
         assert_eq!(trigger_level_for(1, 0), 0);
     }
 
-
-
     #[test]
     fn full_form_estimate_sums_the_projected_events() {
         let caps = Caps::default();
-        let evs = vec![
-            ev_user(&"a".repeat(400)),
-            ev_res("1", &"x".repeat(4000)),
-        ];
+        let evs = vec![ev_user(&"a".repeat(400)), ev_res("1", &"x".repeat(4000))];
         assert_eq!(full_form_estimate(&evs, &caps), 100 + 1000);
         assert_eq!(full_form_estimate(&[], &caps), 0);
     }
@@ -764,7 +750,10 @@ mod tests {
             jv_user(5, "next"),
         ];
         let est_no_rw = estimate_from_events(&no_rewind, 4);
-        assert!(est_no_rw > 12000, "without masking the big result inflates the estimate");
+        assert!(
+            est_no_rw > 12000,
+            "without masking the big result inflates the estimate"
+        );
         assert!(est < est_no_rw, "rewind-aware estimate must be smaller");
     }
 
@@ -816,7 +805,10 @@ mod tests {
         // trailing after asst(4) = user(5, 800 chars) -> 200
         // estimate = 5000 + 300 + 200 = 5500 (no margin, no summary re-add)
         let est = estimate_from_events(&events, 4);
-        assert_eq!(est, 5500, "boundary path must anchor on the measured reading");
+        assert_eq!(
+            est, 5500,
+            "boundary path must anchor on the measured reading"
+        );
 
         // Same shape, but the kept region holds no measured reading:
         // the estimate must fall back to the chars/cpts + margin path.
@@ -838,19 +830,25 @@ mod tests {
         // The capped and uncapped totals straddle the keep budget, so
         // find_cut produces different cut points under each cap set.
         let evs = vec![
-            ev_user("task"),                              // 1 token
-            ev_asst("step one"),                          // 2 tokens
-            ev_res("1", &"x".repeat(2000)),               // 500 tokens
+            ev_user("task"),                // 1 token
+            ev_asst("step one"),            // 2 tokens
+            ev_res("1", &"x".repeat(2000)), // 500 tokens
             Ev::Assistant {
-                text: "a".repeat(4000),                   // 1000 uncapped, 50 capped
+                text: "a".repeat(4000), // 1000 uncapped, 50 capped
                 calls: vec![],
                 reasoning_chars: 0,
             },
-            ev_res("2", &"y".repeat(2000)),               // 500 tokens
+            ev_res("2", &"y".repeat(2000)), // 500 tokens
         ];
 
-        let uncapped_caps = Caps { text: None, chars_per_token: 4 };
-        let capped_caps = Caps { text: Some(200), chars_per_token: 4 };
+        let uncapped_caps = Caps {
+            text: None,
+            chars_per_token: 4,
+        };
+        let capped_caps = Caps {
+            text: Some(200),
+            chars_per_token: 4,
+        };
 
         // Uncapped: 1 + 2 + 500 + 1000 + 500 = 2003
         let full_total = full_form_estimate(&evs, &uncapped_caps);
@@ -868,7 +866,10 @@ mod tests {
         assert_eq!(cut_capped, 0, "capped estimate fits, so nothing is cut");
         // Uncapped total (2003) > 1500 → walk stops at the long asst
         // (group start), orphan check sees a Result before it, no pull.
-        assert_eq!(cut_uncapped, 3, "uncapped estimate exceeds budget, cut lands at the long assistant");
+        assert_eq!(
+            cut_uncapped, 3,
+            "uncapped estimate exceeds budget, cut lands at the long assistant"
+        );
     }
 
     // ── handoff_version_meta tests ──────────────────────────────
@@ -942,7 +943,10 @@ mod tests {
         let (v, pv, ds) = handoff_version_meta(&events);
         assert_eq!(v, 3, "third compaction is version 3");
         assert_eq!(pv, 2, "parent is the most recent boundary");
-        assert_eq!(ds, 15, "diverge point is the last boundary's first_kept_seq");
+        assert_eq!(
+            ds, 15,
+            "diverge point is the last boundary's first_kept_seq"
+        );
     }
 
     /// P11 support (docs/branch-summarize-cases.md): a branch marker
@@ -987,10 +991,18 @@ mod tests {
             jv_compaction_branch(2, 8),
             jv_compaction_branch(3, 11),
         ];
-        assert_eq!(branch_version_meta(&events), 4, "three branch markers, next is 4");
+        assert_eq!(
+            branch_version_meta(&events),
+            4,
+            "three branch markers, next is 4"
+        );
         // A plain marker does not advance the branch counter.
         let mixed: Vec<Value> = vec![jv_compaction_v2(1, 8), jv_compaction_branch(1, 8)];
-        assert_eq!(branch_version_meta(&mixed), 2, "only branch_of markers count");
+        assert_eq!(
+            branch_version_meta(&mixed),
+            2,
+            "only branch_of markers count"
+        );
         // An empty log starts the counter at 1.
         assert_eq!(branch_version_meta(&[]), 1);
     }
@@ -1011,7 +1023,10 @@ mod tests {
         let (v, pv, ds) = handoff_version_meta(&events);
         assert_eq!(v, 3, "two plain markers, next handoff is version 3");
         assert_eq!(pv, 2, "parent is the last plain marker, not a branch one");
-        assert_eq!(ds, 15, "diverge point is the last plain marker's first_kept_seq");
+        assert_eq!(
+            ds, 15,
+            "diverge point is the last plain marker's first_kept_seq"
+        );
         // A branch marker alone never starts the handoff namespace.
         let only_branch: Vec<Value> = vec![jv_compaction_branch(1, 8)];
         let (v, pv, ds) = handoff_version_meta(&only_branch);
@@ -1023,13 +1038,11 @@ mod tests {
     #[test]
     fn version_meta_legacy_events_without_version() {
         // Simulate old events that lack the version field.
-        let events: Vec<Value> = vec![
-            serde_json::json!({
-                "v": 1, "type": "compaction_summary", "ts": "t",
-                "summary": "s", "first_kept_seq": 10,
-                "reason": "threshold", "tokens_before": 0
-            }),
-        ];
+        let events: Vec<Value> = vec![serde_json::json!({
+            "v": 1, "type": "compaction_summary", "ts": "t",
+            "summary": "s", "first_kept_seq": 10,
+            "reason": "threshold", "tokens_before": 0
+        })];
         let (v, pv, ds) = handoff_version_meta(&events);
         assert_eq!(v, 2, "version is count+1 regardless of field presence");
         assert_eq!(pv, 1, "parent is the one existing boundary");

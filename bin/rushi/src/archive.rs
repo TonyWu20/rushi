@@ -37,7 +37,10 @@ pub fn consolidate_session(session_dir: &Path) -> io::Result<()> {
 /// `LogLine` commit takes. The rename inside `consolidate` swaps
 /// the file while the lock is held, so no commit lands mid-swap.
 fn consolidate_locked(path: &Path) -> io::Result<()> {
-    let file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
     let fd = file.as_raw_fd();
     if unsafe { libc::flock(fd, libc::LOCK_EX) } != 0 {
         return Err(io::Error::last_os_error());
@@ -64,8 +67,8 @@ pub fn run_auto_pass(cfg: &crate::config::HarnessConfig, session_dir: &Path, rea
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rushi_common::logstream;
     use rushi_common::logline::LogLine;
+    use rushi_common::logstream;
 
     /// Count the zstd frames in a log stream: one magic byte hit
     /// per frame head, scanned on the raw bytes.
@@ -93,9 +96,12 @@ mod tests {
     /// whole stream, the whole decoded text (P8).
     fn assert_consolidated_index(log: &Path, expected_text: &str) {
         let raw = std::fs::read(log).unwrap();
-        let records =
-            logstream::read_index(&logstream::index_path(log)).unwrap();
-        assert_eq!(records.len(), 1, "the consolidated frame carries one record");
+        let records = logstream::read_index(&logstream::index_path(log)).unwrap();
+        assert_eq!(
+            records.len(),
+            1,
+            "the consolidated frame carries one record"
+        );
         let r = &records[0];
         assert_eq!(r.seq_start, 1);
         assert_eq!(r.frame_offset, 0);
@@ -117,18 +123,19 @@ mod tests {
             .commit(&ev)
             .unwrap();
         let tl = sess.join("tools.jsonl");
-        LogLine::from_json(r#"{"v":1,"ts":"t","id":"c1","exit":0,"stdout":"s","stderr":"","text":"s"}"#)
-            .commit(&tl)
-            .unwrap();
+        LogLine::from_json(
+            r#"{"v":1,"ts":"t","id":"c1","exit":0,"stdout":"s","stderr":"","text":"s"}"#,
+        )
+        .commit(&tl)
+        .unwrap();
         assert_eq!(frame_count(&ev), 2, "two per-commit frames");
         consolidate_session(&sess).unwrap();
         assert_eq!(frame_count(&ev), 1, "one consolidated frame");
         assert_eq!(frame_count(&tl), 1, "one consolidated frame");
-        let expected = String::from(
-                r#"{"v":1,"type":"user_message","ts":"t","content":"one"}"#,
-            ) + "\n"
-                + r#"{"v":1,"type":"user_message","ts":"t","content":"two"}"#
-                + "\n";
+        let expected = String::from(r#"{"v":1,"type":"user_message","ts":"t","content":"one"}"#)
+            + "\n"
+            + r#"{"v":1,"type":"user_message","ts":"t","content":"two"}"#
+            + "\n";
         assert_eq!(logstream::read_log_text(&ev).unwrap(), expected);
         // P8: the index pair rewrites with the stream.
         assert_consolidated_index(&ev, &expected);

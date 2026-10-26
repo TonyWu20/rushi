@@ -59,12 +59,8 @@ fn loop_block(tokens: &[String], sleep_idxs: &[usize], max_s: f64) -> Option<Blo
     }
 
     // for: bounded by iteration count * per-iteration sleep.
-    let Some(f) = tokens.iter().position(|t| t == "for") else {
-        return None;
-    };
-    let Some(body) = for_body(tokens, f) else {
-        return None;
-    };
+    let f = tokens.iter().position(|t| t == "for")?;
+    let body = for_body(tokens, f)?;
     // The loop only matters when its body contains a `sleep`.
     if !body.iter().any(|&k| sleep_idxs.contains(&k)) {
         return None;
@@ -75,9 +71,7 @@ fn loop_block(tokens: &[String], sleep_idxs: &[usize], max_s: f64) -> Option<Blo
         .copied()
         .filter(|&k| sleep_idxs.contains(&k))
         .collect();
-    let per_iter_known = sleeps
-        .iter()
-        .all(|&k| sleep_wait_secs(tokens, k).is_some());
+    let per_iter_known = sleeps.iter().all(|&k| sleep_wait_secs(tokens, k).is_some());
     let per_iter: f64 = sleeps
         .iter()
         .filter_map(|&k| sleep_wait_secs(tokens, k))
@@ -276,10 +270,8 @@ fn is_sleep_token(tok: &str) -> bool {
 fn tokenize(cmd: &str) -> Vec<String> {
     cmd.split_whitespace()
         .map(|t| {
-            t.trim_matches(|c: char| {
-                c == ';' || c == '&' || c == '|' || c == '(' || c == ','
-            })
-            .to_string()
+            t.trim_matches(|c: char| c == ';' || c == '&' || c == '|' || c == '(' || c == ',')
+                .to_string()
         })
         .filter(|t| !t.is_empty())
         .collect()
@@ -463,7 +455,10 @@ mod tests {
     fn for_literal_list_long_blocked() {
         // 10 * 10s = 100s, over the cap.
         assert!(blocked("for i in 1 2 3 4 5 6 7 8 9 10; do sleep 10; done"));
-        assert_eq!(kind("for i in 1 2 3 4 5 6 7 8 9 10; do sleep 10; done").as_deref(), Some("poll-loop"));
+        assert_eq!(
+            kind("for i in 1 2 3 4 5 6 7 8 9 10; do sleep 10; done").as_deref(),
+            Some("poll-loop")
+        );
     }
 
     #[test]
