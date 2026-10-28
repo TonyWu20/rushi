@@ -59,7 +59,7 @@ The attribute is inert until a consumer reads it. A producer that adds
 
 ## 3. Eval-time semantics in `lib.mkRushi`
 
-`lib/mk-rushi.nix` (section 1.5 / 2.5) adds:
+`lib/mk-rushi-meta.nix` (step 1.5) and `lib/mk-rushi-merge.nix` (step 2.5) add:
 
 - **`rushiMeta s`** — accessor. Returns `s.meta.rushi` when the source is
   an attrset that carries it; `{ }` for plain path strings (which cannot

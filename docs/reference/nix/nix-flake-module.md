@@ -409,7 +409,7 @@ completed in the same session:
   cases (`case-meta`, `case-hook-guard`) declare hooks via
   `rushi.config.hooks.defs.<name>` plus
   `rushi.config.hooks.pipeline."<window>"` steps lists.
-- Build-time drift guard (`lib/mk-rushi.nix`) iterates
+- Build-time drift guard (`lib/mk-rushi-package.nix`) iterates
   `hooks.defs.<name>.command` only. A bare command not covered by a
   producer's `meta.rushi.bin` fails the build (verified by
   `tests/nix` `case-hook-guard`).
