@@ -65,6 +65,19 @@
   # suitable for rushi.external_tools / external_ui_extensions.
   fetchExt = args: (import ./fetch-ext.nix).fetchExt args;
 
+  # The rushiExt ext-flake contract (lib/ext-contract.nix):
+  #
+  #   rushiExtBuckets { packages; }
+  #     Bucket an ext flake's package attrset by meta.rushi (issue
+  #     #13). The ext flake exposes the result per system as
+  #     `rushiExt`.
+  #   unionRushiExt { system; extFlakes; }
+  #     Fold a list of ext flake inputs into a bucket table. The
+  #     consumer-side inverse: exts are declared in the consumer's
+  #     flake inputs and placed with one fold.
+  rushiExtBuckets = args: (import ./ext-contract.nix).rushiExtBuckets args;
+  unionRushiExt = args: (import ./ext-contract.nix).unionRushiExt args;
+
   fetchTool = args: (import ./fetch-ext.nix).fetchTool args;
 
   resolvePlatformHash = args: (import ./fetch-ext.nix).resolvePlatformHash args;

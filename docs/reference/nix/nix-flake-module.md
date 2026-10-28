@@ -516,6 +516,28 @@ rushiConfigured = rushiFlake.lib.mkRushi {
 };
 ```
 
+**Ext selection via the `rushiExt` contract.** Instead of
+hand-selecting `extFlake.packages.<system>.<name>` per
+package, the consumer declares the exts in their own flake
+inputs and folds the flake inputs with
+`lib.unionRushiExt`. Each ext flake exposes
+`rushiExt.<system> = { tools; ui; hooks; }`, derived from
+its `meta.rushi` declarations (`ext-flake-authoring.md`
+section 4.6). The fold maps onto the module options:
+
+```nix
+# Consumer flake: exts declared as inputs, placed by one fold
+exts = rushiFlake.lib.unionRushiExt {
+  inherit system;
+  extFlakes = [ goalFlake webFlake ];
+};
+
+# Inside a consumer module:
+#   rushi.external_tools = exts.extTools;
+#   rushi.external_ui_extensions = exts.extUi;
+#   rushi.external_hooks = exts.extHooks;
+```
+
 ## 6. Kernel flake changes (this repo)
 
 The rushi `flake.nix` gains:
@@ -712,6 +734,12 @@ pi-flake does NOT ship extensions. The consumer flake provides helpers:
   - `extraPatch`: shell snippet run during buildPhase
 - **`resolvePlatformHash`** — accepts either a shared hash string or a
   per-system attrset (`{ x86_64-linux = "…"; aarch64-darwin = "…"; }`)
+- **`unionRushiExt`** — the rushi consumer-side ext placement fold
+  (kernel lib, `lib/ext-contract.nix`). Params:
+  `{ system, extFlakes }`. Reads each ext flake's
+  `rushiExt.<system>` and returns
+  `{ extTools; extUi; extHooks; }`. The producer-side inverse
+  is `lib.rushiExtBuckets` (`ext-flake-authoring.md` section 4.6).
 
 ### 9.8 Full capability mapping (pi → rushi)
 

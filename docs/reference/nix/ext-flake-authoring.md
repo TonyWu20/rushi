@@ -507,6 +507,61 @@ fails the build with a clear error.
 
 ---
 
+## 4.6 The `rushiExt` attribute (selection contract)
+
+`meta.rushi` (section 4.5) declares the bucket for one
+package. The `rushiExt` attribute aggregates a flake's
+whole `packages.<system>` attrset into buckets. A consumer
+then declares exts in their own flake inputs and passes
+the flake inputs straight to the builder. No
+`packages.<system>.<name>` selection. No bucket routing in
+the consumer flake.
+
+The kernel lib exposes the aggregator
+(`lib/ext-contract.nix`):
+
+```nix
+# Producer side: one line per ext flake.
+rushiExt = pkgLib.genAttrs supportedSystems (system:
+  rushiFlake.lib.rushiExtBuckets { packages = buildFor system; });
+```
+
+`rushiExtBuckets` reads each concrete package's
+`meta.rushi` declaration and returns
+`{ tools = [ … ]; ui = [ … ]; hooks = [ … ]; }`.
+Packages without `meta.rushi` are ignored (for example a
+bare-binary package the repo ships alongside the ext).
+The `default` alias key is dropped.
+
+The consumer-side inverse is `lib.unionRushiExt`
+(`nix-flake-module.md` section 9.7). It folds a list of
+ext flake inputs into a bucket table:
+
+```nix
+exts = rushiFlake.lib.unionRushiExt {
+  inherit system;
+  extFlakes = [ goalFlake webFlake ];
+};
+# → { extTools; extUi; extHooks; }, which maps onto
+#   rushi.external_tools / external_ui_extensions /
+#   external_hooks, or a deployment builder's exts
+#   parameter.
+```
+
+**Adoption.** The producer flake takes the kernel as a
+flake input (the usual `follows` wiring, section 7 of
+`nix-flake-module.md`):
+
+```nix
+rushi = {
+  url = "github:TonyWu20/rushi";
+  inputs.nixpkgs.follows = "nixpkgs";
+  inputs.fenix.follows = "fenix";
+};
+```
+
+---
+
 ## 5. Combinations: any subset of {tool, hook, ext} in one flake
 
 There is no rule that a repo does exactly one category. `goal-app` does
