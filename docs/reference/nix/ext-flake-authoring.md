@@ -513,29 +513,63 @@ fails the build with a clear error.
 package. The `rushiExt` attribute aggregates a flake's
 whole `packages.<system>` attrset into buckets. A consumer
 then declares exts in their own flake inputs and passes
-the flake inputs straight to the builder. No
+the flake inputs straight to a builder. No
 `packages.<system>.<name>` selection. No bucket routing in
 the consumer flake.
 
-The kernel lib exposes the aggregator
-(`lib/ext-contract.nix`):
+**Producer side (the ext flake): self-contained.** Each
+ext flake derives `rushiExt` inline from the `meta.rushi`
+declarations on its own packages. The ext repo tracks only
+nixpkgs/fenix, not the kernel, so a kernel update is never
+a re-lock of the ext repo:
 
 ```nix
-# Producer side: one line per ext flake.
 rushiExt = pkgLib.genAttrs supportedSystems (system:
-  rushiFlake.lib.rushiExtBuckets { packages = buildFor system; });
+  let
+    # The `default` alias duplicates its target; drop it
+    # before bucketing. Intermediate bindings (helper
+    # functions, intermediate attrsets) carry no meta.rushi
+    # and are ignored by the same rule.
+    concrete = builtins.removeAttrs (buildFor system) [ "default" ];
+    bucketOf =
+      p:
+      let
+        m = p.meta or { };
+      in
+      if m ? rushi
+      then
+      let
+        r = m.rushi;
+      in
+      if r ? entry then "tools"
+      else if r ? ext then "ui"
+      else if r ? bin then "hooks"
+      else null
+      else null;
+    pick =
+      b:
+      builtins.foldl' (a: l: a ++ l) [ ] (
+        builtins.map (n:
+          if bucketOf concrete.${n} == b
+          then [ concrete.${n} ]
+          else [ ]
+        ) (builtins.attrNames concrete)
+      );
+  in
+  {
+    tools = pick "tools";
+    ui = pick "ui";
+    hooks = pick "hooks";
+  });
 ```
 
-`rushiExtBuckets` reads each concrete package's
-`meta.rushi` declaration and returns
-`{ tools = [ … ]; ui = [ … ]; hooks = [ … ]; }`.
 Packages without `meta.rushi` are ignored (for example a
 bare-binary package the repo ships alongside the ext).
-The `default` alias key is dropped.
 
-The consumer-side inverse is `lib.unionRushiExt`
-(`nix-flake-module.md` section 9.7). It folds a list of
-ext flake inputs into a bucket table:
+**Consumer side: the fold.** The kernel lib exposes
+`lib.unionRushiExt` (section 9.7 of `nix-flake-module.md`)
+and `lib.rushiExtBuckets` (the single-source form, for
+flakes that already carry a kernel input):
 
 ```nix
 exts = rushiFlake.lib.unionRushiExt {
@@ -547,20 +581,6 @@ exts = rushiFlake.lib.unionRushiExt {
 #   external_hooks, or a deployment builder's exts
 #   parameter.
 ```
-
-**Adoption.** The producer flake takes the kernel as a
-flake input (the usual `follows` wiring, section 7 of
-`nix-flake-module.md`):
-
-```nix
-rushi = {
-  url = "github:TonyWu20/rushi";
-  inputs.nixpkgs.follows = "nixpkgs";
-  inputs.fenix.follows = "fenix";
-};
-```
-
----
 
 ## 5. Combinations: any subset of {tool, hook, ext} in one flake
 
