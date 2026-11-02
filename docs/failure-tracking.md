@@ -1620,3 +1620,47 @@ The change set:
 - `cargo test --workspace` passes.
 - The acceptance test: after a session compact, the handoff file is
   clean markdown with no tool-call artifacts.
+
+## FT-034 — The compact driver cannot find the write-handoff tool in a Nix install
+
+**Symptom:** The compact driver writes a `compaction_failed` marker.
+The detail names a missing write-handoff tool dir. It suggests
+setting the `WRITE_HANDOFF_TOOL` env var. In the m11 session the
+compact fails, retries, and fails the same way. The handoff stays
+uncompacted.
+
+**Root cause:** The resolver had two ways to find the tool. The
+`WRITE_HANDOFF_TOOL` env var, and a scan of the session config
+`native_tool_paths`. In a Nix deploy neither holds. The base config
+lists only the four core tools. `write-handoff` ships as a sibling
+tool dir, not inside any listed entry.
+
+No operator sets the env var. The scan also resolved relative
+entries against the session `cwd`. The kernel resolves them against
+the config dir. A correct entry would not match either.
+
+**Fix:** Resolve the tool by layout, not by env var. The tool ships
+with the rushi distribution. The compact binary lives in
+`<prefix>/bin/compact`. The tool manifest lives in
+`<prefix>/tools/write-handoff`. The resolver probes
+`<exe_dir>/../tools/write-handoff` first. It uses the canonicalized
+exe so the Nix symlink chain lands on the store package.
+
+It then scans `native_tool_paths` for the tool dir. It resolves
+relative entries against the config dir, matching the kernel. The
+`WRITE_HANDOFF_TOOL` env var is removed. The Nix flake ships the
+tool with no change.
+
+The kernel `cp -r $src/tools/.` copies the manifest. The workspace
+build installs the binary into the package `bin/`.
+
+**Verification:**
+- `resolve_write_handoff_tool_dir_finds_it_under_native_paths`
+  proves the scan path.
+- `resolve_write_handoff_tool_dir_errors_when_absent` proves the
+  missing-tool error.
+- `scripts/compact-e2e.sh` passes. The work config points
+  `native_tool_paths` at the source `tools/` dir. The agent fork
+  resolves the tool by scan.
+- A Nix rebuild places the tool manifest and binary in the store.
+  The driver then resolves the tool by layout, with no env var.

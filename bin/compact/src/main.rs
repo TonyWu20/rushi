@@ -878,12 +878,13 @@ fn run_session_summary(
     // The agent config: a copy of the parent config with one tool
     // (write-handoff) and no auto-compact. The full config is
     // carried, so the model and the other limits stay from the
-    // parent.
-    let tool_dir = resolve_write_handoff_tool_dir(cfg, &cwd).ok_or(
-        "cannot find the write-handoff tool dir: set the WRITE_HANDOFF_TOOL env var \
-         or a native_tool_paths entry that holds it"
-            .to_string(),
-    )?;
+    // parent. The tool dir resolves relative to the config dir for
+    // relative native_tool_paths entries, matching the kernel.
+    let config_dir = config_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let tool_dir = resolve_write_handoff_tool_dir(cfg, &config_dir)?;
     let agent_cfg = c_dir.join("compact-config.toml");
     write_compact_config(&agent_cfg, cfg, &tool_dir).map_err(|e| e.to_string())?;
 
@@ -924,35 +925,60 @@ fn run_session_summary(
     Ok((summary, None, c_dir))
 }
 
-/// Find the `write-handoff` tool dir. The explicit env var wins
-/// (the test and custom layouts). Else the `native_tool_paths`
-/// entries (resolved against the working dir) are scanned for a
-/// `write-handoff` subdir that holds a `tool.toml`.
-fn resolve_write_handoff_tool_dir(cfg: &toml::Value, cwd: &Path) -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("WRITE_HANDOFF_TOOL") {
-        let pb = PathBuf::from(p);
-        if pb.join("tool.toml").exists() {
-            return Some(pb);
+/// Find the `write-handoff` tool dir. The compact agent's only tool
+/// ships with the rushi distribution, so resolution is by layout,
+/// not by env var:
+///
+/// 1. The location next to this binary: `<exe_dir>/../tools/write-handoff`.
+///    The Nix package (and any layout that ships the tool beside the
+///    binary) keeps the manifest two levels up from `bin/`.
+///    `resolved_exe` canonicalizes the profile symlink chain
+///    (issue #25), so the store package resolves.
+/// 2. A `[paths] native_tool_paths` entry that holds the tool
+///    (dev or custom layouts). Relative entries resolve against the
+///    config dir, matching the kernel `resolve_tool_entry`.
+fn resolve_write_handoff_tool_dir(
+    cfg: &toml::Value,
+    config_dir: &Path,
+) -> Result<PathBuf, String> {
+    // 1. The tool ships with the distribution. This binary lives in
+    //    <prefix>/bin/compact; the manifest lives in
+    //    <prefix>/tools/write-handoff.
+    if let Some(exe) = rushi_common::paths::resolved_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let cand = exe_dir.join("..").join("tools").join("write-handoff");
+            if cand.join("tool.toml").exists() {
+                return Ok(cand);
+            }
         }
     }
-    let native = cfg
+    // 2. A native_tool_paths entry that holds the tool.
+    if let Some(native) = cfg
         .get("paths")
         .and_then(|p| p.get("native_tool_paths"))
-        .and_then(|v| v.as_array())?;
-    for entry in native {
-        let s = entry.as_str()?;
-        let base = PathBuf::from(s);
-        let resolved = if base.is_absolute() {
-            base.clone()
-        } else {
-            cwd.join(&base)
-        };
-        let cand = resolved.join("write-handoff");
-        if cand.join("tool.toml").exists() {
-            return Some(cand);
+        .and_then(|v| v.as_array())
+    {
+        for entry in native {
+            if let Some(s) = entry.as_str() {
+                let base = PathBuf::from(s);
+                let resolved = if base.is_absolute() {
+                    base.clone()
+                } else {
+                    config_dir.join(&base)
+                };
+                let cand = resolved.join("write-handoff");
+                if cand.join("tool.toml").exists() {
+                    return Ok(cand);
+                }
+            }
         }
     }
-    None
+    Err(
+        "the write-handoff tool dir was not found. Ship it with the \
+         distribution (next to the rushi bin, at <bin>/../tools/write-handoff), \
+         or list its dir in [paths] native_tool_paths."
+            .to_string(),
+    )
 }
 
 /// Write the compact agent config: the full parent config with the
@@ -1440,9 +1466,6 @@ mod tests {
 
     #[test]
     fn resolve_write_handoff_tool_dir_finds_it_under_native_paths() {
-        // A non-existent env path keeps the env branch from winning,
-        // so the native_tool_paths scan is what the test exercises.
-        std::env::set_var("WRITE_HANDOFF_TOOL", "/nonexistent-xyz");
         let dir = tempfile::tempdir().unwrap();
         let tools_root = dir.path().join("tools");
         let tool_dir = tools_root.join("write-handoff");
@@ -1454,10 +1477,25 @@ native_tool_paths = ["{}"]
 "#,
             tools_root.display()
         ));
+        // The tool is not next to the test binary, so the
+        // native_tool_paths entry is what the resolver finds.
         let found = resolve_write_handoff_tool_dir(&cfg, dir.path()).unwrap();
         assert_eq!(
             found.canonicalize().unwrap(),
             tool_dir.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn resolve_write_handoff_tool_dir_errors_when_absent() {
+        // Nothing next to the test binary, no native_tool_paths entry,
+        // so the resolver reports the missing tool.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config_toml("[active]\nmodel = \"stub\"\n");
+        let err = resolve_write_handoff_tool_dir(&cfg, dir.path()).unwrap_err();
+        assert!(
+            err.contains("write-handoff"),
+            "the error names the missing tool: {err}"
         );
     }
 
