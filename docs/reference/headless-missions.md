@@ -43,6 +43,21 @@ echo $!
 Record the PID that `echo $!` prints. Redirect stdin from
 `/dev/null`. The loop never reads a terminal.
 
+## Result on stdout
+
+On a clean idle stop, `rushi run` prints the last assistant
+message to stdout. The print lands at the moment the loop stops.
+The capture is the Unix form of the mission result.
+
+- Capture it: `result=$(rushi run <s> <task> ...)`
+- Or redirect it: `rushi run <s> <task> ... > result`
+- Only the idle stop prints. A failed or exhausted stop prints
+  nothing. The session log holds that record.
+- An empty content prints nothing. That is a tool-call-only final
+  turn.
+- The live-loop poke prints its notice, not a result. The loop
+  has not stopped.
+
 ## Ping-back
 
 On mission end, the orchestrator pings the main session. The
@@ -52,10 +67,10 @@ dead. No liveness check.
 
 ```bash
 # The poke plus && and || is the event trigger.
-# The result is in the session store and the worktree. rushi run
-# prints nothing on done. Do not redirect its output.
-rushi run <s> <task> </dev/null \
-  && rushi run <main> "done" \
+# On a clean idle stop, rushi run prints the last assistant
+# message to stdout. Capture it and forward it in the poke.
+rushi run <s> <task> </dev/null > out \
+  && rushi run <main> "done. Mission result: $(cat out)" \
        --sessions-root /path/to/project/sessions --cwd /path/to/project \
   || rushi run <main> "failed (rc=$?). Inspect the mission session dir and the worktree." \
        --sessions-root /path/to/project/sessions --cwd /path/to/project
@@ -68,11 +83,12 @@ caller blocks on `wait` and reads each exit state:
 
 ```bash
 # Launch N missions. Record each PID. Wait on each PID.
-# The result is in the session store, not the process output.
+# On a clean idle stop, the mission prints its last assistant
+# message to stdout. Capture it per mission.
 for i in 1 2 3; do
   nohup rushi run "$s_$i" "$(cat task_$i)" \
     --sessions-root /path/to/project/sessions --cwd /path/to/project \
-    </dev/null &
+    </dev/null > out_$i 2>&1 &
   echo $! > pid_$i
 done
 for i in 1 2 3; do
@@ -84,6 +100,8 @@ done
 The `wait` form is for batches that finish inside the tool call
 cap. For longer missions, launch and let the ping-back signal.
 The agent reads the mission session dir and the worktree when mission `i` ends.
+The `out_i` capture holds the mission's last assistant message on a
+clean idle stop.
 
 ## Difference from monitoring
 

@@ -18,6 +18,16 @@
 //! state: the owed work stays in the log, and a new loop (a `rushi
 //! run` poke or the TUI `Ctrl+R`) retries it.
 //!
+//! # The final message
+//!
+//! On a clean idle stop, the call prints the content of the last
+//! `assistant_message` to stdout, one write at the moment the loop
+//! stops. The caller captures it (`result=$(rushi run ...)` or a
+//! redirect) as the Unix form of the mission result. The exhausted,
+//! failed, and signal stops print nothing: the session log holds
+//! their record. An empty content (a tool-call-only final turn)
+//! prints nothing.
+//!
 //! # Exit codes
 //! - `0` — clean stop (idle with no pending follow-ups, exhausted, a
 //!   step that failed and logged an `error` event, or a poke of a
@@ -59,6 +69,12 @@ use crate::step::{append_line, make_runner, StepMode};
 /// This is the single canonical poke of a session. The caller never
 /// branches on loop state. The append-without-start form is
 /// `user --no-run` (bin/user) only.
+///
+/// On a clean idle stop, the call prints the content of the last
+/// `assistant_message` to stdout at the moment the loop stops. The
+/// caller captures or ignores it. The other stop reasons (the
+/// exhausted stop, the failed step, a signal) print nothing: the
+/// session log holds their record.
 ///
 /// `work_dir`: the caller's working directory override (the --cwd
 /// flag, or the parent of a --sessions-root override). When present
@@ -170,7 +186,10 @@ pub fn run(
         }),
     );
 
-    // The turn loop.
+    // The turn loop. The stop flag is the print gate: only a clean
+    // idle stop prints the final message (the loop's final line on
+    // stdout, the capture form of the mission result).
+    let mut stopped_on_idle = false;
     loop {
         let outcome = crate::step::do_step(cfg, session_dir, StepMode::Run);
 
@@ -256,6 +275,7 @@ pub fn run(
             // by this process; the pass takes the log-line lock, not
             // the session lock, so it cannot wedge the exit.
             crate::archive::run_auto_pass(cfg, &session.path, "idle");
+            stopped_on_idle = true;
             break;
         }
 
@@ -269,6 +289,19 @@ pub fn run(
     }
     // A clean stop (idle, exhausted, or a failed step that logged
     // its error). The log holds the record; a new loop resumes it.
+
+    // The loop's final line on a clean idle stop: the content of the
+    // last `assistant_message`, one write to stdout at the moment
+    // the call finishes. The caller captures it or ignores it. The
+    // failed write is ignored: a closed pipe keeps the loop's exit
+    // code, not a panic. An empty content prints nothing.
+    if stopped_on_idle {
+        if let Some(msg) = read_last_assistant_message_content(session_dir) {
+            use std::io::Write;
+            let mut out = std::io::stdout().lock();
+            let _ = writeln!(out, "{msg}");
+        }
+    }
 
     std::process::exit(0);
 }
@@ -448,16 +481,54 @@ fn read_last_assistant_message_id(session_dir: &Path) -> Option<String> {
     let path = session_dir.join("events.jsonl");
     let stream = rushi_common::logstream::open_indexed(&path).ok()?;
     let tail = stream.tail_lines(4096);
-    if let Some(id) = last_assistant_message_id_in(tail.iter().rev().map(|l| l.as_str())) {
+    if let Some(id) = last_assistant_message_in(tail.iter().rev().map(|l| l.as_str()))
+        .and_then(|v| message_id(&v))
+    {
         return Some(id);
     }
     let data = rushi_common::logstream::read_log_text(&path).ok()?;
-    last_assistant_message_id_in(data.lines().rev())
+    last_assistant_message_in(data.lines().rev()).and_then(|v| message_id(&v))
 }
 
-/// Walk lines in reverse; the first `assistant_message` carries
-/// the last id.
-fn last_assistant_message_id_in<'a, I: Iterator<Item = &'a str>>(lines: I) -> Option<String> {
+/// Read the content of the last `assistant_message` from the log.
+///
+/// The same tail-window-first read as the id read. The content is
+/// what `rushi run` prints on a clean idle stop: the loop's final
+/// line on stdout. An empty content (a tool-call-only final turn)
+/// yields `None`: there is nothing to print.
+fn read_last_assistant_message_content(session_dir: &Path) -> Option<String> {
+    let path = session_dir.join("events.jsonl");
+    if let Ok(stream) = rushi_common::logstream::open_indexed(&path) {
+        let tail = stream.tail_lines(4096);
+        if let Some(content) = last_assistant_message_in(tail.iter().rev().map(|l| l.as_str()))
+            .and_then(|v| message_content(&v))
+        {
+            return Some(content);
+        }
+    }
+    let data = rushi_common::logstream::read_log_text(&path).ok()?;
+    last_assistant_message_in(data.lines().rev()).and_then(|v| message_content(&v))
+}
+
+/// The `id` field of a parsed `assistant_message` value.
+fn message_id(v: &serde_json::Value) -> Option<String> {
+    v.get("id").and_then(|i| i.as_str()).map(String::from)
+}
+
+/// The `content` field of a parsed `assistant_message` value. An
+/// empty content maps to `None`.
+fn message_content(v: &serde_json::Value) -> Option<String> {
+    v.get("content")
+        .and_then(|c| c.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// Walk lines in reverse; the first `assistant_message` is the
+/// last one in the log.
+fn last_assistant_message_in<'a, I: Iterator<Item = &'a str>>(
+    lines: I,
+) -> Option<serde_json::Value> {
     for line in lines {
         let line = line.trim();
         if line.is_empty() {
@@ -467,7 +538,7 @@ fn last_assistant_message_id_in<'a, I: Iterator<Item = &'a str>>(lines: I) -> Op
             continue;
         };
         if v.get("type").and_then(|t| t.as_str()) == Some("assistant_message") {
-            return v.get("id").and_then(|i| i.as_str()).map(String::from);
+            return Some(v);
         }
     }
     None
@@ -645,6 +716,113 @@ mod tests {
             read_last_assistant_message_id(&sess),
             Some("deep".to_string()),
             "the window misses the deep id; the full read finds it"
+        );
+    }
+
+    /// The final-message read: the last `assistant_message` content
+    /// is read through the tail window first, like the id read.
+    #[test]
+    fn read_last_assistant_message_content_reads_the_tail_window() {
+        use rushi_common::logline::LogLine;
+        let dir = tempfile::tempdir().unwrap();
+        let sess = dir.path().join("sess");
+        std::fs::create_dir_all(&sess).unwrap();
+        let log = sess.join("events.jsonl");
+        LogLine::from_json(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"id-1","content":"first"}"#,
+        )
+        .commit(&log)
+        .unwrap();
+        LogLine::from_json(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"id-2","content":"second"}"#,
+        )
+        .commit(&log)
+        .unwrap();
+        LogLine::from_json(
+            r#"{"v":1,"type":"ext_status","ts":"t","id":"loop_phase","value":"idle"}"#,
+        )
+        .commit(&log)
+        .unwrap();
+        assert_eq!(
+            read_last_assistant_message_content(&sess),
+            Some("second".to_string()),
+            "the window holds the last message"
+        );
+    }
+
+    /// The content read falls back to the full read past the window,
+    /// as the id read does.
+    #[test]
+    fn read_last_assistant_message_content_falls_back_past_the_window() {
+        use rushi_common::logline::LogLine;
+        let dir = tempfile::tempdir().unwrap();
+        let sess = dir.path().join("sess");
+        std::fs::create_dir_all(&sess).unwrap();
+        let log = sess.join("events.jsonl");
+        LogLine::from_json(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"deep","content":"deep text"}"#,
+        )
+        .commit(&log)
+        .unwrap();
+        for i in 0..4096 {
+            LogLine::from_json(&format!(
+                r#"{{"v":1,"type":"user_message","ts":"t","content":"filler {i}"}}"#
+            ))
+            .commit(&log)
+            .unwrap();
+        }
+        assert_eq!(
+            read_last_assistant_message_content(&sess),
+            Some("deep text".to_string()),
+            "the window misses the deep content; the full read finds it"
+        );
+    }
+
+    /// An empty content on the last message yields `None`: the loop
+    /// prints nothing for a tool-call-only final turn. The earlier
+    /// message with content does not win: the read is the last
+    /// message, not the last non-empty one.
+    #[test]
+    fn read_last_assistant_message_content_empty_is_none() {
+        use rushi_common::logline::LogLine;
+        let dir = tempfile::tempdir().unwrap();
+        let sess = dir.path().join("sess");
+        std::fs::create_dir_all(&sess).unwrap();
+        let log = sess.join("events.jsonl");
+        LogLine::from_json(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"id-1","content":"kept"}"#,
+        )
+        .commit(&log)
+        .unwrap();
+        LogLine::from_json(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"id-2","content":""}"#,
+        )
+        .commit(&log)
+        .unwrap();
+        assert_eq!(read_last_assistant_message_content(&sess), None);
+    }
+
+    /// A log without an `assistant_message` (or without the log)
+    /// yields `None`: a fresh idle session prints nothing.
+    #[test]
+    fn read_last_assistant_message_content_absent_is_none() {
+        use rushi_common::logline::LogLine;
+        let dir = tempfile::tempdir().unwrap();
+        let sess = dir.path().join("sess");
+        std::fs::create_dir_all(&sess).unwrap();
+        assert_eq!(
+            read_last_assistant_message_content(&sess),
+            None,
+            "a missing log is None"
+        );
+        let log = sess.join("events.jsonl");
+        LogLine::from_json(r#"{"v":1,"type":"user_message","ts":"t","content":"only user"}"#)
+            .commit(&log)
+            .unwrap();
+        assert_eq!(
+            read_last_assistant_message_content(&sess),
+            None,
+            "no assistant message is None"
         );
     }
 

@@ -15,7 +15,10 @@
 //!   is appended with the log-line lock only and the call exits 0
 //!   (the live loop drains the message at its next step). No live
 //!   loop: the call starts the loop. This is the single canonical poke
-//!   of a session; the caller never branches on loop state.
+//!   of a session; the caller never branches on loop state. On a
+//!   clean idle stop, the call prints the last `assistant_message`
+//!   content to stdout at the moment the loop stops; the caller
+//!   captures or ignores it.
 //! - `rushi step SESSION` — one step (internal, TUI-supervised)
 //! - `rushi docs [SECTION|DOC]` — print the embedded harness reference;
 //!   a section of the default reference, or a bundled sub-document by
@@ -81,7 +84,10 @@ enum Command {
     /// state. The call keeps `rushi` self-contained for seeding a
     /// session without the separate `user` binary, which plain
     /// installs do not ship (the subagent spawn contract,
-    /// docs/subagent-design.md section 4).
+    /// docs/subagent-design.md section 4). On a clean idle stop,
+    /// the call prints the last `assistant_message` content to
+    /// stdout at the moment the loop stops. The caller captures or
+    /// ignores it.
     Run {
         /// Session name or directory. Hyphen-leading values are
         /// allowed (session dirs are never flags).

@@ -6,6 +6,22 @@ versioned change for each kernel binary, newest first.
 Internal refactors without user-visible behavior do not get an
 entry.
 
+## rushi 0.1.5 (2026-10-30)
+
+`rushi run` prints the last assistant message on a clean idle
+stop. The print is one write to stdout at the moment the loop
+stops. The caller captures it (`result=$(rushi run ...)` or a
+redirect) as the Unix form of the mission result.
+
+- Only the idle stop prints. The exhausted, failed, and signal
+  stops stay silent: the session log holds their record.
+- An empty content (a tool-call-only final turn) prints nothing.
+- A closed pipe keeps the exit code: the failed write is ignored,
+  and the loop's exit code stands.
+- Docs: `rushi docs headless-missions` gains the "Result on
+  stdout" section. The ping-back and fan-out examples capture the
+  stdout instead of the "prints nothing" note.
+
 ## rushi-log 0.2.0 (2026-10-26)
 
 Renamed the log-appender stage binary from `log` to `rushi-log`

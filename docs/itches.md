@@ -763,3 +763,39 @@ and `scripts/compact-e2e.sh` (115 checks) pass.
 **Note.** The `rushi-common` hook-spawn tests are flaky in this
 environment: "Text file busy" on the temp hook script.
 Pass/fail/pass across three runs. Unrelated to this change.
+
+## `rushi run` prints the last assistant message on an idle stop (2026-10-30, user decision)
+
+**Decision.** `rushi run` printed nothing on done. The agent
+reflexively redirected the headless session output. On a clean
+idle stop, the call prints the last `assistant_message` content
+to stdout. The print is one write at the moment the loop stops.
+The capture is the Unix form of the mission result.
+
+- Only the idle stop prints. The exhausted, failed, and signal
+  stops print nothing. The session log holds their record.
+- An empty content (a tool-call-only final turn) prints nothing.
+- A closed pipe does not change the exit code. The failed write
+  is ignored. The loop's exit code stands.
+- The live-loop branch is unchanged. The poke prints its notice,
+  not a result.
+
+**Proof.** `scripts/run-final-message-e2e.sh` (4 checks) verifies
+the print contract against a stub model. A dead-session idle stop
+prints the last assistant message in the capture form and the
+redirect form. An idle stop without an assistant message prints
+nothing. A failed model stop prints nothing.
+
+The neighboring suites still pass: `scripts/run-lock-branch-e2e.sh`
+(12 checks) and `scripts/error-recovery-e2e.sh` (11 checks). The
+new read carries unit tests: the tail window, the full-read
+fallback, the empty content, and the absent log.
+
+**Note.** The `rushi-common` hook-spawn flake ("Text file busy")
+predates this change. It touches no code this change edits.
+
+Docs updated: `docs/reference/headless-missions.md` gains the
+"Result on stdout" section. The ping-back and fan-out examples
+capture the stdout. The `run_loop` and `main` module docs state
+the print contract. The `rushi` version moves 0.1.4 to 0.1.5
+(CHANGELOG).
