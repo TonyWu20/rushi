@@ -1664,3 +1664,39 @@ build installs the binary into the package `bin/`.
   resolves the tool by scan.
 - A Nix rebuild places the tool manifest and binary in the store.
   The driver then resolves the tool by layout, with no env var.
+
+## FT-035 — The compact seed transcript overflows the kernel argv limit
+
+**Symptom:** In the m12 session (261K tokens) the compact fails.
+The marker reads `spawn the rushi fork: Argument list too long (os
+error 7)`. The compact retries, fails the same way, and the
+session then errors on context overflow.
+
+**Root cause:** The compact driver passed the seed transcript as one
+command-line argument to the forked `rushi run`. The seed is a
+rendered transcript of the whole compacted region. For a large
+session it reaches several megabytes. On Linux one argv slot caps at
+128 KiB.
+
+`spawn` fails with E2BIG. The problem stays hidden in small
+sessions. There the seed fits inside the limit.
+
+**Fix:** Stop passing the seed through argv. The driver pre-seeds
+the seed transcript as the agent session's first `user_message`,
+appended to the agent log before the fork. The fork is
+`rushi run <c_id>` with no task. The loop's `claim` reports the
+pending steer message, so the loop runs the compact agent.
+
+The seed is a log line, not an argv slot, so the 128 KiB cap no
+longer applies. The log lives in the agent dir, so the `rm -r`
+cleanup removes it. No new flag on `rushi run`: a `--task-file`
+flag was rejected because the seed is the session's own
+`user_message` and belongs in the session log.
+
+**Verification:**
+- `seed_agent_log_appends_the_seed_as_a_user_message` proves the
+  seed round-trips through the log reader as one steer
+  `user_message`.
+- `scripts/compact-e2e.sh`: the fake `rushi` now checks that the
+  seed log exists and is non-empty. 43 checks pass.
+- `cargo test --workspace` passes.

@@ -6,6 +6,17 @@ versioned change for each kernel binary, newest first.
 Internal refactors without user-visible behavior do not get an
 entry.
 
+## compact 0.1.5 (2026-11-02)
+
+The compact seed no longer crosses the kernel argv limit (FT-035).
+The driver pre-seeds the seed transcript as the agent session's first
+`user_message` in its log, before the fork. The fork is
+`rushi run <c_id>` with no task: the loop's `claim` reports the
+pending steer message, so the loop runs the compact agent. The seed
+is a log line, not an argv slot, and scales past the 128 KiB cap
+that broke a positional task (E2BIG). The log lives in the agent
+dir, so the cleanup removes it. No new flag on `rushi run`.
+
 ## compact 0.1.4 (2026-11-02)
 
 The write-handoff tool dir now resolves by layout, not by env var

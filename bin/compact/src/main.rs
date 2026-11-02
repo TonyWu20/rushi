@@ -19,6 +19,8 @@ use std::process::Command;
 
 use clap::Parser;
 use rushi_common::compact_math::{self, Caps, Ev};
+use rushi_common::event::{Event, UserMessage};
+use rushi_common::logline::LogLine;
 use rushi_common::model_settings::{
     resolve_active_model, resolve_model_settings, val_bool, val_int,
 };
@@ -875,6 +877,16 @@ fn run_session_summary(
     std::fs::write(c_dir.join("handoff-target.json"), sidecar.to_string())
         .map_err(|e| format!("write the handoff sidecar: {e}"))?;
 
+    // The seed transcript crosses the fork as the session's first
+    // `user_message`, appended to the agent log before the fork. A
+    // large compacted region is a multi-megabyte transcript, and a
+    // single argv slot caps at 128 KiB on Linux (E2BIG); the log is
+    // the native channel and scales past the limit. The loop's
+    // `claim` reports the pending steer message, so the fork runs the
+    // compact agent instead of idling. The log lives in the agent dir,
+    // so the `rm -r` removes it too.
+    seed_agent_log(&c_dir, &seed_text)?;
+
     // The agent config: a copy of the parent config with one tool
     // (write-handoff) and no auto-compact. The full config is
     // carried, so the model and the other limits stay from the
@@ -890,12 +902,12 @@ fn run_session_summary(
 
     // Fork the compact agent session and block on it. The `rushi`
     // binary is the sibling of this one, or the `--rushi` /
-    // `RUSHI_BIN` override.
+    // `RUSHI_BIN` override. No task is passed: the seed is already the
+    // session's first `user_message` in the log, so the loop runs it.
     let rushi_bin = resolve_bin(&args.rushi, "RUSHI_BIN", "rushi");
     let mut cmd = Command::new(&rushi_bin);
     cmd.arg("run")
         .arg(&c_id)
-        .arg(&seed_text)
         .arg("--sessions-root")
         .arg(&sessions_root)
         .arg("--cwd")
@@ -923,6 +935,30 @@ fn run_session_summary(
         .map_err(|e| format!("the agent did not write {}: {e}", vpath.display()))?;
 
     Ok((summary, None, c_dir))
+}
+
+/// Append the seed transcript as the agent session's first
+/// `user_message`, mirroring the `rushi run` seed path
+/// (`seed_initial_message`): a steer `user_message` leaves `claim` in
+/// `awaiting_model`, so the loop runs the prompt instead of idling.
+/// Appending to the log before the fork means the seed crosses the
+/// log, not argv, and scales past the 128 KiB argv cap that breaks a
+/// positional task (E2BIG). The log lives in the agent dir, so the
+/// `rm -r` removes it with the rest.
+fn seed_agent_log(c_dir: &Path, seed_text: &str) -> Result<(), String> {
+    let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let event = Event::UserMessage(UserMessage {
+        v: 1,
+        ts,
+        content: seed_text.to_string(),
+        queue: None,
+        id: None,
+    });
+    let line = serde_json::to_string(&event)
+        .map_err(|e| format!("serialize the seed user_message: {e}"))?;
+    LogLine::from_json(&line)
+        .commit(&c_dir.join("events.jsonl"))
+        .map_err(|e| format!("append the seed user_message to the agent log: {e}"))
 }
 
 /// Find the `write-handoff` tool dir. The compact agent's only tool
@@ -1462,6 +1498,24 @@ mod tests {
             back["limits"]["context_budget_tokens"].as_integer(),
             Some(90000)
         );
+    }
+
+    #[test]
+    fn seed_agent_log_appends_the_seed_as_a_user_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let c_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&c_dir).unwrap();
+        seed_agent_log(&c_dir, "summarize this compacted region").unwrap();
+        // The seed round-trips through the log reader: one steer
+        // `user_message` carrying the seed text.
+        let text =
+            rushi_common::logstream::read_log_text(&c_dir.join("events.jsonl")).unwrap();
+        assert_eq!(
+            text.matches(r#""type":"user_message""#).count(),
+            1,
+            "the seed is the single user_message of the new log"
+        );
+        assert!(text.contains("summarize this compacted region"), "missing the seed text");
     }
 
     #[test]
