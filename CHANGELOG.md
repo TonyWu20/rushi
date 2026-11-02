@@ -6,6 +6,17 @@ versioned change for each kernel binary, newest first.
 Internal refactors without user-visible behavior do not get an
 entry.
 
+## compact 0.1.4 (2026-11-02)
+
+The write-handoff tool dir now resolves by layout, not by env var
+(FT-034). The tool ships with the distribution, next to the rushi
+bin. The driver probes `<exe_dir>/../tools/write-handoff` first,
+using the canonicalized exe. It then scans `native_tool_paths`,
+resolving relative entries against the config dir.
+
+The `WRITE_HANDOFF_TOOL` env var is removed. A Nix rebuild ships the
+tool. The driver finds it without any env var.
+
 ## write-handoff 0.1.0 (2026-11-02)
 
 New native tool: the compact agent's only tool (FT-033). The tool
