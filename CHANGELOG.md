@@ -6,6 +6,35 @@ versioned change for each kernel binary, newest first.
 Internal refactors without user-visible behavior do not get an
 entry.
 
+## write-handoff 0.1.0 (2026-11-02)
+
+New native tool: the compact agent's only tool (FT-033). The tool
+arg is `summary` only. The target dir, version, and mode come from
+`handoff-target.json` in `$HARNESS_SESSION_DIR`, not the tool args,
+which blocks path traversal. In `handoff` mode it writes
+`handoff/v<N>.md` and `handoff.md`. In `branch` mode it writes
+`branch-summary/v<N>.md`. All writes are atomic with no leftover
+temp file.
+
+## compact 0.1.3 (2026-11-02)
+
+The compact mechanism is now a compact agent (FT-033). The driver
+forks `rushi run <C>`, a full agent session with the single
+`write-handoff` tool. This is the one compact mechanism in rushi.
+There is no config option, and the one-shot path is removed.
+
+Both the main compact and `--branch` fork the agent. In `branch`
+mode the tool writes the branch summary file. In `handoff` mode it
+writes the handoff files. The driver blocks on the agent, reads the
+file back, appends the marker, and removes the agent session dir.
+
+## assemble 0.1.4 (2026-11-02)
+
+A new `--summary-text` flag. It renders the compacted region as a
+readable markdown transcript for the compact agent seed. It reuses
+the compact-form projection of the old events. The `--summary-input`
+(one-shot request) path is unchanged.
+
 ## rushi 0.1.5 (2026-10-30)
 
 `rushi run` prints the last assistant message on a clean idle

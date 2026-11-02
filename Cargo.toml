@@ -16,6 +16,7 @@ members = [
     "tools/write",
     "tools/edit",
     "tools/bash",
+    "tools/write-handoff",
     "crates/rushi",
 ]
 

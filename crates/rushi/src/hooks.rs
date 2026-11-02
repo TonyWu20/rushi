@@ -550,6 +550,28 @@ mod tests {
             .collect()
     }
 
+    /// The pipeline tests that spawn a temp-file shell script can hit
+    /// ETXTBSY ("Text file busy") when the tests race in parallel on
+    /// Linux. They only run under serial execution: when the test
+    /// binary was invoked with `--test-threads=1`. They skip (pass)
+    /// otherwise.
+    fn spawn_guard() -> bool {
+        let args: Vec<String> = std::env::args().collect();
+        if args.iter().any(|a| a == "--test-threads=1") {
+            return true;
+        }
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == "--test-threads"
+                && args.get(i + 1).map_or(false, |v| v == "1")
+            {
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
+
     /// A hook that prints a fixed JSON state and exits 0.
     fn echo_hook(dir: &std::path::Path, name: &str, stdout_json: &str) -> String {
         exit_hook(dir, name, stdout_json, 0)
@@ -595,6 +617,9 @@ mod tests {
 
     #[test]
     fn two_ok_steps_compose_the_state() {
+        if !spawn_guard() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let h1 = echo_hook(
             dir.path(),
@@ -638,6 +663,9 @@ mod tests {
 
     #[test]
     fn a_noop_step_leaves_the_state_unchanged() {
+        if !spawn_guard() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let h1 = echo_hook(dir.path(), "h1", "{}");
         let h2 = echo_hook(dir.path(), "h2", r#"{"request":{"model":"m2"}}"#);
@@ -659,6 +687,9 @@ mod tests {
 
     #[test]
     fn the_first_abort_stops_the_chain_and_is_sticky() {
+        if !spawn_guard() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let abort = exit_hook(dir.path(), "abort", r#"{"reason":"goal not complete"}"#, 2);
         let h2 = echo_hook(dir.path(), "h2", r#"{"request":{"model":"m2"}}"#);
@@ -690,6 +721,9 @@ mod tests {
 
     #[test]
     fn the_first_fail_stops_the_chain_and_the_default_applies() {
+        if !spawn_guard() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let fail = dir.path().join("fail");
         std::fs::write(&fail, "#!/bin/sh\ncat > /dev/null\nexit 3\n").unwrap();
@@ -724,6 +758,9 @@ mod tests {
 
     #[test]
     fn an_unknown_exit_code_is_a_fail() {
+        if !spawn_guard() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let bad = dir.path().join("bad");
         std::fs::write(&bad, "#!/bin/sh\ncat > /dev/null\nexit 7\n").unwrap();

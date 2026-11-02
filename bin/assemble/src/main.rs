@@ -45,6 +45,14 @@ struct Args {
     #[arg(long)]
     summary_input: bool,
 
+    /// The summary-text mode: the same summary-input projection, but
+    /// rendered as a readable plain-text transcript on stdout. The
+    /// compact-session driver seeds this text as the compact agent's
+    /// first message (the agent loop carries the conversation, not a
+    /// one-shot model request).
+    #[arg(long)]
+    summary_text: bool,
+
     /// The 1-based log sequence the summary-input mode projects up
     /// to, inclusive. Required with `--summary-input`.
     #[arg(long)]
@@ -1614,7 +1622,11 @@ fn main() {
             (None, Some(e)) => builder.effort(e).call(),
             (None, None) => builder.call(),
         };
-        println!("{}", request);
+        if args.summary_text {
+            println!("{}", render_summary_text(&request));
+        } else {
+            println!("{}", request);
+        }
         return;
     }
 
@@ -1746,6 +1758,60 @@ fn main() {
     let request = make_request(&items);
 
     println!("{}", request);
+}
+
+/// Render a summary-input request as a readable plain-text transcript.
+///
+/// The compact-session driver seeds this text as the compact agent's
+/// first message. The agent runs a full loop (not a one-shot call),
+/// so it sees the conversation as text and is told to emit the
+/// summary through the `write-handoff` tool. The instructions block
+/// leads, then the old-region items, then the ask and the tool
+/// directive.
+fn render_summary_text(request: &serde_json::Value) -> String {
+    let mut out = String::new();
+    let instructions = request
+        .get("instructions")
+        .and_then(|i| i.as_str())
+        .unwrap_or("");
+    out.push_str(instructions);
+    out.push_str("\n\n--- Conversation (old region, compact form) ---\n");
+    if let Some(items) = request.get("input").and_then(|i| i.as_array()) {
+        for item in items {
+            match item.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                "message" => {
+                    let role = item.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+                    let content = item.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                    let label = if role == "assistant" { "ASSISTANT" } else { "USER" };
+                    out.push_str(&format!("{label}: {content}\n\n"));
+                }
+                "function_call" => {
+                    let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    let id = item.get("call_id").and_then(|c| c.as_str()).unwrap_or("");
+                    let args = item.get("arguments").and_then(|a| a.as_str()).unwrap_or("{}");
+                    out.push_str(&format!(
+                        "TOOL CALL {name} [{id}]: {args}\n"
+                    ));
+                }
+                "function_call_output" => {
+                    let id = item.get("call_id").and_then(|c| c.as_str()).unwrap_or("");
+                    let text = item
+                        .get("output")
+                        .and_then(|o| o.as_str())
+                        .unwrap_or("");
+                    out.push_str(&format!("TOOL RESULT [{id}]: {text}\n\n"));
+                }
+                _ => {}
+            }
+        }
+    }
+    out.push_str("--- End of conversation ---\n\n");
+    out.push_str(
+        "Write the handoff summary now. Use the write-handoff tool, \
+         passing the full summary text as its `summary` argument. \
+         The write-handoff tool is the only tool you have.",
+    );
+    out
 }
 
 /// The summary-input request of the in-session compaction
@@ -2505,6 +2571,38 @@ not json at all
         assert!(flat.contains("step one"), "the old region is projected");
         // No reasoning effort by default: the session effort stands.
         assert!(req.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn render_summary_text_is_a_readable_transcript() {
+        let events = [
+            Ev::User {
+                text: "the task".to_string(),
+            },
+            ev_asst("step one"),
+            ev_res("1", "ok"),
+        ];
+        let refs: Vec<&Ev> = events.iter().collect();
+        let req: serde_json::Value = summary_input_request()
+            .old(&refs)
+            .prev(&None)
+            .model("m")
+            .max_out_cap(2048)
+            .caps(&Caps { text: 100 })
+            .input_budget(1_000_000)
+            .ptrs(&test_ptrs())
+            .chars_per_token(4)
+            .call();
+        let text = render_summary_text(&req);
+        // The instructions lead, the transcript carries the region.
+        assert!(text.contains("## Goal"), "the compact instructions lead");
+        assert!(text.contains("Conversation (old region"), "the transcript header");
+        assert!(text.contains("USER: the task"), "the task statement");
+        assert!(text.contains("ASSISTANT: step one"), "the assistant step");
+        assert!(text.contains("TOOL RESULT [1]"), "the tool result");
+        // The directive names the single tool.
+        assert!(text.contains("write-handoff"), "the tool directive");
+        assert!(text.contains("only tool"), "the tool is the only tool");
     }
 
     /// A `--prompt` custom instruction replaces the default compact
