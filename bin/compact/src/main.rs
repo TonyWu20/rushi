@@ -53,12 +53,14 @@ struct Args {
     /// The path of the assemble binary (the sibling by default).
     #[arg(long)]
     assemble: Option<PathBuf>,
-    /// The path of the model binary (the sibling by default).
-    #[arg(long)]
-    model: Option<PathBuf>,
     /// The path of the log binary (the sibling by default).
     #[arg(long)]
     log: Option<PathBuf>,
+    /// The path of the `rushi` binary the compact driver forks
+    /// (the sibling by default). The compact mechanism always forks
+    /// `rushi run` for the compact agent session.
+    #[arg(long)]
+    rushi: Option<PathBuf>,
     /// The 1-based log seq where the compact boundary lands: the
     /// prefix up to that seq becomes the summary input. Absent: the
     /// token-based keep-window walk (`find_cut`). Reuses the `assemble
@@ -606,70 +608,33 @@ fn run_compaction(
     // The summary input: assemble prints the request JSON on
     // stdout.
     let assemble_bin = args.assemble.clone().unwrap_or_else(|| sibling("assemble"));
-    let up_to_str = up_to.to_string();
-    let mut cmd = Command::new(&assemble_bin);
-    cmd.arg("--session")
-        .arg(&args.session)
-        .arg("--config")
-        .arg(&config_path)
-        .arg("--summary-input")
-        .arg("--up-to")
-        .arg(&up_to_str);
-    if args.strip_last_assistant {
-        cmd.arg("--drop-last-assistant");
-    }
-    // Forward the custom compaction instruction to assemble: the
-    // user's text replaces the default six-section prompt wholesale
-    // (docs/tree-ui-design-from-human.md, the TUI branch-summarize).
-    if let Some(p) = &args.prompt {
-        cmd.arg("--prompt").arg(p);
-    }
-    let out = cmd.output().unwrap_or_else(|e| {
-        fail_and_exit(
-            args,
-            overflow,
-            last_user_seq,
-            "the assemble call failed",
-            &e.to_string(),
-        );
-    });
-    if !out.status.success() {
-        fail_and_exit(
-            args,
-            overflow,
-            last_user_seq,
-            "the assemble call failed",
-            &String::from_utf8_lossy(&out.stderr),
-        );
-    }
-    let request: Value = match serde_json::from_slice(&out.stdout) {
-        Ok(v) => v,
-        Err(e) => fail_and_exit(
-            args,
-            overflow,
-            last_user_seq,
-            "the assemble output is not a request",
-            &e.to_string(),
-        ),
-    };
 
-    // The summary call: two tries, through the model binary. The
-    // request JSON goes to the model's stdin, and the model appends
-    // its own assistant_message, tool_result, and stop markers to
-    // the session log.
-    let model_bin = resolve_bin(&args.model, "MODEL_BIN", "model");
-    let (summary, summary_usage) = match run_summary_calls(&model_bin, &config_path, &request) {
-        Ok(r) => r,
-        Err(last_err) => {
-            fail_and_exit(
-                args,
-                overflow,
-                last_user_seq,
-                "both summary calls failed",
-                &last_err,
-            );
-        }
-    };
+    // The compact mechanism: a full `rushi run` agent session (the
+    // compact agent). Its only tool is `write-handoff`. `route`
+    // rejects any hallucinated tool call, and the agent loop
+    // self-corrects. The handoff lands in the parent dir via the
+    // tool. This is the one compact mechanism in rushi (docs FT-033).
+    // There is no config option.
+    let (summary, summary_usage, c_dir): (String, Option<Value>, PathBuf) =
+        match run_session_summary(
+            args,
+            &config_path,
+            &cfg,
+            &args.session,
+            &CompactTarget::Main { up_to, version },
+            &assemble_bin,
+        ) {
+            Ok(r) => (r.0, r.1, r.2),
+            Err(last_err) => {
+                fail_and_exit(
+                    args,
+                    overflow,
+                    last_user_seq,
+                    "the compact agent session failed",
+                    &last_err,
+                );
+            }
+        };
 
     // The file ops: merge with the previous boundary's lists, not
     // re-extract (docs/auto-compact-plan.md section 4.1).
@@ -751,6 +716,16 @@ fn run_compaction(
         eprintln!("compact: append compaction_summary failed: {e}");
     }
 
+    // Remove the compact agent's scratch session dir. The summary is
+    // in the parent handoff file and the marker is in the parent log,
+    // so the agent dir is pure scratch.
+    if let Err(e) = std::fs::remove_dir_all(&c_dir) {
+        eprintln!(
+            "compact: cannot remove the agent session dir {}: {e}",
+            c_dir.display()
+        );
+    }
+
     let status = serde_json::json!({
         "status": "compacted",
         "reason": reason_str,
@@ -766,89 +741,261 @@ fn run_compaction(
     std::process::exit(0);
 }
 
-/// The two-try summary call. The request JSON goes to the model's
-/// stdin; the model appends its own assistant_message, tool_result,
-/// and stop markers to the session log. Returns the summary text and
-/// the winning try's usage, or the last error message.
-fn run_summary_calls(
-    model_bin: &Path,
-    config: &Path,
-    request: &Value,
-) -> Result<(String, Option<Value>), String> {
-    let request_str = serde_json::to_string(request).unwrap();
-    let mut last_err = String::new();
-    for try_no in 0..2 {
-        let mut child = match Command::new(model_bin)
-            .arg("--config")
-            .arg(config)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                last_err = format!("try {}: spawn model: {e}", try_no + 1);
-                break;
-            }
-        };
-        if let Some(mut stdin) = child.stdin.take() {
-            if let Err(e) = stdin.write_all(request_str.as_bytes()) {
-                last_err = format!("try {}: write model stdin: {e}", try_no + 1);
-                break;
-            }
+/// The compact target: which region the agent summarizes and where
+/// the `write-handoff` tool writes the result.
+enum CompactTarget {
+    /// Main compaction: the region up to `up_to`, written to the
+    /// versioned handoff files (`handoff/v<N>.md`, `handoff.md`).
+    Main { up_to: usize, version: u64 },
+    /// Branch compaction: the span abandoned at `branch_of`, written
+    /// to the versioned branch summary file (`branch-summary/v<N>.md`).
+    Branch { branch_of: usize, version: u64 },
+}
+
+impl CompactTarget {
+    fn version(&self) -> u64 {
+        match self {
+            Self::Main { version, .. } | Self::Branch { version, .. } => *version,
         }
-        let out = match child.wait_with_output() {
-            Ok(o) => o,
-            Err(e) => {
-                last_err = format!("try {}: wait model: {e}", try_no + 1);
-                break;
-            }
-        };
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            last_err = format!(
-                "try {}: the model binary exited {} ({})",
-                try_no + 1,
-                out.status.code().unwrap_or(-1),
-                stderr.trim()
-            );
-            continue;
-        }
-        let resp: Value = match serde_json::from_slice(&out.stdout) {
-            Ok(v) => v,
-            Err(e) => {
-                last_err = format!("try {}: the model output is not JSON: {e}", try_no + 1);
-                break;
-            }
-        };
-        let stop = resp
-            .get("stop_reason")
-            .and_then(|s| s.as_str())
-            .unwrap_or("");
-        if stop == "error" {
-            let detail = resp
-                .get("detail")
-                .and_then(|d| d.as_str())
-                .unwrap_or("no detail");
-            last_err = format!(
-                "try {}: the model returned an error stop: {detail}",
-                try_no + 1
-            );
-            continue;
-        }
-        let text = resp.get("text").and_then(|t| t.as_str()).unwrap_or("");
-        if text.trim().is_empty() {
-            last_err = format!("try {}: an empty summary (stop reason {stop})", try_no + 1);
-            continue;
-        }
-        // The usage of the winning try rides the marker:
-        // the statusline sums it into the cumulative totals
-        // (docs/auto-compact-plan.md section 4.6).
-        let usage = resp.get("usage").cloned();
-        return Ok((text.trim().to_string(), usage));
     }
-    Err(last_err)
+
+    /// The `assemble --summary-text` region flag and value for the seed.
+    fn seed_flag(&self) -> (&'static str, String) {
+        match self {
+            Self::Main { up_to, .. } => ("--up-to", up_to.to_string()),
+            Self::Branch { branch_of, .. } => ("--branch-of", branch_of.to_string()),
+        }
+    }
+
+    /// The agent session dir name prefix.
+    fn agent_name(&self) -> &'static str {
+        match self {
+            Self::Main { .. } => "compact",
+            Self::Branch { .. } => "branch",
+        }
+    }
+
+    /// The `write-handoff` output mode and the read-back subdir.
+    fn output(&self) -> (&'static str, &'static str) {
+        match self {
+            Self::Main { .. } => ("handoff", "handoff"),
+            Self::Branch { .. } => ("branch", "branch-summary"),
+        }
+    }
+}
+
+/// The session engine compact (docs FT-033). Instead of a one-shot
+/// model call, it forks a full `rushi run` compact agent session with
+/// a single `write-handoff` tool. The agent writes the summary into
+/// the target: the handoff files for main, the branch summary file for
+/// branch, in the parent session dir. The driver reads it back.
+///
+/// Returns the summary text, the usage of the agent run (none), and
+/// the agent session dir (the caller removes it after the marker).
+/// Returns an error string when the fork or the read-back fails.
+fn run_session_summary(
+    args: &Args,
+    config_path: &Path,
+    cfg: &toml::Value,
+    session: &Path,
+    target: &CompactTarget,
+    assemble_bin: &Path,
+) -> Result<(String, Option<Value>, PathBuf), String> {
+    use std::process::{Command, Stdio};
+
+    let version = target.version();
+
+    // The parent values the fork inherits. The sessions root is the
+    // parent of the parent session dir. The working dir is the
+    // parent `cwd` file, else the sessions root.
+    let parent_dir = session
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve the parent session dir: {e}"))?;
+    let sessions_root = parent_dir
+        .parent()
+        .map(|p| p.to_path_buf())
+        .ok_or_else(|| "the parent session dir has no parent (sessions root)".to_string())?;
+    let cwd = std::fs::read_to_string(parent_dir.join("cwd"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| sessions_root.clone());
+
+    // The seed input: the compact agent's first message, the target
+    // region rendered as a readable transcript.
+    let seed_flag = target.seed_flag();
+    let mut seed_cmd = Command::new(assemble_bin);
+    seed_cmd
+        .arg("--summary-text")
+        .arg("--session")
+        .arg(session)
+        .arg("--config")
+        .arg(config_path)
+        .arg(seed_flag.0)
+        .arg(seed_flag.1);
+    if target.agent_name() == "compact" && args.strip_last_assistant {
+        seed_cmd.arg("--drop-last-assistant");
+    }
+    if let Some(p) = &args.prompt {
+        seed_cmd.arg("--prompt").arg(p);
+    }
+    let seed_out = seed_cmd
+        .output()
+        .map_err(|e| format!("spawn assemble for the seed text: {e}"))?;
+    if !seed_out.status.success() {
+        return Err(format!(
+            "the assemble --summary-text call failed: {}",
+            String::from_utf8_lossy(&seed_out.stderr)
+        ));
+    }
+    let seed_text = String::from_utf8_lossy(&seed_out.stdout).to_string();
+
+    // The agent session dir, under the same sessions root as the
+    // parent. The id names the parent and the version, so two
+    // parents never collide.
+    let p_name = parent_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .ok_or("the parent session dir has no name")?;
+    let c_id = format!("{p_name}-{}-v{version}", target.agent_name());
+    let c_dir = sessions_root.join(&c_id);
+    std::fs::create_dir_all(&c_dir)
+        .map_err(|e| format!("create the agent session dir: {e}"))?;
+
+    // The sidecar the write-handoff tool reads: the target dir (the
+    // parent), the version, and the output mode. It lives in the agent
+    // dir, so the `rm -r` removes it with the rest.
+    let (mode, _) = target.output();
+    let sidecar = serde_json::json!({
+        "target_dir": parent_dir.to_string_lossy(),
+        "version": version,
+        "mode": mode,
+    });
+    std::fs::write(c_dir.join("handoff-target.json"), sidecar.to_string())
+        .map_err(|e| format!("write the handoff sidecar: {e}"))?;
+
+    // The agent config: a copy of the parent config with one tool
+    // (write-handoff) and no auto-compact. The full config is
+    // carried, so the model and the other limits stay from the
+    // parent.
+    let tool_dir = resolve_write_handoff_tool_dir(cfg, &cwd).ok_or(
+        "cannot find the write-handoff tool dir: set the WRITE_HANDOFF_TOOL env var \
+         or a native_tool_paths entry that holds it"
+            .to_string(),
+    )?;
+    let agent_cfg = c_dir.join("compact-config.toml");
+    write_compact_config(&agent_cfg, cfg, &tool_dir).map_err(|e| e.to_string())?;
+
+    // Fork the compact agent session and block on it. The `rushi`
+    // binary is the sibling of this one, or the `--rushi` /
+    // `RUSHI_BIN` override.
+    let rushi_bin = resolve_bin(&args.rushi, "RUSHI_BIN", "rushi");
+    let mut cmd = Command::new(&rushi_bin);
+    cmd.arg("run")
+        .arg(&c_id)
+        .arg(&seed_text)
+        .arg("--sessions-root")
+        .arg(&sessions_root)
+        .arg("--cwd")
+        .arg(&cwd)
+        .arg("--config")
+        .arg(&agent_cfg);
+    let out = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("spawn the rushi fork: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "the compact agent session exited {}: {}",
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+
+    // Read back the file the agent wrote, in the parent dir.
+    let (_mode, subdir) = target.output();
+    let vpath = parent_dir.join(subdir).join(format!("v{version}.md"));
+    let summary = std::fs::read_to_string(&vpath)
+        .map_err(|e| format!("the agent did not write {}: {e}", vpath.display()))?;
+
+    Ok((summary, None, c_dir))
+}
+
+/// Find the `write-handoff` tool dir. The explicit env var wins
+/// (the test and custom layouts). Else the `native_tool_paths`
+/// entries (resolved against the working dir) are scanned for a
+/// `write-handoff` subdir that holds a `tool.toml`.
+fn resolve_write_handoff_tool_dir(cfg: &toml::Value, cwd: &Path) -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("WRITE_HANDOFF_TOOL") {
+        let pb = PathBuf::from(p);
+        if pb.join("tool.toml").exists() {
+            return Some(pb);
+        }
+    }
+    let native = cfg
+        .get("paths")
+        .and_then(|p| p.get("native_tool_paths"))
+        .and_then(|v| v.as_array())?;
+    for entry in native {
+        let s = entry.as_str()?;
+        let base = PathBuf::from(s);
+        let resolved = if base.is_absolute() {
+            base.clone()
+        } else {
+            cwd.join(&base)
+        };
+        let cand = resolved.join("write-handoff");
+        if cand.join("tool.toml").exists() {
+            return Some(cand);
+        }
+    }
+    None
+}
+
+/// Write the compact agent config: the full parent config with the
+/// tool set reduced to one `write-handoff` tool and auto-compact off.
+/// The full config is carried so the model and the other limits stay
+/// from the parent, not just the Nix base.
+fn write_compact_config(
+    path: &Path,
+    cfg: &toml::Value,
+    tool_dir: &Path,
+) -> std::io::Result<()> {
+    let tool_str = tool_dir.to_string_lossy().to_string();
+    let mut root: toml::map::Map<String, toml::Value> = match cfg.clone() {
+        toml::Value::Table(t) => t,
+        _ => toml::map::Map::new(),
+    };
+    // [paths]: one tool, no exts.
+    let paths_tbl: toml::map::Map<String, toml::Value> = match root.get("paths") {
+        Some(toml::Value::Table(t)) => t.clone(),
+        _ => toml::map::Map::new(),
+    };
+    let mut paths_tbl = paths_tbl;
+    paths_tbl.insert(
+        "native_tool_paths".to_string(),
+        toml::Value::Array(vec![toml::Value::String(tool_str)]),
+    );
+    paths_tbl.insert(
+        "extension_tool_paths".to_string(),
+        toml::Value::Array(vec![]),
+    );
+    root.insert("paths".to_string(), toml::Value::Table(paths_tbl));
+    // [limits]: no auto-compact for the agent session.
+    let limits_tbl: toml::map::Map<String, toml::Value> = match root.get("limits") {
+        Some(toml::Value::Table(t)) => t.clone(),
+        _ => toml::map::Map::new(),
+    };
+    let mut limits_tbl = limits_tbl;
+    limits_tbl.insert("compact_enabled".to_string(), toml::Value::Boolean(false));
+    root.insert("limits".to_string(), toml::Value::Table(limits_tbl));
+    let text = toml::to_string(&toml::Value::Table(root)).map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+    })?;
+    std::fs::write(path, text)
 }
 
 /// The `--branch` run (docs/branch-summarize-cases.md Phase 0).
@@ -930,69 +1077,38 @@ fn run_branch_compaction(args: &Args, events: &[LogEvent]) -> ! {
         .collect();
     let tokens_before = compact_math::full_form_estimate(&span_projected, &caps);
 
-    // The summary input: assemble projects the ditched span in the
-    // compact form and appends the summary-ask user item.
+    // The compact agent: fork a `rushi run` session that summarizes
+    // the ditched span and writes the branch summary file through the
+    // `write-handoff` tool. The driver reads it back and appends the
+    // branch marker.
     let assemble_bin = args.assemble.clone().unwrap_or_else(|| sibling("assemble"));
-    let mut cmd = Command::new(&assemble_bin);
-    cmd.arg("--session")
-        .arg(&args.session)
-        .arg("--config")
-        .arg(&config_path)
-        .arg("--summary-input")
-        .arg("--branch-of")
-        .arg(branch_of.to_string());
-    if let Some(p) = &args.prompt {
-        cmd.arg("--prompt").arg(p);
-    }
-    let out = cmd.output().unwrap_or_else(|e| {
-        fail_and_exit(
-            args,
-            false,
-            last_user_seq,
-            "the assemble call failed",
-            &e.to_string(),
-        );
-    });
-    if !out.status.success() {
-        fail_and_exit(
-            args,
-            false,
-            last_user_seq,
-            "the assemble call failed",
-            &String::from_utf8_lossy(&out.stderr),
-        );
-    }
-    let request: Value = match serde_json::from_slice(&out.stdout) {
-        Ok(v) => v,
-        Err(e) => {
-            fail_and_exit(
-                args,
-                false,
-                last_user_seq,
-                "the assemble output is not a request",
-                &e.to_string(),
-            );
-        }
-    };
-
-    // The summary call: two tries through the model binary.
-    let model_bin = resolve_bin(&args.model, "MODEL_BIN", "model");
-    let (summary, summary_usage) = match run_summary_calls(&model_bin, &config_path, &request) {
+    let (summary, summary_usage, c_dir) = match run_session_summary(
+        args,
+        &config_path,
+        &cfg,
+        &args.session,
+        &CompactTarget::Branch {
+            branch_of: branch_of as usize,
+            version: branch_version,
+        },
+        &assemble_bin,
+    ) {
         Ok(r) => r,
         Err(last_err) => {
             // P4: the failure appends only `compaction_failed`.
-            // No rewind or branch marker is written.
+            // No branch marker is written.
             fail_and_exit(
                 args,
                 false,
                 last_user_seq,
-                "the branch summary failed",
+                "the branch compact agent session failed",
                 &last_err,
             );
         }
     };
 
-    // The branch marker (P2, P7) and the versioned branch file (P3).
+    // The branch marker (P2, P7). The agent already wrote the
+    // versioned branch summary file through the tool.
     let marker = build_branch_marker(
         &summary,
         branch_of,
@@ -1005,8 +1121,13 @@ fn run_branch_compaction(args: &Args, events: &[LogEvent]) -> ! {
     if let Err(e) = append_event(&log_bin, &args.session, &marker) {
         eprintln!("compact: append branch compaction_summary failed: {e}");
     }
-    if let Err(e) = write_branch_summary_file(&args.session, branch_version, &summary) {
-        eprintln!("compact: write branch summary file failed: {e}");
+
+    // Remove the compact agent's scratch session dir.
+    if let Err(e) = std::fs::remove_dir_all(&c_dir) {
+        eprintln!(
+            "compact: cannot remove the agent session dir {}: {e}",
+            c_dir.display()
+        );
     }
 
     let status = serde_json::json!({
@@ -1054,22 +1175,6 @@ fn build_branch_marker(
         marker["usage"] = u;
     }
     marker
-}
-
-/// Write `branch-summary/v<version>.md` in the session dir
-/// (docs/branch-summarize-cases.md P3): the content equals the
-/// marker's inline summary. Nothing is written under `handoff/` or
-/// `handoff.md`.
-fn write_branch_summary_file(
-    session: &Path,
-    version: u64,
-    summary: &str,
-) -> Result<PathBuf, String> {
-    let dir = session.join("branch-summary");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create branch-summary dir: {e}"))?;
-    let path = dir.join(format!("v{version}.md"));
-    std::fs::write(&path, summary).map_err(|e| format!("write {path:?}: {e}"))?;
-    Ok(path)
 }
 
 /// The failure path: the `compaction_failed` marker, the detail on
@@ -1284,6 +1389,79 @@ mod tests {
     }
 
     #[test]
+    fn write_compact_config_carries_one_tool_and_disables_compact() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool_dir = dir.path().join("write-handoff");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        let cfg = config_toml(
+            r#"
+            [paths]
+            native_tool_paths = ["tools"]
+            extension_tool_paths = ["ext/goal-tools"]
+
+            [models.my-model]
+            context_tokens = 100000
+
+            [active]
+            model = "my-model"
+
+            [limits]
+            context_budget_tokens = 90000
+            compact_reserve_tokens = 16384
+            "#,
+        );
+        let out = dir.path().join("compact-config.toml");
+        write_compact_config(&out, &cfg, &tool_dir).unwrap();
+        let back: toml::Value = std::fs::read_to_string(&out)
+            .unwrap()
+            .parse()
+            .unwrap();
+        // One tool, no exts.
+        assert_eq!(
+            back["paths"]["native_tool_paths"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            back["paths"]["extension_tool_paths"].as_array().unwrap().len(),
+            0
+        );
+        // Auto-compact off.
+        assert_eq!(
+            back["limits"]["compact_enabled"].as_bool(),
+            Some(false)
+        );
+        // The model and the other limits survive.
+        assert_eq!(back["active"]["model"].as_str(), Some("my-model"));
+        assert_eq!(
+            back["limits"]["context_budget_tokens"].as_integer(),
+            Some(90000)
+        );
+    }
+
+    #[test]
+    fn resolve_write_handoff_tool_dir_finds_it_under_native_paths() {
+        // A non-existent env path keeps the env branch from winning,
+        // so the native_tool_paths scan is what the test exercises.
+        std::env::set_var("WRITE_HANDOFF_TOOL", "/nonexistent-xyz");
+        let dir = tempfile::tempdir().unwrap();
+        let tools_root = dir.path().join("tools");
+        let tool_dir = tools_root.join("write-handoff");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(tool_dir.join("tool.toml"), "[tool]\ncommand = \"write-handoff\"\n").unwrap();
+        let cfg = config_toml(&format!(
+            r#"[paths]
+native_tool_paths = ["{}"]
+"#,
+            tools_root.display()
+        ));
+        let found = resolve_write_handoff_tool_dir(&cfg, dir.path()).unwrap();
+        assert_eq!(
+            found.canonicalize().unwrap(),
+            tool_dir.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
     fn trigger_level_uses_context_budget() {
         let cfg = config_toml(
             r#"
@@ -1415,25 +1593,6 @@ mod tests {
             "a branch marker has no handoff parent"
         );
         assert_eq!(m["diverge_seq"], 9, "diverge_seq equals branch_of");
-    }
-
-    /// P3: a successful `--branch` run writes
-    /// `branch-summary/v<N>.md` whose content equals the inline
-    /// summary; nothing goes to `handoff/` or `handoff.md`.
-    #[test]
-    fn compact_branch_writes_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_branch_summary_file(dir.path(), 3, "the branch text").unwrap();
-        assert_eq!(path, dir.path().join("branch-summary").join("v3.md"));
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "the branch text");
-        assert!(
-            !dir.path().join("handoff.md").exists(),
-            "branch mode must not write handoff.md"
-        );
-        assert!(
-            !dir.path().join("handoff").exists(),
-            "branch mode must not write handoff/"
-        );
     }
 
     /// P4: a failed branch run appends a `compaction_failed` marker,

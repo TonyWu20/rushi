@@ -84,7 +84,7 @@ jobs:
         if: matrix.e2e
         run: bash scripts/crash-e2e.sh
 
-      - name: "e2e: compact"
+      - name: "e2e: compact (session engine)"
         if: matrix.e2e
         run: bash scripts/compact-e2e.sh
 

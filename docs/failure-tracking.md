@@ -1561,3 +1561,62 @@ stores hold none of the pokes (`CASTEP-6.11-nixos-dump/sessions/ccastep-vdump`,
 The stdout line carries the resolved dir. The guard containment check
 passes the documented monitor skeleton plus a one-shot `sleep 1`. The
 docs carry the fire-and-forget contract line.
+
+## FT-033 — Handoff degradation: the compaction summary leaks
+hallucinated tool calls
+
+**Symptom:** The handoff files of the `chemrust-hamiltonian`
+`performance-map` session are mixed. Some are clean markdown (v1,
+v3 to v6, v8 to v13, v15, v16). Others hold raw model output with
+hallucinated tool calls in the text (`v2`, `v7`, `v14`, `v17`, `v18`,
+`v19`, `handoff.md`). The model emitted `bash`, `structured_output`,
+and `structured_only` as literal text. No tool named
+`structured_output` exists in the tool set. The corruption entered
+the handoff through the compaction summary. It degraded the context
+for every later iteration.
+
+**Root cause:** The one-shot compact model call (`assemble
+--summary-input` to `model`) runs with no registered tools
+(`"tools": []`). The model still emits tool-call syntax and invents
+tool names. With no tool registered, `route` cannot reject the calls.
+They leak into the summary text as-is. `write_handoff`
+(`bin/rushi/src/step/compact.rs`) saves that text as the handoff
+file. This is the one path where a cost-saving measure contaminates
+the main session once and for all. The summary is the sole input to
+the next compact and the sole handoff file.
+
+**Fix:** Replace the one-shot model call with a compact agent. The
+compact agent is a full `rushi run` session (C) whose only tool is
+`write-handoff`. `route` rejects a call to an unregistered tool. The
+agent loop allows self-correction. The `write-handoff` tool makes
+the output deterministic and validated. The user rejected the cost
+trade as the design goal. The goal is that a bad compact never
+pollutes P. This engine is the one compact mechanism in rushi. There
+is no config option to select it. The one-shot path is removed.
+
+The change set:
+- `tools/write-handoff`: writes the versioned summary file with an
+  atomic rename. The target dir, version, and mode come from
+  `handoff-target.json` in `$HARNESS_SESSION_DIR`, not from tool
+  args. That blocks path traversal. `summary` is the only tool arg.
+  In `handoff` mode it writes `handoff/v<N>.md` and `handoff.md`. In
+  `branch` mode it writes `branch-summary/v<N>.md`.
+- `assemble --summary-text`: renders the target region as a readable
+  markdown transcript. It seeds the compact agent. `--up-to` for
+  main, `--branch-of` for branch.
+- `compact` driver: forks `rushi run <C>`. It inherits the P
+  `sessions_root` and `cwd`. It writes the P full config into the C
+  dir with `native_tool_paths` and `compact_enabled` overridden. It
+  blocks on C, reads the file back, appends the `compaction_summary`
+  marker to P, and removes the C session dir. Both the main compact
+  and the `--branch` compact fork the agent. No loop change.
+
+**Verification:**
+- The `write-handoff` tool writes the versioned file with no
+  leftover temp file.
+- `scripts/compact-e2e.sh` proves the flow with a stubbed `rushi`
+  fork: the threshold, iterative, overflow, branch, failure,
+  kill-switch, and up-to scenarios. All checks pass.
+- `cargo test --workspace` passes.
+- The acceptance test: after a session compact, the handoff file is
+  clean markdown with no tool-call artifacts.

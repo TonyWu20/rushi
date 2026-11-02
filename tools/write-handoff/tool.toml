@@ -1,0 +1,13 @@
+[tool]
+description = "Write the compact handoff summary to the parent session's handoff files. The only tool the compact agent uses. It writes the versioned handoff file and the latest copy."
+command = "write-handoff"
+args = []
+timeout_ms = 30000
+
+[tool.schema]
+type = "object"
+required = ["summary"]
+
+[tool.schema.properties.summary]
+type = "string"
+description = "The full handoff summary text to write. It becomes the versioned handoff document and the latest handoff copy."

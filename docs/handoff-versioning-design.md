@@ -132,6 +132,41 @@ P5. **Backward compatibility.** A log with pre-versioning
 P6. **Append-only invariant.** Adding versioning adds fields to new
     events. It never rewrites or removes earlier log lines.
 
+P7. **Clean handoff (session engine).** The summary is produced by a
+    compact agent through the `write-handoff` tool. The handoff file
+    is clean markdown with no tool-call artifacts. This engine is
+    the one compact mechanism in rushi. It covers the main compact
+    and the `--branch` compact. There is no config option.
+
+## 6. The session compact engine (FT-033)
+
+The one-shot compact call (`assemble --summary-input` to `model`)
+ran with no registered tools. The model still emitted tool-call
+syntax and invented tool names. Those leaked into the summary text
+and the handoff file. The session engine replaces that call with a
+compact agent. It is the one compact mechanism in rushi. There is no
+config option. Both the main compact and the `--branch` compact fork
+the agent.
+
+The flow:
+- The `compact` driver forks `rushi run <C>` (the compact agent).
+- C is seeded with the target region as a readable transcript
+  (`assemble --summary-text`, `--up-to` for main, `--branch-of` for
+  branch).
+- C carries P full config with `native_tool_paths` set to the single
+  `write-handoff` tool and `compact_enabled` off. It inherits the P
+  `sessions_root` and `cwd`.
+- C's only tool is `write-handoff`. It reads the target dir, the
+  version, and the mode from `handoff-target.json` in
+  `$HARNESS_SESSION_DIR`. In `handoff` mode it writes
+  `<P>/handoff/v<N>.md` and `handoff.md`. In `branch` mode it writes
+  `<P>/branch-summary/v<N>.md`.
+- The driver blocks on C, reads the file back, appends the
+  `compaction_summary` marker to P, and removes the C session dir.
+
+No loop change. The mechanism is selected by no key: it is the only
+one. See `tools/write-handoff` and `scripts/compact-e2e.sh`.
+
 ## Verification
 
 | P# | Property | Proof | Status |
@@ -142,6 +177,7 @@ P6. **Append-only invariant.** Adding versioning adds fields to new
 | P4 | correct version | e2e `compact-e2e.sh` threshold scenario checks `handoff/v1.md` matches `handoff.md` | proven |
 | P5 | backward compat | `handoff_version_meta_legacy_events_without_version` test | proven |
 | P6 | append-only | Inherited from FT-005; no new write path | proven |
+| P7 | clean handoff | `scripts/compact-e2e.sh` threshold scenario checks the handoff is agent-written markdown | proven |
 
 ## Gate
 
