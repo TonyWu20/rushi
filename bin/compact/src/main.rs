@@ -498,7 +498,8 @@ fn cut_index(
     kept_events: &[LogEvent],
     up_to: Option<usize>,
     projected: &[Ev],
-    keep_tokens: u64,
+    trigger_level: u64,
+    summary_budget: u64,
     caps: &Caps,
 ) -> usize {
     match up_to {
@@ -510,7 +511,7 @@ fn cut_index(
                 .position(|e| e.seq > u_eff)
                 .unwrap_or(kept_events.len())
         }
-        None => compact_math::find_cut(projected, keep_tokens, caps),
+        None => compact_math::find_cut(projected, trigger_level, summary_budget, caps),
     }
 }
 
@@ -532,13 +533,20 @@ fn run_compaction(
     let cfg = load_config(&config_path);
     let empty = toml::Value::Table(toml::map::Map::new());
     let limits = cfg.get("limits").unwrap_or(&empty);
-    let keep_tokens: u64 = val_int(limits, "compact_keep_tokens").unwrap_or(20_000) as u64;
-    let cpts = {
-        let active = resolve_active_model(&cfg);
-        resolve_model_settings(&cfg, &active)
-            .estimate_chars_per_token
-            .max(1)
-    };
+    let reserve: u64 = val_int(limits, "compact_reserve_tokens").unwrap_or(16_384) as u64;
+    let active = resolve_active_model(&cfg);
+    let model_settings = resolve_model_settings(&cfg, &active);
+    let cpts = model_settings.estimate_chars_per_token.max(1);
+    // The trigger level: the context budget minus the reserve. The
+    // summary budget: the output cap of the compact agent's summary
+    // (`max_output_tokens`), the real bound on the handoff document
+    // that replaces the old region. The walk-back bounds the kept
+    // region at the trigger level minus the summary budget, so the
+    // post-compact context (summary plus kept region) stays under the
+    // trigger level and the next turn does not re-fire immediately.
+    let base = resolve_context_budget(&cfg);
+    let trigger_level = compact_math::trigger_level_for(base, reserve);
+    let summary_budget = model_settings.max_output_tokens;
 
     // The projected kept events, for the estimator. The marker
     // types project to an empty user: zero tokens, no group effect.
@@ -551,7 +559,14 @@ fn run_compaction(
         text: None,
         chars_per_token: cpts,
     };
-    let cut = cut_index(kept_events, args.up_to, &projected, keep_tokens, &est_caps);
+    let cut = cut_index(
+        kept_events,
+        args.up_to,
+        &projected,
+        trigger_level,
+        summary_budget,
+        &est_caps,
+    );
     if cut == 0 {
         let detail = if args.up_to.is_some() {
             format!(
@@ -617,6 +632,11 @@ fn run_compaction(
     // self-corrects. The handoff lands in the parent dir via the
     // tool. This is the one compact mechanism in rushi (docs FT-033).
     // There is no config option.
+    //
+    // The liveness guarantee: if the agent fails, the walk-back-bounded
+    // seed transcript is the fallback handoff. The cut is bounded, so
+    // the handoff fits. The compaction always finishes. The main
+    // session never blocks on a compact error.
     let (summary, summary_usage, c_dir): (String, Option<Value>, PathBuf) =
         match run_session_summary(
             args,
@@ -627,14 +647,11 @@ fn run_compaction(
             &assemble_bin,
         ) {
             Ok(r) => (r.0, r.1, r.2),
-            Err(last_err) => {
-                fail_and_exit(
-                    args,
-                    overflow,
-                    last_user_seq,
-                    "the compact agent session failed",
-                    &last_err,
+            Err((agent_err, fallback)) => {
+                eprintln!(
+                    "compact: the compact agent failed ({agent_err}). Using the bounded model-free cut as the handoff."
                 );
+                (fallback, None, PathBuf::new())
             }
         };
 
@@ -720,12 +737,15 @@ fn run_compaction(
 
     // Remove the compact agent's scratch session dir. The summary is
     // in the parent handoff file and the marker is in the parent log,
-    // so the agent dir is pure scratch.
-    if let Err(e) = std::fs::remove_dir_all(&c_dir) {
-        eprintln!(
-            "compact: cannot remove the agent session dir {}: {e}",
-            c_dir.display()
-        );
+    // so the agent dir is pure scratch. The fallback (the agent
+    // failed) leaves no agent dir: the c_dir is empty.
+    if !c_dir.as_os_str().is_empty() {
+        if let Err(e) = std::fs::remove_dir_all(&c_dir) {
+            eprintln!(
+                "compact: cannot remove the agent session dir {}: {e}",
+                c_dir.display()
+            );
+        }
     }
 
     let status = serde_json::json!({
@@ -794,7 +814,9 @@ impl CompactTarget {
 ///
 /// Returns the summary text, the usage of the agent run (none), and
 /// the agent session dir (the caller removes it after the marker).
-/// Returns an error string when the fork or the read-back fails.
+/// On failure the error carries the agent error message and the
+/// bounded seed transcript. The caller uses the seed as the bounded
+/// model-free fallback handoff so the compaction always finishes.
 fn run_session_summary(
     args: &Args,
     config_path: &Path,
@@ -802,7 +824,7 @@ fn run_session_summary(
     session: &Path,
     target: &CompactTarget,
     assemble_bin: &Path,
-) -> Result<(String, Option<Value>, PathBuf), String> {
+) -> Result<(String, Option<Value>, PathBuf), (String, String)> {
     use std::process::{Command, Stdio};
 
     let version = target.version();
@@ -812,11 +834,16 @@ fn run_session_summary(
     // parent `cwd` file, else the sessions root.
     let parent_dir = session
         .canonicalize()
-        .map_err(|e| format!("cannot resolve the parent session dir: {e}"))?;
+        .map_err(|e| (format!("cannot resolve the parent session dir: {e}"), String::new()))?;
     let sessions_root = parent_dir
         .parent()
         .map(|p| p.to_path_buf())
-        .ok_or_else(|| "the parent session dir has no parent (sessions root)".to_string())?;
+        .ok_or_else(|| {
+            (
+                "the parent session dir has no parent (sessions root)".to_string(),
+                String::new(),
+            )
+        })?;
     let cwd = std::fs::read_to_string(parent_dir.join("cwd"))
         .ok()
         .map(|s| s.trim().to_string())
@@ -825,10 +852,17 @@ fn run_session_summary(
         .unwrap_or_else(|| sessions_root.clone());
 
     // The seed input: the compact agent's first message, the target
-    // region rendered as a readable transcript.
+    // region projected by the summary-input mode and rendered as a
+    // readable transcript. Both flags are needed: `--summary-input`
+    // runs the projection (the drop search that bounds the region at
+    // the input budget), and `--summary-text` renders it instead of
+    // printing the bare model request. Without `--summary-input`, the
+    // call falls through to the raw-request print, which is
+    // unbounded and overflows the compact agent's context.
     let seed_flag = target.seed_flag();
     let mut seed_cmd = Command::new(assemble_bin);
     seed_cmd
+        .arg("--summary-input")
         .arg("--summary-text")
         .arg("--session")
         .arg(session)
@@ -844,11 +878,14 @@ fn run_session_summary(
     }
     let seed_out = seed_cmd
         .output()
-        .map_err(|e| format!("spawn assemble for the seed text: {e}"))?;
+        .map_err(|e| (format!("spawn assemble for the seed text: {e}"), String::new()))?;
     if !seed_out.status.success() {
-        return Err(format!(
-            "the assemble --summary-text call failed: {}",
-            String::from_utf8_lossy(&seed_out.stderr)
+        return Err((
+            format!(
+                "the assemble --summary-text call failed: {}",
+                String::from_utf8_lossy(&seed_out.stderr)
+            ),
+            String::new(),
         ));
     }
     let seed_text = String::from_utf8_lossy(&seed_out.stdout).to_string();
@@ -859,11 +896,11 @@ fn run_session_summary(
     let p_name = parent_dir
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
-        .ok_or("the parent session dir has no name")?;
+        .ok_or_else(|| ("the parent session dir has no name".to_string(), seed_text.clone()))?;
     let c_id = format!("{p_name}-{}-v{version}", target.agent_name());
     let c_dir = sessions_root.join(&c_id);
     std::fs::create_dir_all(&c_dir)
-        .map_err(|e| format!("create the agent session dir: {e}"))?;
+        .map_err(|e| (format!("create the agent session dir: {e}"), seed_text.clone()))?;
 
     // The sidecar the write-handoff tool reads: the target dir (the
     // parent), the version, and the output mode. It lives in the agent
@@ -875,7 +912,7 @@ fn run_session_summary(
         "mode": mode,
     });
     std::fs::write(c_dir.join("handoff-target.json"), sidecar.to_string())
-        .map_err(|e| format!("write the handoff sidecar: {e}"))?;
+        .map_err(|e| (format!("write the handoff sidecar: {e}"), seed_text.clone()))?;
 
     // The seed transcript crosses the fork as the session's first
     // `user_message`, appended to the agent log before the fork. A
@@ -885,7 +922,8 @@ fn run_session_summary(
     // `claim` reports the pending steer message, so the fork runs the
     // compact agent instead of idling. The log lives in the agent dir,
     // so the `rm -r` removes it too.
-    seed_agent_log(&c_dir, &seed_text)?;
+    seed_agent_log(&c_dir, &seed_text)
+        .map_err(|e| (e, seed_text.clone()))?;
 
     // The agent config: a copy of the parent config with one tool
     // (write-handoff) and no auto-compact. The full config is
@@ -896,9 +934,11 @@ fn run_session_summary(
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
-    let tool_dir = resolve_write_handoff_tool_dir(cfg, &config_dir)?;
+    let tool_dir = resolve_write_handoff_tool_dir(cfg, &config_dir)
+        .map_err(|e| (e.to_string(), seed_text.clone()))?;
     let agent_cfg = c_dir.join("compact-config.toml");
-    write_compact_config(&agent_cfg, cfg, &tool_dir).map_err(|e| e.to_string())?;
+    write_compact_config(&agent_cfg, cfg, &tool_dir)
+        .map_err(|e| (e.to_string(), seed_text.clone()))?;
 
     // Fork the compact agent session and block on it. The `rushi`
     // binary is the sibling of this one, or the `--rushi` /
@@ -919,20 +959,27 @@ fn run_session_summary(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .map_err(|e| format!("spawn the rushi fork: {e}"))?;
+        .map_err(|e| (format!("spawn the rushi fork: {e}"), seed_text.clone()))?;
     if !out.status.success() {
-        return Err(format!(
-            "the compact agent session exited {}: {}",
-            out.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&out.stderr)
+        return Err((
+            format!(
+                "the compact agent session exited {}: {}",
+                out.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+            seed_text.clone(),
         ));
     }
 
     // Read back the file the agent wrote, in the parent dir.
     let (_mode, subdir) = target.output();
     let vpath = parent_dir.join(subdir).join(format!("v{version}.md"));
-    let summary = std::fs::read_to_string(&vpath)
-        .map_err(|e| format!("the agent did not write {}: {e}", vpath.display()))?;
+    let summary = std::fs::read_to_string(&vpath).map_err(|e| {
+        (
+            format!("the agent did not write {}: {e}", vpath.display()),
+            seed_text.clone(),
+        )
+    })?;
 
     Ok((summary, None, c_dir))
 }
@@ -1156,9 +1203,10 @@ fn run_branch_compaction(args: &Args, events: &[LogEvent]) -> ! {
         &assemble_bin,
     ) {
         Ok(r) => r,
-        Err(last_err) => {
+        Err((last_err, _fallback)) => {
             // P4: the failure appends only `compaction_failed`.
-            // No branch marker is written.
+            // No branch marker is written. The branch span is a
+            // detached rewrite, not the main session's liveness.
             fail_and_exit(
                 args,
                 false,
@@ -1611,14 +1659,14 @@ native_tool_paths = ["{}"]
         };
 
         // up_to = 3: the first kept event past seq 3 is seq 4 (index 3).
-        assert_eq!(cut_index(&kept, Some(3), &projected, 100, &caps), 3);
+        assert_eq!(cut_index(&kept, Some(3), &projected, 100, 0, &caps), 3);
         // up_to = 1: first event past seq 1 is seq 2 (index 1).
-        assert_eq!(cut_index(&kept, Some(1), &projected, 100, &caps), 1);
+        assert_eq!(cut_index(&kept, Some(1), &projected, 100, 0, &caps), 1);
         // up_to = 5: no kept event past seq 5; the cut lands at the
         // end: the whole kept region is old, nothing is kept.
-        assert_eq!(cut_index(&kept, Some(5), &projected, 100, &caps), 5);
+        assert_eq!(cut_index(&kept, Some(5), &projected, 100, 0, &caps), 5);
         // up_to far beyond the log: same as up_to = last seq.
-        assert_eq!(cut_index(&kept, Some(99), &projected, 100, &caps), 5);
+        assert_eq!(cut_index(&kept, Some(99), &projected, 100, 0, &caps), 5);
     }
 
     /// Rewind rule I4. A target at or before the region head degrades
@@ -1637,12 +1685,12 @@ native_tool_paths = ["{}"]
         // Before the region head: degrades to the head. The cut lands
         // on the event after the head (seq 10, index 1). The old
         // region is the head event alone.
-        assert_eq!(cut_index(&kept, Some(5), &projected, 100, &caps), 1);
-        assert_eq!(cut_index(&kept, Some(1), &projected, 100, &caps), 1);
+        assert_eq!(cut_index(&kept, Some(5), &projected, 100, 0, &caps), 1);
+        assert_eq!(cut_index(&kept, Some(1), &projected, 100, 0, &caps), 1);
         // At the region head: the same degrade.
-        assert_eq!(cut_index(&kept, Some(9), &projected, 100, &caps), 1);
+        assert_eq!(cut_index(&kept, Some(9), &projected, 100, 0, &caps), 1);
         // Inside the un-compact prefix: untouched.
-        assert_eq!(cut_index(&kept, Some(11), &projected, 100, &caps), 3);
+        assert_eq!(cut_index(&kept, Some(11), &projected, 100, 0, &caps), 3);
     }
 
     #[test]
@@ -1654,8 +1702,8 @@ native_tool_paths = ["{}"]
             chars_per_token: 4,
         };
         // Five 1-char user events: 5 chars total, far below a large
-        // keep budget, so find_cut returns 0 (keep everything).
-        assert_eq!(cut_index(&kept, None, &projected, 100_000, &caps), 0);
+        // trigger level, so find_cut returns 0 (keep everything).
+        assert_eq!(cut_index(&kept, None, &projected, 100_000, 0, &caps), 0);
     }
 
     // ── branch mode (docs/branch-summarize-cases.md) ─────────────
