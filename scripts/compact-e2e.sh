@@ -52,11 +52,14 @@ EOF
 }
 
 # ── The fake `rushi` fork: the compact agent + the tool ─────────
-# The compact driver forks `rushi run <c_id> <seed> --sessions-root
-# R --cwd D --config C`. The fork reads the sidecar and writes the
-# target file, as the agent's `write-handoff` tool would. `mode` in
-# the sidecar selects the handoff or the branch output. `FAKE_RUSHI_
-# FAIL` and `FAKE_RUSHI_SUMMARY` drive the failure and content.
+# The compact driver forks `rushi run <c_id>
+# --sessions-root R --cwd D --config C`, with no task. The seed
+# transcript is pre-seeded as the session's first `user_message` in the
+# agent log, never an argv slot (the argv limit is the FT-035 failure).
+# The fork reads the sidecar and writes the target file, as the
+# agent's `write-handoff` tool would. `mode` in the sidecar selects
+# the handoff or the branch output. `FAKE_RUSHI_FAIL` and
+# `FAKE_RUSHI_SUMMARY` drive the failure and content.
 make_fake_rushi() {
   cat > "$WORK/fake-rushi" <<'EOF'
 #!/usr/bin/env bash
@@ -77,6 +80,10 @@ if [[ "${FAKE_RUSHI_FAIL:-0}" == "1" ]]; then
   exit 1
 fi
 c_dir="$R/$c_id"
+# The driver pre-seeded the seed transcript as the session's first
+# user_message before the fork, so the log exists and is non-empty.
+log="$c_dir/events.jsonl"
+[ -s "$log" ] || { echo "fake rushi: the seed log is missing or empty" >&2; exit 6; }
 side="$c_dir/handoff-target.json"
 [ -f "$side" ] || { echo "fake rushi: no sidecar" >&2; exit 3; }
 target="$(sed -n 's/.*"target_dir"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$side")"
