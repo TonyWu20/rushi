@@ -233,6 +233,10 @@ It falls back (main) or fails (branch), as today.
 
 ### D. model.rs: gate the forced compacts
 
+Deferred by decision 5 (section 3). The last-resort compact stays the
+fatal-overflow safety net, so no `model.rs` change. The target state,
+if it is later chosen, would gate every forced compact site:
+
 Every forced compact site in `step/model.rs` runs only when
 `cfg.compact_enabled` is true:
 
@@ -265,6 +269,10 @@ by hand). No agent C dir is created anymore.
    is deferred. The compact work must be healthy first.
 4. The agent orchestration is deleted in the same commit series as
    the one-shot.
+5. Step D is kept as is. The last-resort compact stays the
+   fatal-overflow safety net. The kill switch holds the proactive and
+   normal-overflow compacts. A fatal overflow is still rescued by the
+   last-resort. Step D is deferred until the compact work is healthy.
 
 ## 4. Test plan
 
