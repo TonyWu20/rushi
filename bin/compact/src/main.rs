@@ -5,8 +5,10 @@
 //! calls the model for the summary with a bounded check loop
 //! (docs/ft-038-compact-check-loop.md), and appends the
 //! `compaction_started` / `compaction_summary` / `compaction_failed`
-//! markers through `log`. The loop keeps the session: no handoff, no
-//! new session directory.
+//! markers through `log`. It writes the versioned handoff file for its
+//! target: `handoff/v<N>.md` plus `handoff.md` on the main target,
+//! `branch-summary/v<N>.md` on a branch (docs/ft-038-compact-check-loop.md
+//! step 6). The loop keeps the session: no new session directory.
 //!
 //! The trigger math and the chars/4 estimator are the shared
 //! `rushi_common::compact_math` module (docs/phase-2-plan.md
@@ -744,6 +746,13 @@ fn run_compaction(
         eprintln!("compact: append compaction_summary failed: {e}");
     }
 
+    // Write the versioned handoff file for the main target
+    // (docs/ft-038-compact-check-loop.md step 6). The write carries the
+    // accepted one-shot summary, or the bounded seed on the liveness
+    // fallback. A loop-driven compact also writes the same file; the
+    // duplicate is harmless.
+    write_main_handoff(&args.session, &summary, version);
+
     let status = serde_json::json!({
         "status": "compacted",
         "reason": reason_str,
@@ -1325,6 +1334,10 @@ fn run_branch_compaction(args: &Args, events: &[LogEvent]) -> ! {
         eprintln!("compact: append branch compaction_summary failed: {e}");
     }
 
+    // Write the versioned branch summary file (docs/ft-038-compact-check-loop.md
+    // step 6). Branch mode writes only the branch file, never a handoff.
+    write_branch_summary(&args.session, &summary, branch_version);
+
     let status = serde_json::json!({
         "status": "compacted",
         "reason": args.reason.as_str(),
@@ -1337,6 +1350,40 @@ fn run_branch_compaction(args: &Args, events: &[LogEvent]) -> ! {
     });
     println!("{}", serde_json::to_string(&status).unwrap());
     std::process::exit(0);
+}
+
+/// Write the versioned handoff document for a main compact
+/// (docs/ft-038-compact-check-loop.md step 6): `handoff/v<N>.md` plus
+/// `handoff.md` as the latest copy. This mirrors the loop writer in
+/// `bin/rushi/src/step/compact.rs`. The main target always writes the
+/// file, even on the bounded seed fallback.
+fn write_main_handoff(session: &Path, summary: &str, version: u64) {
+    let vdir = session.join("handoff");
+    let vpath = vdir.join(format!("v{}.md", version));
+    if let Err(e) = std::fs::create_dir_all(&vdir) {
+        eprintln!("compact: cannot create the handoff dir: {e}");
+    }
+    if let Err(e) = std::fs::write(&vpath, summary) {
+        eprintln!("compact: cannot write handoff/v{}.md: {e}", version);
+    }
+    if let Err(e) = std::fs::write(session.join("handoff.md"), summary) {
+        eprintln!("compact: cannot write handoff.md: {e}");
+    }
+}
+
+/// Write the versioned branch summary document
+/// (docs/ft-038-compact-check-loop.md step 6):
+/// `branch-summary/v<N>.md`. Branch mode writes only the branch file,
+/// never a `handoff.md` or a `handoff` dir.
+fn write_branch_summary(session: &Path, summary: &str, version: u64) {
+    let dir = session.join("branch-summary");
+    let path = dir.join(format!("v{}.md", version));
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("compact: cannot create the branch-summary dir: {e}");
+    }
+    if let Err(e) = std::fs::write(&path, summary) {
+        eprintln!("compact: cannot write branch-summary/v{}.md: {e}", version);
+    }
 }
 
 /// The branch `compaction_summary` marker
@@ -1973,6 +2020,36 @@ esac
     fn real_bins_built() -> bool {
         let target_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug");
         target_dir.join("parse").exists() && target_dir.join("route").exists()
+    }
+
+    /// The versioned file writes (docs FT-038 step 6): the main target
+    /// writes `handoff/v<N>.md` plus `handoff.md`; the branch target
+    /// writes `branch-summary/v<N>.md` and never a handoff.
+    #[test]
+    fn versioned_file_writes_match_the_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let main_session = dir.path().join("main");
+        std::fs::create_dir_all(&main_session).unwrap();
+        write_main_handoff(&main_session, "the main summary", 3);
+        assert_eq!(
+            std::fs::read_to_string(main_session.join("handoff/v3.md")).unwrap(),
+            "the main summary"
+        );
+        assert_eq!(
+            std::fs::read_to_string(main_session.join("handoff.md")).unwrap(),
+            "the main summary"
+        );
+
+        let branch_session = dir.path().join("branch");
+        std::fs::create_dir_all(&branch_session).unwrap();
+        write_branch_summary(&branch_session, "the branch summary", 2);
+        assert_eq!(
+            std::fs::read_to_string(branch_session.join("branch-summary/v2.md")).unwrap(),
+            "the branch summary"
+        );
+        // Branch mode never writes a handoff document.
+        assert!(!branch_session.join("handoff.md").exists());
+        assert!(!branch_session.join("handoff").exists());
     }
 
     /// The check loop test (docs FT-038 test plan): a stub model

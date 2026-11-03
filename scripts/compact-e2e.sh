@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
-# The session-engine compact e2e suite (docs FT-033, design P7).
+# The session-engine compact e2e suite (docs FT-038, design P7).
 #
-# The one-shot compact mechanism is removed. The compact driver forks
-# a `rushi run` compact agent whose only tool is `write-handoff`.
-# This suite drives `rushi step` with a stub model for the normal
-# loop turns and stubs the compact agent fork (the RUSHI_BIN override)
-# so it writes the handoff or branch summary file exactly as the
-# agent's tool would. The assertions prove the marker shapes, the
-# versioned files, and the version links.
+# The one-shot compact mechanism: the compact binary reads the log,
+# calls the model with no tools, and runs a bounded check loop (the
+# format gate and the content gate) over up to
+# `compact_max_summary_calls` responses. It writes the versioned
+# handoff file for its target and appends the marker. The loop keeps
+# the session: no new session directory.
 #
-# The stub model answers the loop's normal model calls from the
-# STUB_PLAN lines in order. The fake `rushi` fork reads the sidecar
-# the driver wrote and writes the target file. It never runs a real
-# agent loop; it mimics the agent plus the `write-handoff` tool.
+# This suite drives `rushi step` with a stub model. The stub answers
+# the loop's normal model calls from the STUB_PLAN lines in order. For
+# the compact one-shot call (the request carries the no-tools notice),
+# the stub returns a header-laden summary so the content gate passes.
+# The assertions prove the marker shapes, the versioned files, and the
+# version links.
 
 set -uo pipefail
 
@@ -30,7 +31,13 @@ ko() {
   echo "FAIL: $1"
 }
 
-# ── The stub model: the loop's normal turns ──────────────────────
+# ── The stub model: the normal turns and the compact calls ───────
+# The stub answers the loop's normal model calls from the STUB_PLAN
+# lines in order (the STUB_STATE counter). The compact one-shot call
+# carries the no-tools notice in its request (docs FT-038 component
+# C). For that call the stub returns a header-laden summary so the
+# content gate passes. With COMPACT_FAIL=1 the stub returns a
+# headerless response instead, to exercise the liveness seed fallback.
 make_stub() {
   cat > "$WORK/stub-model" <<'EOF'
 #!/usr/bin/env bash
@@ -39,7 +46,15 @@ if [[ "${1:-}" == "--describe" ]]; then
   echo '{"active":"stub","model_id":"stub-model","reasoning_effort":"none","thinking_level":"off"}'
   exit 0
 fi
-cat > /dev/null
+req=$(cat)
+if [[ "$req" == *"No tools are available in this session"* ]]; then
+  if [[ "${COMPACT_FAIL:-0}" == "1" ]]; then
+    echo '{"text":"done","tool_calls":[],"reasoning":[],"stop_reason":"stop","usage":{"input_tokens":100,"output_tokens":10}}'
+  else
+    echo '{"text":"## Goal\nsummarize the old region\n## Constraints & Preferences\nnone\n## Progress\n### Done\nsummarized the old region\n### In Progress\nnone\n### Blocked\nnone\n## Key Decisions\nkeep the walk-back bound\n## Next Steps\n1. continue\n## Critical Context\nthe summary of the old region","tool_calls":[],"reasoning":[],"stop_reason":"stop","usage":{"input_tokens":100,"output_tokens":60}}'
+  fi
+  exit 0
+fi
 N=$(cat "${STUB_STATE:-}" 2>/dev/null || echo 0)
 N=$((N + 1))
 echo "$N" > "${STUB_STATE:-/dev/null}"
@@ -49,59 +64,6 @@ echo "$line"
 exit 0
 EOF
   chmod +x "$WORK/stub-model"
-}
-
-# ── The fake `rushi` fork: the compact agent + the tool ─────────
-# The compact driver forks `rushi run <c_id>
-# --sessions-root R --cwd D --config C`, with no task. The seed
-# transcript is pre-seeded as the session's first `user_message` in the
-# agent log, never an argv slot (the argv limit is the FT-035 failure).
-# The fork reads the sidecar and writes the target file, as the
-# agent's `write-handoff` tool would. `mode` in the sidecar selects
-# the handoff or the branch output. `FAKE_RUSHI_FAIL` and
-# `FAKE_RUSHI_SUMMARY` drive the failure and content.
-make_fake_rushi() {
-  cat > "$WORK/fake-rushi" <<'EOF'
-#!/usr/bin/env bash
-set -u
-c_id=""
-R=""
-while [ $# -gt 0 ]; do
-  case "$1" in
-    run) shift ;;
-    --sessions-root) R="$2"; shift 2 ;;
-    --cwd) shift 2 ;;
-    --config) shift 2 ;;
-    *) if [ -z "$c_id" ]; then c_id="$1"; fi; shift ;;
-  esac
-done
-if [[ "${FAKE_RUSHI_FAIL:-0}" == "1" ]]; then
-  echo "fake rushi: the compact agent session failed" >&2
-  exit 1
-fi
-c_dir="$R/$c_id"
-# The driver pre-seeded the seed transcript as the session's first
-# user_message before the fork, so the log exists and is non-empty.
-log="$c_dir/events.jsonl"
-[ -s "$log" ] || { echo "fake rushi: the seed log is missing or empty" >&2; exit 6; }
-side="$c_dir/handoff-target.json"
-[ -f "$side" ] || { echo "fake rushi: no sidecar" >&2; exit 3; }
-target="$(sed -n 's/.*"target_dir"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$side")"
-version="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p' "$side")"
-mode="$(sed -n 's/.*"mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$side")"
-[ -n "$target" ] && [ -n "$version" ] || { echo "fake rushi: bad sidecar" >&2; exit 4; }
-summary="${FAKE_RUSHI_SUMMARY:-from the stub compact agent}"
-if [[ "$mode" == "branch" ]]; then
-  mkdir -p "$target/branch-summary"
-  printf '%s\n' "$summary" > "$target/branch-summary/v${version}.md"
-else
-  mkdir -p "$target/handoff"
-  printf '%s\n' "$summary" > "$target/handoff/v${version}.md"
-  printf '%s\n' "$summary" > "$target/handoff.md"
-fi
-exit 0
-EOF
-  chmod +x "$WORK/fake-rushi"
 }
 
 # ── The work config ──────────────────────────────────────────────
@@ -167,15 +129,14 @@ seed_session() {
 EOF
 }
 
-# Run one step against the work session with the stub model and the
-# fake compact-agent fork.
+# Run one step against the work session with the stub model.
 run_step() {
   (
     cd "$WORK"
     export CONFIG="$WORK/config.toml"
     export MODEL_BIN="$WORK/stub-model"
-    export RUSHI_BIN="$WORK/fake-rushi"
     export STUB_PLAN="$WORK/plan" STUB_STATE="$WORK/stub-n"
+    export COMPACT_FAIL="${COMPACT_FAIL:-0}"
     "$BIN_DIR/rushi" step session 2>/dev/null
     true
   )
@@ -234,10 +195,18 @@ NEW_WORK() {
 # The stub plan line: one normal model answer (a final stop).
 NORMAL_STOP='{"text":"done","tool_calls":[],"reasoning":[],"stop_reason":"stop","usage":{"input_tokens":100,"output_tokens":10}}'
 
+# The compact one-shot summary carries this line; the marker and the
+# versioned file hold it when the check loop accepts the response.
+SUMMARY_MARK="the summary of the old region"
+
+# The liveness fallback seed is the bounded transcript. The task
+# statement (the first user message) never drops, so it rides it.
+SEED_MARK="the old work"
+
 # ── Scenario 1: the threshold trigger ────────────────────────────
-# The proactive compact fires before the model call. The driver forks
-# the compact agent; the agent writes the versioned handoff file; the
-# marker rides the summary.
+# The proactive compact fires before the model call. The one-shot
+# check loop accepts the header-laden stub summary; the marker rides
+# that summary; the versioned handoff file is written.
 scenario_threshold() {
   NEW_WORK threshold
   COMPACT_ENABLED=true
@@ -245,8 +214,7 @@ scenario_threshold() {
   seed_session 6000 6200 6500
   echo "$NORMAL_STOP" >"$WORK/plan"
   make_stub
-  make_fake_rushi
-  FAKE_RUSHI_SUMMARY="the summary of the old region" run_step
+  run_step
   assert_eq "$(count_events compaction_summary)" 1 "one compaction_summary"
   assert_eq "$(count_events compaction_failed)" 0 "no compaction_failed"
   assert_eq "$(claim_state)" "idle" "the loop runs to idle"
@@ -258,12 +226,8 @@ scenario_threshold() {
   else
     ko "handoff.md does not match handoff/v1.md"
   fi
-  # The marker carries the agent-written summary.
-  assert_contains "$(last_event compaction_summary)" "the summary of the old region" "the summary body rides the marker"
-  # The agent session dir was removed after the marker.
-  local cdirs
-  cdirs=$(rg -l 'compact-v' "$SESSIONS_DIR/.." 2>/dev/null | wc -l)
-  assert_eq "$(find "$WORK/sessions" -maxdepth 1 -name 'session-compact-*' | wc -l)" 0 "the agent session dir was removed"
+  # The marker carries the accepted one-shot summary.
+  assert_contains "$(last_event compaction_summary)" "$SUMMARY_MARK" "the summary body rides the marker"
 }
 
 # ── Scenario 2: the second compact carries the first ─────────────
@@ -274,8 +238,7 @@ scenario_iterative() {
   seed_session 4000 4200 4300 6000
   echo "$NORMAL_STOP" >"$WORK/plan"
   make_stub
-  make_fake_rushi
-  FAKE_RUSHI_SUMMARY="the summary of the old region" run_step
+  run_step
   # The session grows past the new boundary; the second compact fires.
   local A
   A="$(printf 'd%.0s' $(seq 1 24000))"
@@ -286,8 +249,7 @@ scenario_iterative() {
 {"v":1,"type":"stop","ts":"t17","seq":17,"stop_reason":"end_turn"}
 {"v":1,"type":"user_message","ts":"t18","seq":18,"content":"keep going"}
 EOF
-  echo "$NORMAL_STOP" >"$WORK/plan"
-  FAKE_RUSHI_SUMMARY="the summary of the old region, second pass" run_step
+  run_step
   assert_eq "$(count_events compaction_summary)" 2 "two compaction_summaries in the session"
   # P2: the second marker links to the first.
   local m2
@@ -306,10 +268,10 @@ EOF
 
 # ── Scenario 3: the overflow trigger ─────────────────────────────
 # Below the threshold: the threshold hook is cold. The model call
-# fails with the overflow shape, then the overflow compact fires (the
-# driver forks the agent), then the retry succeeds. The results carry
-# 5600 chars each (1400 tokens) so the walk-back old region is
-# non-empty; the usage readings stay under the trigger.
+# fails with the overflow shape, then the overflow compact fires,
+# then the retry succeeds. The results carry 5600 chars each (1400
+# tokens) so the walk-back old region is non-empty; the usage readings
+# stay under the trigger.
 scenario_overflow() {
   NEW_WORK overflow
   COMPACT_ENABLED=true
@@ -320,8 +282,7 @@ scenario_overflow() {
 {"text":"done","tool_calls":[],"reasoning":[],"stop_reason":"stop","usage":{"input_tokens":100,"output_tokens":10}}
 EOF
   make_stub
-  make_fake_rushi
-  FAKE_RUSHI_SUMMARY="the overflow summary" run_step
+  run_step
   assert_eq "$(count_events compaction_summary)" 1 "one compaction_summary"
   assert_contains "$(last_event compaction_summary)" '"reason":"overflow"' "the overflow reason rides the marker"
   assert_eq "$(test -f "$SESSIONS_DIR/handoff/v1.md" && echo yes)" "yes" "handoff/v1.md exists"
@@ -329,9 +290,9 @@ EOF
 }
 
 # ── Scenario 4: the branch compact ───────────────────────────────
-# The `--branch` run forks the compact agent too. The agent writes
-# the versioned branch summary file, not a handoff file. The marker
-# is an add-on: it compacts nothing.
+# The `--branch` run does a one-shot call over the ditched span. The
+# one-shot writes the versioned branch summary file, not a handoff
+# file. The marker is an add-on: it compacts nothing.
 scenario_branch() {
   NEW_WORK branch
   COMPACT_ENABLED=true
@@ -358,12 +319,13 @@ scenario_branch() {
 EOF
   # A pre-existing handoff.md must stay byte-identical.
   echo "PRE-EXISTING HANDOFF SENTINEL" > "$SESSIONS_DIR/handoff.md"
-  make_fake_rushi
+  make_stub
+  echo "$NORMAL_STOP" >"$WORK/plan"
   local status
   status=$(
     cd "$WORK"
-    export RUSHI_BIN="$WORK/fake-rushi"
-    export FAKE_RUSHI_SUMMARY="the branch summary of the ditched span"
+    export MODEL_BIN="$WORK/stub-model"
+    export STUB_PLAN="$WORK/plan" STUB_STATE="$WORK/stub-n"
     "$BIN_DIR/compact" "$SESSIONS_DIR" --config "$WORK/config.toml" --branch 2>/dev/null
   )
   assert_eq "$(jq -r '.status' <<<"$status")" "compacted" "the branch run compacts"
@@ -375,22 +337,22 @@ EOF
   assert_eq "$(jq -r '.first_kept_seq' <<<"$marker")" 1 "the first_kept sentinel"
   assert_eq "$(jq -r '.diverge_seq' <<<"$marker")" 9 "diverge_seq is the rewind seq"
   assert_eq "$(jq -r '.version' <<<"$marker")" 1 "the branch namespace starts at 1"
-  # The agent wrote the versioned branch summary file, not a handoff.
+  # The one-shot wrote the versioned branch summary file, not a handoff.
   local file
   file="$SESSIONS_DIR/branch-summary/v1.md"
   assert_eq "$(test -f "$file" && echo yes)" "yes" "the versioned branch summary file exists"
-  assert_eq "$(cat "$file")" "the branch summary of the ditched span" "the file holds the summary"
+  assert_contains "$(cat "$file")" "$SUMMARY_MARK" "the file holds the summary"
   assert_eq "$(cat "$SESSIONS_DIR/handoff.md")" "PRE-EXISTING HANDOFF SENTINEL" "handoff.md is unchanged"
   assert_eq "$(test -d "$SESSIONS_DIR/handoff" && echo yes)" "" "no handoff/ dir for a branch marker"
-  # The agent session dir was removed.
-  assert_eq "$(find "$WORK/sessions" -maxdepth 1 -name 'session-branch-*' | wc -l)" 0 "the agent session dir was removed"
 }
 
-# ── Scenario 5: the compact agent failure (the liveness fallback) ─
-# The forked agent session exits non-zero. The driver falls back to the
+# ── Scenario 5: the one-shot failure (the liveness fallback) ─────
+# The stub returns a headerless response for the compact call, so the
+# check loop exhausts its calls. The main target falls back to the
 # bounded model-free cut: the seed transcript becomes the handoff. No
-# `compaction_failed` marker; a `compaction_summary` rides the fallback,
-# and the handoff file is written. The main session is never stuck.
+# `compaction_failed` marker; a `compaction_summary` rides the
+# fallback, and the handoff file is written. The main session is never
+# stuck.
 scenario_compact_failure() {
   NEW_WORK compact-failure
   COMPACT_ENABLED=true
@@ -398,15 +360,14 @@ scenario_compact_failure() {
   seed_session 6000 6200 6500
   echo "$NORMAL_STOP" >"$WORK/plan"
   make_stub
-  make_fake_rushi
-  FAKE_RUSHI_FAIL=1 run_step
+  COMPACT_FAIL=1 run_step
   # The liveness contract: the fallback finishes the compact. No
   # compaction_failed marker; a compaction_summary rides the fallback.
   assert_eq "$(count_events compaction_failed)" 0 "no compaction_failed (the fallback finishes the compact)"
   assert_eq "$(count_events compaction_summary)" 1 "one compaction_summary (the fallback summary)"
   # The fallback handoff is written with the seed transcript.
   assert_eq "$(test -f "$SESSIONS_DIR/handoff/v1.md" && echo yes)" "yes" "the fallback writes the handoff"
-  assert_contains "$(cat "$SESSIONS_DIR/handoff/v1.md")" "conversation to summarize" "the fallback handoff is the seed transcript"
+  assert_contains "$(cat "$SESSIONS_DIR/handoff/v1.md")" "$SEED_MARK" "the fallback handoff is the seed transcript"
 }
 
 # ── Scenario 6: the kill switch holds the threshold ──────────────
@@ -418,15 +379,14 @@ scenario_kill_switch() {
   seed_session 6000 6200 6500
   echo "$NORMAL_STOP" >"$WORK/plan"
   make_stub
-  make_fake_rushi
   run_step
   assert_eq "$(count_events compaction_summary)" 0 "no compaction_summary"
   assert_eq "$(count_events compaction_failed)" 0 "no compaction_failed"
 }
 
 # ── Scenario 7: the explicit `--up-to` boundary ──────────────────
-# The driver places the boundary at the explicit seq. The agent
-# summarizes the prefix.
+# The driver places the boundary at the explicit seq. The one-shot
+# summarizes the prefix and writes the versioned handoff file.
 scenario_up_to() {
   NEW_WORK up-to
   COMPACT_ENABLED=true
@@ -434,18 +394,17 @@ scenario_up_to() {
   seed_session 6000 6200 6500
   echo "$NORMAL_STOP" >"$WORK/plan"
   make_stub
-  make_fake_rushi
   local status
   status=$(
     cd "$WORK"
-    export RUSHI_BIN="$WORK/fake-rushi"
-    export FAKE_RUSHI_SUMMARY="the up-to summary"
+    export MODEL_BIN="$WORK/stub-model"
+    export STUB_PLAN="$WORK/plan" STUB_STATE="$WORK/stub-n"
     "$BIN_DIR/compact" "$SESSIONS_DIR" --config "$WORK/config.toml" --force --up-to 4 2>/dev/null
   )
   assert_eq "$(jq -r '.status' <<<"$status")" "compacted" "the forced compact compacts"
   assert_eq "$(jq -r '.first_kept_seq' <<<"$status")" 5 "the boundary lands at seq 5"
   assert_eq "$(test -f "$SESSIONS_DIR/handoff/v1.md" && echo yes)" "yes" "handoff/v1.md exists"
-  assert_eq "$(cat "$SESSIONS_DIR/handoff/v1.md")" "the up-to summary" "the file holds the agent summary"
+  assert_contains "$(cat "$SESSIONS_DIR/handoff/v1.md")" "$SUMMARY_MARK" "the file holds the summary"
 }
 
 # ── Scenario 8: the real `write-handoff` tool, both modes ────────
