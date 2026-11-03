@@ -559,6 +559,18 @@ const PAR_OPEN: &[u8] = &[0x3c, 0x70, 0x61, 0x72, 0x61, 0x6d, 0x65, 0x74, 0x65, 
 const PAR_CLOSE: &[u8] = &[
     0x3c, 0x2f, 0x70, 0x61, 0x72, 0x61, 0x6d, 0x65, 0x74, 0x65, 0x72,
 ];
+// 0a 3c 74 6f 6f 6c 5f 63 61 6c 6c 3e
+const Q_OPEN: &[u8] = &[0x0a, 0x3c, 0x74, 0x6f, 0x6f, 0x6c, 0x5f, 0x63, 0x61, 0x6c, 0x6c, 0x3e];
+// 0a 3c 2f 74 6f 6f 6c 5f 63 61 6c 6c 3e
+const Q_CLOSE: &[u8] = &[0x0a, 0x3c, 0x2f, 0x74, 0x6f, 0x6f, 0x6c, 0x5f, 0x63, 0x61, 0x6c, 0x6c, 0x3e];
+// 3c 66 75 6e 63 74 69 6f 6e 3d
+const Q_FUNC_OPEN: &[u8] = &[0x3c, 0x66, 0x75, 0x6e, 0x63, 0x74, 0x69, 0x6f, 0x6e, 0x3d];
+// 3c 2f 66 75 6e 63 74 69 6f 6e 3e
+const Q_FUNC_CLOSE: &[u8] = &[0x3c, 0x2f, 0x66, 0x75, 0x6e, 0x63, 0x74, 0x69, 0x6f, 0x6e, 0x3e];
+// 3c 70 61 72 61 6d 65 74 65 72 3d
+const Q_PARAM_OPEN: &[u8] = &[0x3c, 0x70, 0x61, 0x72, 0x61, 0x6d, 0x65, 0x74, 0x65, 0x72, 0x3d];
+// 3c 2f 70 61 72 61 6d 65 74 65 72
+const Q_PARAM_CLOSE: &[u8] = &[0x3c, 0x2f, 0x70, 0x61, 0x72, 0x61, 0x6d, 0x65, 0x74, 0x65, 0x72];
 
 /// Byte search from `from`. Returns a byte offset.
 fn find_bytes(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
@@ -579,14 +591,15 @@ fn find_bytes(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
 
 /// Find tool calls the model embedded in the text.
 ///
-/// Two marker families appear in the wild. The A family holds
+/// Three marker families appear in the wild. The A family holds
 /// JSON: a call object or an array of call objects. Each call
 /// holds name and arguments. The P family holds a bare name line
-/// and parameter keys. Each key holds one argument field.
+/// and parameter keys. Each key holds one argument field. The
+/// Q family holds a named function line and parameter keys.
 fn extract_text_tool_calls(text: &str) -> TextCalls {
     let bytes = text.as_bytes();
-    let opens: [&[u8]; 2] = [A_OPEN, P_OPEN];
-    let closes: [&[u8]; 2] = [A_CLOSE, P_CLOSE];
+    let opens: [&[u8]; 3] = [A_OPEN, P_OPEN, Q_OPEN];
+    let closes: [&[u8]; 3] = [A_CLOSE, P_CLOSE, Q_CLOSE];
     let mut calls: Vec<serde_json::Value> = Vec::new();
     let mut clean = String::new();
     let mut pos = 0usize;
@@ -661,7 +674,7 @@ enum Block {
 }
 
 /// Parse one closed marker block. `kind` is 0 for the A family,
-/// 1 for the P family.
+/// 1 for the P family, 2 for the Q family.
 fn parse_block(kind: usize, inner: &str) -> Block {
     let inner = inner.trim();
     if kind == 0 {
@@ -681,8 +694,10 @@ fn parse_block(kind: usize, inner: &str) -> Block {
             });
         }
         Block::Ok(out)
-    } else {
+    } else if kind == 1 {
         parse_pi_block(inner)
+    } else {
+        parse_q_block(inner)
     }
 }
 
@@ -760,6 +775,86 @@ fn parse_pi_block(inner: &str) -> Block {
     }
 
     // A single JSON arguments parameter carries the whole object.
+    if args.len() == 1 {
+        if let Some(v) = args.get("arguments") {
+            if let Some(obj) = v.as_object() {
+                return Block::Ok(vec![BlockCall {
+                    name,
+                    args: serde_json::Value::Object(obj.clone()),
+                }]);
+            }
+        }
+    }
+    Block::Ok(vec![BlockCall {
+        name,
+        args: serde_json::Value::Object(args),
+    }])
+}
+
+/// Parse one Q-family block: a function line plus parameter keys.
+/// The function line opens with the Q_FUNC_OPEN prefix and holds the
+/// tool name. Each parameter key opens with the Q_PARAM_OPEN prefix
+/// and holds the key. The value follows on the next lines. The
+/// closing marker is the Q_PARAM_CLOSE prefix.
+fn parse_q_block(inner: &str) -> Block {
+    let bytes = inner.as_bytes();
+    let func_at = match find_bytes(bytes, Q_FUNC_OPEN, 0) {
+        Some(x) => x,
+        None => return Block::Bad("no function line in the Q-family block".to_string()),
+    };
+    if func_at != 0 {
+        return Block::Bad("junk before the function line in the Q-family block".to_string());
+    }
+    let name_start = func_at + Q_FUNC_OPEN.len();
+    let name_end = match find_bytes(&bytes[name_start..], &[0x0a], 0) {
+        Some(n) => name_start + n,
+        None => bytes.len(),
+    };
+    let name = inner[name_start..name_end].trim_end_matches(char::from(0x3e)).trim().to_string();
+    if name.is_empty() {
+        return Block::Bad("no tool name in the Q-family block".to_string());
+    }
+
+    let mut args = serde_json::Map::new();
+    let mut rest = name_end;
+    loop {
+        let p = match find_bytes(&bytes[rest..], Q_PARAM_OPEN, 0) {
+            Some(x) => rest + x,
+            None => break,
+        };
+        let key_start = p + Q_PARAM_OPEN.len();
+        let key_end = match find_bytes(&bytes[key_start..], &[0x0a], 0) {
+            Some(n) => key_start + n,
+            None => return Block::Bad("an unterminated parameter key line".to_string()),
+        };
+        let key = inner[key_start..key_end].trim_end_matches(char::from(0x3e)).trim().to_string();
+        if key.is_empty() {
+            return Block::Bad("an empty parameter key in the Q-family block".to_string());
+        }
+        let val_start = key_end + 1;
+        let close = match find_bytes(&bytes[val_start..], Q_PARAM_CLOSE, 0) {
+            Some(c) => val_start + c,
+            None => return Block::Bad("a missing parameter close in the Q-family block".to_string()),
+        };
+        let val = inner[val_start..close].trim().to_string();
+        args.insert(key, parse_param_value(&val));
+        rest = close + Q_PARAM_CLOSE.len();
+    }
+
+    // The tail must carry the function close line, and nothing but
+    // close-tag leftovers and whitespace may sit before it.
+    let tail = &inner[rest..];
+    let fclose_at = match find_bytes(tail.as_bytes(), Q_FUNC_CLOSE, 0) {
+        Some(at) => at,
+        None => {
+            return Block::Bad("a missing function close line in the Q-family block".to_string())
+        }
+    };
+    let gap = tail[..fclose_at].as_bytes();
+    if !gap.iter().all(|&b| b == 0x0a || b == 0x0d || b == 0x3e || b == 0x20 || b == 0x09) {
+        return Block::Bad("junk before the function close line in the Q-family block".to_string());
+    }
+
     if args.len() == 1 {
         if let Some(v) = args.get("arguments") {
             if let Some(obj) = v.as_object() {
@@ -904,6 +999,123 @@ mod tests {
     fn bad_antml_inner_reports_error() {
         let text = "\n<invoke>\nnot json\n\n<invoke>";
         assert!(matches!(extract_text_tool_calls(text), TextCalls::Bad(_)));
+    }
+
+    // Q family (Qwen shape) fixtures, built from the byte constants
+    // so no raw marker text appears in the test source.
+
+    fn q_block(name: &str, params: &[(&str, &str)]) -> String {
+        let open = std::str::from_utf8(Q_OPEN).unwrap();
+        let close = std::str::from_utf8(Q_CLOSE).unwrap();
+        let fop = std::str::from_utf8(Q_FUNC_OPEN).unwrap();
+        let fcl = std::str::from_utf8(Q_FUNC_CLOSE).unwrap();
+        let pop = std::str::from_utf8(Q_PARAM_OPEN).unwrap();
+        let pcl = std::str::from_utf8(Q_PARAM_CLOSE).unwrap();
+        let mut s = String::from("\n");
+        s.push_str(fop);
+        s.push_str(name);
+        s.push_str(">\n");
+        for (key, val) in params {
+            s.push_str(pop);
+            s.push_str(key);
+            s.push_str(">\n");
+            s.push_str(val);
+            s.push_str("\n");
+            s.push_str(pcl);
+            s.push_str(">\n");
+        }
+        s.push_str(fcl);
+        format!("{open}{s}{close}")
+    }
+
+    #[test]
+    fn found_q_family_block() {
+        let text = q_block("Bash", &[("command", "echo hi")]);
+        match extract_text_tool_calls(&text) {
+            TextCalls::Found { calls, clean } => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0]["name"], "Bash");
+                assert_eq!(calls[0]["arguments"]["command"], "echo hi");
+                assert!(clean.is_empty());
+            }
+            other => panic!("expected found calls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn q_block_without_parameters_has_empty_arguments() {
+        let text = q_block("Read", &[]);
+        match extract_text_tool_calls(&text) {
+            TextCalls::Found { calls, .. } => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0]["name"], "Read");
+                assert_eq!(calls[0]["arguments"], serde_json::json!({}));
+            }
+            other => panic!("expected found calls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn q_block_single_arguments_parameter_flattens() {
+        let text = q_block(
+            "read",
+            &[("arguments", r#"{"file_path": "a.txt", "limit": 5}"#)],
+        );
+        match extract_text_tool_calls(&text) {
+            TextCalls::Found { calls, .. } => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0]["name"], "read");
+                assert_eq!(calls[0]["arguments"]["file_path"], "a.txt");
+                assert_eq!(calls[0]["arguments"]["limit"], 5);
+            }
+            other => panic!("expected found calls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn q_block_prose_survives_clean() {
+        let text = format!("summary text\n{}", q_block("Bash", &[("command", "ls")]));
+        match extract_text_tool_calls(&text) {
+            TextCalls::Found { calls, clean } => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(clean, "summary text");
+            }
+            other => panic!("expected found calls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn q_block_missing_function_close_is_bad() {
+        let open = std::str::from_utf8(Q_OPEN).unwrap();
+        let close = std::str::from_utf8(Q_CLOSE).unwrap();
+        let fop = std::str::from_utf8(Q_FUNC_OPEN).unwrap();
+        // No function close line between the name and the block close.
+        let text = format!("{open}\n{fop}Bash>\n{close}");
+        match extract_text_tool_calls(&text) {
+            TextCalls::Bad(msg) => {
+                assert!(msg.contains("function close"), "message: {msg}");
+            }
+            other => panic!("expected bad block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn q_block_junk_before_function_close_is_bad() {
+        let open = std::str::from_utf8(Q_OPEN).unwrap();
+        let close = std::str::from_utf8(Q_CLOSE).unwrap();
+        let fop = std::str::from_utf8(Q_FUNC_OPEN).unwrap();
+        let fcl = std::str::from_utf8(Q_FUNC_CLOSE).unwrap();
+        let pop = std::str::from_utf8(Q_PARAM_OPEN).unwrap();
+        let pcl = std::str::from_utf8(Q_PARAM_CLOSE).unwrap();
+        let text = format!(
+            "{open}\n{fop}Bash>\n{pop}command>\necho hi\n{pcl}>\nstray junk\n{fcl}{close}"
+        );
+        match extract_text_tool_calls(&text) {
+            TextCalls::Bad(msg) => {
+                assert!(msg.contains("function close"), "message: {msg}");
+            }
+            other => panic!("expected bad block, got {other:?}"),
+        }
     }
 
     #[test]

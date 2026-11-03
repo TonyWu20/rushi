@@ -91,6 +91,16 @@ struct Args {
     /// marker itself.
     #[arg(long, value_name = "SEQ")]
     branch_of: Option<usize>,
+
+    /// The compact header list (docs/ft-038-compact-check-loop.md
+    /// component C): print the headers the summary needs as a JSON
+    /// array. The `##` and `###` lines of the active instruction
+    /// text: the custom `--prompt` text when present, the previous
+    /// summary block in update mode, the first-time template
+    /// otherwise. Text that carries no headers prints the
+    /// first-time template set (nine headers).
+    #[arg(long)]
+    compact_headers: bool,
 }
 
 /// One log event, projected to model input items.
@@ -357,6 +367,14 @@ fn file_list_lines(list: &[String]) -> String {
     }
 }
 
+/// The summary-input no-tools notice
+/// (docs/ft-038-compact-check-loop.md component C). The summary
+/// request carries `tools: []`, so the model must not attempt a
+/// tool call. The line informs the model; the compact check loop
+/// guards the result.
+const SUMMARY_INPUT_NOTICE: &str =
+    "No tools are available in this session. Reply with the summary text only.";
+
 /// The update instructions with the previous summary and its
 /// file-op lists carried in.
 fn compact_update_instructions(b: &Boundary) -> String {
@@ -364,6 +382,37 @@ fn compact_update_instructions(b: &Boundary) -> String {
         .replace("{summary}", &b.summary)
         .replace("{read_files}", &file_list_lines(&b.read_files))
         .replace("{modified_files}", &file_list_lines(&b.modified_files))
+}
+
+/// The `##` and `###` header lines of an instruction text, in order.
+fn header_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .map(|l| l.trim())
+        .filter(|l| l.starts_with("##"))
+        .map(|l| l.to_string())
+        .collect()
+}
+
+/// The header list the summary needs
+/// (docs/ft-038-compact-check-loop.md component C): the `##` and
+/// `###` lines of the active instruction text. The active text is
+/// the custom `--prompt` when present, the previous summary block in
+/// update mode, the first-time template otherwise. Text that carries
+/// no headers falls back to the first-time template set.
+fn compact_header_list(prompt: &Option<String>, prev: &Option<Boundary>) -> Vec<String> {
+    let text: &str = match prompt.as_deref() {
+        Some(p) => p,
+        None => match prev {
+            Some(b) => b.summary.as_str(),
+            None => COMPACT_INSTRUCTIONS_FIRST,
+        },
+    };
+    let headers = header_lines(text);
+    if headers.is_empty() {
+        header_lines(COMPACT_INSTRUCTIONS_FIRST)
+    } else {
+        headers
+    }
 }
 
 /// Drop the oldest `count` droppable step groups (the assistant
@@ -1541,6 +1590,24 @@ fn main() {
         );
     }
 
+    // The compact header list (docs/ft-038-compact-check-loop.md
+    // component C): the headers the summary needs, as a JSON array.
+    // The list keys the compact content gate: every header must
+    // appear in the accepted summary.
+    if args.compact_headers {
+        // Update mode only stands when a boundary exists and the
+        // call is not branch mode: a branch span is standalone and
+        // carries no previous summary (the first-time template).
+        let prev: Option<Boundary> = if args.branch_of.is_some() {
+            None
+        } else {
+            boundary.clone()
+        };
+        let headers = compact_header_list(&args.prompt, &prev);
+        println!("{}", serde_json::to_string(&headers).unwrap());
+        return;
+    }
+
     // The summary-input mode (docs/auto-compact-plan.md section 4.3):
     // project the old region from the last boundary to `--up-to` in
     // the compact form, append the summary-ask user item, and print
@@ -1762,12 +1829,12 @@ fn main() {
 
 /// Render a summary-input request as a readable plain-text transcript.
 ///
-/// The compact-session driver seeds this text as the compact agent's
-/// first message. The agent runs a full loop (not a one-shot call),
-/// so it sees the conversation as text and is told to emit the
-/// summary through the `write-handoff` tool. The instructions block
-/// leads, then the old-region items, then the ask and the tool
-/// directive.
+/// The compact driver seeds this text as the bounded model-free
+/// fallback handoff (docs/ft-038-compact-check-loop.md step 1): the
+/// one-shot summary call fails or exhausts its retries, and the
+/// transcript stands in for the summary. The instructions block
+/// leads, then the old-region items, then the ask and the
+/// no-tools notice.
 fn render_summary_text(request: &serde_json::Value) -> String {
     let mut out = String::new();
     let instructions = request
@@ -1806,11 +1873,9 @@ fn render_summary_text(request: &serde_json::Value) -> String {
         }
     }
     out.push_str("--- End of conversation ---\n\n");
-    out.push_str(
-        "Write the handoff summary now. Use the write-handoff tool, \
-         passing the full summary text as its `summary` argument. \
-         The write-handoff tool is the only tool you have.",
-    );
+    // The one-shot compact mechanism (docs/ft-038-compact-check-loop.md):
+    // the session carries no tools, so the directive names none.
+    out.push_str(SUMMARY_INPUT_NOTICE);
     out
 }
 
@@ -1857,6 +1922,10 @@ fn summary_input_request(
             None => COMPACT_INSTRUCTIONS_FIRST.to_string(),
         },
     };
+    // The no-tools notice (docs/ft-038-compact-check-loop.md
+    // component C): the request carries `tools: []`. The line
+    // informs the model; the compact check loop guards the result.
+    let instructions = format!("{instructions}\n\n{SUMMARY_INPUT_NOTICE}");
     // The estimate of one candidate, in the calibrated
     // chars-per-token ratio (docs/auto-compact-plan.md 4.3). The
     // drop search must use the same ratio as the trigger estimate.
@@ -2600,9 +2669,9 @@ not json at all
         assert!(text.contains("USER: the task"), "the task statement");
         assert!(text.contains("ASSISTANT: step one"), "the assistant step");
         assert!(text.contains("TOOL RESULT [1]"), "the tool result");
-        // The directive names the single tool.
-        assert!(text.contains("write-handoff"), "the tool directive");
-        assert!(text.contains("only tool"), "the tool is the only tool");
+        // The one-shot directive: the session carries no tools, so
+        // the notice, not a tool, closes the seed (docs FT-038).
+        assert!(text.contains(SUMMARY_INPUT_NOTICE), "the no-tools notice");
     }
 
     /// A `--prompt` custom instruction replaces the default compact
@@ -2630,10 +2699,11 @@ not json at all
             .chars_per_token(4)
             .custom_instructions("Summarize only the security-relevant findings")
             .call();
-        // The instructions field is the custom prompt, verbatim.
+        // The instructions field is the custom prompt, verbatim, plus
+        // the no-tools notice.
         assert_eq!(
             req["instructions"].as_str().unwrap(),
-            "Summarize only the security-relevant findings",
+            "Summarize only the security-relevant findings\n\nNo tools are available in this session. Reply with the summary text only.",
             "the custom prompt replaces the default wholesale"
         );
         // The six-section format is not present.
@@ -2682,7 +2752,10 @@ not json at all
             .custom_instructions("Write a narrative summary of the new work")
             .call();
         let inst = req["instructions"].as_str().unwrap();
-        assert_eq!(inst, "Write a narrative summary of the new work");
+        assert_eq!(
+            inst,
+            "Write a narrative summary of the new work\n\nNo tools are available in this session. Reply with the summary text only."
+        );
         assert!(
             !inst.contains("the previous summary"),
             "the previous summary is not merged into the custom prompt"
@@ -2692,6 +2765,120 @@ not json at all
             req["input"].as_array().unwrap().last().unwrap()["content"],
             COMPACT_ASK_UPDATE,
         );
+    }
+
+    /// The summary-input instructions carry the no-tools notice in
+    /// every mode: first-time, update, and custom
+    /// (docs/ft-038-compact-check-loop.md component C).
+    #[test]
+    fn summary_input_instructions_carry_the_no_tools_notice() {
+        let events = [ev_asst("step one")];
+        let refs: Vec<&Ev> = events.iter().collect();
+        let boundary = Boundary {
+            seq: 9,
+            first_kept_seq: 5,
+            summary: "the previous summary".to_string(),
+            read_files: vec![],
+            modified_files: vec![],
+            version: 0,
+        };
+        let base = || -> serde_json::Value {
+            summary_input_request()
+                .old(&refs)
+                .prev(&None)
+                .model("m")
+                .max_out_cap(2048)
+                .caps(&Caps { text: 100 })
+                .input_budget(1_000_000)
+                .ptrs(&test_ptrs())
+                .chars_per_token(4)
+                .call()
+        };
+        let update = || -> serde_json::Value {
+            summary_input_request()
+                .old(&refs)
+                .prev(&Some(boundary.clone()))
+                .model("m")
+                .max_out_cap(2048)
+                .caps(&Caps { text: 100 })
+                .input_budget(1_000_000)
+                .ptrs(&test_ptrs())
+                .chars_per_token(4)
+                .call()
+        };
+        let custom = || -> serde_json::Value {
+            summary_input_request()
+                .old(&refs)
+                .prev(&None)
+                .model("m")
+                .max_out_cap(2048)
+                .caps(&Caps { text: 100 })
+                .input_budget(1_000_000)
+                .ptrs(&test_ptrs())
+                .chars_per_token(4)
+                .custom_instructions("the custom text")
+                .call()
+        };
+        for req in [base(), update(), custom()] {
+            let inst = req["instructions"].as_str().unwrap();
+            assert!(
+                inst.contains(SUMMARY_INPUT_NOTICE),
+                "the notice rides every mode: {inst}"
+            );
+            assert_eq!(req["tools"], serde_json::json!([]), "no tools ride the request");
+        }
+    }
+
+    /// The compact header list: the `##` and `###` lines of the active
+    /// instruction text (docs/ft-038-compact-check-loop.md component C).
+    #[test]
+    fn compact_header_list_first_time_is_the_nine_headers() {
+        let headers = compact_header_list(&None, &None);
+        assert_eq!(headers.len(), 9, "the first-time template set: {headers:?}");
+        assert_eq!(headers[0], "## Goal");
+        assert_eq!(headers.last().unwrap(), "## Critical Context");
+        assert!(headers.contains(&"### Done".to_string()));
+    }
+
+    #[test]
+    fn compact_header_list_update_mode_reads_the_previous_summary() {
+        let boundary = Boundary {
+            seq: 9,
+            first_kept_seq: 5,
+            summary: "## Goal\nwork\n## Progress\n### Done\nx\n".to_string(),
+            read_files: vec![],
+            modified_files: vec![],
+            version: 0,
+        };
+        let headers = compact_header_list(&None, &Some(boundary));
+        assert_eq!(
+            headers,
+            vec!["## Goal".to_string(), "## Progress".to_string(), "### Done".to_string()]
+        );
+    }
+
+    #[test]
+    fn compact_header_list_custom_prompt_headers_win() {
+        let prompt = "## My Section\n### Sub\ntext".to_string();
+        let headers = compact_header_list(&Some(prompt), &None);
+        assert_eq!(headers, vec!["## My Section".to_string(), "### Sub".to_string()]);
+    }
+
+    #[test]
+    fn compact_header_list_headerless_text_falls_back() {
+        // A custom prompt with no `##` lines falls back to the
+        // first-time set; a headerless previous summary does too.
+        let prompt = "plain text, no headers".to_string();
+        assert_eq!(compact_header_list(&Some(prompt), &None).len(), 9);
+        let boundary = Boundary {
+            seq: 9,
+            first_kept_seq: 5,
+            summary: "a plain summary with no section headers".to_string(),
+            read_files: vec![],
+            modified_files: vec![],
+            version: 0,
+        };
+        assert_eq!(compact_header_list(&None, &Some(boundary)).len(), 9);
     }
 
     /// The update prompt carries the previous summary and its
