@@ -514,8 +514,7 @@ fn cut_index(
     kept_events: &[LogEvent],
     up_to: Option<usize>,
     projected: &[Ev],
-    trigger_level: u64,
-    summary_budget: u64,
+    keep_tokens: u64,
     caps: &Caps,
 ) -> usize {
     match up_to {
@@ -527,7 +526,7 @@ fn cut_index(
                 .position(|e| e.seq > u_eff)
                 .unwrap_or(kept_events.len())
         }
-        None => compact_math::find_cut(projected, trigger_level, summary_budget, caps),
+        None => compact_math::find_cut(projected, keep_tokens, caps),
     }
 }
 
@@ -550,20 +549,15 @@ fn run_compaction(
     let cfg = load_config(&config_path);
     let empty = toml::Value::Table(toml::map::Map::new());
     let limits = cfg.get("limits").unwrap_or(&empty);
-    let reserve: u64 = val_int(limits, "compact_reserve_tokens").unwrap_or(16_384) as u64;
     let active = resolve_active_model(&cfg);
     let model_settings = resolve_model_settings(&cfg, &active);
     let cpts = model_settings.estimate_chars_per_token.max(1);
-    // The trigger level: the context budget minus the reserve. The
-    // summary budget: the output cap of the compact agent's summary
-    // (`max_output_tokens`), the real bound on the handoff document
-    // that replaces the old region. The walk-back bounds the kept
-    // region at the trigger level minus the summary budget, so the
-    // post-compact context (summary plus kept region) stays under the
-    // trigger level and the next turn does not re-fire immediately.
-    let base = resolve_context_budget(&cfg);
-    let trigger_level = compact_math::trigger_level_for(base, reserve);
-    let summary_budget = model_settings.max_output_tokens;
+    // The cut keeps `compact_keep_tokens` tokens of the tail of the
+    // active context (docs FT-038, section 5). It preserves the real
+    // details of the ongoing work. The post-compact context is
+    // [system prompt + tool schemas] + [summary] + [compact_keep_tokens].
+    let keep_tokens: u64 =
+        val_int(limits, "compact_keep_tokens").unwrap_or(20_000) as u64;
 
     // The projected kept events, for the estimator. The marker
     // types project to an empty user: zero tokens, no group effect.
@@ -576,14 +570,7 @@ fn run_compaction(
         text: None,
         chars_per_token: cpts,
     };
-    let cut = cut_index(
-        kept_events,
-        args.up_to,
-        &projected,
-        trigger_level,
-        summary_budget,
-        &est_caps,
-    );
+    let cut = cut_index(kept_events, args.up_to, &projected, keep_tokens, &est_caps);
     if cut == 0 {
         let detail = if args.up_to.is_some() {
             format!(
@@ -1692,14 +1679,14 @@ mod tests {
         };
 
         // up_to = 3: the first kept event past seq 3 is seq 4 (index 3).
-        assert_eq!(cut_index(&kept, Some(3), &projected, 100, 0, &caps), 3);
+        assert_eq!(cut_index(&kept, Some(3), &projected, 100, &caps), 3);
         // up_to = 1: first event past seq 1 is seq 2 (index 1).
-        assert_eq!(cut_index(&kept, Some(1), &projected, 100, 0, &caps), 1);
+        assert_eq!(cut_index(&kept, Some(1), &projected, 100, &caps), 1);
         // up_to = 5: no kept event past seq 5; the cut lands at the
         // end: the whole kept region is old, nothing is kept.
-        assert_eq!(cut_index(&kept, Some(5), &projected, 100, 0, &caps), 5);
+        assert_eq!(cut_index(&kept, Some(5), &projected, 100, &caps), 5);
         // up_to far beyond the log: same as up_to = last seq.
-        assert_eq!(cut_index(&kept, Some(99), &projected, 100, 0, &caps), 5);
+        assert_eq!(cut_index(&kept, Some(99), &projected, 100, &caps), 5);
     }
 
     /// Rewind rule I4. A target at or before the region head degrades
@@ -1718,12 +1705,12 @@ mod tests {
         // Before the region head: degrades to the head. The cut lands
         // on the event after the head (seq 10, index 1). The old
         // region is the head event alone.
-        assert_eq!(cut_index(&kept, Some(5), &projected, 100, 0, &caps), 1);
-        assert_eq!(cut_index(&kept, Some(1), &projected, 100, 0, &caps), 1);
+        assert_eq!(cut_index(&kept, Some(5), &projected, 100, &caps), 1);
+        assert_eq!(cut_index(&kept, Some(1), &projected, 100, &caps), 1);
         // At the region head: the same degrade.
-        assert_eq!(cut_index(&kept, Some(9), &projected, 100, 0, &caps), 1);
+        assert_eq!(cut_index(&kept, Some(9), &projected, 100, &caps), 1);
         // Inside the un-compact prefix: untouched.
-        assert_eq!(cut_index(&kept, Some(11), &projected, 100, 0, &caps), 3);
+        assert_eq!(cut_index(&kept, Some(11), &projected, 100, &caps), 3);
     }
 
     #[test]
@@ -1734,9 +1721,9 @@ mod tests {
             text: None,
             chars_per_token: 4,
         };
-        // Five 1-char user events: 5 chars total, far below a large
-        // trigger level, so find_cut returns 0 (keep everything).
-        assert_eq!(cut_index(&kept, None, &projected, 100_000, 0, &caps), 0);
+        // Five 1-char user events: 5 chars total, far below the large
+        // keep budget, so find_cut returns 0 (keep everything).
+        assert_eq!(cut_index(&kept, None, &projected, 100_000, &caps), 0);
     }
 
     // ── branch mode (docs/branch-summarize-cases.md) ─────────────

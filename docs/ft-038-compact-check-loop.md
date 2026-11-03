@@ -1,6 +1,7 @@
 # FT-038 design: one-shot compact with the check loop
 
-Status: design, awaiting approval. Session: `compact-degradation-next`.
+Status: the one-shot check loop is implemented and merged (FT-038).
+The cut restore (section 5.4) is done. Session: `compact-degradation-next`.
 
 ## 1. Verified facts
 
@@ -287,3 +288,65 @@ by hand). No agent C dir is created anymore.
   error and never invokes the compact binary.
 - End to end on m11: run the real model. The new handoff version
   must be clean plain markdown.
+
+## 5. The cut and trigger: the pre-FT-033 baseline
+
+The FT-037 walk-back regressed the cut. It replaced the
+`compact_keep_tokens` detail budget with a trigger-fitting budget
+(`trigger_level - summary_budget`). The compact now noops on a
+session with large tool schemas. This section records the correct
+baseline (failure-tracking FT-038).
+
+### 5.1 The trigger threshold (pre-FT-033)
+
+The trigger level is `context_budget - compact_reserve_tokens`
+(pi parity). The decisive trigger reading is the event estimate
+(`estimate_from_events`, uncapped, calibrated, rewind-aware),
+appended as the last reading. The threshold trigger fires when that
+estimate is at or over the trigger level. The overflow and force
+reasons skip the trigger test.
+
+### 5.2 The cut: `compact_keep_tokens` is a detail budget
+
+`compact_keep_tokens` (default 20000) is the token count of the tail
+that survives a compaction. The tail is the most recent events of the
+active context, before the compaction. It preserves the real details
+of the ongoing work. The model picks up from the kept tail, not just
+the summary.
+
+The post-compact context is:
+
+    [system prompt + tool schemas] + [summary] + [compact_keep_tokens]
+
+The FT-037 cut replaces this with `trigger_level - summary_budget`.
+That is a trigger-fitting budget. It does not count the tool schemas
+and system prompt. For a session whose event estimate is under that
+budget, `find_cut` returns 0 and the compact noops.
+
+### 5.3 The concrete failure
+
+The `m11-churn-hoist-follow` session. The model input is 260448
+tokens, over the 245760 trigger. The event estimate is 174516.
+
+The FT-037 keep budget is 180224. Since 174516 is under 180224,
+`find_cut` returns 0. The compact noops. The pre-FT-033 cut
+(compact_keep_tokens = 20000) cut it.
+
+### 5.4 The fix
+
+Restore the pre-FT-033 cut. `find_cut` keeps `compact_keep_tokens`
+tokens of the tail. The post-compact context is
+`[system prompt + tool schemas] + [summary] + [compact_keep_tokens]`.
+The FT-038 check loop (section 2, gate F and gate C) stays. It
+rejects the malformed responses.
+
+Implemented: `find_cut` takes the keep budget. `run_compaction` reads
+`compact_keep_tokens` (default 20000).
+
+### 5.5 The failure designs
+
+FT-033 (the agent fork), FT-036 (the raw seed), and FT-037 (the
+trigger-fitting cut) are failure designs. The pre-FT-033 one-shot is
+the working baseline for the cut. The recurring symptom they share:
+the one-shot compact call predating FT-033 and FT-038 often returns
+malformed format and content.
