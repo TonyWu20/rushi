@@ -2,8 +2,8 @@
 //!
 //! It reads the event log, decides whether the in-session trigger fires
 //! (docs/auto-compact-plan.md sections 3-5), cuts the old region,
-//! calls the LLM once for the summary through the `assemble
-//! --summary-input` and `model` binaries, and appends the
+//! calls the model for the summary with a bounded check loop
+//! (docs/ft-038-compact-check-loop.md), and appends the
 //! `compaction_started` / `compaction_summary` / `compaction_failed`
 //! markers through `log`. The loop keeps the session: no handoff, no
 //! new session directory.
@@ -15,12 +15,10 @@
 use bon::builder;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use clap::Parser;
 use rushi_common::compact_math::{self, Caps, Ev};
-use rushi_common::event::{Event, UserMessage};
-use rushi_common::logline::LogLine;
 use rushi_common::model_settings::{
     resolve_active_model, resolve_model_settings, val_bool, val_int,
 };
@@ -29,7 +27,7 @@ use serde_json::Value;
 
 /// The one-shot auto-compaction call. It exits 0 with a status JSON on
 /// stdout in every state: noop, compacted, failed (exit 1 only when a
-/// summary was required and both attempts failed).
+/// summary was needed and the check loop calls were exhausted).
 #[derive(Parser, Debug)]
 #[command(about = "in-session auto-compaction", version)]
 struct Args {
@@ -58,11 +56,20 @@ struct Args {
     /// The path of the log binary (the sibling by default).
     #[arg(long)]
     log: Option<PathBuf>,
-    /// The path of the `rushi` binary the compact driver forks
-    /// (the sibling by default). The compact mechanism always forks
-    /// `rushi run` for the compact agent session.
+    /// The path of the model binary (the sibling by default). The
+    /// one-shot summary call runs through it (docs FT-038).
     #[arg(long)]
-    rushi: Option<PathBuf>,
+    model: Option<PathBuf>,
+    /// The path of the parse binary (the sibling by default). The
+    /// check loop feeds each summary response to it with a zero-tool
+    /// config (docs FT-038).
+    #[arg(long)]
+    parse: Option<PathBuf>,
+    /// The path of the route binary (the sibling by default). The
+    /// check loop feeds the detected calls to it with no tool paths,
+    /// so every call reports a not-run result (docs FT-038).
+    #[arg(long)]
+    route: Option<PathBuf>,
     /// The 1-based log seq where the compact boundary lands: the
     /// prefix up to that seq becomes the summary input. Absent: the
     /// token-based keep-window walk (`find_cut`). Reuses the `assemble
@@ -407,6 +414,12 @@ fn main() {
     let limits = cfg.get("limits").unwrap_or(&empty);
     let reserve = val_int(limits, "compact_reserve_tokens").unwrap_or(16_384) as u64;
     let enabled = val_bool(limits, "compact_enabled").unwrap_or(true);
+    // The one-shot summary check loop call budget (docs FT-038
+    // decision 1): default 3, minimum 1. The value 1 disables the
+    // second chance.
+    let max_calls = val_int(limits, "compact_max_summary_calls")
+        .map(|v| (v.max(1)) as u64)
+        .unwrap_or(3);
 
     // The trigger base is always the full context budget (pi parity):
     // trigger = context_budget - compact_reserve_tokens.
@@ -477,6 +490,7 @@ fn main() {
                 .version(version)
                 .parent_version(parent_version)
                 .diverge_seq(diverge_seq)
+                .max_calls(max_calls)
                 .call();
         }
     }
@@ -498,7 +512,8 @@ fn cut_index(
     kept_events: &[LogEvent],
     up_to: Option<usize>,
     projected: &[Ev],
-    keep_tokens: u64,
+    trigger_level: u64,
+    summary_budget: u64,
     caps: &Caps,
 ) -> usize {
     match up_to {
@@ -510,7 +525,7 @@ fn cut_index(
                 .position(|e| e.seq > u_eff)
                 .unwrap_or(kept_events.len())
         }
-        None => compact_math::find_cut(projected, keep_tokens, caps),
+        None => compact_math::find_cut(projected, trigger_level, summary_budget, caps),
     }
 }
 
@@ -526,19 +541,27 @@ fn run_compaction(
     version: u64,
     parent_version: u64,
     diverge_seq: u64,
+    max_calls: u64,
 ) -> ! {
     let config_path: PathBuf =
         rushi_common::paths::resolve_config_path(args.config.as_deref()).into();
     let cfg = load_config(&config_path);
     let empty = toml::Value::Table(toml::map::Map::new());
     let limits = cfg.get("limits").unwrap_or(&empty);
-    let keep_tokens: u64 = val_int(limits, "compact_keep_tokens").unwrap_or(20_000) as u64;
-    let cpts = {
-        let active = resolve_active_model(&cfg);
-        resolve_model_settings(&cfg, &active)
-            .estimate_chars_per_token
-            .max(1)
-    };
+    let reserve: u64 = val_int(limits, "compact_reserve_tokens").unwrap_or(16_384) as u64;
+    let active = resolve_active_model(&cfg);
+    let model_settings = resolve_model_settings(&cfg, &active);
+    let cpts = model_settings.estimate_chars_per_token.max(1);
+    // The trigger level: the context budget minus the reserve. The
+    // summary budget: the output cap of the compact agent's summary
+    // (`max_output_tokens`), the real bound on the handoff document
+    // that replaces the old region. The walk-back bounds the kept
+    // region at the trigger level minus the summary budget, so the
+    // post-compact context (summary plus kept region) stays under the
+    // trigger level and the next turn does not re-fire immediately.
+    let base = resolve_context_budget(&cfg);
+    let trigger_level = compact_math::trigger_level_for(base, reserve);
+    let summary_budget = model_settings.max_output_tokens;
 
     // The projected kept events, for the estimator. The marker
     // types project to an empty user: zero tokens, no group effect.
@@ -551,7 +574,14 @@ fn run_compaction(
         text: None,
         chars_per_token: cpts,
     };
-    let cut = cut_index(kept_events, args.up_to, &projected, keep_tokens, &est_caps);
+    let cut = cut_index(
+        kept_events,
+        args.up_to,
+        &projected,
+        trigger_level,
+        summary_budget,
+        &est_caps,
+    );
     if cut == 0 {
         let detail = if args.up_to.is_some() {
             format!(
@@ -607,36 +637,31 @@ fn run_compaction(
         eprintln!("compact: append compaction_started failed: {e}");
     }
 
-    // The summary input: assemble prints the request JSON on
-    // stdout.
-    let assemble_bin = args.assemble.clone().unwrap_or_else(|| sibling("assemble"));
-
-    // The compact mechanism: a full `rushi run` agent session (the
-    // compact agent). Its only tool is `write-handoff`. `route`
-    // rejects any hallucinated tool call, and the agent loop
-    // self-corrects. The handoff lands in the parent dir via the
-    // tool. This is the one compact mechanism in rushi (docs FT-033).
-    // There is no config option.
-    let (summary, summary_usage, c_dir): (String, Option<Value>, PathBuf) =
-        match run_session_summary(
-            args,
-            &config_path,
-            &cfg,
-            &args.session,
-            &CompactTarget::Main { up_to, version },
-            &assemble_bin,
-        ) {
-            Ok(r) => (r.0, r.1, r.2),
-            Err(last_err) => {
-                fail_and_exit(
-                    args,
-                    overflow,
-                    last_user_seq,
-                    "the compact agent session failed",
-                    &last_err,
-                );
-            }
-        };
+    // The compact mechanism: the one-shot summary call with the check
+    // loop (docs FT-038). The model is called with no tools. Each
+    // response passes the format gate (the parse + route check and
+    // the residual marker scan) and the content gate (the template
+    // headers), up to `max_calls` model calls.
+    //
+    // The liveness guarantee: when the calls fail or exhaust, the
+    // walk-back-bounded seed transcript is the fallback handoff. The
+    // cut is bounded, so the handoff fits. The compaction always
+    // finishes. The main session never blocks on a compact error.
+    let (summary, summary_usage) = match summarize_one_shot(
+        args,
+        &config_path,
+        &args.session,
+        &CompactTarget::Main { up_to },
+        max_calls,
+    ) {
+        Ok(r) => r,
+        Err((summary_err, fallback)) => {
+            eprintln!(
+                "compact: the one-shot summary failed ({summary_err}). Using the bounded model-free cut as the handoff."
+            );
+            (fallback, None)
+        }
+    };
 
     // The file ops: merge with the previous boundary's lists, not
     // re-extract (docs/auto-compact-plan.md section 4.1).
@@ -681,6 +706,7 @@ fn run_compaction(
             args,
             overflow,
             last_user_seq,
+            max_calls,
             "the first_kept_seq is below 1",
             "the producer check rejected the marker",
         );
@@ -718,16 +744,6 @@ fn run_compaction(
         eprintln!("compact: append compaction_summary failed: {e}");
     }
 
-    // Remove the compact agent's scratch session dir. The summary is
-    // in the parent handoff file and the marker is in the parent log,
-    // so the agent dir is pure scratch.
-    if let Err(e) = std::fs::remove_dir_all(&c_dir) {
-        eprintln!(
-            "compact: cannot remove the agent session dir {}: {e}",
-            c_dir.display()
-        );
-    }
-
     let status = serde_json::json!({
         "status": "compacted",
         "reason": reason_str,
@@ -743,321 +759,444 @@ fn run_compaction(
     std::process::exit(0);
 }
 
-/// The compact target: which region the agent summarizes and where
-/// the `write-handoff` tool writes the result.
+/// The compact target: which region the one-shot summarizes.
 enum CompactTarget {
-    /// Main compaction: the region up to `up_to`, written to the
-    /// versioned handoff files (`handoff/v<N>.md`, `handoff.md`).
-    Main { up_to: usize, version: u64 },
-    /// Branch compaction: the span abandoned at `branch_of`, written
-    /// to the versioned branch summary file (`branch-summary/v<N>.md`).
-    Branch { branch_of: usize, version: u64 },
+    /// Main compaction: the region up to `up_to`.
+    Main { up_to: usize },
+    /// Branch compaction: the span abandoned at `branch_of`.
+    Branch { branch_of: usize },
 }
 
 impl CompactTarget {
-    fn version(&self) -> u64 {
-        match self {
-            Self::Main { version, .. } | Self::Branch { version, .. } => *version,
-        }
-    }
-
     /// The `assemble --summary-text` region flag and value for the seed.
     fn seed_flag(&self) -> (&'static str, String) {
         match self {
-            Self::Main { up_to, .. } => ("--up-to", up_to.to_string()),
-            Self::Branch { branch_of, .. } => ("--branch-of", branch_of.to_string()),
+            Self::Main { up_to } => ("--up-to", up_to.to_string()),
+            Self::Branch { branch_of } => ("--branch-of", branch_of.to_string()),
         }
     }
 
-    /// The agent session dir name prefix.
+    /// The target kind name, for the `--drop-last-assistant` rule.
     fn agent_name(&self) -> &'static str {
         match self {
             Self::Main { .. } => "compact",
             Self::Branch { .. } => "branch",
         }
     }
-
-    /// The `write-handoff` output mode and the read-back subdir.
-    fn output(&self) -> (&'static str, &'static str) {
-        match self {
-            Self::Main { .. } => ("handoff", "handoff"),
-            Self::Branch { .. } => ("branch", "branch-summary"),
-        }
-    }
 }
 
-/// The session engine compact (docs FT-033). Instead of a one-shot
-/// model call, it forks a full `rushi run` compact agent session with
-/// a single `write-handoff` tool. The agent writes the summary into
-/// the target: the handoff files for main, the branch summary file for
-/// branch, in the parent session dir. The driver reads it back.
+/// The one-shot summary mechanism (docs FT-038). A model call with
+/// no tools, with a bounded check loop. Each response passes two
+/// gates:
 ///
-/// Returns the summary text, the usage of the agent run (none), and
-/// the agent session dir (the caller removes it after the marker).
-/// Returns an error string when the fork or the read-back fails.
-fn run_session_summary(
+/// - Gate F (format): `parse` (the zero-tool config) must emit no
+///   `tool_call` event and no `error` event, and the emitted text
+///   must carry no open marker of any family. The detected calls are
+///   fed to `route` with no tool paths, and the not-run lines become
+///   the correction text.
+/// - Gate C (content): every header on the template list (`assemble
+///   --compact-headers`) must appear in the emitted text.
+///
+/// A failed call gets a second chance: the next request is the
+/// original request plus the failed response (raw, markers and all)
+/// as an assistant item and the correction block as a user item.
+/// After `max_calls` calls the error carries the seed transcript
+/// (the bounded model-free fallback). The main target uses it as the
+/// handoff; the branch target fails instead.
+///
+/// Returns the accepted text and the accepted call's usage.
+fn summarize_one_shot(
     args: &Args,
     config_path: &Path,
-    cfg: &toml::Value,
     session: &Path,
     target: &CompactTarget,
-    assemble_bin: &Path,
-) -> Result<(String, Option<Value>, PathBuf), String> {
-    use std::process::{Command, Stdio};
+    max_calls: u64,
+) -> Result<(String, Option<Value>), (String, String)> {
+    let assemble_bin = args.assemble.clone().unwrap_or_else(|| sibling("assemble"));
+    let model_bin = resolve_bin(&args.model, "MODEL_BIN", "model");
+    let parse_bin = resolve_bin(&args.parse, "PARSE_BIN", "parse");
+    let route_bin = resolve_bin(&args.route, "ROUTE_BIN", "route");
 
-    let version = target.version();
+    // Step 1: the three assemble runs against the target region: the
+    // bounded request JSON, the bounded seed transcript (the
+    // fallback), and the template header list (the content gate).
+    let base = assemble_region_args(args, session, config_path, target)
+        .map_err(|e| (e, String::new()))?;
+    let request_raw = run_capture(&assemble_bin, &base)
+        .map_err(|e| (e, String::new()))?;
+    let request: Value = serde_json::from_str(&request_raw)
+        .map_err(|e| (format!("the assemble request is not JSON: {e}"), String::new()))?;
+    let mut seed_args = base.clone();
+    seed_args.push("--summary-text".to_string());
+    let seed: String =
+        run_capture(&assemble_bin, &seed_args).map_err(|e| (e, String::new()))?;
+    // The header list shares the request args, but drops the
+    // `--summary-input` value flag and leads with `--compact-headers`.
+    let headers_args: Vec<String> = std::iter::once("--compact-headers".to_string())
+        .chain(
+            base.iter()
+                .filter(|f| !matches!(f.as_str(), "--summary-input" | "--summary-text"))
+                .cloned(),
+        )
+        .collect();
+    let headers_raw = run_capture(&assemble_bin, &headers_args)
+        .map_err(|e| (e, seed.clone()))?;
+    let headers: Vec<String> = serde_json::from_str(&headers_raw)
+        .map_err(|e| (format!("the header list is not JSON: {e}"), seed.clone()))?;
 
-    // The parent values the fork inherits. The sessions root is the
-    // parent of the parent session dir. The working dir is the
-    // parent `cwd` file, else the sessions root.
-    let parent_dir = session
-        .canonicalize()
-        .map_err(|e| format!("cannot resolve the parent session dir: {e}"))?;
-    let sessions_root = parent_dir
-        .parent()
-        .map(|p| p.to_path_buf())
-        .ok_or_else(|| "the parent session dir has no parent (sessions root)".to_string())?;
-    let cwd = std::fs::read_to_string(parent_dir.join("cwd"))
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| sessions_root.clone());
+    // Step 2: the zero-tool parse config (the deep merge replaces the
+    // Nix store base tool arrays with the empty ones).
+    let zero_cfg = write_zero_tool_config().map_err(|e| (e, seed.clone()))?;
 
-    // The seed input: the compact agent's first message, the target
-    // region rendered as a readable transcript.
+    // Step 3: the check loop. The context items carry every failed
+    // response and its correction into the next request.
+    let mut context_items: Vec<Value> = Vec::new();
+    let mut last_error = String::new();
+    for call in 1..=max_calls {
+        let mut model_request = request.clone();
+        if !context_items.is_empty() {
+            if let Some(input) = model_request.get_mut("input").and_then(|i| i.as_array_mut()) {
+                input.extend(context_items.iter().cloned());
+            }
+        }
+
+        // The model call (the P config, the request on stdin).
+        let resp_raw = run_model_call(&model_bin, config_path, &model_request)
+            .map_err(|e| (e, seed.clone()))?;
+        let resp: Value = match serde_json::from_str(&resp_raw) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err((
+                    format!("the model response is not JSON: {e}"),
+                    seed.clone(),
+                ))
+            }
+        };
+        // A model API failure gets no second chance (docs FT-038):
+        // fall back (main) or fail (branch), as today.
+        let stop_reason = resp.get("stop_reason").and_then(|s| s.as_str()).unwrap_or("stop");
+        if stop_reason == "error" || stop_reason == "aborted" {
+            let detail = resp
+                .get("detail")
+                .and_then(|d| d.as_str())
+                .unwrap_or("the model API call failed");
+            return Err((format!("model stop reason {stop_reason}: {detail}"), seed.clone()));
+        }
+
+        // Gate F: the zero-tool parse check and the residual scan.
+        // The residual scan reads the raw response text, not the
+        // emitted text: the parse sanitize drops an unterminated
+        // marker block, so the emitted text can look clean while the
+        // response still carries a raw open marker.
+        let raw_text = resp
+            .get("text")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string();
+        let parse_args = vec![
+            "--config".to_string(),
+            zero_cfg.to_string_lossy().into_owned(),
+        ];
+        let parse_raw =
+            run_parse_capture(&parse_bin, &parse_args, &resp_raw)
+                .map_err(|e| (e, seed.clone()))?;
+        let events: Vec<Value> = parse_raw
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        let tool_call_events: Vec<Value> = events
+            .iter()
+            .filter(|e| e.get("type").and_then(|t| t.as_str()) == Some("tool_call"))
+            .cloned()
+            .collect();
+        let parse_error = events
+            .iter()
+            .any(|e| e.get("type").and_then(|t| t.as_str()) == Some("error"));
+        let emitted_text = events
+            .iter()
+            .find(|e| e.get("type").and_then(|t| t.as_str()) == Some("assistant_message"))
+            .and_then(|e| e.get("content").and_then(|c| c.as_str()))
+            .unwrap_or("")
+            .to_string();
+
+        if !tool_call_events.is_empty() {
+            // The detected calls run through `route` with no tool
+            // paths: every call reports a not-run result.
+            let route_in = tool_call_events
+                .iter()
+                .map(|e| serde_json::to_string(e).unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let route_raw =
+                run_capture_stdin(&route_bin, &Vec::<String>::new(), &route_in)
+                    .map_err(|e| (e, seed.clone()))?;
+            let not_run_events: Vec<Value> = route_raw
+                .lines()
+                .filter_map(|l| serde_json::from_str(l).ok())
+                .collect();
+            let not_run: Vec<String> = not_run_events
+                .iter()
+                .filter_map(|e| {
+                    e.get("value")
+                        .and_then(|v| v.get("text"))
+                        .and_then(|t| t.as_str())
+                        .map(str::to_string)
+                })
+                .collect();
+            let correction = correction_with_calls(&not_run);
+            last_error = "the format gate failed: the response carried tool calls".to_string();
+            if call < max_calls {
+                push_retry_context(&mut context_items, &resp, &correction);
+                continue;
+            }
+            break;
+        }
+        if parse_error || carries_open_marker(&raw_text) {
+            // Raw markers only (or the parse gave up): the no-call
+            // correction.
+            let correction = CORRECTION_RAW_MARKERS.to_string();
+            last_error = "the format gate failed: the response carried raw tool-call markers"
+                .to_string();
+            if call < max_calls {
+                push_retry_context(&mut context_items, &resp, &correction);
+                continue;
+            }
+            break;
+        }
+        // Gate C: the content check against the template headers.
+        let missing: Vec<&String> = headers
+            .iter()
+            .filter(|h| {
+                !emitted_text.lines().any(|l| {
+                    let t = l.trim_start();
+                    t == h.as_str() || t.starts_with(&format!("{h} "))
+                })
+            })
+            .collect();
+        if !missing.is_empty() {
+            let correction = correction_missing_sections(&missing);
+            last_error = format!(
+                "the content gate failed: missing sections {}",
+                missing
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            if call < max_calls {
+                push_retry_context(&mut context_items, &resp, &correction);
+                continue;
+            }
+            break;
+        }
+        // Both gates pass: accept the text and the accepted call's
+        // usage (the optional `usage` marker field).
+        let usage = resp.get("usage").filter(|u| !u.is_null()).cloned();
+        return Ok((emitted_text, usage));
+    }
+
+    Err((
+        format!(
+            "the summary check loop failed after {max_calls} calls: {last_error}"
+        ),
+        seed.clone(),
+    ))
+}
+
+/// The `--summary-input` region arguments shared by the request,
+/// seed, and header runs (docs FT-038 step 1).
+fn assemble_region_args(
+    args: &Args,
+    session: &Path,
+    config_path: &Path,
+    target: &CompactTarget,
+) -> Result<Vec<String>, String> {
     let seed_flag = target.seed_flag();
-    let mut seed_cmd = Command::new(assemble_bin);
-    seed_cmd
-        .arg("--summary-text")
-        .arg("--session")
-        .arg(session)
-        .arg("--config")
-        .arg(config_path)
-        .arg(seed_flag.0)
-        .arg(seed_flag.1);
+    let mut v: Vec<String> = vec![
+        "--summary-input".to_string(),
+        seed_flag.0.to_string(),
+        seed_flag.1,
+        "--session".to_string(),
+        session.to_string_lossy().into_owned(),
+        "--config".to_string(),
+        config_path.to_string_lossy().into_owned(),
+    ];
     if target.agent_name() == "compact" && args.strip_last_assistant {
-        seed_cmd.arg("--drop-last-assistant");
+        v.push("--drop-last-assistant".to_string());
     }
     if let Some(p) = &args.prompt {
-        seed_cmd.arg("--prompt").arg(p);
+        v.push("--prompt".to_string());
+        v.push(p.clone());
     }
-    let seed_out = seed_cmd
-        .output()
-        .map_err(|e| format!("spawn assemble for the seed text: {e}"))?;
-    if !seed_out.status.success() {
-        return Err(format!(
-            "the assemble --summary-text call failed: {}",
-            String::from_utf8_lossy(&seed_out.stderr)
-        ));
+    Ok(v)
+}
+
+/// The no-tools correction blocks of the check loop (docs FT-038,
+/// the correction text of the second call).
+const CORRECTION_RAW_MARKERS: &str = "Your last response carried raw tool-call markers. No tools are available in this session. Do not call tools. Write the full summary now as plain text, with every section the instructions need.";
+
+/// The with-calls correction: one `route` not-run line per detected
+/// call.
+fn correction_with_calls(not_run: &[String]) -> String {
+    let lines = if not_run.is_empty() {
+        "(no route lines)".to_string()
+    } else {
+        not_run.join("\n")
+    };
+    format!(
+        "Your last response did not produce a valid summary. The tool calls in it did not run:\n{lines}\nNo tools are available in this session. Do not call tools. Write the full summary now as plain text, with every section the instructions need."
+    )
+}
+
+/// The missing-sections correction: the absent template headers.
+fn correction_missing_sections(missing: &[&String]) -> String {
+    format!(
+        "Your last summary is missing sections from the template: {}. Rewrite the full summary now, with every section, as plain text.",
+        missing
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// The retry context of one failed call: the failed response as an
+/// assistant item (raw, markers and all), then the correction block
+/// as a user item (docs FT-038 step 4).
+fn push_retry_context(items: &mut Vec<Value>, resp: &Value, correction: &str) {
+    let raw_text = resp
+        .get("text")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    items.push(serde_json::json!({
+        "type": "message",
+        "role": "assistant",
+        "content": raw_text
+    }));
+    items.push(serde_json::json!({
+        "type": "message",
+        "role": "user",
+        "content": correction
+    }));
+}
+
+/// The open marker byte forms of the text families (mirrors the
+/// parse constants). The P open form is a byte prefix of the A open
+/// form, so the P scan covers both.
+const RESIDUAL_P_OPEN: &[u8] = &[0x0a, 0x3c, 0x69, 0x6e, 0x76, 0x6f, 0x6b, 0x65];
+const RESIDUAL_Q_OPEN: &[u8] = &[
+    0x0a, 0x3c, 0x74, 0x6f, 0x6f, 0x6c, 0x5f, 0x63, 0x61, 0x6c, 0x6c, 0x3e,
+];
+
+/// Gate F residual scan (docs FT-038 step 3): true when the text
+/// still carries an open marker of any family.
+fn carries_open_marker(text: &str) -> bool {
+    let b = text.as_bytes();
+    let p = RESIDUAL_P_OPEN.len();
+    let q = RESIDUAL_Q_OPEN.len();
+    (b.len() >= p && b.windows(p).any(|w| w == RESIDUAL_P_OPEN))
+        || (b.len() >= q && b.windows(q).any(|w| w == RESIDUAL_Q_OPEN))
+}
+
+/// The zero-tool parse config (docs FT-038 step 3): a temp TOML whose
+/// empty tool path arrays replace the base ones through the deep
+/// merge. Every detected call is unknown to `parse`, so `route`
+/// reports not-run for all of them.
+fn write_zero_tool_config() -> Result<PathBuf, String> {
+    let dir = std::env::temp_dir().join(format!("rushi-zero-tool-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create the zero-tool config dir: {e}"))?;
+    let path = dir.join("zero-tool.toml");
+    let toml_text = "[paths]\nnative_tool_paths = []\nextension_tool_paths = []\n";
+    std::fs::write(&path, toml_text)
+        .map_err(|e| format!("write the zero-tool config: {e}"))?;
+    Ok(path)
+}
+
+/// Run a binary, capture stdout, expect success.
+fn run_capture(bin: &Path, extra_args: &[String]) -> Result<String, String> {
+    run_capture_stdin(bin, extra_args, "")
+}
+
+/// Run a binary with `stdin` on its stdin, capture stdout, expect
+/// success. Stderr rides into the error on a bad exit.
+fn run_capture_stdin(
+    bin: &Path,
+    extra_args: &[String],
+    stdin: &str,
+) -> Result<String, String> {
+    use std::io::Write;
+    let mut cmd = Command::new(bin);
+    for a in extra_args {
+        cmd.arg(a);
     }
-    let seed_text = String::from_utf8_lossy(&seed_out.stdout).to_string();
-
-    // The agent session dir, under the same sessions root as the
-    // parent. The id names the parent and the version, so two
-    // parents never collide.
-    let p_name = parent_dir
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .ok_or("the parent session dir has no name")?;
-    let c_id = format!("{p_name}-{}-v{version}", target.agent_name());
-    let c_dir = sessions_root.join(&c_id);
-    std::fs::create_dir_all(&c_dir)
-        .map_err(|e| format!("create the agent session dir: {e}"))?;
-
-    // The sidecar the write-handoff tool reads: the target dir (the
-    // parent), the version, and the output mode. It lives in the agent
-    // dir, so the `rm -r` removes it with the rest.
-    let (mode, _) = target.output();
-    let sidecar = serde_json::json!({
-        "target_dir": parent_dir.to_string_lossy(),
-        "version": version,
-        "mode": mode,
-    });
-    std::fs::write(c_dir.join("handoff-target.json"), sidecar.to_string())
-        .map_err(|e| format!("write the handoff sidecar: {e}"))?;
-
-    // The seed transcript crosses the fork as the session's first
-    // `user_message`, appended to the agent log before the fork. A
-    // large compacted region is a multi-megabyte transcript, and a
-    // single argv slot caps at 128 KiB on Linux (E2BIG); the log is
-    // the native channel and scales past the limit. The loop's
-    // `claim` reports the pending steer message, so the fork runs the
-    // compact agent instead of idling. The log lives in the agent dir,
-    // so the `rm -r` removes it too.
-    seed_agent_log(&c_dir, &seed_text)?;
-
-    // The agent config: a copy of the parent config with one tool
-    // (write-handoff) and no auto-compact. The full config is
-    // carried, so the model and the other limits stay from the
-    // parent. The tool dir resolves relative to the config dir for
-    // relative native_tool_paths entries, matching the kernel.
-    let config_dir = config_path
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
-    let tool_dir = resolve_write_handoff_tool_dir(cfg, &config_dir)?;
-    let agent_cfg = c_dir.join("compact-config.toml");
-    write_compact_config(&agent_cfg, cfg, &tool_dir).map_err(|e| e.to_string())?;
-
-    // Fork the compact agent session and block on it. The `rushi`
-    // binary is the sibling of this one, or the `--rushi` /
-    // `RUSHI_BIN` override. No task is passed: the seed is already the
-    // session's first `user_message` in the log, so the loop runs it.
-    let rushi_bin = resolve_bin(&args.rushi, "RUSHI_BIN", "rushi");
-    let mut cmd = Command::new(&rushi_bin);
-    cmd.arg("run")
-        .arg(&c_id)
-        .arg("--sessions-root")
-        .arg(&sessions_root)
-        .arg("--cwd")
-        .arg(&cwd)
-        .arg("--config")
-        .arg(&agent_cfg);
-    let out = cmd
-        .stdin(Stdio::null())
+    let mut child = cmd
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("spawn the rushi fork: {e}"))?;
+        .spawn()
+        .map_err(|e| format!("spawn {bin:?}: {e}"))?;
+    if let Some(mut s) = child.stdin.take() {
+        s.write_all(stdin.as_bytes())
+            .map_err(|e| format!("write the stdin of {bin:?}: {e}"))?;
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("wait on {bin:?}: {e}"))?;
     if !out.status.success() {
         return Err(format!(
-            "the compact agent session exited {}: {}",
+            "{} exited {}: {}",
+            bin.display(),
             out.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&out.stderr)
         ));
     }
-
-    // Read back the file the agent wrote, in the parent dir.
-    let (_mode, subdir) = target.output();
-    let vpath = parent_dir.join(subdir).join(format!("v{version}.md"));
-    let summary = std::fs::read_to_string(&vpath)
-        .map_err(|e| format!("the agent did not write {}: {e}", vpath.display()))?;
-
-    Ok((summary, None, c_dir))
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
-/// Append the seed transcript as the agent session's first
-/// `user_message`, mirroring the `rushi run` seed path
-/// (`seed_initial_message`): a steer `user_message` leaves `claim` in
-/// `awaiting_model`, so the loop runs the prompt instead of idling.
-/// Appending to the log before the fork means the seed crosses the
-/// log, not argv, and scales past the 128 KiB argv cap that breaks a
-/// positional task (E2BIG). The log lives in the agent dir, so the
-/// `rm -r` removes it with the rest.
-fn seed_agent_log(c_dir: &Path, seed_text: &str) -> Result<(), String> {
-    let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let event = Event::UserMessage(UserMessage {
-        v: 1,
-        ts,
-        content: seed_text.to_string(),
-        queue: None,
-        id: None,
-    });
-    let line = serde_json::to_string(&event)
-        .map_err(|e| format!("serialize the seed user_message: {e}"))?;
-    LogLine::from_json(&line)
-        .commit(&c_dir.join("events.jsonl"))
-        .map_err(|e| format!("append the seed user_message to the agent log: {e}"))
-}
-
-/// Find the `write-handoff` tool dir. The compact agent's only tool
-/// ships with the rushi distribution, so resolution is by layout,
-/// not by env var:
-///
-/// 1. The location next to this binary: `<exe_dir>/../tools/write-handoff`.
-///    The Nix package (and any layout that ships the tool beside the
-///    binary) keeps the manifest two levels up from `bin/`.
-///    `resolved_exe` canonicalizes the profile symlink chain
-///    (issue #25), so the store package resolves.
-/// 2. A `[paths] native_tool_paths` entry that holds the tool
-///    (dev or custom layouts). Relative entries resolve against the
-///    config dir, matching the kernel `resolve_tool_entry`.
-fn resolve_write_handoff_tool_dir(
-    cfg: &toml::Value,
-    config_dir: &Path,
-) -> Result<PathBuf, String> {
-    // 1. The tool ships with the distribution. This binary lives in
-    //    <prefix>/bin/compact; the manifest lives in
-    //    <prefix>/tools/write-handoff.
-    if let Some(exe) = rushi_common::paths::resolved_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            let cand = exe_dir.join("..").join("tools").join("write-handoff");
-            if cand.join("tool.toml").exists() {
-                return Ok(cand);
-            }
-        }
-    }
-    // 2. A native_tool_paths entry that holds the tool.
-    if let Some(native) = cfg
-        .get("paths")
-        .and_then(|p| p.get("native_tool_paths"))
-        .and_then(|v| v.as_array())
-    {
-        for entry in native {
-            if let Some(s) = entry.as_str() {
-                let base = PathBuf::from(s);
-                let resolved = if base.is_absolute() {
-                    base.clone()
-                } else {
-                    config_dir.join(&base)
-                };
-                let cand = resolved.join("write-handoff");
-                if cand.join("tool.toml").exists() {
-                    return Ok(cand);
-                }
-            }
-        }
-    }
-    Err(
-        "the write-handoff tool dir was not found. Ship it with the \
-         distribution (next to the rushi bin, at <bin>/../tools/write-handoff), \
-         or list its dir in [paths] native_tool_paths."
-            .to_string(),
+/// The one-shot model call: the request JSON on stdin, the response
+/// JSON on stdout.
+fn run_model_call(
+    model_bin: &Path,
+    config_path: &Path,
+    request: &Value,
+) -> Result<String, String> {
+    let request_str = serde_json::to_string(request).map_err(|e| e.to_string())?;
+    run_capture_stdin(
+        model_bin,
+        &["--config".to_string(), config_path.to_string_lossy().into_owned()],
+        &request_str,
     )
 }
 
-/// Write the compact agent config: the full parent config with the
-/// tool set reduced to one `write-handoff` tool and auto-compact off.
-/// The full config is carried so the model and the other limits stay
-/// from the parent, not just the Nix base.
-fn write_compact_config(
-    path: &Path,
-    cfg: &toml::Value,
-    tool_dir: &Path,
-) -> std::io::Result<()> {
-    let tool_str = tool_dir.to_string_lossy().to_string();
-    let mut root: toml::map::Map<String, toml::Value> = match cfg.clone() {
-        toml::Value::Table(t) => t,
-        _ => toml::map::Map::new(),
-    };
-    // [paths]: one tool, no exts.
-    let paths_tbl: toml::map::Map<String, toml::Value> = match root.get("paths") {
-        Some(toml::Value::Table(t)) => t.clone(),
-        _ => toml::map::Map::new(),
-    };
-    let mut paths_tbl = paths_tbl;
-    paths_tbl.insert(
-        "native_tool_paths".to_string(),
-        toml::Value::Array(vec![toml::Value::String(tool_str)]),
-    );
-    paths_tbl.insert(
-        "extension_tool_paths".to_string(),
-        toml::Value::Array(vec![]),
-    );
-    root.insert("paths".to_string(), toml::Value::Table(paths_tbl));
-    // [limits]: no auto-compact for the agent session.
-    let limits_tbl: toml::map::Map<String, toml::Value> = match root.get("limits") {
-        Some(toml::Value::Table(t)) => t.clone(),
-        _ => toml::map::Map::new(),
-    };
-    let mut limits_tbl = limits_tbl;
-    limits_tbl.insert("compact_enabled".to_string(), toml::Value::Boolean(false));
-    root.insert("limits".to_string(), toml::Value::Table(limits_tbl));
-    let text = toml::to_string(&toml::Value::Table(root)).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-    })?;
-    std::fs::write(path, text)
+/// Run parse, capturing the stdout events even on a non-zero exit.
+/// Parse exits 1 when tool calls are present (the route case) and 2
+/// on a terminal error; the events ride stdout in both, so the exit
+/// status is not an error here. Only a spawn or wait failure is.
+fn run_parse_capture(
+    parse_bin: &Path,
+    extra_args: &[String],
+    stdin: &str,
+) -> Result<String, String> {
+    use std::io::Write;
+    let mut cmd = Command::new(parse_bin);
+    for a in extra_args {
+        cmd.arg(a);
+    }
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawn {parse_bin:?}: {e}"))?;
+    if let Some(mut s) = child.stdin.take() {
+        s.write_all(stdin.as_bytes())
+            .map_err(|e| format!("write the stdin of {parse_bin:?}: {e}"))?;
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("wait on {parse_bin:?}: {e}"))?;
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
 /// The `--branch` run (docs/branch-summarize-cases.md Phase 0).
@@ -1139,38 +1278,40 @@ fn run_branch_compaction(args: &Args, events: &[LogEvent]) -> ! {
         .collect();
     let tokens_before = compact_math::full_form_estimate(&span_projected, &caps);
 
-    // The compact agent: fork a `rushi run` session that summarizes
-    // the ditched span and writes the branch summary file through the
-    // `write-handoff` tool. The driver reads it back and appends the
-    // branch marker.
-    let assemble_bin = args.assemble.clone().unwrap_or_else(|| sibling("assemble"));
-    let (summary, summary_usage, c_dir) = match run_session_summary(
+    // The one-shot summary call with the check loop (docs FT-038).
+    // The branch span has no liveness fallback: a failure appends
+    // `compaction_failed` and no branch marker (P4).
+    let empty = toml::Value::Table(toml::map::Map::new());
+    let limits = cfg.get("limits").unwrap_or(&empty);
+    let max_calls = val_int(limits, "compact_max_summary_calls")
+        .map(|v| (v.max(1)) as u64)
+        .unwrap_or(3);
+    let (summary, summary_usage) = match summarize_one_shot(
         args,
         &config_path,
-        &cfg,
         &args.session,
         &CompactTarget::Branch {
             branch_of: branch_of as usize,
-            version: branch_version,
         },
-        &assemble_bin,
+        max_calls,
     ) {
         Ok(r) => r,
-        Err(last_err) => {
+        Err((last_err, _fallback)) => {
             // P4: the failure appends only `compaction_failed`.
-            // No branch marker is written.
+            // No branch marker is written. The branch span is a
+            // detached rewrite, not the main session's liveness.
             fail_and_exit(
                 args,
                 false,
                 last_user_seq,
-                "the branch compact agent session failed",
+                max_calls,
+                "the branch one-shot summary failed",
                 &last_err,
             );
         }
     };
 
-    // The branch marker (P2, P7). The agent already wrote the
-    // versioned branch summary file through the tool.
+    // The branch marker (P2, P7).
     let marker = build_branch_marker(
         &summary,
         branch_of,
@@ -1182,14 +1323,6 @@ fn run_branch_compaction(args: &Args, events: &[LogEvent]) -> ! {
     let log_bin = resolve_bin(&args.log, "LOG_BIN", "rushi-log");
     if let Err(e) = append_event(&log_bin, &args.session, &marker) {
         eprintln!("compact: append branch compaction_summary failed: {e}");
-    }
-
-    // Remove the compact agent's scratch session dir.
-    if let Err(e) = std::fs::remove_dir_all(&c_dir) {
-        eprintln!(
-            "compact: cannot remove the agent session dir {}: {e}",
-            c_dir.display()
-        );
     }
 
     let status = serde_json::json!({
@@ -1241,11 +1374,14 @@ fn build_branch_marker(
 
 /// The failure path: the `compaction_failed` marker, the detail on
 /// stderr, the failed status on stdout, exit 1. The last_user_seq
-/// anchors the cooldown of the next threshold trigger.
+/// anchors the cooldown of the next threshold trigger. The marker
+/// records the one-shot check loop call budget in its count field
+/// (docs FT-038).
 fn fail_and_exit(
     args: &Args,
     overflow: bool,
     last_user_seq: usize,
+    call_count: u64,
     short: &str,
     detail: &str,
 ) -> ! {
@@ -1256,7 +1392,7 @@ fn fail_and_exit(
         "ts": ts_now(),
         "reason": reason_str,
         "last_user_seq": last_user_seq,
-        "attempts": 2,
+        "attempts": call_count,
         "detail": detail,
     });
     let log_bin = resolve_bin(&args.log, "LOG_BIN", "rushi-log");
@@ -1450,108 +1586,6 @@ mod tests {
         src.parse::<toml::Value>().expect("valid toml")
     }
 
-    #[test]
-    fn write_compact_config_carries_one_tool_and_disables_compact() {
-        let dir = tempfile::tempdir().unwrap();
-        let tool_dir = dir.path().join("write-handoff");
-        std::fs::create_dir_all(&tool_dir).unwrap();
-        let cfg = config_toml(
-            r#"
-            [paths]
-            native_tool_paths = ["tools"]
-            extension_tool_paths = ["ext/goal-tools"]
-
-            [models.my-model]
-            context_tokens = 100000
-
-            [active]
-            model = "my-model"
-
-            [limits]
-            context_budget_tokens = 90000
-            compact_reserve_tokens = 16384
-            "#,
-        );
-        let out = dir.path().join("compact-config.toml");
-        write_compact_config(&out, &cfg, &tool_dir).unwrap();
-        let back: toml::Value = std::fs::read_to_string(&out)
-            .unwrap()
-            .parse()
-            .unwrap();
-        // One tool, no exts.
-        assert_eq!(
-            back["paths"]["native_tool_paths"].as_array().unwrap().len(),
-            1
-        );
-        assert_eq!(
-            back["paths"]["extension_tool_paths"].as_array().unwrap().len(),
-            0
-        );
-        // Auto-compact off.
-        assert_eq!(
-            back["limits"]["compact_enabled"].as_bool(),
-            Some(false)
-        );
-        // The model and the other limits survive.
-        assert_eq!(back["active"]["model"].as_str(), Some("my-model"));
-        assert_eq!(
-            back["limits"]["context_budget_tokens"].as_integer(),
-            Some(90000)
-        );
-    }
-
-    #[test]
-    fn seed_agent_log_appends_the_seed_as_a_user_message() {
-        let dir = tempfile::tempdir().unwrap();
-        let c_dir = dir.path().join("agent");
-        std::fs::create_dir_all(&c_dir).unwrap();
-        seed_agent_log(&c_dir, "summarize this compacted region").unwrap();
-        // The seed round-trips through the log reader: one steer
-        // `user_message` carrying the seed text.
-        let text =
-            rushi_common::logstream::read_log_text(&c_dir.join("events.jsonl")).unwrap();
-        assert_eq!(
-            text.matches(r#""type":"user_message""#).count(),
-            1,
-            "the seed is the single user_message of the new log"
-        );
-        assert!(text.contains("summarize this compacted region"), "missing the seed text");
-    }
-
-    #[test]
-    fn resolve_write_handoff_tool_dir_finds_it_under_native_paths() {
-        let dir = tempfile::tempdir().unwrap();
-        let tools_root = dir.path().join("tools");
-        let tool_dir = tools_root.join("write-handoff");
-        std::fs::create_dir_all(&tool_dir).unwrap();
-        std::fs::write(tool_dir.join("tool.toml"), "[tool]\ncommand = \"write-handoff\"\n").unwrap();
-        let cfg = config_toml(&format!(
-            r#"[paths]
-native_tool_paths = ["{}"]
-"#,
-            tools_root.display()
-        ));
-        // The tool is not next to the test binary, so the
-        // native_tool_paths entry is what the resolver finds.
-        let found = resolve_write_handoff_tool_dir(&cfg, dir.path()).unwrap();
-        assert_eq!(
-            found.canonicalize().unwrap(),
-            tool_dir.canonicalize().unwrap()
-        );
-    }
-
-    #[test]
-    fn resolve_write_handoff_tool_dir_errors_when_absent() {
-        // Nothing next to the test binary, no native_tool_paths entry,
-        // so the resolver reports the missing tool.
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = config_toml("[active]\nmodel = \"stub\"\n");
-        let err = resolve_write_handoff_tool_dir(&cfg, dir.path()).unwrap_err();
-        assert!(
-            err.contains("write-handoff"),
-            "the error names the missing tool: {err}"
-        );
-    }
 
     #[test]
     fn trigger_level_uses_context_budget() {
@@ -1611,14 +1645,14 @@ native_tool_paths = ["{}"]
         };
 
         // up_to = 3: the first kept event past seq 3 is seq 4 (index 3).
-        assert_eq!(cut_index(&kept, Some(3), &projected, 100, &caps), 3);
+        assert_eq!(cut_index(&kept, Some(3), &projected, 100, 0, &caps), 3);
         // up_to = 1: first event past seq 1 is seq 2 (index 1).
-        assert_eq!(cut_index(&kept, Some(1), &projected, 100, &caps), 1);
+        assert_eq!(cut_index(&kept, Some(1), &projected, 100, 0, &caps), 1);
         // up_to = 5: no kept event past seq 5; the cut lands at the
         // end: the whole kept region is old, nothing is kept.
-        assert_eq!(cut_index(&kept, Some(5), &projected, 100, &caps), 5);
+        assert_eq!(cut_index(&kept, Some(5), &projected, 100, 0, &caps), 5);
         // up_to far beyond the log: same as up_to = last seq.
-        assert_eq!(cut_index(&kept, Some(99), &projected, 100, &caps), 5);
+        assert_eq!(cut_index(&kept, Some(99), &projected, 100, 0, &caps), 5);
     }
 
     /// Rewind rule I4. A target at or before the region head degrades
@@ -1637,12 +1671,12 @@ native_tool_paths = ["{}"]
         // Before the region head: degrades to the head. The cut lands
         // on the event after the head (seq 10, index 1). The old
         // region is the head event alone.
-        assert_eq!(cut_index(&kept, Some(5), &projected, 100, &caps), 1);
-        assert_eq!(cut_index(&kept, Some(1), &projected, 100, &caps), 1);
+        assert_eq!(cut_index(&kept, Some(5), &projected, 100, 0, &caps), 1);
+        assert_eq!(cut_index(&kept, Some(1), &projected, 100, 0, &caps), 1);
         // At the region head: the same degrade.
-        assert_eq!(cut_index(&kept, Some(9), &projected, 100, &caps), 1);
+        assert_eq!(cut_index(&kept, Some(9), &projected, 100, 0, &caps), 1);
         // Inside the un-compact prefix: untouched.
-        assert_eq!(cut_index(&kept, Some(11), &projected, 100, &caps), 3);
+        assert_eq!(cut_index(&kept, Some(11), &projected, 100, 0, &caps), 3);
     }
 
     #[test]
@@ -1654,8 +1688,8 @@ native_tool_paths = ["{}"]
             chars_per_token: 4,
         };
         // Five 1-char user events: 5 chars total, far below a large
-        // keep budget, so find_cut returns 0 (keep everything).
-        assert_eq!(cut_index(&kept, None, &projected, 100_000, &caps), 0);
+        // trigger level, so find_cut returns 0 (keep everything).
+        assert_eq!(cut_index(&kept, None, &projected, 100_000, 0, &caps), 0);
     }
 
     // ── branch mode (docs/branch-summarize-cases.md) ─────────────
@@ -1748,5 +1782,479 @@ native_tool_paths = ["{}"]
         assert_eq!(b.seq, 5);
         assert_eq!(b.first_kept_seq, 8, "the branch sentinel must not reset it");
         let _ = (plain, branch);
+    }
+
+    // ── The one-shot check loop (docs/ft-038-compact-check-loop.md) ──
+
+    /// The byte forms of the Q-family (Qwen-shape) markers, mirroring
+    /// the parse constants. Built from byte arrays so no raw marker
+    /// appears in the test source (tool transports strip raw
+    /// markers).
+    const Q_OPEN: &[u8] = &[
+        0x0a, 0x3c, 0x74, 0x6f, 0x6f, 0x6c, 0x5f, 0x63, 0x61, 0x6c, 0x6c, 0x3e,
+    ];
+    const Q_CLOSE: &[u8] = &[
+        0x0a, 0x3c, 0x2f, 0x74, 0x6f, 0x6f, 0x6c, 0x5f, 0x63, 0x61, 0x6c, 0x6c, 0x3e,
+    ];
+    const Q_FUNC_OPEN: &[u8] = &[
+        0x3c, 0x66, 0x75, 0x6e, 0x63, 0x74, 0x69, 0x6f, 0x6e, 0x3d,
+    ];
+    const Q_FUNC_CLOSE: &[u8] = &[
+        0x3c, 0x2f, 0x66, 0x75, 0x6e, 0x63, 0x74, 0x69, 0x6f, 0x6e, 0x3e,
+    ];
+    const Q_PARAM_OPEN: &[u8] = &[
+        0x3c, 0x70, 0x61, 0x72, 0x61, 0x6d, 0x65, 0x74, 0x65, 0x72, 0x3d,
+    ];
+    const Q_PARAM_CLOSE: &[u8] = &[
+        0x3c, 0x2f, 0x70, 0x61, 0x72, 0x61, 0x6d, 0x65, 0x74, 0x65, 0x72,
+    ];
+
+    /// One closed Q-family block: the open line, the function line,
+    /// one parameter pair, the function close line, the close line.
+    fn q_block(name: &str, key: &str, val: &str) -> String {
+        let open = String::from_utf8(Q_OPEN.to_vec()).unwrap();
+        let close = String::from_utf8(Q_CLOSE.to_vec()).unwrap();
+        let fop = String::from_utf8(Q_FUNC_OPEN.to_vec()).unwrap();
+        let fcl = String::from_utf8(Q_FUNC_CLOSE.to_vec()).unwrap();
+        let pop = String::from_utf8(Q_PARAM_OPEN.to_vec()).unwrap();
+        let pcl = String::from_utf8(Q_PARAM_CLOSE.to_vec()).unwrap();
+        format!(
+            "{open}\n{fop}{name}>\n{pop}{key}>\n{val}\n{pcl}>\n{fcl}{close}"
+        )
+    }
+
+    /// The template header set (the `##` and `###` lines of the
+    /// first-time compact template).
+    const TEMPLATE_HEADERS: [&str; 9] = [
+        "## Goal",
+        "## Constraints & Preferences",
+        "## Progress",
+        "### Done",
+        "### In Progress",
+        "### Blocked",
+        "## Key Decisions",
+        "## Next Steps",
+        "## Critical Context",
+    ];
+
+    /// A clean summary text carrying every template header. No
+    /// trailing newline: the parse sanitize trims the tail, so the
+    /// accepted text is this string verbatim.
+    fn template_summary_text() -> String {
+        TEMPLATE_HEADERS
+            .iter()
+            .map(|h| format!("{h}\n- the entry under the header"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The stub model script (the docs FT-038 test plan): a counter
+    /// file drives which canned response lands on stdout; every
+    /// request lands in `req<N>.json` for the assertions. The stub
+    /// dir is the parent of the `--config` arg, so no env var is
+    /// needed and parallel tests cannot race on it.
+    const STUB_MODEL_SCRIPT: &str = r#"#!/bin/sh
+cfg=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--config" ]; then cfg="$a"; fi
+  prev="$a"
+done
+dir=$(dirname "$cfg")
+n=$(cat "$dir/count" 2>/dev/null || echo 0)
+n=$((n+1))
+echo "$n" > "$dir/count"
+if [ ! -f "$dir/resp$n.json" ]; then
+  n=1
+fi
+req=$(cat)
+printf '%s' "$req" > "$dir/req$n.json"
+cat "$dir/resp$n.json"
+"#;
+
+    /// The stub assemble script: branches on the flags. The stub dir
+    /// is the parent of the `--config` arg, so no env var is needed.
+    const STUB_ASSEMBLE_SCRIPT: &str = r#"#!/bin/sh
+cfg=""
+prev=""
+mode="request"
+for a in "$@"; do
+  if [ "$prev" = "--config" ]; then cfg="$a"; fi
+  case "$a" in
+    --summary-text) mode="seed" ;;
+    --compact-headers) mode="headers" ;;
+  esac
+  prev="$a"
+done
+dir=$(dirname "$cfg")
+case "$mode" in
+  seed) cat "$dir/seed.txt" ;;
+  headers) cat "$dir/headers.json" ;;
+  *) cat "$dir/request.json" ;;
+esac
+"#;
+
+    /// Make both stub scripts executable (the unix mode).
+    fn chmod_scripts(a: &Path, b: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let p = std::fs::Permissions::from_mode(0o755);
+            std::fs::set_permissions(a, p.clone()).unwrap();
+            std::fs::set_permissions(b, p).unwrap();
+        }
+        #[cfg(not(unix))]
+        let _ = (a, b);
+    }
+
+    /// The one stub dir the check loop tests share: the canned model
+    /// responses, the canned assemble outputs, and the call counter.
+    /// The scripts find it as the parent of the `--config` arg.
+    /// Returns the config path and the ready Args.
+    fn stub_env(
+        root: &Path,
+        resp1: &serde_json::Value,
+        resp2: Option<&serde_json::Value>,
+        seed: &str,
+    ) -> (PathBuf, Args) {
+        let stub_dir = root.join("stub");
+        std::fs::create_dir_all(&stub_dir).unwrap();
+        std::fs::write(stub_dir.join("resp1.json"), resp1.to_string()).unwrap();
+        if let Some(r2) = resp2 {
+            std::fs::write(stub_dir.join("resp2.json"), r2.to_string()).unwrap();
+        }
+        std::fs::write(
+            stub_dir.join("request.json"),
+            serde_json::json!({
+                "model": "m",
+                "input": [],
+                "tools": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(stub_dir.join("seed.txt"), seed).unwrap();
+        std::fs::write(
+            stub_dir.join("headers.json"),
+            serde_json::to_string(&TEMPLATE_HEADERS).unwrap(),
+        )
+        .unwrap();
+        let config_path = stub_dir.join("cfg.toml");
+        let target_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug");
+        let parse_bin = target_dir.join("parse");
+        let route_bin = target_dir.join("route");
+        let model_script = root.join("stub-model.sh");
+        std::fs::write(&model_script, STUB_MODEL_SCRIPT).unwrap();
+        let assemble_script = root.join("stub-assemble.sh");
+        std::fs::write(&assemble_script, STUB_ASSEMBLE_SCRIPT).unwrap();
+        chmod_scripts(&model_script, &assemble_script);
+        let session = root.join("session");
+        std::fs::create_dir_all(&session).unwrap();
+        let args = Args {
+            session,
+            config: None,
+            reason: Reason::Threshold,
+            strip_last_assistant: false,
+            force: false,
+            assemble: Some(assemble_script),
+            log: None,
+            model: Some(model_script),
+            parse: Some(parse_bin),
+            route: Some(route_bin),
+            up_to: None,
+            prompt: None,
+            branch: false,
+        };
+        (config_path, args)
+    }
+
+    /// True when the workspace parse and route binaries are built;
+    /// the check loop tests skip otherwise (run `cargo build` first).
+    fn real_bins_built() -> bool {
+        let target_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug");
+        target_dir.join("parse").exists() && target_dir.join("route").exists()
+    }
+
+    /// The check loop test (docs FT-038 test plan): a stub model
+    /// returns a polluted response (a raw Q-family block) first and a
+    /// clean response second. The real parse and route binaries run
+    /// the gates. Asserts the call count, the route line in the
+    /// correction, and the accepted text.
+    #[test]
+    fn one_shot_check_loop_recovers_a_polluted_first_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        if !real_bins_built() {
+            eprintln!("SKIP one_shot_check_loop: the parse/route binaries are not built (run `cargo build` first)");
+            return;
+        }
+
+        let polluted_text =
+            format!("writing the summary now\n{}", q_block("task", "progress", "summarizing the session"));
+        let clean_text = template_summary_text();
+        let resp1 = serde_json::json!({
+            "text": polluted_text,
+            "tool_calls": [],
+            "stop_reason": "stop",
+            "usage": {"input_tokens": 100, "output_tokens": 50}
+        });
+        let resp2 = serde_json::json!({
+            "text": clean_text,
+            "tool_calls": [],
+            "stop_reason": "stop",
+            "usage": {"input_tokens": 120, "output_tokens": 60}
+        });
+        let (config_path, args) =
+            stub_env(root, &resp1, Some(&resp2), "the bounded seed transcript");
+        let result = summarize_one_shot(
+            &args,
+            &config_path,
+            &args.session,
+            &CompactTarget::Main { up_to: 5 },
+            3,
+        );
+
+        let (summary, usage) = result.expect("the loop must accept the clean second response");
+        assert_eq!(summary, clean_text);
+        assert_eq!(
+            usage,
+            Some(serde_json::json!({"input_tokens": 120, "output_tokens": 60}))
+        );
+        // Two model calls: the polluted one and the clean one.
+        let count = std::fs::read_to_string(args.session.parent().unwrap().join("stub/count"))
+            .unwrap();
+        assert_eq!(count.trim(), "2");
+        // The second request carries the correction: the not-run
+        // route line for the detected call, and the failed response
+        // raw (the Q block, JSON-escaped).
+        let req2 = std::fs::read_to_string(args.session.parent().unwrap().join("stub/req2.json"))
+            .unwrap();
+        assert!(req2.contains("did not run"), "the correction lists the not-run calls");
+        assert!(
+            req2.contains("Unknown tool task"),
+            "the route line names the detected call: {req2}"
+        );
+        let escaped = serde_json::to_string(&polluted_text).unwrap();
+        assert!(
+            req2.contains(&escaped),
+            "the failed response rides the second request raw"
+        );
+    }
+
+    /// Gate C test (docs FT-038 test plan): a headerless-clean
+    /// response fails the content gate and the correction names the
+    /// missing sections; the second, complete response is accepted.
+    #[test]
+    fn one_shot_gate_c_missing_headers_retries() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        if !real_bins_built() {
+            eprintln!("SKIP one_shot_gate_c: the parse/route binaries are not built");
+            return;
+        }
+
+        // A clean response, but two sections are missing.
+        let partial_text = "## Goal\nwork\n## Key Decisions\none\n".to_string();
+        let clean_text = template_summary_text();
+        let resp1 = serde_json::json!({
+            "text": partial_text,
+            "tool_calls": [],
+            "stop_reason": "stop",
+            "usage": {"input_tokens": 90, "output_tokens": 40}
+        });
+        let resp2 = serde_json::json!({
+            "text": clean_text,
+            "tool_calls": [],
+            "stop_reason": "stop",
+            "usage": {"input_tokens": 95, "output_tokens": 45}
+        });
+        let (config_path, args) =
+            stub_env(root, &resp1, Some(&resp2), "seed");
+        let result =
+            summarize_one_shot(&args, &config_path, &args.session, &CompactTarget::Main { up_to: 5 }, 3);
+        let (summary, _) = result.expect("the complete second response must be accepted");
+        assert_eq!(summary, clean_text);
+        // The second request carries the missing-sections correction.
+        let req2 = std::fs::read_to_string(args.session.parent().unwrap().join("stub/req2.json"))
+            .unwrap();
+        let req2_val: serde_json::Value = serde_json::from_str(&req2).unwrap();
+        let input = req2_val.get("input").and_then(|i| i.as_array()).unwrap();
+        let correction = input
+            .iter()
+            .find(|i| {
+                i.get("content")
+                    .and_then(|c| c.as_str())
+                    .map(|c| c.contains("missing sections from the template"))
+                    .unwrap_or(false)
+            })
+            .expect("the content correction rides the second request");
+        let corr = correction.get("content").unwrap().as_str().unwrap();
+        assert!(corr.contains("## Progress"), "the missing section is named in the correction: {corr}");
+        assert!(!corr.contains("## Goal"), "a present section is not listed in the correction: {corr}");
+    }
+
+    /// The raw-marker-only case (docs FT-038 test plan): a response
+    /// with an unterminated open marker and no closed block gets the
+    /// no-call correction; the clean second response is accepted.
+    #[test]
+    fn one_shot_raw_marker_only_uses_the_no_call_correction() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        if !real_bins_built() {
+            eprintln!("SKIP one_shot_raw_marker_only: the parse/route binaries are not built");
+            return;
+        }
+
+        // An unterminated open marker: no closed block, so parse
+        // recovers no call. The residual scan of the raw text catches
+        // the open marker.
+        let open_only = String::from_utf8(Q_OPEN.to_vec()).unwrap();
+        let polluted_text = format!("writing the summary now\n{open_only}");
+        let clean_text = template_summary_text();
+        let resp1 = serde_json::json!({
+            "text": polluted_text,
+            "tool_calls": [],
+            "stop_reason": "stop",
+            "usage": {"input_tokens": 80, "output_tokens": 30}
+        });
+        let resp2 = serde_json::json!({
+            "text": clean_text,
+            "tool_calls": [],
+            "stop_reason": "stop",
+            "usage": {"input_tokens": 85, "output_tokens": 35}
+        });
+        let (config_path, args) = stub_env(root, &resp1, Some(&resp2), "seed");
+        let result =
+            summarize_one_shot(&args, &config_path, &args.session, &CompactTarget::Main { up_to: 5 }, 3);
+        let (summary, _) = result.expect("the clean second response must be accepted");
+        assert_eq!(summary, clean_text);
+        // The second request carries the no-call (raw marker) correction.
+        let req2 = std::fs::read_to_string(args.session.parent().unwrap().join("stub/req2.json"))
+            .unwrap();
+        assert!(
+            req2.contains("carried raw tool-call markers"),
+            "the no-call correction rides the second request: {req2}"
+        );
+        // The raw marker is not a detected call, so no route line.
+        assert!(!req2.contains("did not run"), "no route line for a raw marker");
+    }
+
+    /// The model API failure case (docs FT-038 test plan): a stop
+    /// reason of `error` gets no second chance; the loop stops at the
+    /// first call and the seed fallback is returned.
+    #[test]
+    fn one_shot_api_failure_gets_no_second_chance() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        if !real_bins_built() {
+            eprintln!("SKIP one_shot_api_failure: the parse/route binaries are not built");
+            return;
+        }
+
+        let resp1 = serde_json::json!({
+            "text": "",
+            "tool_calls": [],
+            "stop_reason": "error",
+            "usage": null,
+            "detail": "the provider said no"
+        });
+        let (config_path, args) = stub_env(root, &resp1, None, "the seed fallback");
+        // Even with a large call budget, the API failure stops at one.
+        let result =
+            summarize_one_shot(&args, &config_path, &args.session, &CompactTarget::Main { up_to: 5 }, 3);
+        let (err, seed) = match result {
+            Ok(_) => panic!("an API failure must not be accepted"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("stop reason error") || err.contains("the provider said no"),
+            "the error names the API failure: {err}"
+        );
+        assert_eq!(seed, "the seed fallback");
+        // Only one model call: the failure stops the loop.
+        let count = std::fs::read_to_string(args.session.parent().unwrap().join("stub/count"))
+            .unwrap();
+        assert_eq!(count.trim(), "1");
+    }
+
+    /// Gate F residual scan: a residual open marker of any family
+    /// fails the format gate; clean text passes.
+    #[test]
+    fn residual_scan_catches_open_markers_of_every_family() {
+        let q = q_block("task", "k", "v");
+        assert!(carries_open_marker(&q), "a closed Q block carries its open line");
+        let mut p_open = String::new();
+        p_open.push(char::from(0x0a));
+        p_open.push_str(std::str::from_utf8(&[0x3c, 0x69, 0x6e, 0x76, 0x6f, 0x6b, 0x65]).unwrap());
+        assert!(carries_open_marker(&p_open), "a bare P open line is caught");
+        let mut a_open = p_open.clone();
+        a_open.push('>');
+        assert!(carries_open_marker(&a_open), "the A open line is caught by the P scan");
+        assert!(!carries_open_marker("plain summary text\n## Goal\nwork"), "clean text passes");
+    }
+
+    /// Gate C: the missing-section list holds only the absent
+    /// headers; the correction names them.
+    #[test]
+    fn missing_sections_list_holds_only_the_absent_headers() {
+        let text = "## Goal\nwork\n## Key Decisions\none\n".to_string();
+        let headers: Vec<String> = TEMPLATE_HEADERS.iter().map(|s| s.to_string()).collect();
+        let missing: Vec<&String> = headers
+            .iter()
+            .filter(|h| {
+                !text.lines().any(|l| {
+                    let t = l.trim_start();
+                    t == h.as_str() || t.starts_with(&format!("{h} "))
+                })
+            })
+            .collect();
+        assert!(missing.iter().any(|h| h.as_str() == "## Progress"));
+        assert!(missing.iter().any(|h| h.as_str() == "## Next Steps"));
+        assert!(
+            !missing.iter().any(|h| h.as_str() == "## Goal"),
+            "a present header is not listed"
+        );
+        let correction = correction_missing_sections(&missing);
+        assert!(correction.contains("## Progress"));
+        assert!(correction.contains("## Next Steps"));
+        assert!(!correction.contains("## Goal"));
+    }
+
+    /// The with-calls correction carries one route line per call.
+    #[test]
+    fn with_calls_correction_carries_the_route_lines() {
+        let correction = correction_with_calls(&[
+            "Unknown tool task. No tool ran.".to_string(),
+            "Unknown tool Bash. No tool ran.".to_string(),
+        ]);
+        assert!(correction.contains("Unknown tool task. No tool ran."));
+        assert!(correction.contains("Unknown tool Bash. No tool ran."));
+        assert!(correction.contains("No tools are available in this session"));
+    }
+
+    /// The zero-tool config holds the empty tool path arrays.
+    #[test]
+    fn zero_tool_config_writes_the_empty_tool_paths() {
+        let path = write_zero_tool_config().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("native_tool_paths = []"));
+        assert!(text.contains("extension_tool_paths = []"));
+    }
+
+    /// The retry context: the failed response rides as an assistant
+    /// item, the correction as a user item, in order.
+    #[test]
+    fn retry_context_pairs_the_response_and_the_correction() {
+        let mut items: Vec<Value> = Vec::new();
+        let resp = serde_json::json!({
+            "text": "raw response text",
+            "stop_reason": "stop"
+        });
+        push_retry_context(&mut items, &resp, "the correction");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["role"], "assistant");
+        assert_eq!(items[0]["content"], "raw response text");
+        assert_eq!(items[1]["role"], "user");
+        assert_eq!(items[1]["content"], "the correction");
     }
 }

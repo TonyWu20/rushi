@@ -6,6 +6,24 @@ versioned change for each kernel binary, newest first.
 Internal refactors without user-visible behavior do not get an
 entry.
 
+## compact 0.1.6 (2026-11-02)
+
+The compact now always finishes (FT-037). The cut walk is the
+walk-back: it is anchored at the trigger level, not a fixed
+`compact_keep_tokens` window. The kept region is bounded at
+`trigger_level - max_output_tokens`, so the post-compact context sits
+at or under the trigger level and the next turn does not re-fire. If
+the context still overflows, the cascade is driven by the main loop
+across successive turns. When the compact agent session fails, the
+driver falls back to the bounded model-free seed transcript and writes
+the `compaction_summary` marker. The main session is never stuck on a
+compact error.
+
+The seed is now bounded (FT-036). The driver passes both
+`--summary-input` and `--summary-text` to `assemble`. The seed is the
+bounded readable transcript, not the bare model request that overflowed
+the agent's context.
+
 ## compact 0.1.5 (2026-11-02)
 
 The compact seed no longer crosses the kernel argv limit (FT-035).

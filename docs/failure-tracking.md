@@ -1700,3 +1700,79 @@ flag was rejected because the seed is the session's own
 - `scripts/compact-e2e.sh`: the fake `rushi` now checks that the
   seed log exists and is non-empty. 43 checks pass.
 - `cargo test --workspace` passes.
+
+## FT-036 — The compact seed is a raw model request; the agent overflows
+
+**Symptom:** In the `m11-churn-hoist` session the compact agent
+(C) fails. The parent writes a `compaction_failed` marker: `the
+agent did not write .../handoff/v5.md: No such file or directory`.
+The C session log shows two context-overflow errors: `The input
+(384144 tokens) is longer than the model's context length (262144
+tokens)`. The seed `user_message` (log line 1) is 1,044,914 bytes.
+
+**Root cause:** The compact driver called `assemble --summary-text`
+without `--summary-input`. The `--summary-text` flag is honored only
+inside the `--summary-input` projection block. Without
+`--summary-input`, `assemble` falls through to the default path and
+prints the bare model request: raw JSON, `input` of 299 items, of
+which ~80% (836 KB) is chain-of-thought `reasoning`. That unbounded
+request is the seed. It overflows C's context, so C never runs and
+never writes the handoff.
+
+**Fix:** The driver passes both `--summary-input` and
+`--summary-text`. `--summary-input` runs the projection and the drop
+search that bound the region at the input budget. `--summary-text`
+then renders that bounded region as a readable transcript instead of
+the bare model request. The seed is the bounded transcript, not the
+raw request.
+
+**Verification:**
+- `assemble --summary-text --session m11-churn-hoist --up-to 7395`
+  (no `--summary-input`) prints 1,039,713 bytes and starts with
+  `{"input":[`. The same call with `--summary-input` prints
+  139,526 bytes and starts with `The messages above are NEW
+  conversation messages`. Both flags are needed.
+- `cargo test -p compact` passes. `scripts/compact-e2e.sh` passes.
+
+## FT-037 — The compact must always finish: the walk-back and the
+model-free fallback
+
+**Symptom:** Two hazards kept the main session (P) at risk of being
+stuck by a compact error. First, the old cut walk anchored the kept
+region at a fixed `compact_keep_tokens` window. That window does not
+guarantee the post-compact context sits under the trigger level, so
+the next turn can re-fire immediately. Second, when the compact
+agent session (C) failed, the driver called `fail_and_exit` and wrote
+a `compaction_failed` marker. P was left with no summary, and the
+loop could retry C indefinitely.
+
+**Root cause:** The cut walk was not anchored at the trigger level
+(the user's designed walk-back), and the agent-failure path had no
+bounded fallback. A cost-saving but error-prone compact contaminates
+the main session once and forever.
+
+**Fix:** Two changes. The walk-back: `find_cut` computes the
+post-compact budget as `trigger_level - summary_budget`, where
+`summary_budget` is the compact agent's `max_output_tokens` (the cap
+on the summary). It walks backward from the tail until the kept
+region fits that budget, so the post-compact context (summary plus
+kept region) sits at or under the trigger level. The next turn does
+not re-fire immediately. If the context still overflows, the cascade
+is driven by the P loop across successive turns: one compact per
+trigger level. The `compact_keep_tokens` key is no longer read for
+the walk. The liveness fallback: when C fails, the driver no longer
+`fail_and_exit`s. It uses the bounded seed transcript (the
+`--summary-input` + `--summary-text` output) as a model-free
+fallback summary and writes the `compaction_summary` marker anyway.
+P reassembles and never blocks forever. The fallback leaves an empty
+`c_dir`, so no `rm -r` runs. The branch-mode contract is unchanged:
+a branch failure still writes no marker (P4), because the branch span
+is a detached rewrite, not P's liveness.
+
+**Verification:**
+- `cargo test -p compact` (18) and `cargo test -p rushi-common`
+  (120) pass. `cargo clippy` is clean.
+- `scripts/compact-e2e.sh`: 44 checks pass. The compact-failure
+  scenario now asserts the liveness contract: zero
+  `compaction_failed`, one `compaction_summary`, and the handoff file
+  written with the seed transcript.

@@ -307,12 +307,14 @@ EOF
 # ── Scenario 3: the overflow trigger ─────────────────────────────
 # Below the threshold: the threshold hook is cold. The model call
 # fails with the overflow shape, then the overflow compact fires (the
-# driver forks the agent), then the retry succeeds.
+# driver forks the agent), then the retry succeeds. The results carry
+# 5600 chars each (1400 tokens) so the walk-back old region is
+# non-empty; the usage readings stay under the trigger.
 scenario_overflow() {
   NEW_WORK overflow
   COMPACT_ENABLED=true
   work_config
-  seed_session 2800 2900 3000 2000
+  seed_session 2800 2900 3000 2800
   cat >"$WORK/plan" <<'EOF'
 {"text":"","tool_calls":[],"reasoning":[],"stop_reason":"error","usage":null,"detail":"The input (4500 tokens) is longer than the model's context length (3904 tokens)."}
 {"text":"done","tool_calls":[],"reasoning":[],"stop_reason":"stop","usage":{"input_tokens":100,"output_tokens":10}}
@@ -384,9 +386,11 @@ EOF
   assert_eq "$(find "$WORK/sessions" -maxdepth 1 -name 'session-branch-*' | wc -l)" 0 "the agent session dir was removed"
 }
 
-# ── Scenario 5: the compact agent failure ────────────────────────
-# The forked agent session exits non-zero. The driver appends a
-# `compaction_failed` marker and no `compaction_summary`.
+# ── Scenario 5: the compact agent failure (the liveness fallback) ─
+# The forked agent session exits non-zero. The driver falls back to the
+# bounded model-free cut: the seed transcript becomes the handoff. No
+# `compaction_failed` marker; a `compaction_summary` rides the fallback,
+# and the handoff file is written. The main session is never stuck.
 scenario_compact_failure() {
   NEW_WORK compact-failure
   COMPACT_ENABLED=true
@@ -396,10 +400,13 @@ scenario_compact_failure() {
   make_stub
   make_fake_rushi
   FAKE_RUSHI_FAIL=1 run_step
-  assert_eq "$(count_events compaction_failed)" 1 "one compaction_failed"
-  assert_eq "$(count_events compaction_summary)" 0 "no compaction_summary"
-  # No handoff file on the failure path.
-  assert_eq "$(test -f "$SESSIONS_DIR/handoff/v1.md" && echo yes)" "" "no handoff file on failure"
+  # The liveness contract: the fallback finishes the compact. No
+  # compaction_failed marker; a compaction_summary rides the fallback.
+  assert_eq "$(count_events compaction_failed)" 0 "no compaction_failed (the fallback finishes the compact)"
+  assert_eq "$(count_events compaction_summary)" 1 "one compaction_summary (the fallback summary)"
+  # The fallback handoff is written with the seed transcript.
+  assert_eq "$(test -f "$SESSIONS_DIR/handoff/v1.md" && echo yes)" "yes" "the fallback writes the handoff"
+  assert_contains "$(cat "$SESSIONS_DIR/handoff/v1.md")" "conversation to summarize" "the fallback handoff is the seed transcript"
 }
 
 # ── Scenario 6: the kill switch holds the threshold ──────────────

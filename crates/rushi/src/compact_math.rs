@@ -11,10 +11,12 @@
 //!   arrived after that usage measurement.
 //! - If the total exceeds the trigger level (`budget - reserve`), the
 //!   compact fires before the next model call.
-//! - The cut walk walks backward from the tail of the kept region,
-//!   accumulating chars/4 per-event estimates, until `keep_tokens`
-//!   is reached. The cut snaps to a valid boundary (user or assistant
-//!   message, never a tool result).
+//! - The cut walk (the walk-back) walks backward from the tail of the
+//!   kept region, accumulating chars/4 per-event estimates, until the
+//!   post-compact context is under the trigger level. The kept region is
+//!   what the trigger level leaves after the summary budget. The cut
+//!   snaps to a valid boundary (user or assistant message, never a
+//!   tool result).
 
 use serde_json::Value;
 
@@ -268,18 +270,32 @@ pub fn estimate_from_events(events: &[Value], cpts: u64) -> u64 {
     }
 }
 
-/// The backward cut walk. Given the kept events (from the boundary to
-/// the end) and the keep token budget, find the 0-based index of the
-/// first kept event. The cut snaps to a step group boundary: a user
-/// message is its own group; an assistant message starts the group
-/// with its tool results. A cut never lands between a call and its
-/// result. If the cut would leave a user message as the last event of
-/// the old region, that user is pulled into the kept region.
+/// The backward cut walk (the walk-back, docs/auto-compact-plan.md
+/// "Cut point"). Given the kept events (from the boundary to the end),
+/// the trigger level, and the summary budget, find the 0-based index of
+/// the first kept event. Walk back from the tail until the post-compact
+/// context is under the trigger level: the kept region is what the
+/// trigger level leaves after the summary budget. The cut snaps to a
+/// step group boundary: a user message is its own group; an assistant
+/// message starts the group with its tool results. A cut never lands
+/// between a call and its result. If the cut would leave a user
+/// message as the last event of the old region, that user is pulled
+/// into the kept region.
 ///
-/// Returns 0 when the keep window covers the entire kept region.
-pub fn find_cut(kept: &[Ev], keep_tokens: u64, caps: &Caps) -> usize {
+/// Returns 0 when the post-compact context already fits the trigger
+/// level (the keep region covers the entire kept region).
+pub fn find_cut(
+    kept: &[Ev],
+    trigger_level: u64,
+    summary_budget: u64,
+    caps: &Caps,
+) -> usize {
+    // The kept region is what the trigger level leaves after the
+    // summary budget. The post-compact context is the summary plus the
+    // kept region, and it must sit under the trigger level.
+    let keep_budget = trigger_level.saturating_sub(summary_budget);
     let total: u64 = kept.iter().map(|e| est_tokens(e, caps)).sum();
-    if total <= keep_tokens {
+    if total <= keep_budget {
         return 0;
     }
     let mut acc = 0u64;
@@ -287,7 +303,7 @@ pub fn find_cut(kept: &[Ev], keep_tokens: u64, caps: &Caps) -> usize {
     for ev in kept.iter().rev() {
         acc += est_tokens(ev, caps);
         cut -= 1;
-        if acc >= keep_tokens {
+        if acc >= keep_budget {
             break;
         }
     }
@@ -646,7 +662,7 @@ mod tests {
             text: None,
             chars_per_token: 4,
         };
-        let cut = find_cut(&kept, 150, &caps);
+        let cut = find_cut(&kept, 150, 0, &caps);
         assert_eq!(cut, 3, "the cut sits at the second user");
     }
 
@@ -661,7 +677,7 @@ mod tests {
             text: None,
             chars_per_token: 4,
         };
-        let cut = find_cut(&kept, 10, &caps);
+        let cut = find_cut(&kept, 10, 0, &caps);
         assert_eq!(cut, 0, "the orphan user sits behind the cut");
     }
 
@@ -669,7 +685,7 @@ mod tests {
     fn cut_at_zero_is_the_empty_region() {
         let kept = vec![ev_user("task"), ev_asst("step one")];
         let caps = Caps::default();
-        assert_eq!(find_cut(&kept, 1_000_000, &caps), 0);
+        assert_eq!(find_cut(&kept, 1_000_000, 0, &caps), 0);
     }
 
     #[test]
@@ -860,8 +876,8 @@ mod tests {
 
         // Keep budget between the two: capped fits, uncapped does not.
         let keep = 1500u64;
-        let cut_capped = find_cut(&evs, keep, &capped_caps);
-        let cut_uncapped = find_cut(&evs, keep, &uncapped_caps);
+        let cut_capped = find_cut(&evs, keep, 0, &capped_caps);
+        let cut_uncapped = find_cut(&evs, keep, 0, &uncapped_caps);
         // Capped total (1053) ≤ 1500 → keep everything, no cut.
         assert_eq!(cut_capped, 0, "capped estimate fits, so nothing is cut");
         // Uncapped total (2003) > 1500 → walk stops at the long asst
