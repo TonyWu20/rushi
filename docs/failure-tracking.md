@@ -1776,3 +1776,48 @@ is a detached rewrite, not P's liveness.
   scenario now asserts the liveness contract: zero
   `compaction_failed`, one `compaction_summary`, and the handoff file
   written with the seed transcript.
+
+## FT-038 — The one-shot compact noops on a large tool-schema session
+
+**Symptom:** The `m11-churn-hoist-follow` session. The model input is
+260448 tokens, over the 245760 trigger level. The compact
+(`--reason overflow`) writes no marker. It noops with "the keep window
+covers the log."
+
+The context stays over the trigger. Every model call ends on the
+length stop. The pre-FT-033 one-shot compacted it.
+
+**Root cause:** The FT-037 walk-back changed the cut from
+`compact_keep_tokens` (20000) to `trigger_level - summary_budget`
+(180224). `compact_keep_tokens` is a detail-preservation budget. It
+keeps that many tokens of the tail of the active context after a
+compaction. The FT-037 budget is a trigger-fitting budget. It does
+not count the tool schemas and system prompt.
+
+The event estimate of this session is 174516, under 180224. So
+`find_cut` returns 0. The compact noops. The pre-FT-033 compact cut
+this session.
+
+The recurring symptom behind the redesign chain: the one-shot compact
+call predating FT-033 and FT-038 often returns malformed format and
+content. The model emits tool-call syntax in the summary text. FT-033
+and FT-038 both point to it.
+
+**Fix:** Restore the pre-FT-033 cut. `find_cut` keeps
+`compact_keep_tokens` tokens of the tail. The post-compact context is
+`[system prompt + tool schemas] + [summary] + [compact_keep_tokens]`.
+The FT-038 check loop stays. It rejects the malformed responses. The
+cut restore is done. It is in `find_cut` and `run_compaction`.
+
+**Status:** FT-033, FT-036, and FT-037 are failure designs. The
+pre-FT-033 one-shot is the working baseline for the cut. The FT-038
+check loop addresses the recurring malformed-format symptom.
+
+**Verification:** The pre-FT-033 compact (rev 0cc9849) and the
+restored cut both cut this session. The compact now prints status
+compacted, first_kept_seq 2083, tokens_after 20789. The event
+estimate is 174516. The FT-037 keep budget was 180224. The
+`compact_keep_tokens` budget is 20000.
+
+`cargo test -p compact` (24) and `-p rushi-common` (120) pass.
+`scripts/compact-e2e.sh` (42) passes.
