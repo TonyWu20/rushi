@@ -15,10 +15,13 @@
 # extension_tool_paths / ui_extension_names unset does mkRushi fill
 # them from the producers' meta.rushi declarations. An explicit
 # `= [ ]` counts as set: the empty list stays empty, and no
-# fallback discovery runs. Filled values land in the returned
-# `config` text and `configAttrs`, and the shipped config.toml is
-# written once from them, byte-identical to the returned config,
-# unless the build-time fallback appends names.
+# fallback discovery runs. The native_tool_paths fill follows the
+# enabled native tools (the evaluated `rushi.tools` value): one
+# relative `tools/<name>` entry per enabled tool. The static
+# kernel-default catalog serves non-Nix users only. Filled values
+# land in the returned `config` text and `configAttrs`, and the
+# shipped config.toml is written once from them, byte-identical to
+# the returned config, unless the build-time fallback appends names.
 #
 # Plain function (not a module): the flake `lib` output must be a
 # value. Used by lib/mk-rushi.nix.
@@ -29,6 +32,9 @@
   defaults,
   # `rushi.config` merged across consumer modules (empty when unset).
   userConfig,
+  # The module-evaluated `rushi.tools` value (the enabled native
+  # tool list; the option default is the kernel's real tool set).
+  tools,
   # Module-evaluated values (lib/mk-rushi-modules.nix).
   extUiExtNames,
   uiExtensions,
@@ -63,6 +69,21 @@ let
     else
       lib.unique (lib.map (e: "tools/${e}") metaToolEntries);
 
+  # The [paths].native_tool_paths fill. A consumer-set value is
+  # authoritative as-is (the prebaked absolute store paths, a
+  # relative subset, or an explicit `= [ ]`). Unset, the value
+  # follows the enabled native tools: one relative `tools/<name>`
+  # entry per `rushi.tools` entry. The static kernel-default
+  # catalog (rushi-defaults.nix) serves non-Nix users only; the
+  # Nix builder never ships a path list wider than the enabled set.
+  userNativeToolPathsSet =
+    (userConfig ? paths) && (userConfig.paths ? native_tool_paths);
+  finalNativeToolPaths =
+    if userNativeToolPathsSet
+    then userConfig.paths.native_tool_paths
+    else
+      lib.map (n: "tools/${n}") tools;
+
   finalExtUiNames =
     if extUiExtNames != [ ]
     then extUiExtNames
@@ -74,21 +95,21 @@ let
   finalUiNames =
     lib.unique (uiExtensions ++ finalExtUiNames);
 
+  # Each fill applies only when the consumer left that value
+  # unset. An explicit `= [ ]` counts as set.
   extPathsOverride =
-    lib.listToAttrs [
-      (lib.nameValuePair "extension_tool_paths" finalExtToolPaths)
-    ];
+    lib.optionalAttrs (!userExtToolPathsSet) {
+      extension_tool_paths = finalExtToolPaths;
+    }
+    // lib.optionalAttrs (!userNativeToolPathsSet) {
+      native_tool_paths = finalNativeToolPaths;
+    };
   filledPaths =
     baseConfig.paths // extPathsOverride;
-  filledConfig =
+  mergedConfig =
     lib.recursiveUpdate baseConfig (lib.listToAttrs [
       (lib.nameValuePair "paths" filledPaths)
     ]);
-  mergedConfig =
-    if userExtToolPathsSet then
-      baseConfig
-    else
-      filledConfig;
 
   # Build-time discovery runs only when a source lacks a meta.rushi
   # field AND the consumer did not set the value themselves.
@@ -118,6 +139,7 @@ in
   inherit
     mergedConfig
     finalExtToolPaths
+    finalNativeToolPaths
     finalExtUiNames
     finalUiNames
     needToolDiscovery

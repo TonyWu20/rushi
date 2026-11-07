@@ -31,6 +31,11 @@
     };
 
     # [paths]
+    # The static native_tool_paths catalog serves non-Nix users
+    # (the binary defaults). The Nix builder (lib/mk-rushi-merge.nix)
+    # fills native_tool_paths from the evaluated `rushi.tools`
+    # value when the consumer leaves it unset, so the Nix config
+    # never lists a path for a tool the package does not ship.
     paths = {
       sessions_root = "sessions";
       native_tool_paths = [ "tools/bash" "tools/edit" "tools/read" "tools/write" ];

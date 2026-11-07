@@ -97,6 +97,7 @@ let
   configMerge = (import ./mk-rushi-merge.nix) {
     inherit lib userConfig;
     defaults = import ./rushi-defaults.nix;
+    tools = moduleEval.tools;
     extUiExtNames = moduleEval.extUiExtNames;
     uiExtensions = moduleEval.uiExtensions;
     inherit

@@ -254,6 +254,13 @@ rushi = {
   build-time discovery with an eval-time warning. A consumer-set
   value is authoritative and suppresses the derived list. The hook
   drift guard is reduced to commands not covered by `meta.rushi.bin`.
+- **Native tool paths follow the whitelist.** When the consumer
+  leaves `rushi.config.paths.native_tool_paths` unset, `mkRushi`
+  fills it from the evaluated `rushi.tools` value: one relative
+  `tools/<name>` entry per enabled native tool. A consumer-set
+  value is authoritative as-is (the prebaked absolute store paths
+  keep working). The static kernel-default catalog serves
+  non-Nix users only.
 - **Extensions are fetched, not embedded in the kernel.** The kernel
   flake does NOT ship extensions. The consumer flake fetches them
   (exactly like pi-config fetches `pi-automode`, `pi-lynx`, etc.)
