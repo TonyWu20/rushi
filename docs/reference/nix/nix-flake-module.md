@@ -151,11 +151,14 @@ rushi = {
   };
 
   # ── Tools ──
-  # Kernel tool names to enable. Each must exist in the kernel's
-  # tools/ dir. The final package ships tool.toml + binary for each.
+  # Native tool names to enable. Each must exist in the kernel's
+  # tools/ dir. The configured package ships a tool.toml manifest
+  # per enabled native tool; disabled native tools stay out of the
+  # package (the manifest enabled list is the exposure point).
+  # Kernel binaries always ship in bin/.
   # Default: the kernel's full tool set, derived at eval time from
   # the kernel's own tools/*/tool.toml — omit this line to get all
-  # kernel tools. Set a subset to restrict the bundle.
+  # kernel tools. Set a subset to restrict the shipped manifests.
   # tools = [ "read" "write" "edit" "bash" ];
 
   # ── Extensions ──

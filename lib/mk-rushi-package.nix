@@ -4,7 +4,8 @@
 # Assembles the rushi-configured stdenv derivation ($out layout):
 #
 #   bin/             rushi + all tool/hook/stage binaries
-#   tools/           tool manifests (tool.toml per enabled tool)
+#   tools/           native tool manifests (tool.toml per enabled
+#                    native tool, the rushi.tools set) + ext tools
 #   ui_extensions/   UI extension files
 #   hooks/           hook binaries (if any)
 #   config.toml      generated from the deep-merged options
@@ -233,11 +234,22 @@ pkgs.stdenv.mkDerivation {
     cp -rL ${rushi}/bin/. $out/bin/
     chmod -R +x $out/bin/
 
-    # ── Tool manifests (tool.toml only, skip source/Cargo noise) ──
+    # ── Native tool manifests (enabled tools only) ──
+    # The raw kernel package ships the full tool catalog (every
+    # tool.toml dir). The configured package ships only the
+    # manifests for the enabled native tools (TOOLS_RAW, the
+    # module-evaluated rushi.tools value). Disabled native tools
+    # stay out of the package: the manifest enabled list is the
+    # tool exposure point, an inert manifest is dead weight.
     if [ -d "${rushi}/tools" ]; then
       for toml in "${rushi}"/tools/*/tool.toml; do
         [ -f "$toml" ] || continue
         name=$(basename "$(dirname "$toml")")
+        enabled=0
+        for t in $TOOLS_RAW; do
+          if [ "$name" = "$t" ]; then enabled=1; break; fi
+        done
+        [ "$enabled" -eq 1 ] || continue
         mkdir -p "$out/tools/$name"
         cp "$toml" "$out/tools/$name/tool.toml"
       done
@@ -245,6 +257,22 @@ pkgs.stdenv.mkDerivation {
 
     # ── External tool sources (add to tools/) ──
     ${extToolScript}
+
+    # ── Enabled native tool manifest check ──
+    # Every enabled native tool (rushi.tools) must carry a
+    # tool.toml in the assembled package. A typo'd or new tool
+    # name fails the build here instead of breaking at runtime.
+    missing_native=""
+    for t in $TOOLS_RAW; do
+      if [ ! -f "$out/tools/$t/tool.toml" ]; then
+        missing_native="$missing_native $t"
+      fi
+    done
+    if [ -n "$missing_native" ]; then
+      echo "mkRushi: enabled native tool manifest(s) missing:$missing_native" >&2
+      echo "  The tool must exist in the kernel tools/ catalog (NixOS option rushi.tools)." >&2
+      exit 1
+    fi
 
     # ── External UI extension sources (add to ui_extensions/) ──
     ${extUiScript}
