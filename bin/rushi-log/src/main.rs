@@ -1,11 +1,14 @@
 #![deny(clippy::todo, clippy::unimplemented, clippy::unreachable)]
 
 use rushi_common::event;
+use rushi_common::logstream;
+use rushi_common::rewind;
 use rushi_common::logline::LogLine;
 
 use clap::Parser;
 use std::fs;
 use std::io::{self, BufRead};
+use std::path::Path;
 use std::path::PathBuf;
 
 /// Append events to the session log
@@ -63,12 +66,78 @@ fn main() {
         }
     }
 
+    // The kernel guard at the write boundary (P8,
+    // docs/rewind-fork-design.md): a rewind that would strand a
+    // tool-call pair in the projected context is refused with a
+    // named error, and nothing is appended. The read-side P4
+    // backstop in `bin/assemble` then covers only hand-edited
+    // logs.
+    guard_rewind_batch(&lines, &log_path);
+
     // One locked single-write append per line (FT-005). `LogLine` is
-    // the only type that may write the session log.
+    // the only type that may write the session log. Rewind markers
+    // take the kernel append entry point (P8): the guard re-runs
+    // against the on-disk log at commit time, so a marker never
+    // lands stranded even when a batch mixes markers and events.
     for line in &lines {
-        if let Err(e) = LogLine::from_json(line).commit(&log_path) {
-            eprintln!("Error: cannot write to log: {e}");
+        match event::parse_event(line) {
+            Ok(event::Event::Rewind(_)) => {
+                if let Err(rej) = rewind::append_rewind(line, &log_path) {
+                    match rej {
+                        rewind::AppendRejection::Guard(g) => {
+                            eprintln!("rushi-log: refusing the append: {g}");
+                            eprintln!("rushi-log: the log is unchanged. Rewind to a settled point: a user_message, a tool_result, or an assistant_message with no outstanding tool calls.");
+                        }
+                        other => {
+                            eprintln!("rushi-log: {other}");
+                        }
+                    }
+                    std::process::exit(1);
+                }
+            }
+            _ => {
+                if let Err(e) = LogLine::from_json(line).commit(&log_path) {
+                    eprintln!("Error: cannot write to log: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+}
+
+/// The P8 write-boundary guard: refuse, loudly, a `rewind` line
+/// whose projected context strands a tool-call pair. The existing
+/// log reads through `logstream` (plain or zstd stream; a missing
+/// log is empty). The batch walks a virtual log: each accepted line
+/// extends the context the later rewind lines are judged against.
+fn guard_rewind_batch(lines: &[String], log_path: &Path) {
+    let existing: Vec<serde_json::Value> = match logstream::read_log_text(log_path) {
+        Ok(text) => text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect(),
+        // A missing log is an empty log: every rewind target is
+        // out of range, and the guard says so by name.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => {
+            eprintln!("Error: cannot read session log: {e}");
             std::process::exit(1);
+        }
+    };
+    let mut virtual_log: Vec<serde_json::Value> = existing;
+    for line in lines {
+        if let Ok(event::Event::Rewind(r)) = event::parse_event(line) {
+            let before = r.mode == event::RewindMode::Before;
+            if let Err(rej) = rewind::guard_rewind(&virtual_log, r.target_seq, before) {
+                eprintln!("rushi-log: refusing the append: {rej}");
+                eprintln!("rushi-log: the log is unchanged. Rewind to a settled point: a user_message, a tool_result, or an assistant_message with no outstanding tool calls.");
+                std::process::exit(1);
+            }
+        }
+        if let Ok(v) = serde_json::from_str(line) {
+            virtual_log.push(v);
         }
     }
 }

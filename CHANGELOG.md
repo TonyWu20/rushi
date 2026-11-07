@@ -6,6 +6,19 @@ versioned change for each kernel binary, newest first.
 Internal refactors without user-visible behavior do not get an
 entry.
 
+## rushi-log 0.2.1 (2026-11-04)
+
+A `rewind` marker that would strand a tool-call pair is now
+refused at the write boundary (P8, docs/rewind-fork-design.md).
+The guard in `rushi_common::rewind::guard_rewind` checks the
+projected context of the target over the existing rewind chain.
+Every kept tool call must keep its `tool_result`, and every kept
+`tool_result` must keep its call. A refusal is loud: a named
+stderr error, a non-zero exit, and the log is untouched.
+Downstream readers keep the P4 backstop for hand-edited logs
+only. Settled picks (a `user_message`, a `tool_result`, a
+finished `assistant_message`) pass.
+
 ## compact 0.1.6 (2026-11-02)
 
 The compact now always finishes (FT-037). The cut walk is the
