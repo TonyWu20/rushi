@@ -92,6 +92,10 @@ jobs:
         if: matrix.e2e
         run: bash scripts/e2e-rewind.sh
 
+      - name: "e2e: fork"
+        if: matrix.e2e
+        run: bash scripts/e2e-fork.sh
+
       - name: "e2e: tool conformance"
         if: matrix.e2e
         run: bash scripts/tool-conformance.sh
