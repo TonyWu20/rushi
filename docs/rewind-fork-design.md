@@ -1,9 +1,15 @@
 # Session rewind and fork: the rewind event and the active path
 
-Status: Implemented — the mechanism (event, schema, shared active-path
-computation, rewind-aware `bin/assemble` projection, rewind-aware
-`bin/claim` state, TUI event vocabulary and marker rendering) landed
-2026-07-17. The TUI picker command (the `/tree`-style entry point)
+Status: Implemented.
+
+The mechanism landed in July 2026. It covers the event, the
+active-path computation, the rewind-aware `bin/assemble`
+projection, and the `bin/claim` state. The write-boundary kernel
+guard (P8) is new: `bin/rushi-log` refuses a `rewind` that would
+strand a tool-call pair, with a named stderr error.
+
+The TUI event vocabulary and marker rendering live in the Tier-2
+`rushi-tui` repo. The TUI picker (the `/tree`-style entry point)
 is the next stage, specified in section 10.
 
 ## 1. Request
@@ -11,8 +17,9 @@ is the next stage, specified in section 10.
 Let the user rewind the session to any recorded event, pi `/tree`
 style: pick an event, and the state goes back to the moment before
 or on it. A user-message target restores the message to the input
-box, unsent; a finished-step target (tool call / agent response)
-restores the moment the step completed, ready for the next step.
+box, unsent. A finished-step target (a `tool_result`, or a
+finished `assistant_message`) restores the moment the step
+completed, ready for the next step.
 The session log stays append-only: the rewind appends a checkpoint
 event, `bin/assemble` masks the abandoned events out of the model
 context, and later rewinds can fork from or re-enter any branch.
@@ -62,11 +69,11 @@ shared glob loader (docs/phase-2-plan.md section 6):
   rewind list and `claim` reads it for state; neither appends its
   fields to the model input.
 
-Target rules (enforced by the producer; `bin/log` schema validation
-covers the shape only): `target_seq >= 1`, strictly earlier than
-the marker's own seq, and a settled point — a `user_message`, a
-`tool_result`, or an `assistant_message` with no outstanding tool
-calls. Section 7.
+Target rules: `target_seq >= 1`, and strictly earlier than the
+marker's own seq. The write boundary enforces the settled-point
+rule (P8, section 7): the kernel guard refuses a `rewind` whose
+projected context strands a tool-call pair. `bin/rushi-log` shape
+validation covers the marker's shape only. Section 7.
 
 ## 4. Issues with the proposed design (the review)
 
@@ -112,7 +119,11 @@ Responses API rejects that shape. The settled-target rule of
 section 7 keeps this out of producer picks; `assemble` enforces it
 defensively (P4): a rewind whose context strands a call is ignored
 with a stderr warning, and the branch re-projects linear — the same
-degrade-or-skip discipline as a corrupt compaction boundary.
+degrade-or-skip discipline as a corrupt compaction boundary. Since
+November 2026 the guard is loud at the write boundary. The kernel
+guard (P8) refuses the append of such a marker. It names the
+stranded pair on stderr, and the log stays untouched. The P4
+degrade path now fires only on hand-edited logs.
 
 **I4. The compaction boundary owns the old region.**
 A rewind target below `first_kept_seq` points at events the
@@ -205,6 +216,11 @@ Shared in `crates/rushi/src/rewind.rs` (the one home, like
   re-entering a branch means.
 - `seq_in_ranges(s, ranges)` — the membership test the
   projection''s filter uses.
+- `guard_rewind(log, target, before)` — the P8 guard: it refuses a
+  rewind whose projected context strands a pair, or that points at
+  no event. `append_rewind(line, path)` is the kernel append entry
+  point: it runs the guard and commits through `LogLine`. Every
+  marker writer goes through this call.
 
 `bin/assemble` applies it after the boundary filter: the projected
 events are kept only where their seq is active. If the kept events
@@ -212,7 +228,10 @@ strand a call (I3), the outermost marker is popped, warned, and the
 projection recomputed — until clean or marker-free. `bin/claim`
 consumes the markers for state (I5).
 
-## 6. TUI (implemented)
+## 6. TUI (implemented, Tier 2)
+
+The TUI binary lives in the `rushi-tui` repo. This section names
+its contract. The kernel side is this repo.
 
 - `EventKind::Rewind` joins the vocabulary; `produce::rewind`
   builds the marker (G3: producers build typed envelopes).
@@ -227,8 +246,12 @@ A pick is offered only at a settled point: a `user_message`
 `on`), or an `assistant_message` with no outstanding calls (mode
 `on`). "Outstanding" is computed over the active path, not the raw
 log. This keeps every projected context call-complete without the
-defensive path of I3 ever firing; the check stays in `assemble`
-because the log is the source of truth and can be edited by hand.
+defensive path of I3 ever firing. The rule is enforced at the
+write boundary by the kernel guard (P8). The guard checks the
+projected context, not just the target's type, both sides. A
+`tool_result` whose call was masked by an earlier fork is refused
+too. `assemble` keeps the P4 backstop because the log is the
+source of truth and can be edited by hand.
 
 ## 8. Interaction with compaction, one example
 
@@ -247,6 +270,10 @@ of the filter order; no compaction-aware rule in the mask.
 - `crates/rushi/src/rewind.rs` tests: the recursion, the depth-2
   counter-example, the depth-3 chain composition, branch re-entry,
   before/at-seq-1 edges, the parse guards.
+- `crates/rushi/src/rewind.rs` guard tests (P8): the stranded
+  call, the stranded result, the steer mid-step target, the
+  settled points, the out-of-range target, and the kernel append
+  entry point.
 - `bin/assemble` tests: the mask on single forks, nested forks
   (B masked), branch re-entry (A'' masked), the P4 ignore-and-
   warn path, the dangling-call check.
@@ -256,8 +283,8 @@ of the filter order; no compaction-aware rule in the mask.
   clear, a new-branch message reopens the loop.
 - `bin/tui` tests: the kind round-trips, the producer envelope,
   the marker line renders and degrades.
-- `scripts/e2e-rewind.sh`: drives the real `log`, `claim`, and
-  `assemble` binaries over a synthetic forked session.
+- `scripts/e2e-rewind.sh`: drives the real `rushi-log`, `claim`,
+  and `assemble` binaries over a synthetic forked session.
 
 ## Properties
 
@@ -270,6 +297,7 @@ P4. no-stranded-pair: given a rewind whose context would strand a tool call with
 P5. boundary-degrade: given a rewind target below the boundary''s first_kept_seq, observe the compacted region staying out of the input — the target degrades to the region head, the framing item still leads, and a mask that would strand a pair across the boundary drops the marker under P4.
 P6. claim-settled: given a log ending in a rewind, observe claim report idle (or awaiting_model for an on-mode tool_result target) with empty pending tool calls, follow-ups, and approval waits.
 P7. append-only: given a rewind, observe the log gain exactly one line and every earlier byte unchanged (the FT-005 write discipline is the one writer).
+P8. write-guard: given a `rewind` that would strand a tool-call pair, observe the append refused with a named stderr error and the log unchanged.
 
 ## Verification
 
@@ -278,10 +306,11 @@ P7. append-only: given a rewind, observe the log gain exactly one line and every
 | P1 | fork-mask | `mask_masks_the_abandoned_branch` in `bin/assemble/src/main.rs`; `on_mode_includes_the_target` in `crates/rushi/src/rewind.rs` | proven |
 | P2 | nested-fork | `mask_nested_forks_mask_the_intermediate_branch` in `bin/assemble`; `nested_forks_mask_the_abandoned_branch` and `depth_three_forks_compose_through_the_chain` in `crates/rushi/src/rewind.rs`; the nested (B) and depth-3 (F) scenarios of `scripts/e2e-rewind.sh` | proven |
 | P3 | branch-reentry | `mask_reentering_a_branch_rebuilds_its_path` in `bin/assemble`; `reentering_a_branch_rebuilds_its_path` in `crates/rushi/src/rewind.rs` | proven |
-| P4 | no-stranded-pair | `mask_ignores_a_rewind_that_strands_a_call` and `pair_stranding_check_both_sides` in `bin/assemble` | proven |
+| P4 | no-stranded-pair | `mask_ignores_a_rewind_that_strands_a_call` and `pair_stranding_check_both_sides` in `bin/assemble` (the read-side backstop for hand-edited logs. The write side is P8) | proven |
 | P5 | boundary-degrade | The filter order in `main` (boundary before mask); observed by the `e2e-rewind` boundary scenarios when a boundary precedes the fork | proven |
 | P6 | claim-settled | the six `rewind_*` tests in `bin/claim/src/main.rs` | proven |
 | P7 | append-only | `LogLine::commit` is the only writer (FT-005); `scripts/e2e-rewind.sh` asserts the prefix hash is unchanged after the append | proven |
+| P8 | write-guard | The `guard_*` and `append_rewind_*` tests in `crates/rushi/src/rewind.rs`. The `append_rewind` path in `bin/rushi-log`. Scenario G of `scripts/e2e-rewind.sh` | proven |
 
 ## Gate
 
@@ -314,3 +343,7 @@ Spec, not yet built. The `/tree`-style entry point:
   when one is not running: claim already reports `awaiting_model`,
   so the step that continues the finished step is the one the
   loop owes.
+- The write boundary is the guard (P8). When `rushi-log` refuses
+  a pick, the TUI shows the named stderr error in place. The
+  picker offers settled points. The guard is the last authority.
+  A refused pick is visible in the TUI, never silent.

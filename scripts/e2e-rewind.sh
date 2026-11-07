@@ -15,6 +15,9 @@
 #      a call/result pair is ignored, the branch re-projects linear)
 #   F. depth-3 fork composition (P2 beyond depth 2: three nested
 #      rewinds compose; every abandoned intermediate span stays out)
+#   G. the write-boundary kernel guard (P8: a stranded rewind is
+#      refused by the real `rushi-log` with a named stderr error,
+#      the log stays byte-identical; the settled pick appends)
 
 set -uo pipefail
 
@@ -308,6 +311,62 @@ case "$IN_E" in
   *"R1 result"*) ok "E: the re-projected pair stays intact" ;;
   *) ko "E: the pair was lost from the input: $IN_E" ;;
 esac
+
+# ── G. the write-boundary kernel guard (P8) ─────────────────────
+
+# A stranded rewind is refused by the real rushi-log: a named
+# stderr error, a non-zero exit, and the log stays byte-identical.
+# The settled pick appends.
+mkdir -p "$WORK/sG"
+cat > "$WORK/sG/events.jsonl" <<'EOF'
+{"v":1,"type":"user_message","ts":"t","content":"task"}
+{"v":1,"type":"assistant_message","ts":"t","content":"","tool_calls":[{"id":"c1","name":"bash","arguments":{"command":"x"}}],"stop_reason":"tool_calls"}
+{"v":1,"type":"tool_result","ts":"t","id":"c1","value":{"text":"R1 result"},"is_error":false}
+EOF
+G_LOG="$WORK/sG/events.jsonl"
+G_HASH_BEFORE=$(sha256sum "$G_LOG" | cut -d' ' -f1)
+ERR_G="$WORK/g.err"
+if printf '%s\n' '{"v":1,"type":"rewind","ts":"t","target_seq":2,"mode":"on"}' |
+  "$LOG_BIN" --session "$WORK/sG" 2>"$ERR_G" >/dev/null; then
+  ko "G: the stranded rewind must be refused"
+else
+  if rg -q "strands tool call c1" "$ERR_G"; then
+    ok "G: the guard refuses the stranded target by name"
+  else
+    ko "G: the stderr does not name the stranded pair: $(cat "$ERR_G")"
+  fi
+  G_HASH_AFTER=$(sha256sum "$G_LOG" | cut -d' ' -f1)
+  if [ "$G_HASH_AFTER" = "$G_HASH_BEFORE" ]; then
+    ok "G: the refusal leaves the log byte-identical"
+  else
+    ko "G: the refused append touched the log"
+  fi
+fi
+
+# An out-of-range target is refused by name, the log untouched.
+ERR_G2="$WORK/g2.err"
+if printf '%s\n' '{"v":1,"type":"rewind","ts":"t","target_seq":9,"mode":"on"}' |
+  "$LOG_BIN" --session "$WORK/sG" 2>"$ERR_G2" >/dev/null; then
+  ko "G: the out-of-range target must be refused"
+else
+  if rg -q "out of range" "$ERR_G2"; then
+    ok "G: the out-of-range target is refused by name"
+  else
+    ko "G: the stderr does not name the range: $(cat "$ERR_G2")"
+  fi
+fi
+
+# The settled pick (a tool_result in on mode) appends as a line.
+if printf '%s\n' '{"v":1,"type":"rewind","ts":"t","target_seq":3,"mode":"on"}' |
+  "$LOG_BIN" --session "$WORK/sG" 2>/dev/null; then
+  if [ "$(slog "$G_LOG" | wc -l)" -eq 4 ]; then
+    ok "G: the settled pick appends as the fourth line"
+  else
+    ko "G: the settled pick did not land as a line"
+  fi
+else
+  ko "G: the settled pick must be accepted"
+fi
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"
