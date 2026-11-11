@@ -14,6 +14,18 @@
 //! the rewind chain, so every nesting depth masks the right spans.
 //! See `active_ranges` for the definition and the counter-example
 //! that the single-gap rule gets wrong.
+//!
+//! The write-boundary guard (`guard_rewind`, P8) is sidecar-aware
+//! through `guard_rewind_sidecar` (P8.1): the newer kernel
+//! generation keeps tool result text out of `events.jsonl` and in
+//! the `tools.jsonl` sidecar next to it. The read side projects a
+//! sidecar result into the model context by call id, so a pair
+//! whose result sits in the sidecar is whole. The guard pairs a
+//! stranded call with a sidecar record by id and refuses only the
+//! pair with no result anywhere in the log.
+
+use std::collections::HashSet;
+use std::path::Path;
 
 use serde_json::Value;
 
@@ -184,26 +196,72 @@ fn mode_word(before: bool) -> &'static str {
     }
 }
 
-/// The kernel guard: whether appending a `rewind` marker with
-/// `target` and `before` would strand a tool-call pair in the
-/// projected context. `log` is the log without the marker: the
-/// marker lands as the next line, so the target must point at an
-/// existing line.
-///
-/// The guard is the write-boundary form of the settled-target rule
-/// (section 7) and of the pair-stranding invariant (P4): the
-/// projected context of `T_eff`, over the existing rewind chain,
-/// must keep every tool call paired with its result, both sides.
-/// Malformed earlier markers degrade out, exactly as the
-/// projection does.
-///
-/// A refusal is final and loud: the write path refuses the append
-/// and names the stranded pair. The read-side P4 backstop in
-/// `bin/assemble` then covers only hand-edited logs.
-pub fn guard_rewind(
+/// The call ids of the tool-log sidecar (`tools.jsonl`, next to
+/// the events log). The P8.1 sidecar-aware guard pairs a stranded
+/// call with a sidecar record by id: the newer kernel generation
+/// keeps the result text out of `events.jsonl` and projects it
+/// into the model context from the sidecar at read time, so the
+/// pair is whole even though no `tool_result` line sits in the
+/// events log.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SidecarResults {
+    ids: HashSet<String>,
+}
+
+impl SidecarResults {
+    /// The empty set: the guard keeps the sidecar-blind behavior.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Read `<dir>/tools.jsonl` (plain or zstd stream) through
+    /// `logstream`. A missing or unreadable sidecar yields the
+    /// empty set: the guard degrades to the sidecar-blind rule.
+    pub fn from_dir(dir: &Path) -> Self {
+        let Ok(text) = crate::logstream::read_log_text(&dir.join("tools.jsonl")) else {
+            return Self::default();
+        };
+        let mut ids = HashSet::new();
+        for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            let Ok(rec) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if let Some(id) = rec.get("id").and_then(|i| i.as_str()) {
+                if !id.is_empty() {
+                    ids.insert(id.to_string());
+                }
+            }
+        }
+        Self { ids }
+    }
+
+    /// Whether a call id carries a sidecar result record.
+    pub fn contains(&self, id: &str) -> bool {
+        self.ids.contains(id)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+}
+
+/// The sidecar-aware kernel guard (P8.1): the P8 guard plus the
+/// sidecar pairing and the caused-strand rule. The guard refuses
+/// only the strand the marker causes: it masks the result line of
+/// a pair that was whole before the marker. A pair is whole when
+/// its result line sits in the log or a sidecar record carries
+/// the result by call id. A call with no result anywhere in the
+/// log is the pre-existing state the log carried since the call's
+/// line: the marker is not its cause, and the refusal stays off.
+/// A stranded result (a `tool_result` whose call is out of the
+/// context) is refused as in the P8 guard: a sidecar record is
+/// keyed by the call id, so it cannot keep an orphan result
+/// paired.
+pub fn guard_rewind_sidecar(
     log: &[Value],
     target: u64,
     before: bool,
+    sidecar: &SidecarResults,
 ) -> Result<(), RewindRejection> {
     let log_len = log.len();
     let target_seq = target as usize;
@@ -213,8 +271,6 @@ pub fn guard_rewind(
             log_len,
         });
     }
-    // The existing chain: malformed markers degrade out, as in the
-    // projection.
     let markers: Vec<RewindRef> = log
         .iter()
         .enumerate()
@@ -222,7 +278,6 @@ pub fn guard_rewind(
         .collect();
     let t_eff = if before { target_seq - 1 } else { target_seq };
     let ranges = active_ranges(t_eff, &markers);
-    // The projected context: the kept lines, in seq order.
     let kept: Vec<&Value> = log
         .iter()
         .enumerate()
@@ -233,9 +288,25 @@ pub fn guard_rewind(
         kept.iter().flat_map(|ev| call_ids_of(ev)).collect();
     let result_ids: std::collections::HashSet<String> =
         kept.iter().filter_map(|ev| result_id_of(ev)).collect();
+    // The baseline pairs of the full log: a pair is whole before
+    // the marker when its result line sits in the log or the
+    // sidecar. The guard refuses only the strand the marker causes:
+    // it masks the result line of a whole pair. A call with no
+    // result anywhere in the log is the pre-existing state the log
+    // carried since the call's line; the marker is not its cause,
+    // and the model context includes the call.
+    let all_result_ids: std::collections::HashSet<String> = log
+        .iter()
+        .filter_map(|ev| result_id_of(ev))
+        .collect();
     for ev in &kept {
         for id in call_ids_of(ev) {
-            if !result_ids.contains(&id) {
+            if result_ids.contains(&id) || sidecar.contains(&id) {
+                continue;
+            }
+            if all_result_ids.contains(&id) {
+                // The pair was whole, and the marker masked its
+                // result line: the caused strand.
                 return Err(RewindRejection::StrandedCall {
                     call_id: id,
                     target,
@@ -256,6 +327,37 @@ pub fn guard_rewind(
         }
     }
     Ok(())
+}
+
+/// The sidecar-blind kernel guard: whether appending a `rewind`
+/// marker with `target` and `before` would strand a tool-call
+/// pair in the projected context of `events.jsonl` alone. `log`
+/// is the log without the marker: the marker lands as the next
+/// line, so the target must point at an existing line.
+///
+/// The guard is the write-boundary form of the settled-target rule
+/// (section 7) and of the pair-stranding invariant (P4): the
+/// projected context of `T_eff`, over the existing rewind chain,
+/// must keep every tool call paired with its result, both sides.
+/// Malformed earlier markers degrade out, exactly as the
+/// projection does.
+///
+/// The write path itself runs the sidecar-aware form
+/// ([`guard_rewind_sidecar`], P8.1): a result record in the
+/// `tools.jsonl` sidecar keeps its call paired. This form stays
+/// for callers that judge the events log alone (the TV's mirrored
+/// backstop, the batch walk of `rushi-log` before the sidecar
+/// pairing).
+///
+/// A refusal is final and loud: the write path refuses the append
+/// and names the stranded pair. The read-side P4 backstop in
+/// `bin/assemble` then covers only hand-edited logs.
+pub fn guard_rewind(
+    log: &[Value],
+    target: u64,
+    before: bool,
+) -> Result<(), RewindRejection> {
+    guard_rewind_sidecar(log, target, before, &SidecarResults::empty())
 }
 
 /// The inline tool-call ids of one `assistant_message` line.
@@ -310,11 +412,12 @@ impl std::fmt::Display for AppendRejection {
 }
 
 /// The one kernel entry point for appending a `rewind` marker
-/// (P8). The P8 guard runs against the current log. Only a valid
-/// marker reaches the log. The commit takes the FT-005 `LogLine`
-/// path. A `Guard` refusal leaves the log untouched and names the
-/// cause. Every marker writer goes through this call: `rushi-log`
-/// in this repo, the Tier-2 TUI append path, and any later stage.
+/// (P8). The P8.1 sidecar-aware guard runs against the current log
+/// and the `tools.jsonl` sidecar next to it. Only a valid marker
+/// reaches the log. The commit takes the FT-005 `LogLine` path. A
+/// `Guard` refusal leaves the log untouched and names the cause.
+/// Every marker writer goes through this call: `rushi-log` in this
+/// repo, the Tier-2 TUI append path, and any later stage.
 pub fn append_rewind(
     line: &str,
     log_path: &std::path::Path,
@@ -347,7 +450,15 @@ pub fn append_rewind(
         .filter_map(|l| serde_json::from_str(l).ok())
         .collect();
     let before = marker.mode == crate::event::RewindMode::Before;
-    if let Err(rej) = guard_rewind(&existing, marker.target_seq, before) {
+    // The P8.1 sidecar pairing: a result record in the `tools.jsonl`
+    // sidecar next to the log keeps its call paired.
+    let dir = log_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let sidecar = SidecarResults::from_dir(&dir);
+    if let Err(rej) = guard_rewind_sidecar(&existing, marker.target_seq, before, &sidecar) {
         return Err(AppendRejection::Guard(rej));
     }
     crate::logline::LogLine::from_json(line)
@@ -757,14 +868,36 @@ mod tests {
         assert_eq!(text.lines().count(), 4, "the marker is the fourth line");
     }
 
+    /// P8.1 carried-call tolerance: the log carried the call
+    /// without a result line since its line. The marker is not the
+    /// cause, and it lands.
     #[test]
-    fn append_rewind_refuses_a_stranded_marker_and_keeps_the_log() {
+    fn append_rewind_lands_the_marker_over_a_carried_call() {
         let dir = tempfile::tempdir().unwrap();
         let log = write_log(
             dir.path(),
             &[
                 r#"{"v":1,"type":"user_message","ts":"t","content":"task"}"#,
                 r#"{"v":1,"type":"assistant_message","ts":"t","content":"","tool_calls":[{"id":"c1","name":"bash","arguments":{}}],"stop_reason":"tool_calls"}"#,
+            ],
+        );
+        append_rewind(&g_rewind_line(2, "on"), &log).unwrap();
+        let text = crate::logstream::read_log_text(&log).unwrap();
+        assert_eq!(text.lines().count(), 3, "the marker is the third line");
+    }
+
+    /// P8.1 caused strand: the marker masks the result line of a
+    /// pair that was whole. The append is refused and the log
+    /// stays untouched.
+    #[test]
+    fn append_rewind_refuses_a_masked_result_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = write_log(
+            dir.path(),
+            &[
+                r#"{"v":1,"type":"user_message","ts":"t","content":"task"}"#,
+                r#"{"v":1,"type":"assistant_message","ts":"t","content":"","tool_calls":[{"id":"c1","name":"bash","arguments":{}}],"stop_reason":"tool_calls"}"#,
+                r#"{"v":1,"type":"tool_result","ts":"t","id":"c1","value":{"text":"R1 result"},"is_error":false}"#,
             ],
         );
         let before = std::fs::read(&log).unwrap();
@@ -791,6 +924,107 @@ mod tests {
         assert!(matches!(err, AppendRejection::Malformed(_)));
         assert!(!log.exists() || std::fs::read(&log).unwrap().is_empty());
     }
+
+    /// P8.1: a call whose result sits only in the `tools.jsonl`
+    /// sidecar is not stranded. The marker lands.
+    #[test]
+    fn guard_sidecar_keeps_the_call_paired() {
+        let log = vec![
+            g_user("task"),              // 1
+            g_assistant(&["c1"]),        // 2
+            g_user("branch B question"), // 3
+        ];
+        let sidecar = SidecarResults {
+            ids: std::collections::HashSet::from(["c1".to_string()]),
+        };
+        assert_eq!(guard_rewind_sidecar(&log, 3, true, &sidecar), Ok(()));
+    }
+
+    /// P8.1 carried-call tolerance: a call with no result line in
+    /// the log and no sidecar record is the state the log carried
+    /// since the call's line. The marker is not its cause.
+    #[test]
+    fn guard_sidecar_tolerates_a_call_without_any_result() {
+        let log = vec![
+            g_user("task"),              // 1
+            g_assistant(&["c1"]),        // 2
+            g_user("branch B question"), // 3
+        ];
+        assert_eq!(
+            guard_rewind_sidecar(&log, 3, true, &SidecarResults::empty()),
+            Ok(())
+        );
+    }
+
+    /// P8.1: a sidecar record is keyed by the call id. It cannot
+    /// keep an orphan result paired: the orphan refusal stands.
+    #[test]
+    fn guard_sidecar_still_refuses_an_orphan_result() {
+        let log = vec![
+            g_user("task"),         // 1
+            g_assistant(&["c1"]),   // 2
+            g_rewind(1, "before"),  // 3
+            g_result("c1"),        // 4
+        ];
+        let sidecar = SidecarResults {
+            ids: std::collections::HashSet::from(["c1".to_string()]),
+        };
+        let err = guard_rewind_sidecar(&log, 4, false, &sidecar).unwrap_err();
+        assert!(
+            matches!(err, RewindRejection::StrandedResult { .. }),
+            "the orphan result stays refused: {err:?}"
+        );
+    }
+
+    /// The sidecar reader: one id per record, the records without
+    /// an id and the malformed lines drop out, a missing sidecar
+    /// is the empty set.
+    #[test]
+    fn sidecar_from_dir_reads_the_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = dir.path().join("tools.jsonl");
+        std::fs::write(
+            &sidecar,
+            r#"{"id":"c1","text":"ok"}
+{"id":"c2"}
+not json at all
+{"id":""}
+"#,
+        )
+        .unwrap();
+        let sc = SidecarResults::from_dir(dir.path());
+        assert!(sc.contains("c1"));
+        assert!(sc.contains("c2"));
+        assert!(!sc.contains("c3"));
+        let empty = tempfile::tempdir().unwrap();
+        assert!(SidecarResults::from_dir(empty.path()).is_empty());
+    }
+
+    /// The write path: with the sidecar record, the stranded call
+    /// keeps its pair and the marker lands in the log.
+    #[test]
+    fn append_rewind_lands_the_marker_with_the_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = write_log(
+            dir.path(),
+            &[
+                r#"{"v":1,"type":"user_message","ts":"t","content":"task"}"#,
+                r#"{"v":1,"type":"assistant_message","ts":"t","content":"","tool_calls":[{"id":"c1","name":"bash","arguments":{}}],"stop_reason":"tool_calls"}"#,
+                r#"{"v":1,"type":"user_message","ts":"t","content":"branch B question"}"#,
+            ],
+        );
+        std::fs::write(
+            dir.path().join("tools.jsonl"),
+            r#"{"id":"c1","text":"the tool output"}
+"#,
+        )
+        .unwrap();
+        append_rewind(&g_rewind_line(3, "before"), &log).unwrap();
+        let text = crate::logstream::read_log_text(&log).unwrap();
+        assert_eq!(text.lines().count(), 4, "the marker is the fourth line");
+    }
+
+
 
     #[test]
     fn append_rewind_refuses_a_target_past_the_log_end() {

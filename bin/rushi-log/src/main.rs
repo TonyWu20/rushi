@@ -105,11 +105,13 @@ fn main() {
     }
 }
 
-/// The P8 write-boundary guard: refuse, loudly, a `rewind` line
-/// whose projected context strands a tool-call pair. The existing
-/// log reads through `logstream` (plain or zstd stream; a missing
-/// log is empty). The batch walks a virtual log: each accepted line
-/// extends the context the later rewind lines are judged against.
+/// The P8.1 write-boundary guard: refuse, loudly, a `rewind` line
+/// whose projected context strands a tool-call pair, the result
+/// records of the `tools.jsonl` sidecar pairing calls by id. The
+/// existing log reads through `logstream` (plain or zstd stream;
+/// a missing log is empty). The batch walks a virtual log: each
+/// accepted line extends the context the later rewind lines are
+/// judged against.
 fn guard_rewind_batch(lines: &[String], log_path: &Path) {
     let existing: Vec<serde_json::Value> = match logstream::read_log_text(log_path) {
         Ok(text) => text
@@ -126,11 +128,21 @@ fn guard_rewind_batch(lines: &[String], log_path: &Path) {
             std::process::exit(1);
         }
     };
+    // The P8.1 sidecar pairing: a result record in the
+    // `tools.jsonl` sidecar next to the log keeps its call paired.
+    let dir = log_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let sidecar = rewind::SidecarResults::from_dir(&dir);
     let mut virtual_log: Vec<serde_json::Value> = existing;
     for line in lines {
         if let Ok(event::Event::Rewind(r)) = event::parse_event(line) {
             let before = r.mode == event::RewindMode::Before;
-            if let Err(rej) = rewind::guard_rewind(&virtual_log, r.target_seq, before) {
+            if let Err(rej) =
+                rewind::guard_rewind_sidecar(&virtual_log, r.target_seq, before, &sidecar)
+            {
                 eprintln!("rushi-log: refusing the append: {rej}");
                 eprintln!("rushi-log: the log is unchanged. Rewind to a settled point: a user_message, a tool_result, or an assistant_message with no outstanding tool calls.");
                 std::process::exit(1);
