@@ -17,6 +17,8 @@
 #      named errors, no temp dirs left behind (P7, P8, P12)
 #   6. the sessions root and the cwd precedence (P9, P11)
 #   7. the missing parent: a named error, no directory creates (P11)
+#   8. the bare dir-form parent in the CWD keeps the CWD as its
+#      root (P11)
 
 set -uo pipefail
 
@@ -443,6 +445,22 @@ if [ ! -e "$SESS/ghost" ] && [ ! -e "$SESS/f7" ]; then
   ok "7: the missing parent creates no directory"
 else
   ko "7: the missing parent created a directory"
+fi
+
+# ── 8. the bare dir-form parent in the CWD keeps the CWD root ───
+
+mkdir -p "$WORK/relroot/p"
+cat > "$WORK/relroot/p/events.jsonl" <<'EVENTS'
+{"v":1,"type":"user_message","ts":"t","content":"task"}
+EVENTS
+
+# The parent is a bare name in the CWD (no separator, no flag):
+# its own root is the CWD, not the config sessions root (P11).
+if ( cd "$WORK/relroot" && rfork p relf --fork-at 1 ) &&
+   [ -e "$WORK/relroot/relf/events.jsonl" ]; then
+  ok "8: the bare dir-form parent keeps the CWD root"
+else
+  ko "8: the bare dir-form fork missed the CWD root"
 fi
 
 echo

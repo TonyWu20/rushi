@@ -161,8 +161,20 @@ pub fn resolve_paths(
         None if dir_form => {
             let p = Path::new(parent);
             match p.parent() {
+                // A dir-form parent with a parent: the root is that
+                // parent (docs/fork-design.md P11).
                 Some(par) if !par.as_os_str().is_empty() => par.to_path_buf(),
-                _ => return Err(ForkError::NoRoot(parent_path)),
+                // A bare dir-form name (an existing dir in the CWD,
+                // no separator) has an empty parent: the root is
+                // the CWD, the dir's own parent (docs/fork-design.
+                // md P11).
+                Some(_) => match std::env::current_dir() {
+                    Ok(cwd) => cwd,
+                    Err(_) => return Err(ForkError::NoRoot(parent_path.clone())),
+                },
+                // The parent dir is the filesystem root: it holds
+                // no sessions root of its own.
+                None => return Err(ForkError::NoRoot(parent_path.clone())),
             }
         }
         None => cfg.sessions_root.clone(),
@@ -211,12 +223,19 @@ pub fn settled_guard(
 ///
 /// The tool log holds one record per `tool_result`, in call order
 /// (`route` writes the line before the event, same call id). The
-/// key that sits in no record keeps every record: the fork never
-/// drops a record a kept event can reference.
-pub fn kept_tool_lines(tool_lines: &[Value], key: &str) -> usize {
+/// cut keys the raw lines, not a reparsed copy: a malformed line
+/// keeps its place and never skews the count. The key that sits in
+/// no parseable record keeps every raw line: the fork never drops
+/// a record a kept event can reference.
+pub fn kept_tool_lines(tool_lines: &[&str], key: &str) -> usize {
     tool_lines
         .iter()
-        .rposition(|rec| rec.get("id").and_then(|i| i.as_str()) == Some(key))
+        .rposition(|line| {
+            let id: Option<String> = serde_json::from_str::<Value>(line)
+                .ok()
+                .and_then(|rec| rec.get("id").and_then(|i| i.as_str()).map(String::from));
+            id.as_deref() == Some(key)
+        })
         .map_or(tool_lines.len(), |i| i + 1)
 }
 
@@ -346,11 +365,7 @@ pub fn fork_session(
             let tool_text =
                 logstream::read_log_text(&tools).map_err(ForkError::Io)?;
             let tool_lines = complete_lines(&tool_text);
-            let parsed_tools: Vec<Value> = tool_lines
-                .iter()
-                .filter_map(|l| serde_json::from_str(l).ok())
-                .collect();
-            let keep = kept_tool_lines(&parsed_tools, &key);
+            let keep = kept_tool_lines(&tool_lines, &key);
             Some(tool_lines[..keep].iter().copied().map(String::from).collect())
         }
         _ => None,
@@ -617,17 +632,59 @@ mod tests {
         assert_eq!(text, want, "the fork keeps the c1 and c2 records only");
     }
 
-    /// P4 edge: a key that sits in no tool record keeps every
-    /// record.
+    /// P4 edge: a key that sits in no tool line keeps every
+    /// line.
     #[test]
     fn a_missing_key_keeps_every_tool_line() {
-        let lines: Vec<Value> = vec![
-            serde_json::json!({"id":"a","text":"a"}),
-            serde_json::json!({"id":"b","text":"b"}),
+        let lines: [&str; 2] = [
+            r#"{"id":"a","text":"a"}"#,
+            r#"{"id":"b","text":"b"}"#,
         ];
         assert_eq!(kept_tool_lines(&lines, "zz"), 2, "the miss keeps all");
         assert_eq!(kept_tool_lines(&lines, "b"), 2, "the last match keeps the tail");
         assert_eq!(kept_tool_lines(&lines, "a"), 1, "the first match cuts the tail");
+    }
+
+    /// P4 edge: a malformed line in the tool log keeps its place.
+    /// The cut keys the raw lines, so the keyed record stays kept.
+    #[test]
+    fn a_malformed_line_never_skews_the_tool_cut() {
+        let lines: [&str; 3] = [
+            "{not-json",
+            r#"{"v":1,"ts":"t","id":"c1","text":"one"}"#,
+            r#"{"v":1,"ts":"t","id":"c2","text":"two"}"#,
+        ];
+        assert_eq!(kept_tool_lines(&lines, "c1"), 2, "the cut lands on the keyed raw line");
+        assert_eq!(kept_tool_lines(&lines, "c2"), 3, "the tail keys the last line");
+        assert_eq!(kept_tool_lines(&lines, "zz"), 3, "the miss keeps all");
+    }
+
+    /// P4: a malformed tool line never drops the keyed record from
+    /// the forked tool log.
+    #[test]
+    fn a_malformed_tool_line_keeps_the_keyed_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("sessions");
+        let sess = events(
+            &root,
+            "p",
+            &[
+                user("task"),
+                &asst(&["c1"]),
+                &result("c1"),
+            ],
+        );
+        std::fs::write(
+            sess.join("tools.jsonl"),
+            format!("{bad}\n{c1}\n", bad = "{not-json", c1 = tool_rec("c1")),
+        )
+        .unwrap();
+        let cfg = cfg_with_root(&root);
+        let target = fork_session(&cfg, "p", "f", 3, None, None).unwrap();
+        let text = std::fs::read_to_string(target.join("tools.jsonl")).unwrap();
+        let lines = text.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2, "both raw lines stay: {text}");
+        assert!(lines[1].contains(r#""id":"c1""#), "the keyed record survives: {text}");
     }
 
     /// P5: no `tool_result` at or before N keeps no tool log.
@@ -811,6 +868,16 @@ mod tests {
         // A name with a separator is not a bare name.
         let err = fork_session(&cfg, "n", "a/b", 1, None, None).unwrap_err();
         assert!(matches!(err, ForkError::BadNewName(_)), "{err:?}");
+    }
+
+    /// P11: a dir-form parent at the filesystem root holds no
+    /// sessions root: a named error.
+    #[test]
+    fn a_root_dir_parent_raises_no_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = cfg_with_root(dir.path());
+        let err = resolve_paths(&cfg, "/", "f", None).unwrap_err();
+        assert!(matches!(err, ForkError::NoRoot(_)), "{err:?}");
     }
 
     /// P11: a missing parent is a named error. No directory

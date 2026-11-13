@@ -72,7 +72,9 @@ The effective root follows this order:
 
 1. The `--sessions-root` flag, when given.
 2. Else, for a dir-form parent (a path or an existing dir), the
-   parent dir's parent: the parent's own sessions root.
+   parent dir's parent: the parent's own sessions root. A bare
+   dir-form name (an existing dir in the CWD, no separator) has
+   an empty parent: the root is the CWD itself.
 3. Else, the config `[paths] sessions_root` (the `rushi run`
    rule, resolved against CWD).
 
@@ -185,14 +187,14 @@ partial target dir survives.
 | P1 | fork-prefix | `fork_copies_the_event_prefix` in `bin/rushi/src/fork.rs`; e2e scenario 1 in `scripts/e2e-fork.sh` | proven |
 | P2 | format-preserved | `fork_keeps_a_plain_log_plain` and `fork_writes_a_consolidated_zstd_log_with_a_valid_sidecar` in `bin/rushi/src/fork.rs`; e2e scenarios 1 and 2 in `scripts/e2e-fork.sh` | proven |
 | P3 | resume-append | `a_commit_after_the_forked_stream_continues_the_seq` in `bin/rushi/src/fork.rs`; e2e scenario 1b in `scripts/e2e-fork.sh` | proven |
-| P4 | tool-boundary | `the_tool_boundary_keys_the_last_kept_line` and `a_missing_key_keeps_every_tool_line` in `bin/rushi/src/fork.rs`; e2e scenario 3 in `scripts/e2e-fork.sh` | proven |
+| P4 | tool-boundary | `the_tool_boundary_keys_the_last_kept_line`, `a_missing_key_keeps_every_tool_line`, `a_malformed_line_never_skews_the_tool_cut`, and `a_malformed_tool_line_keeps_the_keyed_record` in `bin/rushi/src/fork.rs`; e2e scenario 3 in `scripts/e2e-fork.sh` | proven |
 | P5 | no-tool-skip | `a_prefix_without_results_keeps_no_tool_log` and `a_parent_without_a_tool_log_keeps_none` in `bin/rushi/src/fork.rs`; e2e scenario 2 in `scripts/e2e-fork.sh` | proven |
 | P6 | settled-boundary | `a_stranded_prefix_is_refused_by_name` in `bin/rushi/src/fork.rs`; e2e scenario 4 in `scripts/e2e-fork.sh` | proven |
 | P7 | range-guard | `an_out_of_range_boundary_is_refused` in `bin/rushi/src/fork.rs`; e2e scenario 5 in `scripts/e2e-fork.sh` | proven |
 | P8 | target-exists | `an_existing_target_is_refused_and_untouched` in `bin/rushi/src/fork.rs`; e2e scenario 5 in `scripts/e2e-fork.sh` | proven |
 | P9 | cwd-precedence | `the_cwd_precedence_is_flag_then_record` in `bin/rushi/src/fork.rs`; e2e scenario 6 in `scripts/e2e-fork.sh` | proven |
 | P10 | idle-fork | `the_fork_holds_no_loop_files` in `bin/rushi/src/fork.rs`; e2e scenario 1 in `scripts/e2e-fork.sh` | proven |
-| P11 | root-placement | `the_root_rule_is_flag_then_parent_parent_then_config` and `a_missing_parent_raises_a_named_error` in `bin/rushi/src/fork.rs`; e2e scenarios 6 and 7 in `scripts/e2e-fork.sh` | proven |
+| P11 | root-placement | `the_root_rule_is_flag_then_parent_parent_then_config`, `a_root_dir_parent_raises_no_root`, and `a_missing_parent_raises_a_named_error` in `bin/rushi/src/fork.rs`; e2e scenarios 6, 7, and 8 in `scripts/e2e-fork.sh` | proven |
 | P12 | no-partial | `a_failed_write_leaves_no_partial_target` in `bin/rushi/src/fork.rs`; e2e scenario 5 in `scripts/e2e-fork.sh` | proven |
 
 ## Gate
