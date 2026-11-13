@@ -87,7 +87,9 @@ enum Command {
     /// docs/subagent-design.md section 4). On a clean idle stop,
     /// the call prints the last `assistant_message` content to
     /// stdout at the moment the loop stops. The caller captures or
-    /// ignores it.
+    /// ignores it. stdout carries only that result: the live-branch
+    /// notice, the echoed event line, and every diagnostic go to
+    /// stderr.
     Run {
         /// Session name or directory. Hyphen-leading values are
         /// allowed (session dirs are never flags).

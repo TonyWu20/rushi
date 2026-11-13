@@ -114,7 +114,9 @@ pub fn fire_step_start(cfg: &HarnessConfig, session: &SessionDir, claim: &Claim)
 /// inert fields (12.5, once per run), one `hook.<window>.chain`
 /// with the per-step outcomes and the stop point, and — when
 /// `resolution` is `Some` — one `hook.<window>` resolution marker.
-/// When zero steps ran, nothing is logged (P1).
+/// When zero steps ran, nothing is logged (P1). Each failed step is
+/// also announced on stderr at the moment its marker lands: the
+/// marker is the log record, the line is the operator's view.
 ///
 /// `base` is the pipeline's initial payload; unknown-field detection
 /// compares the final state against it plus the window's effect
@@ -138,6 +140,13 @@ pub fn log_pipeline(
                 &session.path,
                 &format!("hook.{window_name}.error"),
                 &Value::String(format!("step '{}': {}", s.def, s.detail)),
+            );
+            // The marker is the log record; the stderr line is the
+            // operator's view of the same failure. A broken hook
+            // must not degrade the loop silently.
+            eprintln!(
+                "rushi: hook {window_name} step '{}' failed: {}",
+                s.def, s.detail
             );
         }
     }

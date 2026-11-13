@@ -8,6 +8,9 @@
 #     0 (the live loop drains the message at its next step)
 #   - a task-less `rushi run` against a live loop exits 0 without
 #     appending anything
+#   - the pokes' stdout is empty: the notice and the echoed event
+#     line go to stderr, so the result capture stays clean
+#     (docs/reference/headless-missions.md, "Result on stdout")
 #   - `--no-run` is gone: it now fails as an unknown flag
 #   - it starts the loop on a dead session (the old full path)
 #   - `user --no-run` stays the append-only form
@@ -121,13 +124,17 @@ if ! rg -q '"model_call_context"' <(sl <(sl "$SLOG")) 2>/dev/null; then
 fi
 
 # ── 1. Plain run with a task against a held lock: append, exit 0 ───
-out="$("$BIN_DIR/rushi" run session "poke message" 2>&1)"
+# The poke's stdout is the result channel: it must stay empty. The
+# echoed event line and the alive notice land on stderr.
+out="$("$BIN_DIR/rushi" run session "poke message" 2>"$WORK/poke.err")"
 rc=$?
-if [ "$rc" -eq 0 ] && echo "$out" | rg -q '"content":"poke message"' \
-   && echo "$out" | rg -q 'session loop is alive'; then
-  ok "plain run against a held lock appends and exits 0 (alive notice)"
+err="$(cat "$WORK/poke.err")"
+if [ "$rc" -eq 0 ] && [ -z "$out" ] \
+   && echo "$err" | rg -q '"content":"poke message"' \
+   && echo "$err" | rg -q 'session loop is alive'; then
+  ok "plain run against a held lock appends, stdout stays empty (notice on stderr)"
 else
-  ko "plain run against held lock: rc=$rc, output: $out"
+  ko "plain run against held lock: rc=$rc, stdout: $(printf '%q' "$out"), stderr: $(printf '%q' "$err")"
 fi
 
 if rg -q '"content":"poke message"' <(sl "$SLOG"); then
@@ -144,12 +151,13 @@ fi
 
 # ── 2. Task-less run against a held lock: notice, nothing appended ──
 USERS_BEFORE=$(rg -c '"type":"user_message"' <(sl "$SLOG") || true)
-out="$("$BIN_DIR/rushi" run session 2>&1)"
+out="$("$BIN_DIR/rushi" run session 2>"$WORK/poke-taskless.err")"
 rc=$?
-if [ "$rc" -eq 0 ] && echo "$out" | rg -q 'nothing to start'; then
-  ok "task-less run against a held lock exits 0 with a notice"
+err="$(cat "$WORK/poke-taskless.err")"
+if [ "$rc" -eq 0 ] && [ -z "$out" ] && echo "$err" | rg -q 'nothing to start'; then
+  ok "task-less run against a held lock exits 0, stdout empty (notice on stderr)"
 else
-  ko "task-less run against held lock: rc=$rc, output: $out"
+  ko "task-less run against held lock: rc=$rc, stdout: $(printf '%q' "$out"), stderr: $(printf '%q' "$err")"
 fi
 USERS_AFTER=$(rg -c '"type":"user_message"' <(sl "$SLOG") || true)
 if [ "$USERS_BEFORE" = "$USERS_AFTER" ]; then
@@ -159,21 +167,25 @@ else
 fi
 
 # ── 3. --no-run is gone: it fails as an unknown flag ───────────────
-out="$("$BIN_DIR/rushi" run session "x" --no-run 2>&1)"
+# The usage text lands on stderr; the poke's stdout stays empty.
+out="$("$BIN_DIR/rushi" run session "x" --no-run 2>"$WORK/norun.err")"
 rc=$?
-if [ "$rc" -eq 2 ] && echo "$out" | rg -q "unexpected argument '--no-run'"; then
-  ok "--no-run fails as an unknown flag (rc=2)"
+err="$(cat "$WORK/norun.err")"
+if [ "$rc" -eq 2 ] && [ -z "$out" ] && echo "$err" | rg -q "unexpected argument '--no-run'"; then
+  ok "--no-run fails as an unknown flag (rc=2, usage on stderr)"
 else
-  ko "--no-run: rc=$rc, output: $out"
+  ko "--no-run: rc=$rc, stdout: $(printf '%q' "$out"), stderr: $(printf '%q' "$err")"
 fi
 
 # ── 4. An empty task fails instead of poking or running ────────────
-out="$("$BIN_DIR/rushi" run session "" 2>&1)"
+# The error is a diagnostic: it lands on stderr, stdout stays empty.
+out="$("$BIN_DIR/rushi" run session "" 2>"$WORK/empty.err")"
 rc=$?
-if [ "$rc" -eq 1 ] && echo "$out" | rg -q "task must not be empty"; then
-  ok "an empty task fails with the empty-task message"
+err="$(cat "$WORK/empty.err")"
+if [ "$rc" -eq 1 ] && [ -z "$out" ] && echo "$err" | rg -q "task must not be empty"; then
+  ok "an empty task fails with the empty-task message on stderr"
 else
-  ko "empty task: rc=$rc, output: $out"
+  ko "empty task: rc=$rc, stdout: $(printf '%q' "$out"), stderr: $(printf '%q' "$err")"
 fi
 
 # Wait for the live loop to finish (it drains the poke at step 2).
