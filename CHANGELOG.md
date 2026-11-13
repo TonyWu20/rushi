@@ -151,6 +151,16 @@ reached the devshell `PATH`. No `bin/log` alias: the builder
 drops the alias too. The `LOG_BIN` env override and the
 `compact --log` flag are unchanged.
 
+## rushi-common 0.1.8 (2026-10-22)
+
+Frame index reader (P8, docs/session-log-compression.md). New
+public API for reading zstd session logs through the frame-index
+sidecar: `IndexRecord`, `index_path`, `read_index`, `encode_index`,
+`validate_index`, `open_indexed`, `LogStream` (`tail_lines`,
+`line_at`, `lines_range`, `has_index`), `read_log_tail`,
+`decode_stream_bytes`. Consumer repos that take the P8 reads pin
+this release.
+
 ## rushi 0.1.4 (2026-10-20)
 
 `rushi run` accepts a hyphen-leading `task` (and `session`) value.
