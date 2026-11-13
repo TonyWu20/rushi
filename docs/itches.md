@@ -799,3 +799,59 @@ Docs updated: `docs/reference/headless-missions.md` gains the
 capture the stdout. The `run_loop` and `main` module docs state
 the print contract. The `rushi` version moves 0.1.4 to 0.1.5
 (CHANGELOG).
+
+## `rushi run` keeps stdout the result channel; the live-branch notice moves to stderr (2026-11-11, user decision)
+
+**Decision.** The idle-stop print (the last `assistant_message`
+on stdout) made stdout the mission result. A live-branch poke
+printed its notice and the echoed event line on stdout. A capture
+of a live poke (`result=$(rushi run ...)`) received that notice
+as the result. The user's call: `stderr` is used seriously. stdout
+carries only the final-message result. Everything else stays on
+stderr.
+
+- The live-branch echo of the appended event line moves to stderr.
+- The `rushi: session loop is alive` notice moves to stderr, with
+  and without a task.
+- The poke's stdout is empty. Its exit code is unchanged (0).
+- Every hard failure was already on stderr (config load, session
+  dir, empty task, claim, log append). No change there.
+- The terminal `error` event of a failed step (the model API
+  failure, the spawn failure, the hook and empty-turn stops) is
+  now announced on stderr at the moment it is logged. Before, the
+  retry diagnostics were on stderr and the terminal failure was
+  log-only. The failed stop stays silent on stdout and keeps its
+  exit code (FT-031). The announcement is the operator's record
+  of the stop.
+- The audit of the whole run path found five more log-only
+  failures. The user's call: every one announces on stderr at
+  the moment it is recorded. The log marker stays the record.
+  The exit codes and the stdout result channel are unchanged.
+  - the exhausted stop (`run_loop`)
+  - the failed `run.idle` chain stop (P4; the log record reads
+    "idle", so the cause was invisible)
+  - a failed hook step, any window (`log_pipeline`)
+  - a failed compact: the loop re-prints the compact binary's
+    own stderr (`stage_runner`)
+  - the approval timeout (`approval`)
+- Noted, not changed: the `post_compact_sanity` warning stays a
+  log marker (it repeats every turn it is true; the terminal
+  outcome is announced). The assemble `type:"error"` arm is a
+  defensive form no current stage produces.
+
+**Proof.** `scripts/run-lock-branch-e2e.sh` now captures the two
+streams apart. The pokes' stdout is empty. The notice and the
+event line land on stderr. The append still reaches the live
+session log. The live loop still drains the poked message.
+`scripts/error-recovery-e2e.sh` carries four stream checks: the
+terminal model failure and the exhausted stop announce on stderr,
+and the failed and exhausted stops print nothing on stdout.
+`scripts/run-idle-log-message-e2e.sh` carries three: the failed
+hook step and the P4 stop announce on stderr, and the failed
+stop prints nothing on stdout.
+
+Docs updated: `docs/reference/headless-missions.md` (the "Result
+on stdout" section states the poke's stdout is empty and lists
+the stderr diagnostics), the `run_loop`, `main`, `append_error`,
+and `log_pipeline` module docs state the stream split. The
+`rushi` version moves 0.1.5 to 0.1.6 (CHANGELOG).

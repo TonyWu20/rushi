@@ -177,6 +177,9 @@ EOF
 }
 
 run_loop() {
+  # The call's streams land in $WORK/last.stdout and $WORK/last.stderr
+  # for the scenario checks to inspect (the stream split: stdout is
+  # the result channel, diagnostics stay on stderr).
   (
     cd "$WORK"
     export CONFIG="$WORK/config.toml"
@@ -184,7 +187,7 @@ run_loop() {
     export STUB_REQLOG="$WORK/reqlog"
     : >"$STUB_REQLOG"
     timeout 120 "$BIN_DIR/rushi" run session
-  ) >/dev/null 2>&1
+  ) >"$WORK/last.stdout" 2>"$WORK/last.stderr"
   true
 }
 
@@ -321,6 +324,23 @@ scenario_fail() {
     "the chain marker records the fail with its detail"
   assert_eq "$(marker_values "hook.run.idle")" '"stop"' \
     "the failed chain resolved to the window default"
+  # The stream split: the failed step and the P4 stop announce on
+  # stderr; the failed stop prints nothing on stdout.
+  if rg -q "hook run.idle step 'hook-run-idle' failed: idle hook crashed" "$WORK/last.stderr"; then
+    ok "the failed hook step is announced on stderr"
+  else
+    ko "the hook-fail announcement is missing: $(cat "$WORK/last.stderr")"
+  fi
+  if rg -q "run.idle pipeline failed; the loop stops" "$WORK/last.stderr"; then
+    ok "the P4 stop is announced on stderr"
+  else
+    ko "the P4-stop announcement is missing: $(cat "$WORK/last.stderr")"
+  fi
+  if [[ ! -s "$WORK/last.stdout" ]]; then
+    ok "the failed stop prints nothing on stdout"
+  else
+    ko "the failed stop printed stdout: $(cat "$WORK/last.stdout")"
+  fi
 }
 
 # default: no pipeline entry — zero steps, no markers, the loop
