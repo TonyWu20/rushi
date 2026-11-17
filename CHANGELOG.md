@@ -26,6 +26,14 @@ working dir. An existing target refuses the fork. No partial
 write survives a failed cut. Docs: `docs/fork-design.md`. Gate:
 `scripts/e2e-fork.sh`.
 
+## rushi-common 0.1.9 (2026-11-17)
+
+`logstream` gains `write_consolidated` (docs/fork-design.md P2,
+P3). It writes one consolidated zstd frame plus the one sidecar
+record that covers the stream. `rushi fork` uses it for a forked
+log. The frame passes the open-time index checks. A round-trip
+compare refuses a bad encode before any byte is written.
+
 ## rushi 0.1.6 (2026-11-11)
 
 `rushi run` keeps stdout the result channel. The idle-stop print
