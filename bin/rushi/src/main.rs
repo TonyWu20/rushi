@@ -25,6 +25,10 @@
 //!   name (e.g. `rushi docs nix-flake-module`)
 //! - `rushi config` — print the resolved config file to stdout, so it
 //!   can be dumped to disk for tweaking (e.g. `sessions_root`)
+//! - `rushi fork PARENT NEW --fork-at N` — fork one session at a log
+//!   entry: copy the two session logs, cut at entry N, into a new
+//!   session under the same sessions root. The forked session starts
+//!   idle. Start it through the plain `rushi run` flow
 //!
 //! The loop stages (`claim`, `assemble`, `model`, `parse`, `route`,
 //! `compact`) are spawned as separate binaries. The TUI is a separate
@@ -35,6 +39,7 @@ mod archive;
 mod classifier;
 mod config;
 mod docs;
+mod fork;
 mod run_loop;
 mod setup;
 mod signals;
@@ -87,7 +92,9 @@ enum Command {
     /// docs/subagent-design.md section 4). On a clean idle stop,
     /// the call prints the last `assistant_message` content to
     /// stdout at the moment the loop stops. The caller captures or
-    /// ignores it.
+    /// ignores it. stdout carries only that result: the live-branch
+    /// notice, the echoed event line, and every diagnostic go to
+    /// stderr.
     Run {
         /// Session name or directory. Hyphen-leading values are
         /// allowed (session dirs are never flags).
@@ -163,6 +170,44 @@ enum Command {
     Archive {
         /// Session name or directory
         session: String,
+    },
+    /// Fork one session at a log entry (docs/fork-design.md).
+    ///
+    /// Copies the parent's `events.jsonl` and `tools.jsonl`, cut at
+    /// entry N, into a new session under the same sessions root. The
+    /// cut point must be settled: a prefix that keeps a tool call
+    /// without its result refuses with a named error. The forked
+    /// session starts idle. Start it through `rushi run NEW`.
+    Fork {
+        /// Parent session name or directory. Hyphen-leading values
+        /// are allowed (session dirs are never flags).
+        #[arg(allow_hyphen_values = true)]
+        parent: String,
+
+        /// New session name. A bare name: no path separator. The
+        /// target dir is `<sessions-root>/NEW`.
+        #[arg(allow_hyphen_values = true)]
+        new: String,
+
+        /// The 1-based log seq to cut at. Every event with seq at or
+        /// below N moves to the new session.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        fork_at: u64,
+
+        /// Where the command finds the parent and places the new
+        /// session. Absolute paths are used as-is. Relative paths
+        /// resolve against the current directory. Without the flag,
+        /// a dir-form parent keeps its own root, and a bare name
+        /// resolves under the config sessions root.
+        #[arg(long)]
+        sessions_root: Option<PathBuf>,
+
+        /// The new session's working directory, overriding the
+        /// parent's recorded `cwd` file. Absolute paths are used
+        /// as-is. Relative paths resolve against the current
+        /// directory.
+        #[arg(long)]
+        cwd: Option<PathBuf>,
     },
 }
 
@@ -241,6 +286,27 @@ fn main() {
             let session_dir = cfg.resolve_session(&session);
             if let Err(e) = archive::consolidate_session(&session_dir) {
                 eprintln!("rushi archive: {e}");
+                std::process::exit(1);
+            }
+        }
+
+        Command::Fork {
+            parent,
+            new,
+            fork_at,
+            sessions_root,
+            cwd,
+        } => {
+            let cfg = config::HarnessConfig::load(&PathBuf::from(config_path));
+            if let Err(e) = fork::fork_session(
+                &cfg,
+                &parent,
+                &new,
+                fork_at,
+                sessions_root.as_deref(),
+                cwd.as_deref(),
+            ) {
+                eprintln!("rushi fork: {e}");
                 std::process::exit(1);
             }
         }
@@ -410,6 +476,51 @@ mod tests {
             }
             _ => panic!("expected the Run subcommand"),
         }
+    }
+
+    /// The `fork` flags parse: parent and new positionals, the
+    /// `--fork-at` value, and the two optional path flags.
+    #[test]
+    fn fork_parses_all_the_flags() {
+        let args = Args::try_parse_from([
+            "rushi",
+            "fork",
+            "parent",
+            "child",
+            "--fork-at",
+            "5",
+            "--sessions-root",
+            "/x/sessions",
+            "--cwd",
+            "/w",
+        ])
+        .unwrap();
+        match args.command.unwrap() {
+            Command::Fork {
+                parent,
+                new,
+                fork_at,
+                sessions_root,
+                cwd,
+            } => {
+                assert_eq!(parent, "parent");
+                assert_eq!(new, "child");
+                assert_eq!(fork_at, 5);
+                assert_eq!(sessions_root, Some(PathBuf::from("/x/sessions")));
+                assert_eq!(cwd, Some(PathBuf::from("/w")));
+            }
+            _ => panic!("expected the Fork subcommand"),
+        }
+    }
+
+    /// A zero `--fork-at` is a parse error (the seq is 1-based).
+    /// A missing `--fork-at` is a parse error (the flag must sit).
+    #[test]
+    fn fork_rejects_a_zero_boundary() {
+        let bad = Args::try_parse_from(["rushi", "fork", "p", "n", "--fork-at", "0"]);
+        assert!(bad.is_err(), "seq 0 is below the 1-based range");
+        let missing = Args::try_parse_from(["rushi", "fork", "p", "n"]);
+        assert!(missing.is_err(), "the --fork-at value is missing");
     }
 
     /// The `--` escape form stays valid next to the flag allowance

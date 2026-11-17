@@ -24,6 +24,7 @@ IN_SCOPE=(
   "bash-tool.md"
   "branch-summarize-cases.md"
   "ft-005-logline.md"
+  "fork-design.md"
   "harness-distribution.md"
   "handoff-strategy.md"
   "handoff-versioning-design.md"

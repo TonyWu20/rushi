@@ -97,6 +97,52 @@ fn decompress_stream(path: &Path, buf: &[u8]) -> io::Result<String> {
     })
 }
 
+/// Encode `text` as one consolidated zstd frame (`CONSOLIDATE_LEVEL`)
+/// and return the frame bytes plus the one sidecar record that
+/// covers the whole stream.
+///
+/// The round-trip check: one extra decompress, one compare. A
+/// mismatch is an error; no caller writes the bytes.
+fn encode_consolidated(text: &str) -> io::Result<(Vec<u8>, IndexRecord)> {
+    use std::io::Write;
+    let mut out = Vec::with_capacity(text.len() / 4 + 64);
+    {
+        let mut enc = zstd::stream::write::Encoder::new(&mut out, CONSOLIDATE_LEVEL)?;
+        enc.write_all(text.as_bytes())?;
+        enc.finish()?;
+    }
+    let back = decode_strict(&out)?;
+    if back != text.as_bytes() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "consolidation round-trip mismatch",
+        ));
+    }
+    let record = IndexRecord {
+        seq_start: 1,
+        frame_offset: 0,
+        frame_len: out.len() as u64,
+        text_len: text.len() as u64,
+    };
+    Ok((out, record))
+}
+
+/// Write `text` (complete lines, each with a trailing newline) to
+/// `path` as one consolidated zstd frame, and write the `<path>.idx`
+/// sidecar with the one record that covers the stream.
+///
+/// The caller picks the path and the atomicity. `rushi fork` uses
+/// this for a forked log: one frame at rest, one record, the same
+/// pair the idle consolidation writes in place
+/// (docs/fork-design.md P2, P3).
+pub fn write_consolidated(path: &Path, text: &str) -> io::Result<()> {
+    let (bytes, record) = encode_consolidated(text)?;
+    std::fs::write(path, &bytes)?;
+    let idx_bytes = encode_index(std::slice::from_ref(&record));
+    std::fs::write(&index_path(path), &idx_bytes)?;
+    Ok(())
+}
+
 /// Consolidate the stream at `path` into one level-19 frame, and
 /// rewrite its frame index sidecar in the same pass (P5, P8).
 ///
@@ -121,12 +167,11 @@ pub fn consolidate(path: &Path) -> io::Result<()> {
         "{}.consolidate",
         idx.file_name().unwrap().to_string_lossy()
     ));
+    let (bytes, record) = encode_consolidated(&text)?;
     let res = (|| -> io::Result<()> {
         use std::io::Write;
         let mut out = std::fs::File::create(&tmp)?;
-        let mut enc = zstd::stream::write::Encoder::new(&mut out, CONSOLIDATE_LEVEL)?;
-        enc.write_all(text.as_bytes())?;
-        enc.finish()?;
+        out.write_all(&bytes)?;
         out.flush()?;
         // The round-trip check: one extra decompress, one compare.
         let check = std::fs::read(&tmp)?;
@@ -139,13 +184,6 @@ pub fn consolidate(path: &Path) -> io::Result<()> {
         }
         std::fs::rename(&tmp, path)?;
         // The index pair: one record for the consolidated frame.
-        let stream_len = std::fs::metadata(path)?.len();
-        let record = IndexRecord {
-            seq_start: 1,
-            frame_offset: 0,
-            frame_len: stream_len,
-            text_len: text.len() as u64,
-        };
         let idx_bytes = encode_index(std::slice::from_ref(&record));
         std::fs::write(&tmp_idx, &idx_bytes)?;
         // The index round trip: one re-read, one parse, one compare.
@@ -699,6 +737,71 @@ mod tests {
         consolidate(&p).unwrap();
         consolidate(&p).unwrap();
         assert_eq!(read_log_text(&p).unwrap(), "z\n");
+    }
+
+    #[test]
+    fn write_consolidated_writes_one_frame_and_one_record() {
+        // docs/fork-design.md P2: one level-19 frame, one sidecar
+        // record that passes the open-time checks.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("events.jsonl");
+        let text = "one\ntwo\n";
+        write_consolidated(&p, text).unwrap();
+        let raw = std::fs::read(&p).unwrap();
+        assert!(is_zstd_stream(&raw));
+        assert_eq!(read_log_text(&p).unwrap(), text);
+        let records = read_index(&index_path(&p)).unwrap();
+        assert_eq!(records.len(), 1, "the forked log carries one record");
+        let r = &records[0];
+        assert_eq!(r.seq_start, 1);
+        assert_eq!(r.frame_offset, 0);
+        assert_eq!(r.frame_len, raw.len() as u64);
+        assert_eq!(r.text_len, text.len() as u64);
+        // The open-time validation the readers run.
+        assert!(validate_index(&records, raw.len() as u64));
+        assert!(index_matches_stream(&records, &raw));
+        let stream = open_indexed(&p).unwrap();
+        assert!(stream.has_index(), "the forked log opens indexed");
+        assert_eq!(stream.lines_range(1, 2), vec!["one", "two"]);
+    }
+
+    #[test]
+    fn a_commit_after_write_consolidated_continues_the_seq() {
+        // docs/fork-design.md P3: the forked stream resumes through
+        // the one `LogLine` append path. The seq numbering keeps
+        // running past the forked prefix.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("events.jsonl");
+        write_consolidated(
+            &p,
+            r#"{"v":1,"type":"user_message","ts":"t","content":"one"}
+{"v":1,"type":"user_message","ts":"t","content":"two"}
+"#,
+        )
+        .unwrap();
+        LogLine::from_json(r#"{"v":1,"type":"user_message","ts":"t","content":"three"}"#)
+            .commit(&p)
+            .unwrap();
+        let records = read_index(&index_path(&p)).unwrap();
+        assert_eq!(records.len(), 2, "the resume adds one record");
+        assert_eq!(records[1].seq_start, 3, "the third line is seq 3");
+        let raw = std::fs::read(&p).unwrap();
+        assert_eq!(
+            records[1].frame_offset,
+            records[0].frame_offset + records[0].frame_len,
+            "the resume frame rides on after the forked frame"
+        );
+        assert_eq!(
+            records[1].frame_offset + records[1].frame_len,
+            raw.len() as u64,
+            "the index still covers the stream"
+        );
+        let stream = open_indexed(&p).unwrap();
+        assert_eq!(
+            stream.line_at(3),
+            Some(r#"{"v":1,"type":"user_message","ts":"t","content":"three"}"#.to_string())
+        );
+        assert_eq!(read_log_text(&p).unwrap().lines().count(), 3);
     }
 
     // ------------------------------------------------------------------

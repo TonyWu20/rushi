@@ -85,6 +85,11 @@ pub fn publish_ext_status(cfg: &HarnessConfig, session_dir: &Path, id: &str, val
 /// compact stop). The event is informational: it settles no claim
 /// state and clears no pending work (FT-031). The run loop stops on
 /// the failed step, and a new loop retries the owed work.
+///
+/// The logged failure is also announced on stderr at the moment it
+/// lands: `rushi: <message>`. This is the operator's record of why
+/// the step stopped. The stop keeps its exit code (FT-031) and
+/// prints nothing on stdout: stdout is the result channel.
 pub fn append_error(cfg: &HarnessConfig, session_dir: &Path, message: &str) {
     let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let event = serde_json::json!({
@@ -94,6 +99,7 @@ pub fn append_error(cfg: &HarnessConfig, session_dir: &Path, message: &str) {
         "message": message,
     });
     append_event(cfg, session_dir, &event);
+    eprintln!("rushi: {message}");
 }
 
 // ---------------------------------------------------------------------------

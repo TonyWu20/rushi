@@ -390,6 +390,20 @@ impl StageRunner for SubprocessRunner {
             }
         };
 
+        // A failed compact carries the binary's own diagnostics on
+        // its stderr (the summary-call failure, the fallback note).
+        // The child's pipe would drop them, so the loop re-prints
+        // them on its own stderr: the marker in the log is the
+        // record, this is the operator's view.
+        if outcome == CompactOutcome::Failed {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            for line in stderr.lines() {
+                if !line.is_empty() {
+                    eprintln!("rushi: {line}");
+                }
+            }
+        }
+
         Ok(CompactStatus {
             outcome,
             first_kept_seq: v.get("first_kept_seq").and_then(|s| s.as_u64()),
