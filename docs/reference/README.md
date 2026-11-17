@@ -138,6 +138,19 @@ tests in `crates/rushi/src/rewind.rs`, the `bin/assemble` mask
 tests, gated by `scripts/e2e-rewind.sh`. The Lean backstop and DRT
 pair were retired 2026-09-17 (`docs/lean-driven-development.md` §8).
 
+The `rushi fork PARENT NEW --fork-at N` subcommand (issue #67)
+copies one session's two logs into a new session, cut at log entry
+N. The new session starts idle under the same sessions root. The
+cut point must be settled: a prefix that keeps a tool call without
+its result refuses with a named error. The parent's log layout
+holds: plain stays plain, a zstd stream consolidates to one frame
+with a rebuilt sidecar.
+
+The tool log cuts at the line keyed by the last `tool_result` at
+or before N. An explicit `--cwd` wins over the parent's recorded
+working dir. The spec sits in `docs/fork-design.md`. The gate is
+`scripts/e2e-fork.sh`.
+
 ---
 
 ## 4. Configuration (`config.toml`)

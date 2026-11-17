@@ -17,7 +17,7 @@
       ...
     }:
     let
-      rushiVersion = "0.1.8";
+      rushiVersion = "0.1.9";
     in
     rec {
 

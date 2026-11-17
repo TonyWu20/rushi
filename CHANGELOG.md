@@ -6,6 +6,34 @@ versioned change for each kernel binary, newest first.
 Internal refactors without user-visible behavior do not get an
 entry.
 
+## rushi 0.1.7 (2026-11-17)
+
+A new subcommand `rushi fork PARENT NEW --fork-at N` (issue #67).
+It copies one session's `events.jsonl` and `tools.jsonl` into a
+new session, cut at log entry N. The new session starts idle
+under the same sessions root. The caller starts it through the
+plain `rushi run` flow.
+
+The cut keeps the parent's log layout. A plain parent stays
+plain. A zstd parent writes one consolidated frame and rebuilds
+the `<log>.idx` sidecar. The cut point must be settled. A prefix
+that keeps a tool call without its result refuses the fork with
+a named error that names the stranded pair.
+
+The tool log cuts at the line keyed by the last `tool_result` at
+or before N. An explicit `--cwd` wins over the parent's recorded
+working dir. An existing target refuses the fork. No partial
+write survives a failed cut. Docs: `docs/fork-design.md`. Gate:
+`scripts/e2e-fork.sh`.
+
+## rushi-common 0.1.9 (2026-11-17)
+
+`logstream` gains `write_consolidated` (docs/fork-design.md P2,
+P3). It writes one consolidated zstd frame plus the one sidecar
+record that covers the stream. `rushi fork` uses it for a forked
+log. The frame passes the open-time index checks. A round-trip
+compare refuses a bad encode before any byte is written.
+
 ## rushi 0.1.6 (2026-11-11)
 
 `rushi run` keeps stdout the result channel. The idle-stop print
@@ -43,7 +71,6 @@ writes to stdout. Docs: the "Result on stdout" section of
 `rushi docs headless-missions` states the poke's stdout is empty
 and lists the stderr diagnostics. `scripts/error-recovery-e2e.sh`
 and `scripts/run-idle-log-message-e2e.sh` carry the stream checks.
-
 ## rushi-log 0.2.1 (2026-11-04)
 
 A `rewind` marker that would strand a tool-call pair is now
