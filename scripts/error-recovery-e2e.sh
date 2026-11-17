@@ -7,6 +7,10 @@
 # editing. The endpoint is switched between two stub models:
 # STUB_DOWN=1 fails every call with a connection error; otherwise
 # the stub answers a clean stop.
+#
+# The stream split (docs/reference/headless-missions.md, "Result on
+# stdout"): a failed stop prints nothing on stdout. The terminal
+# `error` event is announced on stderr at the moment it lands.
 
 set -uo pipefail
 
@@ -75,7 +79,9 @@ CONFIG_EOF
 
 run_loop() {
   # One `rushi run` start: with a task when $2 is non-empty (the
-  # spawn form), taskless otherwise (the TUI `Ctrl+R` form).
+  # spawn form), taskless otherwise (the TUI `Ctrl+R` form). The
+  # call's streams land in $WORK/last.stdout and $WORK/last.stderr
+  # for the scenario checks to inspect.
   local task="${2:-}"
   (
     cd "$WORK"
@@ -88,7 +94,7 @@ run_loop() {
     else
       "$BIN_DIR/rushi" run "$1"
     fi
-  ) 2>/dev/null
+  ) >"$WORK/last.stdout" 2>"$WORK/last.stderr"
 }
 
 claim_state() {
@@ -124,6 +130,18 @@ STUB_DOWN=1 run_loop sess "do the task"
 [[ ! -f "$WORK/up.log" ]] \
   && ok "no call reached the up stub while down" \
   || ko "the up stub saw a request while down"
+# The terminal failure is announced on stderr; the failed stop
+# prints nothing on stdout (the result channel).
+if rg -q "model API call failed after retries" "$WORK/last.stderr"; then
+  ok "the terminal model failure is announced on stderr"
+else
+  ko "the stderr announcement is missing: $(cat "$WORK/last.stderr")"
+fi
+if [[ ! -s "$WORK/last.stdout" ]]; then
+  ok "the failed stop prints nothing on stdout"
+else
+  ko "the failed stop printed stdout: $(cat "$WORK/last.stdout")"
+fi
 
 # ── Scenario 2: resume while still down: bounded, no spin ────────
 STUB_DOWN=1 run_loop sess
@@ -172,6 +190,18 @@ LOG_EOF
 [[ "$(claim_state handoff)" == "exhausted" ]] \
   && ok "the handoff marker still settles exhausted" \
   || ko "handoff claim is $(claim_state handoff), want exhausted"
+# The exhausted stop is announced on stderr; stdout stays empty.
+run_loop handoff
+if rg -q "context exhausted; the loop stops" "$WORK/last.stderr"; then
+  ok "the exhausted stop is announced on stderr"
+else
+  ko "the exhausted-stop announcement is missing: $(cat "$WORK/last.stderr")"
+fi
+if [[ ! -s "$WORK/last.stdout" ]]; then
+  ok "the exhausted stop prints nothing on stdout"
+else
+  ko "the exhausted stop printed stdout: $(cat "$WORK/last.stdout")"
+fi
 
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]

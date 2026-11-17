@@ -6,6 +6,44 @@ versioned change for each kernel binary, newest first.
 Internal refactors without user-visible behavior do not get an
 entry.
 
+## rushi 0.1.6 (2026-11-11)
+
+`rushi run` keeps stdout the result channel. The idle-stop print
+made stdout the mission result. The live-branch poke printed its
+notice and the echoed event line on stdout, so a capture of a
+live poke received that notice as the result. The streams now
+split:
+
+- The live-branch echo of the appended event line goes to stderr.
+- The `rushi: session loop is alive` notice goes to stderr, with
+  and without a task.
+- The poke's stdout is empty. Its exit code stays 0.
+- Every hard failure was already on stderr (config load, session
+  dir, empty task, claim, log append). No change there.
+- The terminal `error` event of a failed step is now announced on
+  stderr at the moment it is logged (`append_error` in
+  `bin/rushi/src/step/logio.rs`). Before, the retry diagnostics
+  were on stderr and the terminal failure was log-only. The failed
+  stop still prints nothing on stdout and keeps its exit code
+  (FT-031): the announcement is the operator's record of the stop.
+  It covers every terminal stop reason: the model API and spawn
+  failures, the assemble error form, the overflow and exhausted
+  hook stops, the empty-turn guard.
+- The audit found five more log-only failures. Each now announces
+  on stderr at the moment it is recorded: the exhausted stop
+  (`run_loop`), the failed `run.idle` chain stop (P4, `run_loop`),
+  the failed hook step (`log_pipeline`, every window), the failed
+  compact (the binary's own stderr is re-printed by the loop,
+  `stage_runner`), and the approval timeout (`approval`). The log
+  markers stay the record. The exit codes and the stdout result
+  channel are unchanged.
+
+The final-message print is unchanged: only a clean idle stop
+writes to stdout. Docs: the "Result on stdout" section of
+`rushi docs headless-missions` states the poke's stdout is empty
+and lists the stderr diagnostics. `scripts/error-recovery-e2e.sh`
+and `scripts/run-idle-log-message-e2e.sh` carry the stream checks.
+
 ## rushi-log 0.2.1 (2026-11-04)
 
 A `rewind` marker that would strand a tool-call pair is now
@@ -112,6 +150,16 @@ it merges packages into a devshell, so a `bin/log` entry never
 reached the devshell `PATH`. No `bin/log` alias: the builder
 drops the alias too. The `LOG_BIN` env override and the
 `compact --log` flag are unchanged.
+
+## rushi-common 0.1.8 (2026-10-22)
+
+Frame index reader (P8, docs/session-log-compression.md). New
+public API for reading zstd session logs through the frame-index
+sidecar: `IndexRecord`, `index_path`, `read_index`, `encode_index`,
+`validate_index`, `open_indexed`, `LogStream` (`tail_lines`,
+`line_at`, `lines_range`, `has_index`), `read_log_tail`,
+`decode_stream_bytes`. Consumer repos that take the P8 reads pin
+this release.
 
 ## rushi 0.1.4 (2026-10-20)
 

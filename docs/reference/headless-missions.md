@@ -52,11 +52,19 @@ The capture is the Unix form of the mission result.
 - Capture it: `result=$(rushi run <s> <task> ...)`
 - Or redirect it: `rushi run <s> <task> ... > result`
 - Only the idle stop prints. A failed or exhausted stop prints
-  nothing. The session log holds that record.
+  nothing on stdout. The logged `error` event is announced on
+  stderr at the moment it lands. The session log holds the record.
+- Diagnostics stay on stderr, each announced at the moment it is
+  recorded: the terminal `error` event, the exhausted stop, the
+  failed `run.idle` chain, a failed hook step, a failed compact
+  (the binary's own stderr is re-printed), and the approval
+  timeout. The log is the record. stderr is the operator's view.
 - An empty content prints nothing. That is a tool-call-only final
   turn.
 - The live-loop poke prints its notice, not a result. The loop
-  has not stopped.
+  has not stopped. The notice and the echoed event line go to
+  stderr. The poke's stdout is empty, so a capture of a live poke
+  receives no result.
 
 ## Ping-back
 
