@@ -94,13 +94,16 @@ docs/session-log-compression.md):
   stream, the whole text. `rushi archive`'s idle pass writes the
   same pair in place.
 
-The cut point must be settled (P8 of docs/rewind-fork-design.md,
-cut form). The guard checks the projected prefix: the active path
-at N over the rewind markers inside the prefix. Every kept tool
-call must keep its `tool_result`, and every kept `tool_result`
-must keep its call. A violation refuses the fork with a named
-error that names the stranded pair. The caller snaps the pick to a
-settled point first, as the events-channel `rewind` action does.
+The cut point follows the P8.1 caused-strand rule (P8.1 of
+docs/rewind-fork-design.md, cut form). The guard checks the
+projected prefix: the active path at N over the rewind markers
+inside the prefix. A kept `tool_result` must keep its call: an
+orphan result refuses the fork with a named error that names the
+orphan pair. A kept tool call without its `tool_result` crosses
+the cut. The result line sits past the cut, and the cut is not
+its cause: the log carried the call since its line. The forked
+context keeps the call, and the loop state machine owes the
+result.
 
 ### The tool-log cut
 
@@ -155,9 +158,11 @@ kept tool line keys the last `tool_result` at or before N. Every
 P5. no-tool-skip: given no parent tool log, or no `tool_result` at
 or before N, the fork holds no tool log.
 
-P6. settled-boundary: given a prefix that keeps a tool pair
-split, the fork refuses with a named error. The error names the
-stranded pair.
+P6. cut-strand: the cut follows the P8.1 caused-strand rule. A
+prefix that carries a tool call without its result crosses the
+cut. The loop state machine owes the result. A prefix that keeps
+a `tool_result` without its call refuses the fork with a named
+error. The error names the orphan pair.
 
 P7. range-guard: given N outside [1, the line count], the fork
 refuses with a named error and writes nothing.
@@ -189,7 +194,7 @@ partial target dir survives.
 | P3 | resume-append | `a_commit_after_the_forked_stream_continues_the_seq` in `bin/rushi/src/fork.rs`; e2e scenario 1b in `scripts/e2e-fork.sh` | proven |
 | P4 | tool-boundary | `the_tool_boundary_keys_the_last_kept_line`, `a_missing_key_keeps_every_tool_line`, `a_malformed_line_never_skews_the_tool_cut`, and `a_malformed_tool_line_keeps_the_keyed_record` in `bin/rushi/src/fork.rs`; e2e scenario 3 in `scripts/e2e-fork.sh` | proven |
 | P5 | no-tool-skip | `a_prefix_without_results_keeps_no_tool_log` and `a_parent_without_a_tool_log_keeps_none` in `bin/rushi/src/fork.rs`; e2e scenario 2 in `scripts/e2e-fork.sh` | proven |
-| P6 | settled-boundary | `a_stranded_prefix_is_refused_by_name` in `bin/rushi/src/fork.rs`; e2e scenario 4 in `scripts/e2e-fork.sh` | proven |
+| P6 | cut-strand | `a_carried_call_crosses_the_cut` and `a_result_without_its_call_is_refused_by_name` in `bin/rushi/src/fork.rs`; e2e scenario 4 in `scripts/e2e-fork.sh` | proven |
 | P7 | range-guard | `an_out_of_range_boundary_is_refused` in `bin/rushi/src/fork.rs`; e2e scenario 5 in `scripts/e2e-fork.sh` | proven |
 | P8 | target-exists | `an_existing_target_is_refused_and_untouched` in `bin/rushi/src/fork.rs`; e2e scenario 5 in `scripts/e2e-fork.sh` | proven |
 | P9 | cwd-precedence | `the_cwd_precedence_is_flag_then_record` in `bin/rushi/src/fork.rs`; e2e scenario 6 in `scripts/e2e-fork.sh` | proven |

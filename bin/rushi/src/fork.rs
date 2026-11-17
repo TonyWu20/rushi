@@ -34,8 +34,8 @@ pub enum ForkError {
         /// (a hand-edited log).
         parsed: Option<u64>,
     },
-    /// The settled-boundary rule refuses the cut. The message names
-    /// the stranded pair.
+    /// The P8.1 cut rule refuses the cut. The message names
+    /// the orphan pair.
     Stranded(rewind::RewindRejection),
     /// The target dir exists. No overwrite.
     TargetExists(PathBuf),
@@ -192,13 +192,16 @@ pub fn resolve_paths(
     })
 }
 
-/// The settled-boundary guard over a parsed event prefix
-/// (docs/fork-design.md P6, the P8 guard in cut form).
+/// The cut-boundary guard over a parsed event prefix
+/// (docs/fork-design.md P6, the P8.1 guard in cut form).
 ///
-/// The target is the prefix end in on mode: the projected prefix
-/// keeps every tool call paired with its result, both sides. The
-/// out-of-range arm maps to `SeqOutOfRange`: it only fires when
-/// the prefix holds unparseable lines (a hand-edited log).
+/// The target is the prefix end in on mode. The P8.1
+/// caused-strand rule runs over the prefix: a kept `tool_result`
+/// without its call refuses the cut by name. A kept tool call
+/// without its result crosses the cut: the result line sits past
+/// the cut, and the cut is not its cause. The out-of-range arm
+/// maps to `SeqOutOfRange`: it only fires when the prefix holds
+/// unparseable lines (a hand-edited log).
 pub fn settled_guard(
     parsed: &[Value],
     fork_at: u64,
@@ -334,7 +337,7 @@ pub fn fork_session(
         return Err(ForkError::NoEvents(paths.parent_dir.clone()));
     }
 
-    // The event prefix and its settled-boundary check.
+    // The event prefix and its cut-boundary check.
     let text = logstream::read_log_text(&events).map_err(ForkError::Io)?;
     let lines = complete_lines(&text);
     let total = lines.len() as u64;
@@ -717,9 +720,13 @@ mod tests {
         assert!(!target.join("tools.jsonl").exists());
     }
 
-    /// P6: the stranded prefix refuses by name. Nothing writes.
+    /// P6, P8.1: the carried call crosses the cut. The prefix
+    /// keeps the c1 call without its result. The cut is not the
+    /// cause: the log carried the call since its line. The fork
+    /// lands and carries the pending call. The loop state machine
+    /// owes the result.
     #[test]
-    fn a_stranded_prefix_is_refused_by_name() {
+    fn a_carried_call_crosses_the_cut() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("sessions");
         events(
@@ -729,18 +736,41 @@ mod tests {
         );
         let cfg = cfg_with_root(&root);
         // N = 2: the prefix keeps the c1 call without its result.
+        let target = fork_session(&cfg, "p", "f", 2, None, None).unwrap();
+        let text = std::fs::read_to_string(target.join("events.jsonl")).unwrap();
+        assert_eq!(
+            text,
+            lines_to_text(&[user("task"), &asst(&["c1"])]),
+            "the fork holds lines 1..=N"
+        );
+        assert!(
+            !target.join("tools.jsonl").exists(),
+            "no tool result at or before N: no tool log"
+        );
+    }
+
+    /// P6: a hand-edited prefix keeps a result without its call.
+    /// The cut strands it. The refusal names the orphan pair and
+    /// writes nothing.
+    #[test]
+    fn a_result_without_its_call_is_refused_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("sessions");
+        events(&root, "p", &[user("task"), &result("c9")]);
+        let cfg = cfg_with_root(&root);
+        // N = 2: the prefix keeps the c9 result without its call.
         let err = fork_session(&cfg, "p", "f", 2, None, None).unwrap_err();
         match err {
-            ForkError::Stranded(rewind::RewindRejection::StrandedCall {
-                call_id,
+            ForkError::Stranded(rewind::RewindRejection::StrandedResult {
+                result_id,
                 target,
                 before,
             }) => {
-                assert_eq!(call_id, "c1");
+                assert_eq!(result_id, "c9");
                 assert_eq!(target, 2);
                 assert!(!before);
             }
-            other => panic!("expected the stranded-call refusal: {other:?}"),
+            other => panic!("expected the stranded-result refusal: {other:?}"),
         }
         assert!(!root.join("f").exists(), "the refusal writes nothing");
     }

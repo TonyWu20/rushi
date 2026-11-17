@@ -11,8 +11,9 @@
 #   3. the tool-log boundary: the last kept line keys the last
 #      tool_result at or before N, and the forked context assembles
 #      without a dangling tool reference (P4)
-#   4. the stranded boundary: a named error names the stranded pair,
-#      nothing writes, the parent log is untouched (P6)
+#   4. the carried-call boundary: the pending call crosses the
+#      cut, the fork holds no tool log, the parent log is
+#      untouched (P6)
 #   5. the range guard, the existing target, and the no-partial rule:
 #      named errors, no temp dirs left behind (P7, P8, P12)
 #   6. the sessions root and the cwd precedence (P9, P11)
@@ -293,7 +294,7 @@ else
   ko "3: the tool log reference is dangling or leaked"
 fi
 
-# ── 4. the stranded boundary ─────────────────────────────────────
+# ── 4. the carried-call boundary (P8.1) ─────────────────────────
 
 mkdir -p "$SESS/str-p"
 cat > "$SESS/str-p/events.jsonl" <<'EOF'
@@ -301,26 +302,29 @@ cat > "$SESS/str-p/events.jsonl" <<'EOF'
 {"v":1,"type":"assistant_message","ts":"t","content":"","tool_calls":[{"id":"c9","name":"bash","arguments":{"command":"x"}}],"stop_reason":"tool_calls"}
 EOF
 STR_HASH_BEFORE=$(sha256sum "$SESS/str-p/events.jsonl" | cut -d' ' -f1)
-ERR4="$WORK/str.err"
-if rfork str-p sf --fork-at 2 --sessions-root "$SESS" 2>"$ERR4" >/dev/null; then
-  ko "4: the stranded fork must be refused"
+
+if rfork str-p sf --fork-at 2 --sessions-root "$SESS"; then
+  ok "4: the carried-call fork exits 0"
 else
-  if grep -q "strands tool call c9" "$ERR4"; then
-    ok "4: the refusal names the stranded pair"
-  else
-    ko "4: the stderr does not name the stranded pair: $(cat "$ERR4")"
-  fi
+  ko "4: the carried-call fork refused"
 fi
-if [ ! -e "$SESS/sf" ]; then
-  ok "4: the refusal writes nothing"
+SF="$SESS/sf"
+if diff <(slog "$SESS/str-p/events.jsonl" | head -n 2) \
+      <(slog "$SF/events.jsonl" 2>/dev/null) > /dev/null; then
+  ok "4: the forked log decodes to the parent's lines 1..=2"
 else
-  ko "4: the refusal left the target dir"
+  ko "4: the forked log content is wrong"
+fi
+if [ ! -e "$SF/tools.jsonl" ]; then
+  ok "4: the fork holds no tool log"
+else
+  ko "4: the fork wrote a tool log"
 fi
 STR_HASH_AFTER=$(sha256sum "$SESS/str-p/events.jsonl" | cut -d' ' -f1)
 if [ "$STR_HASH_BEFORE" = "$STR_HASH_AFTER" ]; then
   ok "4: the parent log is untouched"
 else
-  ko "4: the refused fork touched the parent log"
+  ko "4: the fork touched the parent log"
 fi
 
 # ── 5. the range guard, the existing target, no partial writes ───

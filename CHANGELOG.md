@@ -6,6 +6,15 @@ versioned change for each kernel binary, newest first.
 Internal refactors without user-visible behavior do not get an
 entry.
 
+## rushi 0.1.8 (2026-11-17)
+
+The fork cut follows the P8.1 caused-strand rule (docs/
+fork-design.md P6). A prefix that carries a tool call without
+its result crosses the cut. The result line sits past the cut,
+and the cut is not its cause. The forked context keeps the call,
+and the loop state machine owes the result. An orphan result
+without its call still refuses the cut by name.
+
 ## rushi-log 0.2.2 (2026-11-17)
 
 The P8.1 sidecar-aware guard (docs/rewind-fork-design.md). The
