@@ -77,6 +77,9 @@ pub(crate) fn wait_for_approval(
                     "is_error": true,
                 });
                 append_event(cfg, &session.path, &deny);
+                // The synthesized deny is the model's record; the
+                // operator's view of the same event goes to stderr.
+                eprintln!("rushi: approval timed out after {n} s; the call was denied");
                 return;
             }
         }

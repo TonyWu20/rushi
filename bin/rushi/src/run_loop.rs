@@ -7,11 +7,11 @@
 //! The session lock is the authority for loop liveness: the kernel
 //! releases the `flock` when the holder dies. When a live loop holds
 //! the lock, the call appends the task with the log-line lock only,
-//! prints the event line, and exits 0 without starting a loop. The
-//! live loop drains the message at its next step. When no live loop
-//! holds the lock, the call starts one. This makes `rushi run` the
-//! single canonical poke of a session: the caller never branches on
-//! loop state (docs/reference/monitoring.md, "The poke").
+//! echoes the event line on stderr, and exits 0 without starting a
+//! loop. The live loop drains the message at its next step. When no
+//! live loop holds the lock, the call starts one. This makes `rushi
+//! run` the single canonical poke of a session: the caller never
+//! branches on loop state (docs/reference/monitoring.md, "The poke").
 //!
 //! A step that ended with a logged `error` event stops the loop
 //! (docs/failure-tracking.md FT-031). The error settles no claim
@@ -24,9 +24,21 @@
 //! `assistant_message` to stdout, one write at the moment the loop
 //! stops. The caller captures it (`result=$(rushi run ...)` or a
 //! redirect) as the Unix form of the mission result. The exhausted,
-//! failed, and signal stops print nothing: the session log holds
-//! their record. An empty content (a tool-call-only final turn)
-//! prints nothing.
+//! failed, and signal stops print nothing on stdout: the session log
+//! holds their record. An empty content (a tool-call-only final
+//! turn) prints nothing.
+//!
+//! stdout carries only that result. Everything else stays on
+//! stderr: the live-branch notice, the echo of the appended event
+//! line, and every diagnostic. The split keeps
+//! `result=$(rushi run ...)` clean when the poked session's loop is
+//! alive: the poke prints its notice, not a result, and the capture
+//! receives nothing. The operator's diagnostics, each announced at
+//! the moment it is recorded: the terminal `error` event of a
+//! failed step, the exhausted stop, the failed `run.idle` chain,
+//! the failed hook step, the failed compact, and the approval
+//! timeout. The session log holds the record in every case, and
+//! the stop keeps its exit code.
 //!
 //! # Exit codes
 //! - `0` — clean stop (idle with no pending follow-ups, exhausted, a
@@ -63,7 +75,9 @@ use crate::step::{append_line, make_runner, StepMode};
 ///   only (FT-005) and the call exits 0. It writes no `loop.pid` or
 ///   `loop.meta` and starts no loop. The live loop drains the message
 ///   at its next step. Without a task, the call prints a notice and
-///   exits 0: there is nothing to start.
+///   exits 0: there is nothing to start. The notice and the echoed
+///   event line go to stderr: stdout carries only the final-message
+///   result, so a capture of a live poke stays clean.
 /// - Free: the call takes the lock and runs the full loop.
 ///
 /// This is the single canonical poke of a session. The caller never
@@ -121,18 +135,19 @@ pub fn run(
         // Live branch: a live loop holds the lock. Append the task
         // with the log-line lock only and exit. The live loop drains
         // the message at its next step. No `loop.pid`, no `loop.meta`,
-        // no `cwd` refresh, no loop.
+        // no `cwd` refresh, no loop. The echo and the notice go to
+        // stderr: stdout carries only the final-message result.
         if let Some(task) = task {
             let line = seed_initial_message(cfg, session_dir, work_dir.as_deref(), task);
-            println!("{line}");
+            eprintln!("{line}");
         }
         let hint = liveness_hint(session_dir);
         if task.is_some() {
-            println!(
+            eprintln!(
                 "rushi: session loop is alive{hint}; message appended, the live loop will drain it."
             );
         } else {
-            println!("rushi: session loop is alive{hint}; nothing to start.");
+            eprintln!("rushi: session loop is alive{hint}; nothing to start.");
         }
         std::process::exit(0);
     }
@@ -270,16 +285,24 @@ pub fn run(
                 continue;
             }
             // The window default (or a failed chain): stop the loop.
+            // A failed chain announces on stderr: the stop record in
+            // the log is "idle", so without the line the operator
+            // would not see the real cause. A failed stop is not a
+            // clean idle stop: it prints no result on stdout.
+            if run.failed {
+                eprintln!("rushi: run.idle pipeline failed; the loop stops");
+            }
             fire_session_end(cfg, &session, "idle");
             // P7: the idle consolidation pass. The lock is still held
             // by this process; the pass takes the log-line lock, not
             // the session lock, so it cannot wedge the exit.
             crate::archive::run_auto_pass(cfg, &session.path, "idle");
-            stopped_on_idle = true;
+            stopped_on_idle = !run.failed;
             break;
         }
 
         if claim.state == "exhausted" {
+            eprintln!("rushi: context exhausted; the loop stops");
             fire_session_end(cfg, &session, "exhausted");
             break;
         }
