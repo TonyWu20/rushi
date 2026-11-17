@@ -6,6 +6,33 @@ versioned change for each kernel binary, newest first.
 Internal refactors without user-visible behavior do not get an
 entry.
 
+## rushi-log 0.2.2 (2026-11-17)
+
+The P8.1 sidecar-aware guard (docs/rewind-fork-design.md). The
+write-boundary guard pairs a stranded call with the `tools.jsonl`
+sidecar record by call id. A pair that keeps its result in the
+sidecar is whole. A marker that masks the result line of a whole
+pair is still refused by name. A call with no result anywhere
+lands: the log carried it since its line.
+
+## assemble 0.1.5 (2026-11-17)
+
+The read-side mirror of the P8.1 rule. The rewind mask pairs a
+kept call with the `tools.jsonl` sidecar by call id. A marker
+that masks the result line of a sidecar-whole pair no longer
+drops the pair. The branch re-projects instead. The carried-call
+state is pre-existing: the context carries the call, and the loop
+state machine owes the result.
+
+## rushi-common 0.1.10 (2026-11-17)
+
+The P8.1 sidecar-aware kernel guard. `rewind` gains
+`SidecarResults` and `guard_rewind_sidecar`. The sidecar-blind
+`guard_rewind` stays, as a wrapper over the empty sidecar.
+`append_rewind` judges the marker against the `tools.jsonl`
+sidecar next to the log. The caused-strand rule refuses only the
+strand the marker causes.
+
 ## rushi 0.1.7 (2026-11-17)
 
 A new subcommand `rushi fork PARENT NEW --fork-at N` (issue #67).
