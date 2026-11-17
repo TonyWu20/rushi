@@ -713,31 +713,61 @@ fn record_text(rec: &serde_json::Value) -> Option<String> {
 /// ids are unique, so membership on each side is enough. A rewind
 /// that strands either side is ignored by the projection: the
 /// marker is dropped, the branch re-projects linear.
-fn context_strands_pairs(events: &[&Ev]) -> bool {
-    let result_ids: HashSet<&str> = events
-        .iter()
-        .filter_map(|ev| match ev {
-            Ev::ToolResult { id, .. } => Some(id.as_str()),
-            _ => None,
-        })
-        .collect();
-    let call_ids: HashSet<&str> = events
-        .iter()
-        .filter_map(|ev| match ev {
-            Ev::Assistant { calls, .. } => Some(calls),
-            _ => None,
-        })
-        .flat_map(|calls| calls.iter())
-        .map(|c| c.id.as_str())
-        .collect();
-    events.iter().any(|ev| match ev {
-        Ev::Assistant { calls, .. } => calls.iter().any(|c| !result_ids.contains(c.id.as_str())),
-        // An orphan result: the output sits in the context but its
-        // call is masked (or absent). The pair is stranded either
-        // way.
-        Ev::ToolResult { id, .. } => !call_ids.contains(id.as_str()),
-        Ev::User { .. } => false,
-    })
+///
+/// The P8.1 caused-strand rule (the read-side mirror of the write
+/// guard). The marker is dropped only when it causes a strand: it
+/// masks the result line of a pair that was whole before the
+/// marker, or it masks the call of a kept result. `full` is the
+/// pre-mask projection, `events` the kept view. A pair is whole in
+/// `full` when its result event sits in `full` or a sidecar record
+/// carries the result by call id. A call with no result anywhere
+/// (the interrupted step the log carried since its line) is not a
+/// marker-caused strand: the context keeps the call, and the loop
+/// state machine owes the result. A result without its call
+/// anywhere is the same pre-existing state.
+fn context_strands_pairs(
+    events: &[&Ev],
+    full: &[&Ev],
+    sidecar_ids: &std::collections::HashSet<&str>,
+) -> bool {
+    fn side<'a>(evs: &'a [&'a Ev]) -> (HashSet<&'a str>, HashSet<&'a str>) {
+        let calls: HashSet<&'a str> = evs
+            .iter()
+            .filter_map(|ev| match ev {
+                Ev::Assistant { calls, .. } => Some(calls),
+                _ => None,
+            })
+            .flat_map(|calls| calls.iter())
+            .map(|c| c.id.as_str())
+            .collect();
+        let results: HashSet<&'a str> = evs
+            .iter()
+            .filter_map(|ev| match ev {
+                Ev::ToolResult { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        (calls, results)
+    }
+    let (kept_calls, kept_results) = side(events);
+    let (full_calls, full_results) = side(full);
+    // The caused call strand: the kept context holds the call, the
+    // pair was whole in the full projection, and the marker masked
+    // the result line (the sidecar keeps its records unmasked).
+    for id in kept_calls.iter() {
+        if !kept_results.contains(id) && !sidecar_ids.contains(id) && full_results.contains(id) {
+            return true;
+        }
+    }
+    // The caused result strand: the kept context holds the result,
+    // its call sat in the full projection, and the marker masked
+    // the call.
+    for id in kept_results.iter() {
+        if !kept_calls.contains(id) && full_calls.contains(id) {
+            return true;
+        }
+    }
+    false
 }
 
 /// The active-path mask of the projected region
@@ -752,6 +782,7 @@ fn mask_active_path<'a>(
     projected_seqs: &[usize],
     end_seq: usize,
     mut rewinds: Vec<rewind::RewindRef>,
+    sidecar_ids: &std::collections::HashSet<&str>,
 ) -> (Vec<&'a Ev>, Vec<usize>, Vec<rewind::RewindRef>) {
     let mut ignored: Vec<rewind::RewindRef> = Vec::new();
     loop {
@@ -764,7 +795,9 @@ fn mask_active_path<'a>(
                 kept_seqs.push(*s);
             }
         }
-        if context_strands_pairs(&kept_events) && !rewinds.is_empty() {
+        if context_strands_pairs(&kept_events, events_refs, sidecar_ids)
+            && !rewinds.is_empty()
+        {
             // The outermost marker is the one that owns the current
             // gap: pop it and re-project. The branch it abandoned
             // re-projects linear until a valid marker applies.
@@ -1579,8 +1612,12 @@ fn main() {
     // abandoned branch, at every nesting depth. The boundary filter
     // runs first: a rewind target inside the compacted region
     // degrades to the region head.
+    // The P8.1 sidecar pairing: the tool-log keys keep their calls
+    // paired when a rewind masks the result line.
+    let sidecar_ids: std::collections::HashSet<&str> =
+        tool_texts.keys().map(String::as_str).collect();
     let (kept_events, kept_seqs, ignored_rewinds) =
-        mask_active_path(&events_refs, &projected_seqs, seq, rewinds);
+        mask_active_path(&events_refs, &projected_seqs, seq, rewinds, &sidecar_ids);
     // The P4 violations, outermost first: each marker re-projected
     // as absent. The log keeps them; only the request loses them.
     for r in &ignored_rewinds {
@@ -3211,7 +3248,7 @@ not json at all
             target: 3,
             before: false,
         }];
-        let (kept, kept_seqs, ignored) = mask_active_path(&refs, &seqs, 6, rewinds);
+        let (kept, kept_seqs, ignored) = mask_active_path(&refs, &seqs, 6, rewinds, &std::collections::HashSet::new());
         let texts: Vec<&str> = kept
             .iter()
             .map(|ev| match ev {
@@ -3263,7 +3300,7 @@ not json at all
                 before: false,
             },
         ];
-        let (kept, _, ignored) = mask_active_path(&refs, &seqs, 12, rewinds);
+        let (kept, _, ignored) = mask_active_path(&refs, &seqs, 12, rewinds, &std::collections::HashSet::new());
         let texts: Vec<&str> = kept
             .iter()
             .map(|ev| match ev {
@@ -3315,7 +3352,7 @@ not json at all
                 before: false,
             },
         ];
-        let (kept, _, ignored) = mask_active_path(&refs, &seqs, 12, rewinds);
+        let (kept, _, ignored) = mask_active_path(&refs, &seqs, 12, rewinds, &std::collections::HashSet::new());
         let texts: Vec<&str> = kept
             .iter()
             .map(|ev| match ev {
@@ -3331,13 +3368,15 @@ not json at all
         assert!(ignored.is_empty());
     }
 
-    /// P4: a rewind whose context strands a tool call without its
-    /// result is ignored: the marker drops out, the branch re-
-    /// projects linear, and the violation is reported.
+    /// The P8.1 read-side rule: a marker over a carried call (no
+    /// result anywhere in the log) is honored: the interrupted
+    /// step's call is the state the log carried since its line,
+    /// the marker did not strand it, and the loop state machine
+    /// owes the result (claim).
     #[test]
-    fn mask_ignores_a_rewind_that_strands_a_call() {
+    fn mask_honors_a_rewind_over_a_carried_call() {
         // The target branch ends mid-step: assistant c5 with no
-        // result. A rewind to it strands c5 in the context.
+        // result anywhere. A rewind to it keeps c5 in the context.
         let events: Vec<Ev> = vec![
             ev_user("task"),          // 1
             ev_call("c5"),            // 2 (no result follows)
@@ -3351,35 +3390,132 @@ not json at all
             target: 2,
             before: false,
         }];
-        let (kept, _, ignored) = mask_active_path(&refs, &seqs, 5, rewinds);
-        // The marker is ignored: the projection is the full log.
-        assert_eq!(kept.len(), 4, "the branch re-projects linear");
-        assert_eq!(ignored.len(), 1, "the violation is reported");
-        assert_eq!(ignored[0].seq, 3);
-        // And the linear projection is itself dangling (an
-        // interrupted log): the check stops at the marker, not at
-        // the log. The loop state machine owes the result (claim),
-        // so no stranded request is ever sent.
-        assert!(context_strands_pairs(&kept), "the linear tail strands c5");
+        let (kept, _, ignored) =
+            mask_active_path(&refs, &seqs, 5, rewinds, &std::collections::HashSet::new());
+        // The marker stands: the abandoned span (c6 and its
+        // result) is masked, c5 rides the target prefix.
+        assert_eq!(ignored.len(), 0, "no marker-caused strand");
+        let texts: Vec<&str> = kept
+            .iter()
+            .map(|ev| match ev {
+                Ev::User { text } => text.as_str(),
+                Ev::Assistant { .. } => "assistant",
+                Ev::ToolResult { text, .. } => text.as_str(),
+            })
+            .collect();
+        // The target prefix (task, c5) plus the branch after the
+        // marker (c6, its result). c5 stays carried.
+        assert_eq!(
+            texts,
+            vec!["task", "assistant", "assistant", "C result"],
+            "the masked view"
+        );
     }
 
-    /// The pair-stranding invariant, both sides: a call without a
-    /// result strands; a result without its call strands; a paired
-    /// log is clean.
+    /// The P4 read-side backstop, the caused strand: a marker that
+    /// masks the result line of a pair that was whole is ignored:
+    /// the branch re-projects linear, and the violation is
+    /// reported.
     #[test]
-    fn pair_stranding_check_both_sides() {
+    fn mask_ignores_a_rewind_that_masks_a_whole_result() {
+        // The result line rides the abandoned span: the target
+        // prefix ends at the call.
+        let events: Vec<Ev> = vec![
+            ev_user("task"),          // 1
+            ev_call("c5"),            // 2
+            ev_user("branch B"),      // 3
+            ev_res("c5", "R5"),      // 4
+        ];
+        let refs: Vec<&Ev> = events.iter().collect();
+        let seqs: Vec<usize> = vec![1, 2, 3, 4];
+        let rewinds = vec![rushi_common::rewind::RewindRef {
+            seq: 5,
+            target: 3,
+            before: true,
+        }];
+        let (kept, _, ignored) =
+            mask_active_path(&refs, &seqs, 5, rewinds, &std::collections::HashSet::new());
+        // The marker is ignored: the kept view would hold c5 and
+        // mask its result line, the pair that was whole at line 4.
+        assert_eq!(ignored.len(), 1, "the violation is reported");
+        assert_eq!(ignored[0].seq, 5);
+        assert_eq!(kept.len(), 4, "the branch re-projects linear");
+    }
+
+    /// The P8.1 caused-strand invariant, both sides: the marker is
+    /// dropped only when it causes a strand. A masked whole result
+    /// strands; a masked call of a kept result strands; the
+    /// pre-existing unpaired state (a carried call, a pre-existing
+    /// orphan result) does not.
+    #[test]
+    fn pair_stranding_check_caused_sides() {
+        let empty: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        // The paired log is clean, marker or no marker.
         let ok: Vec<Ev> = vec![ev_user("task"), ev_call("c1"), ev_res("c1", "r")];
         let refs: Vec<&Ev> = ok.iter().collect();
-        assert!(!context_strands_pairs(&refs), "the paired log is clean");
+        assert!(
+            !context_strands_pairs(&refs, &refs, &empty),
+            "the paired log is clean"
+        );
+        // The caused call strand: the kept view holds the call,
+        // the full view held the whole pair, the result line is
+        // masked.
+        let full: Vec<Ev> = vec![ev_user("task"), ev_call("c1"), ev_res("c1", "r")];
+        let kept: Vec<Ev> = vec![ev_user("task"), ev_call("c1")];
+        let full_refs: Vec<&Ev> = full.iter().collect();
+        let kept_refs: Vec<&Ev> = kept.iter().collect();
+        assert!(
+            context_strands_pairs(&kept_refs, &full_refs, &empty),
+            "the masked result line of a whole pair strands"
+        );
+        // The caused result strand: the kept view holds the
+        // result, the full view held the call, the marker masked
+        // the call.
+        let full: Vec<Ev> = vec![ev_user("task"), ev_call("c3"), ev_res("c3", "r")];
+        let kept: Vec<Ev> = vec![ev_user("task"), ev_res("c3", "r")];
+        let full_refs: Vec<&Ev> = full.iter().collect();
+        let kept_refs: Vec<&Ev> = kept.iter().collect();
+        assert!(
+            context_strands_pairs(&kept_refs, &full_refs, &empty),
+            "the masked call of a kept result strands"
+        );
+        // The pre-existing state: a carried call (no result
+        // anywhere) and a pre-existing orphan result are not
+        // marker-caused strands.
+        let full: Vec<Ev> = vec![ev_user("task"), ev_call("c2")];
+        let refs: Vec<&Ev> = full.iter().collect();
+        assert!(
+            !context_strands_pairs(&refs, &refs, &empty),
+            "the carried call is not a marker-caused strand"
+        );
+        let full: Vec<Ev> = vec![ev_user("task"), ev_res("c4", "orphan")];
+        let refs: Vec<&Ev> = full.iter().collect();
+        assert!(
+            !context_strands_pairs(&refs, &refs, &empty),
+            "the pre-existing orphan is not a marker-caused strand"
+        );
+    }
 
-        let dangling: Vec<Ev> = vec![ev_user("task"), ev_call("c2")];
-        let refs: Vec<&Ev> = dangling.iter().collect();
-        assert!(context_strands_pairs(&refs), "a result-less call strands");
-
-        // The mirror case: an orphan result, its call masked out.
-        let orphan: Vec<Ev> = vec![ev_user("task"), ev_res("c3", "orphan")];
-        let refs: Vec<&Ev> = orphan.iter().collect();
-        assert!(context_strands_pairs(&refs), "a call-less result strands");
+    /// The P8.1 read-side sidecar pairing: a kept view that masks
+    /// the result line of a pair whose record sits in the tool log
+    /// is not a strand: the read side projects the record by id.
+    /// Without the record, the same view is the caused strand.
+    #[test]
+    fn pair_stranding_check_pairs_with_the_sidecar() {
+        let full: Vec<Ev> = vec![ev_user("task"), ev_call("c2"), ev_res("c2", "r2")];
+        let kept: Vec<Ev> = vec![ev_user("task"), ev_call("c2")];
+        let full_refs: Vec<&Ev> = full.iter().collect();
+        let kept_refs: Vec<&Ev> = kept.iter().collect();
+        let sidecar: std::collections::HashSet<&str> = ["c2"].iter().copied().collect();
+        assert!(
+            !context_strands_pairs(&kept_refs, &full_refs, &sidecar),
+            "the sidecar record keeps the masked result paired"
+        );
+        let empty: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        assert!(
+            context_strands_pairs(&kept_refs, &full_refs, &empty),
+            "without the record the masked result strands"
+        );
     }
 
     /// The anchor includes both input and output tokens of the last

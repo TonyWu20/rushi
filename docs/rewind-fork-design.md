@@ -6,7 +6,11 @@ The mechanism landed in July 2026. It covers the event, the
 active-path computation, the rewind-aware `bin/assemble`
 projection, and the `bin/claim` state. The write-boundary kernel
 guard (P8) is new: `bin/rushi-log` refuses a `rewind` that would
-strand a tool-call pair, with a named stderr error.
+strand a tool-call pair, with a named stderr error. The P8.1
+sidecar-aware form pairs a stranded call with its result record in
+the `tools.jsonl` sidecar by call id: the newer kernel generation
+keeps the result text out of `events.jsonl`, and the read side
+projects it into the model context, so such a pair is whole.
 
 The TUI event vocabulary and marker rendering live in the Tier-2
 `rushi-tui` repo. The TUI picker (the `/tree`-style entry point)
@@ -218,9 +222,13 @@ Shared in `crates/rushi/src/rewind.rs` (the one home, like
   projection''s filter uses.
 - `guard_rewind(log, target, before)` — the P8 guard: it refuses a
   rewind whose projected context strands a pair, or that points at
-  no event. `append_rewind(line, path)` is the kernel append entry
-  point: it runs the guard and commits through `LogLine`. Every
-  marker writer goes through this call.
+  no event. `guard_rewind_sidecar(log, target, before, sidecar)`
+  is the P8.1 sidecar-aware form: a call whose result record sits
+  in the `tools.jsonl` sidecar (`SidecarResults::from_dir`) is
+  not stranded; a result without its call still is. `append_rewind(line,
+  path)` is the kernel append entry point: it runs the P8.1 guard
+  against the log and the sidecar next to it, and commits through
+  `LogLine`. Every marker writer goes through this call.
 
 `bin/assemble` applies it after the boundary filter: the projected
 events are kept only where their seq is active. If the kept events
@@ -298,6 +306,7 @@ P5. boundary-degrade: given a rewind target below the boundary''s first_kept_seq
 P6. claim-settled: given a log ending in a rewind, observe claim report idle (or awaiting_model for an on-mode tool_result target) with empty pending tool calls, follow-ups, and approval waits.
 P7. append-only: given a rewind, observe the log gain exactly one line and every earlier byte unchanged (the FT-005 write discipline is the one writer).
 P8. write-guard: given a `rewind` that would strand a tool-call pair, observe the append refused with a named stderr error and the log unchanged.
+P8.1. sidecar-guard: the write and read boundaries drop a marker only when it causes a strand: it masks the result line of a pair that was whole, or the call of a kept result. Given a `rewind` whose context keeps a tool call whose result record sits in the `tools.jsonl` sidecar, observe the append honored (the read side projects the record by id). Given a call with no result anywhere in the log (the interrupted step), observe the append honored: the marker is not the cause, and the loop state machine owes the result. Given a masked result line of a whole pair, or a kept result whose call the marker masked, observe the refusal (write side) and the marker drop (read side), the sidecar pairing its calls only.
 
 ## Verification
 
@@ -306,11 +315,12 @@ P8. write-guard: given a `rewind` that would strand a tool-call pair, observe th
 | P1 | fork-mask | `mask_masks_the_abandoned_branch` in `bin/assemble/src/main.rs`; `on_mode_includes_the_target` in `crates/rushi/src/rewind.rs` | proven |
 | P2 | nested-fork | `mask_nested_forks_mask_the_intermediate_branch` in `bin/assemble`; `nested_forks_mask_the_abandoned_branch` and `depth_three_forks_compose_through_the_chain` in `crates/rushi/src/rewind.rs`; the nested (B) and depth-3 (F) scenarios of `scripts/e2e-rewind.sh` | proven |
 | P3 | branch-reentry | `mask_reentering_a_branch_rebuilds_its_path` in `bin/assemble`; `reentering_a_branch_rebuilds_its_path` in `crates/rushi/src/rewind.rs` | proven |
-| P4 | no-stranded-pair | `mask_ignores_a_rewind_that_strands_a_call` and `pair_stranding_check_both_sides` in `bin/assemble` (the read-side backstop for hand-edited logs. The write side is P8) | proven |
+| P4 | no-stranded-pair | `mask_ignores_a_rewind_that_masks_a_whole_result` and `pair_stranding_check_caused_sides` in `bin/assemble` (the read-side backstop for hand-edited logs: it drops the marker that causes a strand; the pre-existing unpaired state is tolerated per P8.1. The write side is P8/P8.1) | proven |
 | P5 | boundary-degrade | The filter order in `main` (boundary before mask); observed by the `e2e-rewind` boundary scenarios when a boundary precedes the fork | proven |
 | P6 | claim-settled | the six `rewind_*` tests in `bin/claim/src/main.rs` | proven |
 | P7 | append-only | `LogLine::commit` is the only writer (FT-005); `scripts/e2e-rewind.sh` asserts the prefix hash is unchanged after the append | proven |
 | P8 | write-guard | The `guard_*` and `append_rewind_*` tests in `crates/rushi/src/rewind.rs`. The `append_rewind` path in `bin/rushi-log`. Scenario G of `scripts/e2e-rewind.sh` | proven |
+| P8.1 | sidecar-guard | The `guard_sidecar_*`, `guard_sidecar_tolerates_a_call_without_any_result`, `sidecar_from_dir_reads_the_ids`, `append_rewind_lands_the_marker_with_the_sidecar`, and `append_rewind_lands_the_marker_over_a_carried_call` tests in `crates/rushi/src/rewind.rs`; `pair_stranding_check_pairs_with_the_sidecar`, `pair_stranding_check_caused_sides`, `mask_honors_a_rewind_over_a_carried_call`, and `mask_ignores_a_rewind_that_masks_a_whole_result` in `bin/assemble` | proven |
 
 ## Gate
 
